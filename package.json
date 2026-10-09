@@ -22,7 +22,8 @@
     "commit:retry": "git-cz --retry",
     "commitlint": "commitlint",
     "lint:md": "markdownlint-cli2 \"**/*.md\"",
-    "skills:install": "pnpm dlx skills@latest experimental_install --yes"
+    "skills:install": "pnpm dlx skills@latest experimental_install --yes",
+    "test": "bash scripts/test.sh"
   },
   "config": {
     "commitizen": {

@@ -7,10 +7,12 @@ software factory. It contains no factory-specific values: repositories, apps,
 credentials, and model transport belong to each factory's own Hermes settings
 and `.env`.
 
-- `plugins/<name>/`: Hermes plugins, one directory per plugin (planned)
-- `profiles/<name>/`: Hermes worker profiles and their scripts (planned)
-- `templates/`: webhook route, triage prompt, and cron templates rendered from
-  settings (planned)
+- `plugins/<name>/`: Hermes plugins, one directory per plugin
+- `profiles/<name>/`: Hermes worker profiles and their scripts
+- `templates/`: webhook route and triage prompt templates rendered from
+  settings
+- `skills/setup-factory/`: the agent runbook that sets up a factory on a
+  machine
 - `docs/`: contributor docs such as `docs/file-structure.md` and
   `docs/release-flow.md`
 - `CLAUDE.md` imports this file

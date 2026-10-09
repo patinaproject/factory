@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""Run one Claude Code turn for a Kanban card in its Hermes-owned worktree.
+
+Prints exactly one JSON line on stdout. The Hermes worker that calls this
+script relays the line to the board; this process is fenced from board
+mutations, so it never touches Kanban itself.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
+DEFAULT_WORKER_ENTRY = (
+    "Work Linear issue {issue_identifier} ({issue_url}) in {repo} on branch {branch}. "
+    "First start the issue through this repository's own issue-start workflow, which moves it to In Progress. "
+    "Open a ready (non-draft) pull request and drive it until it is ready to merge."
+)
+RESUME_PROMPT = "Continue."
+PUBLISH_RULE = (
+    "Publish commits only by running {push_signed} from the worktree, never `git push`. It creates "
+    "commits that the GitHub App signs, which repositories requiring verified signatures need. To bring "
+    "in the base branch, run `gh pr update-branch`, never a local merge."
+)
+COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
+LOCK_NAME = "claude-session.lock"
+SETTINGS_FILE_NAME = "claude-session.settings.json"
+
+
+class Refusal(Exception):
+    pass
+
+
+def git(cwd: Path, *args: str) -> str:
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refusal(f"git {' '.join(args)} failed in {cwd}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def load_settings(settings_file: str | None) -> dict:
+    if settings_file:
+        return json.loads(Path(settings_file).read_text())
+    proc = subprocess.run(
+        ["hermes", "config", "get", SETTINGS_KEY, "--json", "--raw"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise Refusal(f"hermes config get {SETTINGS_KEY} failed: {proc.stderr.strip()}")
+    return json.loads(proc.stdout)
+
+
+def find_repository(settings: dict, full_name: str) -> dict:
+    for repo in settings.get("repositories") or []:
+        if repo.get("full_name") == full_name:
+            return repo
+    raise Refusal(f"repository {full_name} is not configured")
+
+
+def resolve_worktree(workspace: str, repo_path: str) -> Path:
+    worktree = Path(workspace).resolve()
+    if not worktree.is_dir():
+        raise Refusal(f"workspace {worktree} does not exist")
+    if Path(git(worktree, "rev-parse", "--show-toplevel")).resolve() != worktree:
+        raise Refusal(f"workspace {worktree} is not the root of a git worktree")
+    main = Path(repo_path).resolve()
+    common = Path(git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    repo_common = Path(git(main, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    if common != repo_common:
+        raise Refusal(f"workspace {worktree} does not belong to the repository at {main}")
+    if worktree == main:
+        raise Refusal(f"workspace {worktree} is the main checkout, not a Kanban worktree")
+    return worktree
+
+
+def claude_config_dir() -> Path:
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(configured) if configured else Path.home() / ".claude"
+
+
+def transcript_cwd(transcript: Path) -> str | None:
+    with open(transcript, encoding="utf-8") as lines:
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict) and entry.get("cwd"):
+                return entry["cwd"]
+    return None
+
+
+def transcript_exists(session_id: str, worktree: Path) -> bool:
+    # Claude Code resumes only a session started in the same working directory, so a new card's
+    # worktree starts a fresh session even though the issue's session ID is the same.
+    transcripts = (claude_config_dir() / "projects").glob(f"*/{session_id}.jsonl")
+    return any(transcript_cwd(transcript) == str(worktree) for transcript in transcripts)
+
+
+def session_process_running(session_id: str) -> bool:
+    listing = subprocess.run(["ps", "-Ao", "pid=,command="], capture_output=True, text=True, check=True)
+    for line in listing.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid != str(os.getpid()) and session_id in command:
+            return True
+    return False
+
+
+def version_key(name: str) -> tuple:
+    return tuple(int(part) for part in name.lstrip("v").split("."))
+
+
+def node_bin_for(worktree: Path) -> Path | None:
+    nvmrc = worktree / ".nvmrc"
+    if not nvmrc.is_file():
+        return None
+    spec = nvmrc.read_text().strip().lstrip("v")
+    if not spec.replace(".", "").isdigit():
+        raise Refusal(f".nvmrc version {spec!r} is not a numeric version prefix")
+    nvm_dir = Path(os.environ.get("NVM_DIR") or Path.home() / ".nvm")
+    matches = [
+        d for d in (nvm_dir / "versions" / "node").glob("v*")
+        if d.name[1:] == spec or d.name[1:].startswith(spec + ".")
+    ]
+    if not matches:
+        raise Refusal(f"Node {spec} from .nvmrc is not installed under {nvm_dir}; run nvm install {spec}")
+    return max(matches, key=lambda d: version_key(d.name)) / "bin"
+
+
+MODEL_TIER_VARIABLES = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+
+
+def child_env(worktree: Path) -> dict:
+    env = {name: value for name, value in os.environ.items() if not name.startswith("ANTHROPIC_")}
+    node_bin = node_bin_for(worktree)
+    if node_bin:
+        env["PATH"] = f"{node_bin}{os.pathsep}{env.get('PATH', '')}"
+    return env
+
+
+def transport_settings(transport: dict) -> dict | None:
+    # Passed with --settings because Claude Code lets a user-level
+    # ~/.claude/settings.json env block override the process environment.
+    env = {}
+    if transport.get("base_url"):
+        env["ANTHROPIC_BASE_URL"] = transport["base_url"]
+    token_env = transport.get("auth_token_env")
+    if token_env:
+        if not os.environ.get(token_env):
+            raise Refusal(f"auth_token_env names {token_env}, which is not set")
+        env["ANTHROPIC_AUTH_TOKEN"] = os.environ[token_env]
+    if transport.get("model"):
+        env.update({name: transport["model"] for name in MODEL_TIER_VARIABLES})
+    return {"env": env} if env else None
+
+
+def build_prompt(args: argparse.Namespace, repo: dict, branch: str, resumed: bool) -> str:
+    message = Path(args.message_file).read_text() if args.message_file else ""
+    if resumed:
+        return message or RESUME_PROMPT
+    entry = (repo.get("worker_entry") or DEFAULT_WORKER_ENTRY).format(
+        issue_id=args.issue_id,
+        issue_identifier=args.issue_identifier,
+        issue_url=args.issue_url,
+        branch=branch,
+        repo=args.repo,
+    )
+    return f"{entry}\n\n{message}" if message else entry
+
+
+def run(args: argparse.Namespace) -> tuple[int, dict]:
+    workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
+    if not workspace:
+        raise Refusal("HERMES_KANBAN_WORKSPACE is not set; claude-session runs only inside a Kanban worker")
+    settings = load_settings(args.settings_json)
+    repo = find_repository(settings, args.repo)
+    worktree = resolve_worktree(workspace, repo["path"])
+    session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{args.issue_id}"))
+
+    lock_path = Path(git(worktree, "rev-parse", "--absolute-git-dir")) / LOCK_NAME
+    with open(lock_path, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Refusal(f"another claude-session holds {worktree}") from None
+        if session_process_running(session_id):
+            raise Refusal(f"a process for Claude session {session_id} is already running")
+
+        branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
+        resumed = transcript_exists(session_id, worktree)
+        transport = settings.get("claude_session") or {}
+        command = [
+            os.environ.get("CLAUDE_BIN", "claude"),
+            "-p", build_prompt(args, repo, branch, resumed),
+            "--output-format", "json",
+            "--max-turns", str(transport.get("max_turns") or 40),
+            "--permission-mode", "bypassPermissions",
+            "--resume" if resumed else "--session-id", session_id,
+            "--append-system-prompt", PUBLISH_RULE.format(push_signed=Path(__file__).resolve().with_name("push-signed")),
+        ]
+        if transport.get("model"):
+            command += ["--model", transport["model"]]
+        overrides = transport_settings(transport)
+        settings_path = lock_path.with_name(SETTINGS_FILE_NAME)
+        if overrides:
+            fd = os.open(settings_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                json.dump(overrides, handle)
+            command += ["--settings", str(settings_path)]
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=worktree,
+                env=child_env(worktree),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            settings_path.unlink(missing_ok=True)
+
+    report = {"session_id": session_id, "resumed": resumed, "worktree": str(worktree), "branch": branch}
+    try:
+        output = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        detail = (proc.stderr or proc.stdout).strip()[-2000:]
+        return 1, {"error": f"claude exited {proc.returncode} without JSON output: {detail}", **report}
+    report.update(subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"))
+    if report["subtype"] not in COMPLETED_SUBTYPES:
+        return 1, {"error": f"claude run ended with {report['subtype']} (exit {proc.returncode})", **report}
+    return 0, report
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--issue-id", required=True)
+    parser.add_argument("--issue-identifier", required=True)
+    parser.add_argument("--issue-url", required=True)
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--message-file")
+    parser.add_argument("--settings-json")
+    args = parser.parse_args()
+    try:
+        status, report = run(args)
+    except Refusal as refusal:
+        status, report = 2, {"error": str(refusal)}
+    except Exception as error:
+        status, report = 1, {"error": f"{type(error).__name__}: {error}"}
+    print(json.dumps(report))
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())
