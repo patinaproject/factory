@@ -1,0 +1,42 @@
+{
+  "scopes": [],
+  "types": [
+    { "value": "feat", "name": "feat:     A new feature" },
+    { "value": "fix", "name": "fix:      A bug fix" },
+    { "value": "docs", "name": "docs:     Documentation only changes" },
+    {
+      "value": "style",
+      "name": "style:    Code style changes (formatting, semicolons)"
+    },
+    {
+      "value": "refactor",
+      "name": "refactor: A code change that neither fixes a bug nor adds a feature"
+    },
+    {
+      "value": "perf",
+      "name": "perf:     A code change that improves performance"
+    },
+    { "value": "test", "name": "test:     Adding or updating tests" },
+    {
+      "value": "chore",
+      "name": "chore:    Build process, tooling, or auxiliary changes"
+    },
+    { "value": "revert", "name": "revert:   Revert to a commit" },
+    { "value": "ci", "name": "ci:       CI/CD configuration changes" }
+  ],
+  "allowCustomScopes": false,
+  "allowBreakingChanges": ["feat", "fix"],
+  "allowTicketNumber": true,
+  "isTicketNumberRequired": true,
+  "ticketNumberPrefix": "",
+  "ticketNumberRegExp": "#[1-9]\\d*",
+  "prependTicketToHead": false,
+  "skipQuestions": ["scope", "body", "footer"],
+  "messages": {
+    "type": "Select the type of change you're committing:",
+    "ticketNumber": "Enter the GitHub issue reference (e.g. #1):\n",
+    "subject": "Write a short description of the change:\n",
+    "confirmCommit": "Are you sure you want to proceed with the commit above?"
+  },
+  "subjectLimit": 72
+}

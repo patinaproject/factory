@@ -1,0 +1,119 @@
+name: Pull Request
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  lint:
+    name: Validate pull request
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: "${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') && !(github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'release-please--')) }}"
+    steps:
+      - name: Enforce ASCII-only title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if printf '%s' "$PR_TITLE" | LC_ALL=C grep -qP '[^\x00-\x7F]'; then
+            echo "::error::PR title contains non-ASCII characters. Use ASCII only (no emoji, smart quotes, em-dashes, etc.)."
+            exit 1
+          fi
+
+      - name: Validate conventional commits
+        # amannn/action-semantic-pull-request@v6.1.1
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            chore
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            revert
+          requireScope: false
+          disallowScopes: |
+            .+
+          subjectPattern: '^#[1-9]\d* .+$'
+          subjectPatternError: |
+            PR title subject must start with a GitHub issue reference. Example:
+              feat: #123 add boot timeline
+              fix: #456 restore search
+            Scopes are not permitted. See AGENTS.md for conventions.
+          ignoreLabels: |
+            dependencies
+
+      - name: Check for closing keyword in PR body
+        if: "${{ github.event.pull_request.user.login != 'dependabot[bot]' }}"
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ -z "$PR_BODY" ]; then
+            echo '::error::PR body is empty. Add "Closes #N".'
+            exit 1
+          fi
+          # Strip HTML comments, fenced code blocks, inline code, strikethrough, blockquotes.
+          BT=$(printf '\x60')
+          # shellcheck disable=SC2016
+          sanitized=$(printf '%s' "$PR_BODY" \
+            | sed -E 's/<!--([^-]|-[^-])*-->//g' \
+            | awk -v bt="$BT" 'BEGIN{fence=bt bt bt} $0 ~ "^" fence {toggle=!toggle; next} !toggle' \
+            | sed -E "s/${BT}[^${BT}]*${BT}//g" \
+            | sed -E 's/~~[^~]*~~//g')
+          sanitized=$(printf '%s' "$sanitized" | grep -vE '^[[:space:]]*>' || true)
+          # GitHub Apps may qualify same-repository references as owner/repo#N.
+          normalized="${sanitized//$GITHUB_REPOSITORY#/#}"
+          if printf '%s' "$normalized" | grep -qE \
+            '(^|[^A-Za-z])(Closes|Fixes|Resolves)[ \t]+#[1-9][0-9]*([^0-9A-Za-z_]|$)'; then
+            echo "GitHub issue-closing reference found."
+            exit 0
+          fi
+          echo '::error::PR body must contain "Closes #N", "Fixes #N", or "Resolves #N" outside code blocks, HTML comments, strikethrough, and blockquotes.'
+          exit 1
+
+      - name: Compare title `!` with breaking-change markers
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title_has_bang=false
+          if echo "$PR_TITLE" | grep -qE '^[a-z]+(\([^)]*\))?!:'; then
+            title_has_bang=true
+          fi
+          body_has_footer=false
+          if printf '%s' "$PR_BODY" | grep -qE '^BREAKING[ -]CHANGE:'; then
+            body_has_footer=true
+          fi
+          commit_has_footer=false
+          if ! commit_messages="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" --jq '.[].commit.message')"; then
+            echo "::error::Failed to list PR commits while checking breaking-change markers."
+            exit 1
+          fi
+          if printf '%s\n' "$commit_messages" | grep -qE '^BREAKING[ -]CHANGE:'; then
+            commit_has_footer=true
+          fi
+          breaking_has_footer=false
+          if [ "$body_has_footer" = true ] || [ "$commit_has_footer" = true ]; then
+            breaking_has_footer=true
+          fi
+          if [ "$title_has_bang" = true ] && [ "$breaking_has_footer" = false ]; then
+            echo "::error::PR title declares a breaking change (\`!\` in prefix) but neither the body nor PR commit messages include a \`BREAKING CHANGE:\` footer. Explain the break or drop the \`!\`."
+            exit 1
+          fi
+          if [ "$breaking_has_footer" = true ] && [ "$title_has_bang" = false ]; then
+            echo "::error::PR body or commit messages include a \`BREAKING CHANGE:\` footer but the title is missing the \`!\` marker. Add \`!\` to the type (e.g. \`feat!: #123 ...\`) so squash-merged commits carry the marker."
+            exit 1
+          fi
+          echo "Breaking change markers are consistent."

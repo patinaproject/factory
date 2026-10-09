@@ -1,0 +1,9 @@
+node_modules/
+
+# Local agent worktrees created by the harness under .claude/.
+.claude/worktrees/
+
+# Transient skills install lock/staging files. The committed installer avoids
+# creating these, but ignore them defensively so they are never staged.
+.skills-install.lock
+.skills-install.lock.*.tmp

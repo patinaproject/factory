@@ -1,0 +1,6 @@
+* text=auto eol=lf
+
+# Dogfood overlay symlinks are workspace-only.
+# They must not leak into release tarballs produced by git archive.
+.agents/skills/** export-ignore
+.claude/skills/** export-ignore

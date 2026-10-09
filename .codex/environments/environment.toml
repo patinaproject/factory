@@ -1,0 +1,10 @@
+# Maintained by the scaffold-repository skill. Keep the [setup] script in sync
+# with the Claude Code SessionStart hook in .claude/settings.json so both agents
+# run the same scripts/worktree-setup.sh bootstrap.
+version = 1
+name = "factory"
+
+[setup]
+script = '''
+bash scripts/worktree-setup.sh
+'''

@@ -1,0 +1,44 @@
+{
+  "name": "factory",
+  "private": true,
+  "type": "module",
+  "description": "Hermes software factory: Linear agent sessions, Hermes Kanban, and Claude Code workers",
+  "author": {
+    "name": "Ted Mader",
+    "email": "ted@patinaproject.com",
+    "url": "https://github.com/tlmader"
+  },
+  "license": "MIT",
+  "packageManager": "pnpm@10.33.2",
+  "engines": {
+    "node": ">=24",
+    "pnpm": ">=10"
+  },
+  "scripts": {
+    "prepare": "husky",
+    "env:setup": "pnpm install",
+    "clean": "bash scripts/clean.sh",
+    "commit": "git-cz",
+    "commit:retry": "git-cz --retry",
+    "commitlint": "commitlint",
+    "lint:md": "markdownlint-cli2 \"**/*.md\"",
+    "skills:install": "pnpm dlx skills@latest experimental_install --yes"
+  },
+  "config": {
+    "commitizen": {
+      "path": "cz-customizable"
+    },
+    "cz-customizable": {
+      "config": "commitizen.config.json"
+    }
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.8.1",
+    "@commitlint/config-conventional": "^19.8.1",
+    "commitizen": "^4.3.1",
+    "cz-customizable": "^7.5.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.10",
+    "markdownlint-cli2": "^0.14.0"
+  }
+}

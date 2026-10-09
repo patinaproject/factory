@@ -1,0 +1,26 @@
+name: Markdown
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint Markdown
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - name: Check out repository
+        # actions/checkout@v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Run Markdown lint
+        # DavidAnson/markdownlint-cli2-action@v18.0.0
+        uses: DavidAnson/markdownlint-cli2-action@eb5ca3ab411449c66620fe7f1b3c9e10547144b0
+        with:
+          # Exclusions live in `.markdownlint-cli2.jsonc` (`ignores`), the
+          # single list every markdown entry point inherits.
+          globs: |
+            **/*.md

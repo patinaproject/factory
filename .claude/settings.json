@@ -1,0 +1,16 @@
+{
+  "enabledPlugins": {},
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/worktree-setup.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

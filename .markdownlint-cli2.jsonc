@@ -1,0 +1,23 @@
+{
+  // markdownlint-cli2 configuration.
+  //
+  // Rule configuration lives in `.markdownlint.jsonc`; this file carries the
+  // cli2-only options. `ignores` is the single exclusion mechanism: unlike a
+  // `.markdownlintignore` file, which markdownlint-cli2 does not read at all,
+  // it applies to glob runs and to explicitly passed files alike.
+  //
+  // It matches relative paths only. `.lintstagedrc.js` converts the absolute
+  // paths lint-staged supplies so the pre-commit hook inherits this list too.
+  "$schema": "https://raw.githubusercontent.com/DavidAnson/markdownlint-cli2/main/schema/markdownlint-cli2-config-schema.json",
+  "ignores": [
+    "**/node_modules/**",
+    "dist/**",
+    "build/**",
+    "CHANGELOG.md",
+    // Vendored third-party skill payloads and the overlays that mirror them are
+    // written against their own upstream markdownlint config and are overwritten
+    // on every re-vendor, so they are never linted here.
+    ".agents/skills/**",
+    ".claude/skills/**"
+  ]
+}
