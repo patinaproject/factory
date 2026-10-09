@@ -75,8 +75,12 @@ printf '%s' <worker>/gh | env_set <worker>/.env GH_CONFIG_DIR
 > from their own terminal:
 >
 > ```sh
-> GH_CONFIG_DIR=<worker>/gh gh auth login --hostname github.com --git-protocol https --web
+> GH_CONFIG_DIR=<worker>/gh gh auth login --hostname github.com --git-protocol https --web --insecure-storage
 > ```
+>
+> `--insecure-storage` keeps the token in `<worker>/gh/hosts.yml` (mode `0600`
+> inside a `0700` directory) instead of the macOS keychain. A gateway that
+> launchd or systemd starts may not be able to read the login keychain.
 >
 > Afterwards, check that `GH_CONFIG_DIR=<worker>/gh gh api user --jq .login`
 > prints `<login>`.
