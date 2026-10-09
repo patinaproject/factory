@@ -203,7 +203,7 @@ class IssueTest(unittest.TestCase):
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "branchName": "abc-123-fix-checkout",
                 "priority": 2.0,
-                "state": {"name": "Todo"},
+                "state": {"name": "Todo", "type": "unstarted"},
                 "delegate": {"id": "app-user-1"},
                 "attachments": {
                     "nodes": [
@@ -227,6 +227,7 @@ class IssueTest(unittest.TestCase):
                 "gitBranchName": "abc-123-fix-checkout",
                 "priority": 2,
                 "state": "Todo",
+                "stateType": "unstarted",
                 "delegate": "app-user-1",
                 "attachments": [
                     {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}

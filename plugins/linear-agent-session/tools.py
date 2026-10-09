@@ -46,7 +46,7 @@ ISSUE_SCHEMA = {
     "name": "linear_issue",
     "description": (
         "Read a Linear issue as the agent app: id, identifier, title, url, gitBranchName, priority, "
-        "state, delegate, and attachments."
+        "state, stateType, delegate (the delegate's user ID, or null), and attachments."
     ),
     "parameters": {
         "type": "object",

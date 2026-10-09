@@ -32,7 +32,7 @@ SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: A
 ISSUE_QUERY = """query Issue($id: String!) {
   issue(id: $id) {
     id identifier title url branchName priority
-    state { name }
+    state { name type }
     delegate { id }
     attachments { nodes { url sourceType } }
   }
@@ -115,6 +115,7 @@ class LinearClient:
             "gitBranchName": issue["branchName"],
             "priority": int(issue["priority"]),
             "state": issue["state"]["name"],
+            "stateType": issue["state"]["type"],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
             "attachments": [
                 {"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]

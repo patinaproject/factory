@@ -51,7 +51,7 @@ The full payload, truncated to 4000 characters:
 Type `AgentSessionEvent`, action `created`. The issue is the agent session issue.
 
 1. Read the issue with `linear_issue`.
-2. If its `delegate` is missing or its `delegate.id` is not
+2. If its `delegate` (a user ID) is null or is not
    `<<app_user_id>>`, the agent was mentioned. Answer the request in one
    `response` activity on this agent session, from the prompt context and the
    issue. Create no card and stop.
@@ -121,7 +121,7 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
 3. If the card's body names a different `linear_agent_session_id`, update it as
    in "Session created" step 6.
 4. If the card is `blocked`, read the issue with `linear_issue`. If its
-   `delegate.id` is `<<app_user_id>>`, run `hermes kanban unblock <task id>`.
+   `delegate` is `<<app_user_id>>`, run `hermes kanban unblock <task id>`.
 5. If the card is `done` or `triage`, post a `thought` on this agent session
    saying the reply is on the card, and that the card must be reopened from the
    Kanban dashboard.
@@ -144,9 +144,9 @@ Type `Issue`. The issue is the data change issue.
 
 1. Find the issue's card. If there is none, stop.
 2. Read the issue with `linear_issue`.
-3. If its state type is `completed` or `canceled`, run
+3. If its `stateType` is `completed` or `canceled`, run
    `hermes kanban archive <task id>` and stop.
-4. If its `delegate` is missing or its `delegate.id` is not
+4. If its `delegate` (a user ID) is null or is not
    `<<app_user_id>>`, the issue was un-delegated. If the card is not `blocked`
    and not `done`, run `hermes kanban block <task id> undelegated`. Do not
    archive it.
