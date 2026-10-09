@@ -1,5 +1,3 @@
-"""Hermes plugin: Linear agent session acknowledgement hook and Linear agent tools."""
-
 from __future__ import annotations
 
 import asyncio
@@ -55,7 +53,7 @@ def register(ctx: Any) -> None:
 def make_dispatch_hook(
     get_client: Callable[[], linear.LinearClient], webhook_route: Callable[[], str]
 ) -> Callable[..., Any]:
-    async def on_pre_gateway_dispatch(event: Any, **_: Any) -> None:
+    async def acknowledge_agent_session_best_effort(event: Any, **_: Any) -> None:
         try:
             session_id = _ack_session_id(event, webhook_route())
             if session_id is None:
@@ -71,11 +69,10 @@ def make_dispatch_hook(
                 timeout=ACK_TIMEOUT_SECONDS,
             )
         except Exception:
-            # The acknowledgement is best effort and must never hold up or drop the triage run.
             logger.exception("linear-agent-session: agent session acknowledgement failed")
         return None
 
-    return on_pre_gateway_dispatch
+    return acknowledge_agent_session_best_effort
 
 
 def _ack_session_id(event: Any, webhook_route: str) -> Optional[str]:

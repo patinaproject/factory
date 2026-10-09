@@ -1,5 +1,3 @@
-"""The linear_agent_activity and linear_issue tools, shared by the Hermes plugin and cli.py."""
-
 from __future__ import annotations
 
 import json
@@ -88,19 +86,18 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
             result["external_urls"] = [u["url"] for u in args["external_urls"]]
         return result
 
-    return _as_json(run)
+    return _tool_result_or_error(run)
 
 
 def run_session_create(client_factory: ClientFactory, args: dict) -> str:
-    return _as_json(lambda: {"agent_session_id": client_factory().create_session_on_issue(args["issue"])})
+    return _tool_result_or_error(lambda: {"agent_session_id": client_factory().create_session_on_issue(args["issue"])})
 
 
 def run_issue(client_factory: ClientFactory, args: dict) -> str:
-    return _as_json(lambda: client_factory().get_issue(args["issue"]))
+    return _tool_result_or_error(lambda: client_factory().get_issue(args["issue"]))
 
 
-def _as_json(run: Callable[[], dict]) -> str:
-    # Tool handlers are the boundary with Hermes: every failure becomes a result the model can read.
+def _tool_result_or_error(run: Callable[[], dict]) -> str:
     try:
         return json.dumps(run())
     except KeyError as e:

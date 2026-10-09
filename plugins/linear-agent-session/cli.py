@@ -1,5 +1,3 @@
-"""Shell entry for the plugin's tools: same arguments and JSON output as linear_agent_activity and linear_issue."""
-
 from __future__ import annotations
 
 import argparse
@@ -12,8 +10,7 @@ from typing import Optional
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def _load_plugin():
-    # The plugin directory name has a hyphen, so load it as a package by path to keep its relative imports.
+def _load_hyphenated_plugin_dir_as_package():
     spec = importlib.util.spec_from_file_location(
         "linear_agent_session", os.path.join(PLUGIN_DIR, "__init__.py"), submodule_search_locations=[PLUGIN_DIR]
     )
@@ -24,7 +21,7 @@ def _load_plugin():
 
 
 def main(argv: Optional[list] = None) -> int:
-    plugin = _load_plugin()
+    plugin = _load_hyphenated_plugin_dir_as_package()
     parser = argparse.ArgumentParser(prog="cli.py")
     commands = parser.add_subparsers(dest="command", required=True)
 

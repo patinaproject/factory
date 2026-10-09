@@ -37,8 +37,6 @@ class FakeResponse:
 
 
 class FakeLinear:
-    """Stands in for urllib.request.urlopen against Linear's token and GraphQL endpoints."""
-
     def __init__(self, graphql_responses=(), expires_in: int = 2591999) -> None:
         self.graphql_responses = list(graphql_responses)
         self.expires_in = expires_in

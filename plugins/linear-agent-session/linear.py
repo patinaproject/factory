@@ -1,5 +1,3 @@
-"""Linear GraphQL client for an agent app authenticated with client credentials."""
-
 from __future__ import annotations
 
 import base64

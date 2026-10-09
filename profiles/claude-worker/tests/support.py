@@ -38,8 +38,6 @@ def git(cwd: Path, *args: str) -> str:
 
 
 class GitFixture(unittest.TestCase):
-    """A bare origin, a main checkout cloned from it, and helpers to add worktrees."""
-
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)

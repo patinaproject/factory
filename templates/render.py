@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Render the Hermes `linear` and `github` webhook routes from the factory settings.
-
-Prints a JSON object for `platforms.webhook.extra.routes`. Settings come from
-`hermes config get plugins.entries.linear-agent-session.settings --json`, or from
-`--settings-json <file>`.
-"""
+"""Render the Hermes `linear` and `github` webhook routes from the factory settings."""
 from __future__ import annotations
 
 import argparse
@@ -157,6 +152,10 @@ def _read_template(name: str) -> str:
     return (TEMPLATE_DIR / name).read_text(encoding="utf-8")
 
 
+def _exclude_events_sent_by(login: str) -> dict:
+    return {"not": {"field": "sender.login", "equals": login}}
+
+
 def build_routes(settings: Any) -> dict:
     config = validate(settings)
     repos = repository_lines(config["repositories"])
@@ -172,9 +171,7 @@ def build_routes(settings: Any) -> dict:
         },
     ]
     if config["github_login"] is not None:
-        # Events the factory account causes itself (pushes, PR updates, comments) would
-        # otherwise loop back onto its own cards.
-        github_filters.append({"not": {"field": "sender.login", "equals": config["github_login"]}})
+        github_filters.append(_exclude_events_sent_by(config["github_login"]))
 
     return {
         config["webhook_route"]: {
