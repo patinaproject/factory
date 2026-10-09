@@ -216,9 +216,14 @@ hermes config set model.default <alias>
 ```sh
 hermes chat -q "Reply with exactly: PONG"
 hermes -p claude-worker chat -q "Reply with exactly: PONG"
+sqlite3 <home>/state.db "select model, billing_provider, input_tokens, output_tokens from sessions order by started_at desc limit 1"
+sqlite3 <worker>/state.db "select model, billing_provider, input_tokens, output_tokens from sessions order by started_at desc limit 1"
 ```
 
-Both print `PONG`.
+Each latest session names the operator's alias and
+`claude-subscription-directsdk-experimental`, with non-zero token counts. A
+session with no billing provider and zero tokens never reached the model, even
+when the chat appeared to finish.
 
 **Keep `ANTHROPIC_*` out of the gateway.** The provider refuses to start when
 the environment holds `ANTHROPIC_AUTH_TOKEN` or another native override. Only
