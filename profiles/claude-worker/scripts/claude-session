@@ -11,7 +11,6 @@ import argparse
 import fcntl
 import json
 import os
-import re
 import subprocess
 import sys
 import uuid
@@ -88,11 +87,23 @@ def claude_config_dir() -> Path:
     return Path(configured) if configured else Path.home() / ".claude"
 
 
+def transcript_cwd(transcript: Path) -> str | None:
+    with open(transcript, encoding="utf-8") as lines:
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict) and entry.get("cwd"):
+                return entry["cwd"]
+    return None
+
+
 def transcript_exists(session_id: str, worktree: Path) -> bool:
-    # Claude Code resumes only from the project directory named after the working directory, so a
-    # new card's worktree starts a fresh session even though the issue's session ID is the same.
-    project = re.sub(r"[^A-Za-z0-9]", "-", str(worktree))
-    return (claude_config_dir() / "projects" / project / f"{session_id}.jsonl").exists()
+    # Claude Code resumes only a session started in the same working directory, so a new card's
+    # worktree starts a fresh session even though the issue's session ID is the same.
+    transcripts = (claude_config_dir() / "projects").glob(f"*/{session_id}.jsonl")
+    return any(transcript_cwd(transcript) == str(worktree) for transcript in transcripts)
 
 
 def session_process_running(session_id: str) -> bool:

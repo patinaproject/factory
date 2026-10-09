@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import fcntl
 import json
-import re
 import os
 import subprocess
+import uuid
 from pathlib import Path
 
 from tests.support import SCRIPTS, GitFixture, git
@@ -65,9 +65,11 @@ class ClaudeSessionTest(GitFixture):
         return json.loads(self.log.read_text())
 
     def write_transcript(self, worktree: Path | None = None) -> None:
-        project = self.claude_config / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str((worktree or self.worktree).resolve()))
+        project = self.claude_config / "projects" / f"project-{uuid.uuid4()}"
         project.mkdir(parents=True)
-        (project / f"{SESSION_ID}.jsonl").write_text("{}\n")
+        cwd = str((worktree or self.worktree).resolve())
+        lines = [{"type": "summary"}, {"type": "user", "cwd": cwd}, {"type": "assistant", "cwd": "/elsewhere"}]
+        (project / f"{SESSION_ID}.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
 
     def test_first_run_starts_a_pinned_session_with_the_default_entry(self) -> None:
         status, report = self.run_session()
