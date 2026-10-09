@@ -244,21 +244,14 @@ object in place of the reply means the home's `.env` lacks
 **Keep `ANTHROPIC_*` out of the gateway.** The provider refuses to start when
 the environment holds `ANTHROPIC_AUTH_TOKEN` or another native override. Only
 `claude-session` sets `ANTHROPIC_*` variables, and only for the Claude Code
-process it starts. Each of these counts must be `0`:
+process it starts. Each count must be `0`:
 
 ```sh
 grep -c '^ANTHROPIC_' <home>/.env <worker>/.env
-# macOS: the running gateway and its launchd agent
-ps eww -p "$(pgrep -f 'hermes.*gateway' | head -1)" | tr ' ' '\n' | grep -c '^ANTHROPIC_'
-grep -c ANTHROPIC_ ~/Library/LaunchAgents/*hermes*.plist
-# Linux: the running gateway and its systemd unit
-tr '\0' '\n' < "/proc/$(pgrep -f 'hermes.*gateway' | head -1)/environ" | grep -c '^ANTHROPIC_'
-systemctl --user cat '*hermes*' | grep -c ANTHROPIC_
 ```
 
-If a count is not `0`, remove the variable from that file or unit, then restart
-the gateway in part 14. Also check the operator's shell profile when the
-gateway inherits it.
+A variable set in the gateway's service definition or the operator's shell
+profile also stops the provider, and the live test in part 14 then fails.
 
 ## 5. Factory plugins and the worker profile
 
@@ -380,7 +373,7 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
-  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 40, "permission_mode": "bypassPermissions"}
+  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 40}
 }
 ```
 
@@ -553,8 +546,6 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8644/webhooks/linear  
 curl -s -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:8644/webhooks/linear # 401 Invalid signature
 lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(8644|<dashboard port>|<proxy port>) '                    # 127.0.0.1 only
 ```
-
-Repeat the `ANTHROPIC_*` checks from part 4 against the restarted gateway.
 
 **External checks.** Run the checks at the end of
 [`references/cloudflare-sst.md`](references/cloudflare-sst.md).

@@ -186,17 +186,8 @@ class ValidationTest(unittest.TestCase):
         "exactly one repository must have routing 'default', found 2": with_repo(1, routing="default"),
         "exactly one repository must have routing 'default', found 0": with_repo(0, routing="synced_github"),
         "github must be an object": settings(github="example-factory-bot"),
-        "kanban_url 'factory/kanban' must be empty or an http(s) URL": settings(kanban_url="factory/kanban"),
-        "github.login 'not a login' must be empty, a GitHub login, or an App's <name>[bot] login": settings(
-            github={"login": "not a login"}
-        ),
-        "github.app_id 'example' must be empty or a numeric ID": settings(github={"app_id": "example"}),
-        "github.installation_id True must be empty or a numeric ID": settings(github={"installation_id": True}),
-        "github.private_key_path 'keys/app.pem' must be empty or an absolute path": settings(
-            github={"private_key_path": "keys/app.pem"}
-        ),
-        "add Hermes payload placeholders to the prompt: {action}": with_repo(0, path="/srv/{action}"),
-        "contains a brace outside a Hermes payload placeholder": with_repo(0, path="/srv/a}b"),
+        "kanban_url 7 must be a string": settings(kanban_url=7),
+        "github.login 7 must be a string": settings(github={"login": 7}),
     }
 
     def test_each_invalid_setting_is_rejected(self):
@@ -205,14 +196,6 @@ class ValidationTest(unittest.TestCase):
                 with self.assertRaises(render.SettingsError) as raised:
                     render.build_routes(value)
                 self.assertIn(message, str(raised.exception))
-
-    def test_template_without_raw_payload_is_rejected(self):
-        with self.assertRaisesRegex(render.SettingsError, "must contain"):
-            render.render_prompt("Event {type}", {})
-
-    def test_template_with_env_reference_is_rejected(self):
-        with self.assertRaisesRegex(render.SettingsError, "expands as an environment variable"):
-            render.render_prompt("Event ${type} {__raw__}", {})
 
     def test_template_marker_without_value_is_rejected(self):
         with self.assertRaisesRegex(render.SettingsError, "<<missing>> has no value"):

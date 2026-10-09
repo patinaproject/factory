@@ -36,7 +36,6 @@ class StepFailed(Exception):
 
 
 def read_settings_text(settings_file: str | None) -> str:
-    settings_file = settings_file or os.environ.get("FACTORY_SETTINGS_JSON")
     if settings_file:
         return Path(settings_file).read_text()
     proc = subprocess.run(

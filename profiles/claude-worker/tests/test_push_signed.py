@@ -104,12 +104,6 @@ if method == "GET" and resource.startswith("ref/heads/"):
 if method == "POST" and resource == "refs":
     git("update-ref", fields["ref"], fields["sha"], "0" * 40)
     reply({"ref": fields["ref"], "object": {"sha": fields["sha"]}})
-if method == "PATCH" and resource.startswith("refs/heads/") and fields.get("force") == "true":
-    git("update-ref", resource, fields["sha"])
-    reply({"ref": resource, "object": {"sha": fields["sha"]}})
-if method == "DELETE" and resource.startswith("refs/heads/"):
-    git("update-ref", "-d", resource)
-    sys.exit(0)
 if method == "GET" and resource.startswith("commits/"):
     oid = resource[len("commits/"):]
     reply({"sha": oid, "tree": {"sha": git("rev-parse", oid + "^{tree}")}})
@@ -203,7 +197,6 @@ class PushSignedTest(GitFixture):
             "repository": REPO,
             "branch": "feature",
             "created_branch": True,
-            "rewritten": False,
             "published": [{"local": first, "remote": remote_first}, {"local": second, "remote": remote_second}],
             "head": remote_second,
         })
@@ -273,7 +266,7 @@ class PushSignedTest(GitFixture):
 
         self.assertEqual(status, 0, report)
         self.assertEqual(report, {
-            "repository": REPO, "branch": "feature", "created_branch": False, "rewritten": False,
+            "repository": REPO, "branch": "feature", "created_branch": False,
             "published": [], "head": signed,
         })
         self.assertEqual(self.gh_argv(), [self.ref_get(), self.commit_get(signed)])
@@ -295,94 +288,11 @@ class PushSignedTest(GitFixture):
         self.assertEqual(status, 2)
         self.assertEqual(report, {"error": (
             f"feature on {REPO} has commits this branch lacks; "
-            "update from the remote (for example git pull --ff-only) or pass --rewrite"
+            "update from the remote (for example git pull --ff-only)"
         )})
         self.assertEqual(self.gh_argv(), [self.ref_get()])
         self.assertEqual(self.origin_branch(), remote)
         self.assertEqual(git(self.main, "rev-parse", "HEAD"), local)
-
-    def test_rewrite_replaces_a_bot_authored_remote(self) -> None:
-        local, _ = self.diverge(BOT_EMAIL)
-
-        status, report = self.push("--rewrite")
-
-        self.assertEqual(status, 0, report)
-        head = self.origin_branch()
-        self.assertEqual(report["rewritten"], True)
-        self.assertEqual(report["published"], [{"local": local, "remote": head}])
-        self.assertEqual(self.origin_git("rev-list", f"{self.seed}..{head}"), head)
-        self.assertEqual(self.gh_argv(), [
-            self.ref_get(),
-            ["api", "--method", "DELETE", f"repos/{REPO}/git/refs/heads/feature--push-signed"],
-            ["api", "--method", "POST", f"repos/{REPO}/git/refs", "-f", "ref=refs/heads/feature--push-signed", "-f", f"sha={self.seed}"],
-            ["api", "graphql", "--input", self.gh_argv()[3][3]],
-            self.commit_get(head),
-            ["api", "--method", "PATCH", f"repos/{REPO}/git/refs/heads/feature", "-f", f"sha={head}", "-F", "force=true"],
-            ["api", "--method", "DELETE", f"repos/{REPO}/git/refs/heads/feature--push-signed"],
-        ])
-        self.assertEqual([change["expectedHeadOid"] for change in self.graphql_inputs()], [self.seed])
-        self.assertEqual([change["branch"]["branchName"] for change in self.graphql_inputs()], ["feature--push-signed"])
-        self.assertIsNone(self.origin_branch("feature--push-signed"))
-        self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)
-
-    def test_rewrite_resigns_a_branch_already_pushed_unsigned(self) -> None:
-        git(self.main, "checkout", "-q", "-b", "feature")
-        published = []
-        for name in ("one", "two"):
-            self.commit(f"{name}.txt", f"{name}\n", f"Add {name}")
-            git(self.main, "commit", "-q", "--amend", "--no-edit", f"--author=Bot <{BOT_EMAIL}>")
-            published.append(git(self.main, "rev-parse", "HEAD"))
-        first, second = published
-        git(self.main, "push", "-q", "origin", "feature")
-
-        status, report = self.push("--rewrite")
-
-        self.assertEqual(status, 0, report)
-        head = self.origin_branch()
-        self.assertEqual(report["rewritten"], True)
-        self.assertEqual([p["local"] for p in report["published"]], [first, second])
-        self.assertNotEqual(head, second)
-        self.assertNotIn(
-            ["api", "--method", "PATCH", f"repos/{REPO}/git/refs/heads/feature", "-f", f"sha={self.seed}", "-F", "force=true"],
-            self.gh_argv(),
-        )
-        self.assertIn(
-            ["api", "--method", "PATCH", f"repos/{REPO}/git/refs/heads/feature", "-f", f"sha={head}", "-F", "force=true"],
-            self.gh_argv(),
-        )
-        self.assertEqual(self.origin_git("rev-parse", f"{head}^{{tree}}"), git(self.main, "rev-parse", f"{second}^{{tree}}"))
-        self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)
-
-    def test_rewrite_replaces_a_scratch_branch_left_by_an_interrupted_run(self) -> None:
-        local, remote = self.diverge(BOT_EMAIL)
-        self.origin_git("update-ref", "refs/heads/feature--push-signed", remote)
-
-        status, report = self.push("--rewrite")
-
-        self.assertEqual(status, 0, report)
-        self.assertEqual([p["local"] for p in report["published"]], [local])
-        self.assertIsNone(self.origin_branch("feature--push-signed"))
-
-    def test_failed_rewrite_leaves_the_pull_request_branch_alone(self) -> None:
-        _, remote = self.diverge(BOT_EMAIL)
-
-        status, report = self.push("--rewrite", env={"FAKE_GH_STRAY_FILE": "1"})
-
-        self.assertEqual(status, 2)
-        self.assertIn("feature was left unchanged", report["error"])
-        self.assertEqual(self.origin_branch(), remote)
-        self.assertIsNone(self.origin_branch("feature--push-signed"))
-        self.assertEqual(self.gh_argv()[-1], ["api", "--method", "DELETE", f"repos/{REPO}/git/refs/heads/feature--push-signed"])
-
-    def test_rewrite_refuses_to_discard_a_person_commit(self) -> None:
-        _, remote = self.diverge("person@example.com")
-
-        status, report = self.push("--rewrite")
-
-        self.assertEqual(status, 2)
-        self.assertEqual(report, {"error": f"--rewrite would discard commit {remote} by person@example.com, which no bot authored"})
-        self.assertEqual(self.gh_argv(), [self.ref_get()])
-        self.assertEqual(self.origin_branch(), remote)
 
     def assert_refused_before_any_write(self, error: str) -> None:
         status, report = self.push()

@@ -26,7 +26,6 @@ CREATE_COMMIT = (
 GITHUB_URL = re.compile(
     r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+?)(?:\.git)?/?$"
 )
-BOT_EMAIL_SUFFIX = "[bot]@users.noreply.github.com"
 EXECUTABLE_FILE = "100755"
 SYMLINK = "120000"
 SUBMODULE = "160000"
@@ -144,14 +143,7 @@ def publish(repository: str, branch: str, expected_head: str, commit: Commit) ->
     return response["data"]["createCommitOnBranch"]["commit"]["oid"]
 
 
-def refuse_human_commits(remote: str, default: str) -> None:
-    for line in git("log", "--format=%H %ae", f"origin/{default}..{remote}").splitlines():
-        sha, email = line.split(" ", 1)
-        if not email.endswith(BOT_EMAIL_SUFFIX):
-            raise Refusal(f"--rewrite would discard commit {sha} by {email}, which no bot authored")
-
-
-def run(args: argparse.Namespace) -> dict:
+def run() -> dict:
     inside = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True)
     if inside.stdout.strip() != "true":
         raise Refusal("push-signed runs only inside a git worktree")
@@ -170,13 +162,8 @@ def run(args: argparse.Namespace) -> dict:
     base = git("merge-base", "HEAD", f"origin/{default}")
     remote = remote_head(repository, branch)
     created = remote is None
-    rewritten = False
     start = remote
     if created:
-        start = base
-    elif args.rewrite:
-        refuse_human_commits(remote, default)
-        rewritten = True
         start = base
     elif subprocess.run(["git", "merge-base", "--is-ancestor", remote, head]).returncode == 0:
         pass
@@ -185,17 +172,19 @@ def run(args: argparse.Namespace) -> dict:
     else:
         raise Refusal(
             f"{branch} on {repository} has commits this branch lacks; "
-            "update from the remote (for example git pull --ff-only) or pass --rewrite"
+            "update from the remote (for example git pull --ff-only)"
         )
     commits = [read_commit(sha) for sha in git("rev-list", "--reverse", "--topo-order", f"{start}..{head}").split()]
 
-    if rewritten:
-        remote, published = rewrite(repository, branch, base, commits, head, head_tree)
-    else:
-        if created:
-            create_ref(repository, branch, base)
-            remote = base
-        remote, published = publish_all(repository, branch, remote, commits, head, head_tree, "the local branch")
+    if created:
+        create_ref(repository, branch, base)
+        remote = base
+    published = []
+    for commit in commits:
+        remote = publish(repository, branch, remote, commit)
+        published.append({"local": commit.sha, "remote": remote})
+    if remote_tree(repository, remote) != head_tree:
+        raise Refusal(f"remote commit {remote} does not match the tree of {head}; the local branch was left unchanged")
     git("fetch", "--quiet", "origin", branch)
     git("update-ref", "-m", "push-signed", f"refs/heads/{branch}", remote, head)
     git("branch", "--quiet", f"--set-upstream-to=origin/{branch}", branch)
@@ -203,7 +192,6 @@ def run(args: argparse.Namespace) -> dict:
         "repository": repository,
         "branch": branch,
         "created_branch": created,
-        "rewritten": rewritten,
         "published": published,
         "head": remote,
     }
@@ -213,47 +201,10 @@ def create_ref(repository: str, branch: str, oid: str) -> None:
     gh("api", "--method", "POST", f"repos/{repository}/git/refs", "-f", f"ref=refs/heads/{branch}", "-f", f"sha={oid}")
 
 
-def publish_all(repository: str, branch: str, remote: str, commits: list, head: str, head_tree: str, unchanged_label: str) -> tuple:
-    published = []
-    for commit in commits:
-        remote = publish(repository, branch, remote, commit)
-        published.append({"local": commit.sha, "remote": remote})
-    if remote_tree(repository, remote) != head_tree:
-        raise Refusal(f"remote commit {remote} does not match the tree of {head}; {unchanged_label} was left unchanged")
-    return remote, published
-
-
-def delete_ref(repository: str, branch: str) -> None:
-    gh_call("api", "--method", "DELETE", f"repos/{repository}/git/refs/heads/{branch}")
-
-
-def rewrite(repository: str, branch: str, base: str, commits: list, head: str, head_tree: str) -> tuple:
-    # Signed replacements are built on a scratch branch first: moving the pull
-    # request's branch back to the base would leave it empty, and GitHub closes
-    # a pull request whose branch has no changes.
-    scratch = f"{branch}--push-signed"
-    # A scratch branch left by an interrupted run would block create_ref.
-    delete_ref(repository, scratch)
-    create_ref(repository, scratch, base)
-    try:
-        remote, published = publish_all(repository, scratch, base, commits, head, head_tree, branch)
-        gh("api", "--method", "PATCH", f"repos/{repository}/git/refs/heads/{branch}", "-f", f"sha={remote}", "-F", "force=true")
-    finally:
-        # Failing to delete must not hide the error that ended the rewrite.
-        delete_ref(repository, scratch)
-    return remote, published
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--rewrite",
-        action="store_true",
-        help="reset a diverged remote branch whose own commits are all bot-authored, then republish",
-    )
-    args = parser.parse_args()
+    argparse.ArgumentParser(description=__doc__).parse_args()
     try:
-        status, report = 0, run(args)
+        status, report = 0, run()
     except Refusal as refusal:
         status, report = 2, {"error": str(refusal)}
     except Failure as failure:

@@ -32,7 +32,6 @@ plugins:
           model: ""
           auth_token_env: ""
           max_turns: 40
-          permission_mode: bypassPermissions
     pr-ready-gate:
       settings:
         gated_profiles: [claude-worker]

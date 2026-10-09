@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,8 +22,6 @@ def git(cwd: str, *args: str) -> subprocess.CompletedProcess:
 def load_settings(settings_file: str | None) -> dict:
     if settings_file:
         return json.loads(Path(settings_file).read_text())
-    if os.environ.get("FACTORY_SETTINGS_JSON"):
-        return json.loads(Path(os.environ["FACTORY_SETTINGS_JSON"]).read_text())
     proc = subprocess.run(
         ["hermes", "config", "get", SETTINGS_KEY, "--json", "--raw"],
         capture_output=True,

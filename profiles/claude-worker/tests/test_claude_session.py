@@ -33,7 +33,7 @@ class ClaudeSessionTest(GitFixture):
         self.claude_config = self.tmp / "claude-config"
         self.nvm_dir = self.tmp / "nvm"
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
-        self.settings = self.write_settings([self.repository], {"max_turns": 40, "permission_mode": "bypassPermissions"})
+        self.settings = self.write_settings([self.repository], {"max_turns": 40})
 
     def run_session(self, *extra: str, workspace: Path | None = None, env: dict | None = None):
         base = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
@@ -235,7 +235,6 @@ class ClaudeSessionTest(GitFixture):
             "model": "example-model",
             "auth_token_env": "EXAMPLE_PROXY_TOKEN",
             "max_turns": 12,
-            "permission_mode": "acceptEdits",
         })
 
         self.run_session(env={"EXAMPLE_PROXY_TOKEN": "token-value"})
@@ -245,7 +244,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(call["argv"][2:], [
             "--output-format", "json",
             "--max-turns", "12",
-            "--permission-mode", "acceptEdits",
+            "--permission-mode", "bypassPermissions",
             "--session-id", SESSION_ID,
             "--append-system-prompt", PUBLISH_RULE,
             "--model", "example-model",

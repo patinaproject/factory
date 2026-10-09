@@ -8,7 +8,6 @@ import os
 import re
 import subprocess
 import sys
-from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -36,8 +35,6 @@ GITHUB_SECRET = "${GITHUB_WEBHOOK_SECRET}"
 FULL_NAME = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 ROUTE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 MARKER = re.compile(r"<<([a-z_]+)>>")
-# The same token shape the Hermes webhook adapter substitutes from the payload.
-HERMES_PLACEHOLDER = re.compile(r"\{[a-zA-Z0-9_.]+\}")
 
 
 class SettingsError(Exception):
@@ -101,19 +98,12 @@ def validate(settings: Any) -> dict:
     if not isinstance(github, dict):
         raise SettingsError("github must be an object")
     login = github.get("login", "")
-    if not isinstance(login, str) or not re.match(r"^([A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?)?$", login):
-        raise SettingsError(f"github.login {login!r} must be empty, a GitHub login, or an App's <name>[bot] login")
-    for key in ("app_id", "installation_id"):
-        value = github.get(key)
-        if value not in (None, "") and (isinstance(value, bool) or not str(value).isdigit()):
-            raise SettingsError(f"github.{key} {value!r} must be empty or a numeric ID")
-    private_key_path = github.get("private_key_path", "")
-    if private_key_path != "" and not (isinstance(private_key_path, str) and os.path.isabs(private_key_path)):
-        raise SettingsError(f"github.private_key_path {private_key_path!r} must be empty or an absolute path")
+    if not isinstance(login, str):
+        raise SettingsError(f"github.login {login!r} must be a string")
 
     kanban_url = settings.get("kanban_url", "")
-    if not isinstance(kanban_url, str) or (kanban_url and not re.match(r"^https?://\S+$", kanban_url)):
-        raise SettingsError(f"kanban_url {kanban_url!r} must be empty or an http(s) URL")
+    if not isinstance(kanban_url, str):
+        raise SettingsError(f"kanban_url {kanban_url!r} must be a string")
 
     return {
         "app_user_id": app_user_id,
@@ -150,20 +140,7 @@ def render_prompt(template: str, values: dict) -> str:
             raise SettingsError(f"template marker <<{name}>> has no value")
         return values[name]
 
-    rendered = MARKER.sub(substitute, template)
-    expected = Counter(HERMES_PLACEHOLDER.findall(template))
-    found = Counter(HERMES_PLACEHOLDER.findall(rendered))
-    if found != expected:
-        added = sorted((found - expected).elements())
-        raise SettingsError(f"settings values add Hermes payload placeholders to the prompt: {', '.join(added)}")
-    if "{__raw__}" not in found:
-        raise SettingsError("the prompt template must contain {__raw__}")
-    stray = HERMES_PLACEHOLDER.sub("", rendered)
-    if "{" in stray or "}" in stray:
-        raise SettingsError("the rendered prompt contains a brace outside a Hermes payload placeholder")
-    if "${" in rendered:
-        raise SettingsError("the rendered prompt contains '${', which Hermes expands as an environment variable")
-    return rendered
+    return MARKER.sub(substitute, template)
 
 
 def _read_template(name: str) -> str:
