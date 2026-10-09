@@ -12,8 +12,13 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys
+argv = sys.argv[1:]
+settings = None
+if "--settings" in argv:
+    path = argv[argv.index("--settings") + 1]
+    settings = {"content": json.load(open(path)), "mode": oct(os.stat(path).st_mode & 0o777)}
 with open(os.environ["FAKE_CLAUDE_LOG"], "w") as log:
-    json.dump({"argv": sys.argv[1:], "cwd": os.getcwd(), "env": dict(os.environ)}, log)
+    json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings}, log)
 print(json.dumps({
     "type": "result",
     "subtype": os.environ.get("FAKE_CLAUDE_SUBTYPE", "success"),

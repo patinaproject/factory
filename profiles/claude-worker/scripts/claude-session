@@ -24,6 +24,7 @@ DEFAULT_WORKER_ENTRY = (
 RESUME_PROMPT = "Continue."
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 LOCK_NAME = "claude-session.lock"
+SETTINGS_FILE_NAME = "claude-session.settings.json"
 
 
 class Refusal(Exception):
@@ -114,21 +115,38 @@ def node_bin_for(worktree: Path) -> Path | None:
     return max(matches, key=lambda d: version_key(d.name)) / "bin"
 
 
-def child_env(worktree: Path, transport: dict) -> dict:
+MODEL_TIER_VARIABLES = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+
+
+def child_env(worktree: Path) -> dict:
     env = dict(os.environ)
     node_bin = node_bin_for(worktree)
     if node_bin:
         env["PATH"] = f"{node_bin}{os.pathsep}{env.get('PATH', '')}"
+    return env
+
+
+def transport_settings(transport: dict) -> dict | None:
+    # Passed with --settings because Claude Code lets a user-level
+    # ~/.claude/settings.json env block override the process environment.
+    env = {}
     if transport.get("base_url"):
         env["ANTHROPIC_BASE_URL"] = transport["base_url"]
-    if transport.get("model"):
-        env["ANTHROPIC_MODEL"] = transport["model"]
     token_env = transport.get("auth_token_env")
     if token_env:
         if not os.environ.get(token_env):
             raise Refusal(f"auth_token_env names {token_env}, which is not set")
         env["ANTHROPIC_AUTH_TOKEN"] = os.environ[token_env]
-    return env
+    if transport.get("model"):
+        env.update({name: transport["model"] for name in MODEL_TIER_VARIABLES})
+    return {"env": env} if env else None
 
 
 def build_prompt(args: argparse.Namespace, repo: dict, branch: str, resumed: bool) -> str:
@@ -176,14 +194,24 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         ]
         if transport.get("model"):
             command += ["--model", transport["model"]]
-        proc = subprocess.run(
-            command,
-            cwd=worktree,
-            env=child_env(worktree, transport),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-        )
+        overrides = transport_settings(transport)
+        settings_path = lock_path.with_name(SETTINGS_FILE_NAME)
+        if overrides:
+            fd = os.open(settings_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                json.dump(overrides, handle)
+            command += ["--settings", str(settings_path)]
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=worktree,
+                env=child_env(worktree),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            settings_path.unlink(missing_ok=True)
 
     report = {"session_id": session_id, "resumed": resumed, "worktree": str(worktree), "branch": branch}
     try:

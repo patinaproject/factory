@@ -212,24 +212,38 @@ class ClaudeSessionTest(GitFixture):
         self.run_session(env={"EXAMPLE_PROXY_TOKEN": "token-value"})
 
         call = self.claude_call()
+        settings_path = call["argv"][-1]
         self.assertEqual(call["argv"][2:], [
             "--output-format", "json",
             "--max-turns", "12",
             "--permission-mode", "acceptEdits",
             "--session-id", SESSION_ID,
             "--model", "example-model",
+            "--settings", settings_path,
         ])
-        transport = {k: v for k, v in call["env"].items() if k.startswith("ANTHROPIC_")}
-        self.assertEqual(transport, {
-            "ANTHROPIC_BASE_URL": "http://127.0.0.1:9999",
-            "ANTHROPIC_MODEL": "example-model",
-            "ANTHROPIC_AUTH_TOKEN": "token-value",
+        self.assertEqual(call["settings"], {
+            "mode": "0o600",
+            "content": {"env": {
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:9999",
+                "ANTHROPIC_AUTH_TOKEN": "token-value",
+                "ANTHROPIC_MODEL": "example-model",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "example-model",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "example-model",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "example-model",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "example-model",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "example-model",
+            }},
         })
+        self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
+        self.assertFalse(Path(settings_path).exists())
 
     def test_unset_transport_adds_no_anthropic_variables(self) -> None:
         self.run_session()
 
-        self.assertEqual([k for k in self.claude_call()["env"] if k.startswith("ANTHROPIC_")], [])
+        call = self.claude_call()
+        self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
+        self.assertNotIn("--settings", call["argv"])
+        self.assertIsNone(call["settings"])
 
     def test_max_turns_run_is_reported_as_completed(self) -> None:
         status, report = self.run_session(env={"FAKE_CLAUDE_SUBTYPE": "error_max_turns"})
