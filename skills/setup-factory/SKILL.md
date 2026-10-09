@@ -1,6 +1,6 @@
 ---
 name: setup-factory
-description: Set up or re-check a Hermes software factory on a machine from this repository. Installs and verifies Hermes, the Claude Code CLI and transport, the factory plugins and claude-worker profile, the Linear and GitHub apps and webhook routes, Slack, and Cloudflare Tunnel and Access ingress through the operator's SST app. Use for "set up a factory", "install the factory on this machine", "re-run factory setup", or checking that an existing factory is configured correctly.
+description: Set up or re-check a Hermes software factory on a machine from this repository. Installs and verifies Hermes, the Claude Code CLI and transport, the factory plugins and claude-worker profile, the Linear agent app, the factory's GitHub account and webhooks, the webhook routes, Slack, and Cloudflare Tunnel and Access ingress through the operator's SST app. Use for "set up a factory", "install the factory on this machine", "re-run factory setup", or checking that an existing factory is configured correctly.
 ---
 
 # Set up a factory
@@ -51,7 +51,8 @@ notes, not in the repository.
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
 | The operator's SST app, its stage, and its review process | Ingress |
 | Whether Claude Code uses a local proxy, and if so its base URL, model alias, and token variable name | Claude Code transport |
-| Linear workspace, and the GitHub organization or account that owns the repositories | Linear app, GitHub App |
+| Linear workspace, and whether the operator has an existing agent app access token | Linear app |
+| The GitHub organization or account that owns the repositories, and the factory's GitHub account login | GitHub account |
 | Slack workspace and the channels the agent joins | Slack |
 
 ## Where each value lives
@@ -62,9 +63,10 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 
 | Value | Location |
 | --- | --- |
-| `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | `<home>/.env` and `<worker>/.env` |
+| `LINEAR_ACCESS_TOKEN`, or `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` and `<worker>/.env` |
+| `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | `<worker>/.env`. The key file itself is mode `0600`, outside every repository |
+| `GH_CONFIG_DIR` | `<worker>/.env`. The directory holds the factory account's `gh` login |
 | The token variable that `claude_session.auth_token_env` names | `<worker>/.env`. Never name it `ANTHROPIC_*` |
 | Dashboard OIDC client secret | `<home>/.env` |
 | Cloudflare tunnel token | The `cloudflared` system service only |
@@ -126,7 +128,7 @@ Run the parts in this order. Later parts depend on values from earlier ones.
 6. [Webhook secrets and listener](#6-webhook-secrets-and-listener)
 7. [Public ingress](#7-public-ingress)
 8. [Linear agent app](#8-linear-agent-app)
-9. [GitHub App](#9-github-app)
+9. [GitHub account and webhooks](#9-github-account-and-webhooks)
 10. [Factory settings, repositories, and Kanban](#10-factory-settings-repositories-and-kanban)
 11. [Webhook routes](#11-webhook-routes)
 12. [Checkout refresh cron job](#12-checkout-refresh-cron-job)
@@ -200,7 +202,15 @@ at the end of part 5.
 hermes config get model.provider   # claude-subscription-directsdk-experimental
 hermes config get model.default    # the operator's alias
 hermes plugins list                # lists claude-subscription-directsdk, enabled
+grep -c '^CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1$' <home>/.env <worker>/.env   # 1 for each file
 ```
+
+The last line matters when the gateway runs as a launchd or systemd service.
+In that clean environment, the first request that Claude Code sends is a
+terminal-title request. DirectSDK relays a single request, so it returns that
+title, a `{"title": ...}` object, in place of the model's answer, and tool
+calls never happen. `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` stops the title
+request.
 
 **Configure** whatever the check found missing:
 
@@ -209,6 +219,8 @@ hermes plugins install claude-subscription-directsdk --yes-deps </dev/null
 hermes plugins enable claude-subscription-directsdk-experimental
 hermes config set model.provider claude-subscription-directsdk-experimental
 hermes config set model.default <alias>
+printf 1 | env_set <home>/.env CLAUDE_CODE_DISABLE_TERMINAL_TITLE
+printf 1 | env_set <worker>/.env CLAUDE_CODE_DISABLE_TERMINAL_TITLE
 ```
 
 **Verify.**
@@ -223,7 +235,9 @@ sqlite3 <worker>/state.db "select model, billing_provider, input_tokens, output_
 Each latest session names the operator's alias and
 `claude-subscription-directsdk-experimental`, with non-zero token counts. A
 session with no billing provider and zero tokens never reached the model, even
-when the chat appeared to finish.
+when the chat appeared to finish. Each reply is `PONG`. A `{"title": ...}`
+object in place of the reply means the home's `.env` lacks
+`CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1`.
 
 **Keep `ANTHROPIC_*` out of the gateway.** The provider refuses to start when
 the environment holds `ANTHROPIC_AUTH_TOKEN` or another native override. Only
@@ -306,8 +320,9 @@ hermes config get platforms.webhook.extra.host    # 127.0.0.1
 hermes config get platforms.webhook.extra.port    # the webhook port
 ```
 
-Parts 8 and 9 create the two secrets, because the operator also enters each
-one in its app's form. A missing secret here is expected on a new machine.
+Parts 8 and 9 create the two secrets, because each one also goes into the
+Linear app's form or the GitHub webhooks. A missing secret here is expected on
+a new machine.
 
 **Enable** the listener on the loopback interface only. The default port is
 `8644`.
@@ -330,20 +345,21 @@ the external checks that this part must pass.
 ## 8. Linear agent app
 
 Follow [`references/linear-app.md`](references/linear-app.md). It creates the
-OAuth app, stores its credentials in both `.env` files, and finds the
-`app_user_id` for part 10.
+OAuth app or uses an existing app's access token, stores the credential in
+both `.env` files, and finds the `app_user_id` for part 10.
 
-## 9. GitHub App
+## 9. GitHub account and webhooks
 
-Follow [`references/github-app.md`](references/github-app.md). It creates the
-App, stores its private key, installs it on each repository, and sets up the
-credentials that the worker's `gh` and `git` use.
+Follow [`references/github.md`](references/github.md). It signs the worker's
+`gh` in as the factory's GitHub account, sets up `git` in each checkout to
+push as that account, and creates each repository's webhook. Part 10 needs
+the account's login.
 
 ## 10. Factory settings, repositories, and Kanban
 
-Build the settings JSON from the operator's answers and the IDs from parts 8
-and 9. Write it to a file in your scratch directory. The settings hold no
-secrets.
+Build the settings JSON from the operator's answers, the app user ID from
+part 8, and the login from part 9. Write it to a file in your scratch
+directory. The settings hold no secrets.
 
 ```json
 {
@@ -352,13 +368,14 @@ secrets.
   "repositories": [
     {"full_name": "<owner>/<name>", "path": "/abs/path/to/checkout", "routing": "default", "worker_entry": ""}
   ],
-  "github_app": {"app_id": "<from part 9>", "installation_id": "<from part 9>"},
+  "github": {"login": "<factory login from part 9>"},
   "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 40, "permission_mode": "bypassPermissions"}
 }
 ```
 
-Exactly one repository has `routing: default`. Leave `claude_session.base_url`,
-`model`, and `auth_token_env` empty unless part 3 set up a proxy. An empty
+Exactly one repository has `routing: default`. Leave `github.login` empty in
+the interim setup of part 9. Leave `claude_session.base_url`, `model`, and
+`auth_token_env` empty unless part 3 set up a proxy. An empty
 `worker_entry` uses the built-in prompt.
 
 **Check**, for each home:
@@ -435,7 +452,9 @@ no secret.
 **Dynamic routes.** Run `hermes webhook list`. A static route overrides a
 dynamic subscription of the same name in `webhook_subscriptions.json`. If a
 dynamic subscription named `linear`, `github`, or the `webhook_route` value
-exists, show it to the operator. Remove it only with their approval.
+exists, show it to the operator. With their approval, disable it with the
+`hermes webhook` CLI or by setting `enabled: false`, so only one
+configuration remains.
 
 Render and install again whenever the settings change, then restart the
 gateway.
@@ -471,6 +490,20 @@ uncommitted changes. Fix each problem it names.
 Follow [`references/slack.md`](references/slack.md).
 
 ## 14. Restart and end-to-end checks
+
+**Older factory on this machine.** When the machine already runs an older
+factory, do these before the restart:
+
+- Leave the cards that the older factory created on the board. Linear triage
+  leaves an issue alone while any card that is not `done` or `archived`, has no
+  `linear_issue_id:` line, and names the issue still exists. Triage posts a
+  Linear `thought` that names those cards instead of creating a new card.
+- The static `linear` and `github` routes from part 11 override the older
+  factory's dynamic subscriptions with the same names. Disable those
+  subscriptions as the dynamic routes check in part 11 describes.
+- Keep the existing webhook port when a tunnel already targets it. Set
+  `platforms.webhook.extra.port` to that port in part 6, and use it in place of
+  `8644` in the local checks below.
 
 > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart` from
 > a shell outside Hermes, not from a Hermes session or tool.
@@ -522,11 +555,12 @@ each check. Report each result.
 12. `git -C <repo> status --porcelain` prints nothing. This repository holds no
     factory value.
 
-**Known limitation.** Hermes v0.21.5 has no CLI command or tool that moves a
-`done` or `triage` card back to `ready`. When a GitHub event arrives for a done
-card, triage comments on the card and asks the operator to reopen the card from
-the Kanban dashboard. A failed check after completion therefore waits for the
-operator before the worker resumes.
+**Known limitation.** Only the Kanban dashboard reopens a `done` or `triage`
+card. The operator drags the card to Ready, which Hermes documents as a
+deliberate re-queue. Hermes v0.21.5 has no CLI command or tool for it. When a
+GitHub event arrives for a done card, triage comments on the card and asks the
+operator to reopen the card from the Kanban dashboard. A failed check after
+completion therefore waits for the operator before the worker resumes.
 
 ## Report
 

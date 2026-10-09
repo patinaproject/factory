@@ -1,17 +1,32 @@
 # Linear agent app
 
 The factory acts in Linear as an OAuth application with agent session events.
-The `linear-agent-session` plugin mints its tokens with the client credentials
-grant as `actor=app`, so every comment and activity comes from the app.
+Every comment and activity comes from the app. The `linear-agent-session`
+plugin accepts one of two credentials:
+
+- `LINEAR_ACCESS_TOKEN`: an OAuth access token that Linear issued to an
+  existing agent app with `actor=app`. The plugin uses it as it is and never
+  mints a new one. When Linear rejects it with `401`, the plugin reports the
+  error and does not retry.
+- `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET`: the plugin mints client
+  credentials tokens with the scopes `read,write,app:assignable,app:mentionable`.
+
+When `LINEAR_ACCESS_TOKEN` has a value, the plugin uses it and ignores the
+client credentials. Put the credential you use in both `<home>/.env` and
+`<worker>/.env`.
 
 ## Check
 
 All of these must hold:
 
-- `env_has <home>/.env LINEAR_CLIENT_ID`, `env_has <home>/.env LINEAR_CLIENT_SECRET`,
-  and the same two for `<worker>/.env` each print `1`.
+- In both `<home>/.env` and `<worker>/.env`, either
+  `env_has <file> LINEAR_ACCESS_TOKEN` prints `1`, or
+  `env_has <file> LINEAR_CLIENT_ID` and `env_has <file> LINEAR_CLIENT_SECRET`
+  each print `1`.
+- The token acts as the app (see [Verify](#verify)).
 - `env_has <home>/.env LINEAR_WEBHOOK_SECRET` prints `1`.
-- The plugin can read an issue as the app (see [Verify](#verify)).
+- The plugin can read an issue as the app (see
+  [Find the app user ID](#find-the-app-user-id)).
 - `app_user_id` in the settings is the app's user ID.
 
 If all of them hold, skip to the live test.
@@ -29,6 +44,15 @@ If all of them hold, skip to the live test.
 > Then ask the operator to store the client ID and client secret with the
 > `read -rs` line from the skill, once per key, into both `<home>/.env` and
 > `<worker>/.env`.
+
+**Existing app.** If the operator already has an agent app and an access token
+that Linear issued to it with `actor=app`, use that token in place of the
+checkpoint above. The app's webhook URL and events must still match the
+values above.
+
+> **HUMAN CHECKPOINT.** Ask the operator to store the token as
+> `LINEAR_ACCESS_TOKEN` with the `read -rs` line from the skill, into both
+> `<home>/.env` and `<worker>/.env`. Skip the install below.
 
 Check both files with `env_has` afterwards.
 
@@ -65,14 +89,26 @@ token cache under `<home>/plugin-data/linear-agent-session/`.
   HERMES_HOME=<home> python3 <repo>/plugins/linear-agent-session/cli.py issue <ABC-123> )
 ```
 
-The JSON output's `delegate.id` is the app user ID. Use it as `app_user_id` in
-part 10. A `viewer { id }` GraphQL query made with the app's token returns the
-same ID.
+The command exits `0` and prints the issue's `gitBranchName`. The JSON
+output's `delegate.id` is the app user ID. Use it as `app_user_id` in part 10.
 
 ## Verify
 
-The `issue` command above exits `0` and prints the issue's `gitBranchName`.
-That proves the credentials, the `actor=app` install, and the scopes.
+Check that the token acts as the app with a read-only `viewer` query. The
+plugin's client picks the credential the same way the plugin does, and the
+command never prints the token:
+
+```sh
+( set -a; . <worker>/.env; set +a
+  HERMES_HOME=<worker> python3 -c 'import json, sys; sys.path.insert(0, sys.argv[1]); import linear; print(json.dumps(linear.client_from_env()._graphql("{ viewer { id name app } }", {})))' \
+    <repo>/plugins/linear-agent-session )
+```
+
+Run it again with `<home>/.env` and `HERMES_HOME=<home>`.
+
+Expect `"app": true`. `viewer.id` is the app user ID, and it equals
+`app_user_id` in the settings. `"app": false` means the token acts as a person,
+not the app. Replace it with a token that Linear issued with `actor=app`.
 
 ## Live test
 
