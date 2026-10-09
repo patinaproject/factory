@@ -1,0 +1,24 @@
+name: claude-worker
+version: 0.1.0
+description: "Kanban worker that drives Claude Code from a Linear issue to a ready-to-merge pull request"
+hermes_requires: ">=0.21.4"
+license: "MIT"
+
+env_requires:
+  - name: LINEAR_CLIENT_ID
+    description: "Linear agent app OAuth client ID (activities are posted as the app)"
+    required: true
+  - name: LINEAR_CLIENT_SECRET
+    description: "Linear agent app OAuth client secret"
+    required: true
+  - name: GITHUB_APP_PRIVATE_KEY_PATH
+    description: "Path to the factory GitHub App private key used for pushes and pull requests"
+    required: true
+
+# With an explicit list, only listed paths are installed. config.yaml must be
+# listed so a fresh install gets it; `hermes profile update` still preserves the
+# installed copy unless --force-config is passed.
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - scripts
