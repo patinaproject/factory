@@ -1,0 +1,30 @@
+platform_toolsets:
+  cli: [terminal, kanban, linear_agent_session]
+
+skills:
+  auto_load: [claude-code]
+
+plugins:
+  enabled: [linear-agent-session, pr-ready-gate]
+  entries:
+    linear-agent-session:
+      settings:
+        app_user_id: "<linear agent app user id>"
+        webhook_route: linear
+        repositories:
+          - full_name: example-org/example-repo
+            path: /abs/path/to/example-repo
+            routing: default
+            worker_entry: ""
+        github_app:
+          app_id: ""
+          installation_id: ""
+        claude_session:
+          base_url: ""
+          model: ""
+          auth_token_env: ""
+          max_turns: 40
+          permission_mode: bypassPermissions
+    pr-ready-gate:
+      settings:
+        gated_profiles: [claude-worker]
