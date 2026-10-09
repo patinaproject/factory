@@ -94,10 +94,12 @@ Heartbeat after every run as in step 3.
 ## 5. Try to complete
 
 Call `kanban_complete` with a one-sentence `summary` and `metadata` holding
-`session_id`, `worktree`, `branch`, and `pr_url`.
+`session_id`, `worktree`, `branch`, and `published_pr` (the pull request URL).
+Both `pr-ready-gate` and the card's `completion_contract` read
+`published_pr`.
 
 - **Accepted.** Post a `response` activity that summarizes the change, with
-  `external_urls` set to `[{"label": "Pull request", "url": <pr_url>}]`. You
+  `external_urls` set to `[{"label": "Pull request", "url": <published_pr>}]`. You
   are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, a state other
   than `CLEAN`, or a head commit that is not the worktree's `HEAD`. Write the
