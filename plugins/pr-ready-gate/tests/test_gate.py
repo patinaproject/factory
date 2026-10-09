@@ -102,10 +102,12 @@ class HookScopeTest(unittest.TestCase):
         self.assertIsNone(call_hook(shell, tool_name="terminal"))
         self.assertEqual(shell.calls, [])
 
-    def test_non_worker_process_is_ignored(self):
-        shell = FakeShell(pr={**CLEAN, "isDraft": True})
-        env = {k: v for k, v in WORKER_ENV.items() if k != "HERMES_KANBAN_TASK"}
-        self.assertIsNone(call_hook(shell, env=env))
+    def test_gated_profile_without_worker_env_fails_closed(self):
+        shell = FakeShell(pr=CLEAN)
+        env = {k: v for k, v in WORKER_ENV.items() if not k.startswith("HERMES_KANBAN_")}
+        result = call_hook(shell, env=env)
+        self.assertEqual(result["action"], "block")
+        self.assertIn("HERMES_KANBAN_WORKSPACE is not set", result["message"])
         self.assertEqual(shell.calls, [])
 
     def test_ungated_profile_is_ignored(self):

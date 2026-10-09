@@ -95,7 +95,7 @@ def check(args: Any, env: dict) -> tuple[str, list[str]]:
 
 def make_hook(ctx: Any):
     def on_pre_tool_call(tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict]:
-        if tool_name != "kanban_complete" or not os.environ.get("HERMES_KANBAN_TASK"):
+        if tool_name != "kanban_complete":
             return None
         profile = ctx.profile_name or os.environ.get("HERMES_PROFILE", "")
         if profile not in ctx.get_config("gated_profiles", default=DEFAULT_GATED_PROFILES):
