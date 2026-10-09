@@ -11,6 +11,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -19,6 +20,7 @@ from pathlib import Path
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_WORKER_ENTRY = (
     "Work Linear issue {issue_identifier} ({issue_url}) in {repo} on branch {branch}. "
+    "First start the issue through this repository's own issue-start workflow, which moves it to In Progress. "
     "Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
 RESUME_PROMPT = "Continue."
@@ -86,8 +88,11 @@ def claude_config_dir() -> Path:
     return Path(configured) if configured else Path.home() / ".claude"
 
 
-def transcript_exists(session_id: str) -> bool:
-    return any((claude_config_dir() / "projects").glob(f"*/{session_id}.jsonl"))
+def transcript_exists(session_id: str, worktree: Path) -> bool:
+    # Claude Code resumes only from the project directory named after the working directory, so a
+    # new card's worktree starts a fresh session even though the issue's session ID is the same.
+    project = re.sub(r"[^A-Za-z0-9]", "-", str(worktree))
+    return (claude_config_dir() / "projects" / project / f"{session_id}.jsonl").exists()
 
 
 def session_process_running(session_id: str) -> bool:
@@ -187,7 +192,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             raise Refusal(f"a process for Claude session {session_id} is already running")
 
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
-        resumed = transcript_exists(session_id)
+        resumed = transcript_exists(session_id, worktree)
         transport = settings.get("claude_session") or {}
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),

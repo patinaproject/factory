@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import os
 import subprocess
 from pathlib import Path
@@ -18,7 +19,8 @@ PUBLISH_RULE = (
 REPO = "example-org/example-repo"
 DEFAULT_ENTRY = (
     "Work Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) in example-org/example-repo "
-    "on branch abc-123-fix. Open a ready (non-draft) pull request and drive it until it is ready to merge."
+    "on branch abc-123-fix. First start the issue through this repository's own issue-start workflow, "
+    "which moves it to In Progress. Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
 
 
@@ -62,8 +64,8 @@ class ClaudeSessionTest(GitFixture):
     def claude_call(self) -> dict:
         return json.loads(self.log.read_text())
 
-    def write_transcript(self) -> None:
-        project = self.claude_config / "projects" / "-tmp-some-worktree"
+    def write_transcript(self, worktree: Path | None = None) -> None:
+        project = self.claude_config / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str((worktree or self.worktree).resolve()))
         project.mkdir(parents=True)
         (project / f"{SESSION_ID}.jsonl").write_text("{}\n")
 
@@ -108,6 +110,15 @@ class ClaudeSessionTest(GitFixture):
             "--resume", SESSION_ID,
             "--append-system-prompt", PUBLISH_RULE,
         ])
+
+    def test_transcript_of_another_worktree_starts_a_fresh_session(self) -> None:
+        self.write_transcript(self.add_worktree("abc-123-old-card"))
+
+        self.run_session()
+
+        argv = self.claude_call()["argv"]
+        self.assertEqual(argv[argv.index("--session-id") + 1], SESSION_ID)
+        self.assertNotIn("--resume", argv)
 
     def test_resume_without_a_message_says_continue(self) -> None:
         self.write_transcript()

@@ -213,18 +213,18 @@ def create_ref(repository: str, branch: str, oid: str) -> None:
     gh("api", "--method", "POST", f"repos/{repository}/git/refs", "-f", f"ref=refs/heads/{branch}", "-f", f"sha={oid}")
 
 
-def publish_all(repository: str, branch: str, remote: str, commits: list, head: str, head_tree: str, untouched: str) -> tuple:
+def publish_all(repository: str, branch: str, remote: str, commits: list, head: str, head_tree: str, unchanged_label: str) -> tuple:
     published = []
     for commit in commits:
         remote = publish(repository, branch, remote, commit)
         published.append({"local": commit.sha, "remote": remote})
     if remote_tree(repository, remote) != head_tree:
-        raise Refusal(f"remote commit {remote} does not match the tree of {head}; {untouched} was left unchanged")
+        raise Refusal(f"remote commit {remote} does not match the tree of {head}; {unchanged_label} was left unchanged")
     return remote, published
 
 
-def delete_ref(repository: str, branch: str) -> subprocess.CompletedProcess:
-    return gh_call("api", "--method", "DELETE", f"repos/{repository}/git/refs/heads/{branch}")
+def delete_ref(repository: str, branch: str) -> None:
+    gh_call("api", "--method", "DELETE", f"repos/{repository}/git/refs/heads/{branch}")
 
 
 def rewrite(repository: str, branch: str, base: str, commits: list, head: str, head_tree: str) -> tuple:
