@@ -126,7 +126,7 @@ MODEL_TIER_VARIABLES = (
 
 
 def child_env(worktree: Path) -> dict:
-    env = dict(os.environ)
+    env = {name: value for name, value in os.environ.items() if not name.startswith("ANTHROPIC_")}
     node_bin = node_bin_for(worktree)
     if node_bin:
         env["PATH"] = f"{node_bin}{os.pathsep}{env.get('PATH', '')}"

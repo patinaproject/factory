@@ -35,7 +35,8 @@ branch: <gitBranchName>
 ```
 
 If any key is missing, call `kanban_block` with kind `capability` and a reason
-that names the missing key. Stop.
+that names the missing key. When `linear_agent_session_id` is present, first
+post an `error` activity on that session naming the missing key. Stop.
 
 ## 2. Announce the start
 
@@ -66,8 +67,8 @@ prints one JSON line.
   `subtype`, `num_turns`, and `result`. Call `kanban_heartbeat` with the whole
   line as the note.
 - On failure the line holds `error`. A refusal that another process holds the
-  worktree means a second worker is running this card: call `kanban_block` with
-  kind `transient` and stop. For any other error, post an `error` activity with
+  worktree means a second worker is running this card: post an `error`
+  activity saying so, call `kanban_block` with kind `transient`, and stop. For any other error, post an `error` activity with
   the message, call `kanban_block` with kind `capability`, and stop.
 
 ## 4. Pick up new comments and resume

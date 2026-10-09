@@ -104,17 +104,28 @@ def validate(settings: Any) -> dict:
     if not isinstance(login, str) or not re.match(r"^([A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?)?$", login):
         raise SettingsError(f"github.login {login!r} must be empty, a GitHub login, or an App's <name>[bot] login")
 
+    kanban_url = settings.get("kanban_url", "")
+    if not isinstance(kanban_url, str) or (kanban_url and not re.match(r"^https?://\S+$", kanban_url)):
+        raise SettingsError(f"kanban_url {kanban_url!r} must be empty or an http(s) URL")
+
     return {
         "app_user_id": app_user_id,
         "webhook_route": route,
         "repositories": repositories,
         "github_login": login or None,
+        "kanban_url": kanban_url or None,
     }
 
 
 def _workspace_flag(repo: dict) -> str:
     # The `default` repository's worktrees anchor at the board's default_workdir.
     return "--workspace worktree" if repo["routing"] == "default" else f"--workspace worktree:{repo['path']}"
+
+
+def queued_link_sentence(kanban_url) -> str:
+    if kanban_url is None:
+        return "Leave `external_urls` unset."
+    return f"Set `external_urls` to one link labeled `Kanban card <task id>` whose URL is `{kanban_url}`."
 
 
 def repository_lines(repositories: list) -> str:
@@ -194,7 +205,11 @@ def build_routes(settings: Any) -> dict:
             "toolsets": TOOLSETS,
             "prompt": render_prompt(
                 _read_template("triage-linear.md"),
-                {"app_user_id": config["app_user_id"], "repositories": repos},
+                {
+                    "app_user_id": config["app_user_id"],
+                    "repositories": repos,
+                    "queued_link": queued_link_sentence(config["kanban_url"]),
+                },
             ),
         },
         GITHUB_ROUTE: {

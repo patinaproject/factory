@@ -237,6 +237,11 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
         self.assertFalse(Path(settings_path).exists())
 
+    def test_inherited_anthropic_variables_never_reach_claude(self) -> None:
+        self.run_session(env={"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ANTHROPIC_AUTH_TOKEN": "inherited"})
+
+        self.assertEqual([k for k in self.claude_call()["env"] if k.startswith("ANTHROPIC_")], [])
+
     def test_unset_transport_adds_no_anthropic_variables(self) -> None:
         self.run_session()
 

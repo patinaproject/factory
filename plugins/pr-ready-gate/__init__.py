@@ -34,7 +34,7 @@ def evaluate(pr: dict, local_head: str) -> list[str]:
     if state != "OPEN":
         failures.append(f"state is {state!r}, expected 'OPEN': reopen the pull request or open a new one")
     if pr.get("isDraft") is not False:
-        failures.append(f"isDraft is {pr.get('isDraft')!r}, expected False: mark it ready with `gh pr ready`")
+        failures.append(f"isDraft is {pr.get('isDraft')!r}, expected False: {MERGE_STATE_REMEDIES['DRAFT']}")
     merge_state = pr.get("mergeStateStatus")
     if merge_state != "CLEAN":
         remedy = MERGE_STATE_REMEDIES.get(merge_state, "wait until GitHub reports CLEAN")

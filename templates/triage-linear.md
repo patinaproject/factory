@@ -105,8 +105,11 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
      line with this agent session and keep the rest of the body:
      `hermes kanban edit <task id> --body '<new body>'`. Then comment on the
      card that the Linear agent session moved from the old ID to the new one.
-   - If its status is `blocked`, run `hermes kanban unblock <task id>`. This is
-     the re-delegation path for a card blocked as `undelegated` or `stopped`.
+   - If its status is `blocked`, read its latest block reason from
+     `hermes kanban show <task id> --json`. When the reason is `undelegated` or
+     `stopped`, run `hermes kanban unblock <task id>`. Leave a card blocked for
+     any other reason blocked, and comment on it that the issue was delegated
+     again.
    - If its status is `done` or `triage`, comment on the card that the issue
      was delegated again. The Kanban CLI has no command that moves a card from
      either status back to `ready`, so also post a `thought` on this agent
@@ -115,7 +118,8 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    session, post one `action` activity on this agent session with `action`
    `Queued as <task id>` and `parameter` `<priority name> · <repository full_name>`,
    where the priority name is Urgent, High, Medium, Low, or No priority.
-   Otherwise the card already belongs to this session: post nothing.
+   <<queued_link>> Otherwise the card already belongs to this session: post
+   nothing.
 
 ## Prompt
 
@@ -158,12 +162,14 @@ Type `Issue`. The issue is the data change issue.
    `done`, run `hermes kanban block <task id> undelegated`. Do not archive it.
    Stop.
 5. Otherwise the issue was just delegated to the agent. Linear opens a new
-   agent session only for an issue's first delegation, so a re-delegation can
+   agent session on an issue's first delegation, but a re-delegation can
    arrive with no "Session created" event.
-   - If a card exists and is `blocked`, run `hermes kanban unblock <task id>`,
-     and post a `thought` on the agent session its body names, saying the
-     issue was delegated again. Stop.
-   - If a card exists in any other status, stop.
-   - If no card exists, open a session with `linear_agent_session_create` for
-     the issue. Then follow "Session created" from step 3, using the issue
-     you read and the returned `agent_session_id` as this agent session.
+   - Compare the issue's newest `agentSessions` entry whose `appUserId` is
+     `<<app_user_id>>` with the time from `date -u +%Y-%m-%dT%H:%M:%SZ`. If it
+     was created in the last five minutes, its "Session created" event
+     handles this delegation. Stop.
+   - Otherwise open a session with `linear_agent_session_create` for the
+     issue. Then follow "Session created" from step 3, using the issue you
+     read and the returned `agent_session_id` as this agent session. That
+     moves an existing card to the new session and keeps a link to the old
+     one.

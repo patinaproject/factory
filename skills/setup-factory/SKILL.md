@@ -369,6 +369,7 @@ directory. The settings hold no secrets.
     {"full_name": "<owner>/<name>", "path": "/abs/path/to/checkout", "routing": "default", "worker_entry": ""}
   ],
   "github": {"login": "<factory login from part 9>"},
+  "kanban_url": "https://<hostname>/kanban",
   "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 40, "permission_mode": "bypassPermissions"}
 }
 ```
@@ -376,7 +377,9 @@ directory. The settings hold no secrets.
 Exactly one repository has `routing: default`. Leave `github.login` empty in
 the interim setup of part 9. Leave `claude_session.base_url`, `model`, and
 `auth_token_env` empty unless part 3 set up a proxy. An empty
-`worker_entry` uses the built-in prompt.
+`worker_entry` uses the built-in prompt. `kanban_url` is the dashboard's
+Kanban page; triage links it from the "Queued" activity in Linear. Leave it
+empty to post no link.
 
 **Check**, for each home:
 

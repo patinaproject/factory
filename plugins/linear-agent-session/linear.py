@@ -37,6 +37,7 @@ ISSUE_QUERY = """query Issue($id: String!) {
     state { name type }
     delegate { id }
     attachments { nodes { url sourceType } }
+    agentSessions(first: 20) { nodes { id status createdAt appUser { id } } }
   }
 }"""
 
@@ -130,6 +131,14 @@ class LinearClient:
             "attachments": [
                 {"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]
             ],
+            "agentSessions": sorted(
+                (
+                    {"id": n["id"], "status": n["status"], "createdAt": n["createdAt"], "appUserId": n["appUser"]["id"]}
+                    for n in issue["agentSessions"]["nodes"]
+                ),
+                key=lambda n: n["createdAt"],
+                reverse=True,
+            ),
         }
 
     def _graphql(self, query: str, variables: dict) -> dict:

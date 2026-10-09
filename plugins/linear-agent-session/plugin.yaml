@@ -1,3 +1,4 @@
+manifest_version: 2
 name: linear-agent-session
 version: "0.1.0"
 description: >-
@@ -19,6 +20,10 @@ config_schema:
     type: list
     default: []
     description: Repositories the factory works, each with full_name, path, routing, and worker_entry.
+  kanban_url:
+    type: str
+    default: ""
+    description: Optional Kanban dashboard URL that triage links from the Queued activity in Linear.
   github:
     type: dict
     default: {}

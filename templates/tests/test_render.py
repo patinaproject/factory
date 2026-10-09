@@ -140,6 +140,14 @@ class PromptSubstitutionTest(unittest.TestCase):
                     prompt,
                 )
 
+    def test_queued_activity_links_the_kanban_board_when_configured(self):
+        routes = render.build_routes(settings(kanban_url="https://factory.example.com/kanban"))
+        self.assertIn(
+            "labeled `Kanban card <task id>` whose URL is `https://factory.example.com/kanban`.",
+            routes["linear"]["prompt"],
+        )
+        self.assertIn("Leave `external_urls` unset.", self.prompts["linear"])
+
     def test_linear_prompt_names_the_app_user(self):
         self.assertIn("00000000-0000-4000-8000-000000000001", self.prompts["linear"])
 
@@ -172,6 +180,7 @@ class ValidationTest(unittest.TestCase):
         "exactly one repository must have routing 'default', found 2": with_repo(1, routing="default"),
         "exactly one repository must have routing 'default', found 0": with_repo(0, routing="synced_github"),
         "github must be an object": settings(github="example-factory-bot"),
+        "kanban_url 'factory/kanban' must be empty or an http(s) URL": settings(kanban_url="factory/kanban"),
         "github.login 'not a login' must be empty, a GitHub login, or an App's <name>[bot] login": settings(
             github={"login": "not a login"}
         ),
