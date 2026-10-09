@@ -55,8 +55,12 @@ The first run on this card takes no message:
   --repo <repo>
 ```
 
-Run it in the card's workspace with a timeout long enough for a capped Claude
-run (at least 60 minutes). It prints one JSON line.
+A capped Claude run often outlasts the terminal tool's foreground limit, so
+never run `claude-session` in the foreground. Start it in the card's workspace
+with the terminal tool's `background: true` and `notify: true`, then wait on
+it with the process tool's `wait` action. Call `kanban_heartbeat` between waits
+so the card shows the run is alive. Read the process output once it exits. It
+prints one JSON line.
 
 - On success the line holds `session_id`, `resumed`, `worktree`, `branch`,
   `subtype`, `num_turns`, and `result`. Call `kanban_heartbeat` with the whole
@@ -78,6 +82,8 @@ for example `mktemp`, and resume:
 ```sh
 "$HERMES_HOME/scripts/claude-session" ... --message-file <file>
 ```
+
+Run it in the background and wait on it exactly as in step 3.
 
 Without new comments, check the pull request from the worktree:
 
