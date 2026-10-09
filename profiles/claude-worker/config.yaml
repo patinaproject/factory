@@ -1,6 +1,12 @@
 platform_toolsets:
   cli: [terminal, kanban, linear_agent_session]
 
+# The worker has few tools, and it needs process_manage and the Linear tools
+# on every turn; Tool Search would defer them behind tool_search.
+tools:
+  tool_search:
+    enabled: "off"
+
 skills:
   auto_load: [claude-code]
 

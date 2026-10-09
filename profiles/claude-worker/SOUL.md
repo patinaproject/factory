@@ -109,9 +109,17 @@ Both `pr-ready-gate` and the card's `completion_contract` read
   `external_urls` set to `[{"label": "Pull request", "url": <published_pr>}]`. You
   are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, a state other
-  than `CLEAN`, or a head commit that is not the worktree's `HEAD`. Write the
-  refusal text to a message file and resume Claude with it, then return to
-  step 4.
+  than `CLEAN`, or a head commit that is not the worktree's `HEAD`.
+  - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
+    running. Run `gh pr checks <pr>` from the worktree. While any check is
+    pending, wait five minutes with a foreground `sleep 300`, call
+    `kanban_heartbeat`, and call `kanban_complete` again. Keep waiting up to
+    one hour after the last push.
+  - Otherwise, or when the wait runs out, write the refusal text to a message
+    file and resume Claude with it, then return to step 4.
+  - Do not block the card for a state Claude can still change. Each block
+    counts, and Hermes moves a card that is blocked twice in a row for the
+    same reason to `triage`, where only the dashboard can move it back.
 
 ## 6. When you are stuck
 
