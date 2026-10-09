@@ -313,8 +313,9 @@ class PushSignedTest(GitFixture):
         self.assertEqual(self.origin_git("rev-list", f"{self.seed}..{head}"), head)
         self.assertEqual(self.gh_argv(), [
             self.ref_get(),
+            ["api", "--method", "DELETE", f"repos/{REPO}/git/refs/heads/feature--push-signed"],
             ["api", "--method", "POST", f"repos/{REPO}/git/refs", "-f", "ref=refs/heads/feature--push-signed", "-f", f"sha={self.seed}"],
-            ["api", "graphql", "--input", self.gh_argv()[2][3]],
+            ["api", "graphql", "--input", self.gh_argv()[3][3]],
             self.commit_get(head),
             ["api", "--method", "PATCH", f"repos/{REPO}/git/refs/heads/feature", "-f", f"sha={head}", "-F", "force=true"],
             ["api", "--method", "DELETE", f"repos/{REPO}/git/refs/heads/feature--push-signed"],
@@ -351,6 +352,16 @@ class PushSignedTest(GitFixture):
         )
         self.assertEqual(self.origin_git("rev-parse", f"{head}^{{tree}}"), git(self.main, "rev-parse", f"{second}^{{tree}}"))
         self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)
+
+    def test_rewrite_replaces_a_scratch_branch_left_by_an_interrupted_run(self) -> None:
+        local, remote = self.diverge(BOT_EMAIL)
+        self.origin_git("update-ref", "refs/heads/feature--push-signed", remote)
+
+        status, report = self.push("--rewrite")
+
+        self.assertEqual(status, 0, report)
+        self.assertEqual([p["local"] for p in report["published"]], [local])
+        self.assertIsNone(self.origin_branch("feature--push-signed"))
 
     def test_failed_rewrite_leaves_the_pull_request_branch_alone(self) -> None:
         _, remote = self.diverge(BOT_EMAIL)

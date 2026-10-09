@@ -45,7 +45,7 @@ class SettingsError(Exception):
 
 
 def load_settings(settings_json: Optional[str]) -> Any:
-    command = f"hermes config get {SETTINGS_KEY} --json"
+    command = f"hermes config get {SETTINGS_KEY} --json --raw"
     try:
         if settings_json:
             return json.loads(Path(settings_json).read_text(encoding="utf-8"))
@@ -171,7 +171,13 @@ def _read_template(name: str) -> str:
 
 
 def _exclude_events_sent_by(login: str) -> dict:
-    return {"not": {"field": "sender.login", "equals": login}}
+    # A check failure on the App's own push names the App as sender, and the worker still needs it.
+    return {
+        "any": [
+            {"field": "event", "in": GITHUB_CHECK_EVENTS},
+            {"not": {"field": "sender.login", "equals": login}},
+        ]
+    }
 
 
 def build_routes(settings: Any) -> dict:

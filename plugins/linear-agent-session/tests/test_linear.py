@@ -148,6 +148,17 @@ class TokenTest(unittest.TestCase):
             self.assertEqual(len(fake.token_requests), 1)
             self.assertEqual(fake.graphql_requests[1]["authorization"], "Bearer token-1")
 
+    def test_corrupt_token_cache_mints_a_new_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "token.json")
+            with open(path, "w") as f:
+                f.write("{not json")
+            fake = FakeLinear([activity_ok()])
+            make_client(fake, token_cache_path=path).create_activity("session-1", {"type": "thought", "body": "x"})
+            self.assertEqual(len(fake.token_requests), 1)
+            with open(path) as f:
+                self.assertEqual(json.load(f)["access_token"], "token-1")
+
     def test_token_failure_is_reported(self):
         def refuse(request, timeout=None):
             import io

@@ -127,6 +127,15 @@ class ClaudeSessionTest(GitFixture):
             f"Run /work-issue ABC-123 {ISSUE_ID} https://linear.app/example/issue/ABC-123 abc-123-fix {REPO}",
         )
 
+    def test_unexpected_error_is_reported_as_one_json_line(self) -> None:
+        self.repository["worker_entry"] = "Run {unknown_field}"
+        self.settings = self.write_settings([self.repository])
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(report, {"error": "KeyError: 'unknown_field'"})
+
     def test_refuses_while_the_worktree_lock_is_held(self) -> None:
         lock_path = Path(git(self.worktree, "rev-parse", "--absolute-git-dir")) / "claude-session.lock"
         with open(lock_path, "w") as lock:

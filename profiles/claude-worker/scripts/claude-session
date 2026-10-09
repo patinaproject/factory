@@ -244,6 +244,8 @@ def main() -> int:
         status, report = run(args)
     except Refusal as refusal:
         status, report = 2, {"error": str(refusal)}
+    except Exception as error:
+        status, report = 1, {"error": f"{type(error).__name__}: {error}"}
     print(json.dumps(report))
     return status
 

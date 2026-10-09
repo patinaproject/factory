@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import time
@@ -202,15 +203,20 @@ class LinearClient:
 
     def _discard_token(self) -> None:
         self._token = None
-        if self._token_cache_path and os.path.exists(self._token_cache_path):
-            os.remove(self._token_cache_path)
+        if self._token_cache_path:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(self._token_cache_path)
 
     def _read_cached_token(self) -> Optional[dict]:
-        if not self._token_cache_path or not os.path.exists(self._token_cache_path):
+        if not self._token_cache_path:
             return None
-        with open(self._token_cache_path) as f:
-            token = json.load(f)
-        return token if token.get("client_id") == self._client_id else None
+        try:
+            with open(self._token_cache_path) as f:
+                token = json.load(f)
+        except (OSError, ValueError):
+            # A missing or corrupt cache only costs a fresh token request.
+            return None
+        return token if isinstance(token, dict) and token.get("client_id") == self._client_id else None
 
     def _write_cached_token(self, token: dict) -> None:
         if not self._token_cache_path:

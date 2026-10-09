@@ -49,7 +49,12 @@ CHECK_FILTER = {
         {"field": "workflow_run.conclusion", "in": FAILED},
     ]
 }
-SELF_FILTER = {"not": {"field": "sender.login", "equals": "example-app[bot]"}}
+SELF_FILTER = {
+    "any": [
+        {"field": "event", "in": ["check_run", "check_suite", "workflow_run"]},
+        {"not": {"field": "sender.login", "equals": "example-app[bot]"}},
+    ]
+}
 LINEAR_FILTERS = [
     {
         "any": [

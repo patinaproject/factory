@@ -144,6 +144,8 @@ Record these values for the `github` object in part 10:
 
 The `github` route drops every event whose `sender.login` equals
 `github.login`, so the factory does not triage its own pushes and comments.
+Failed checks are the exception: a check on the App's own push names the App
+as sender, and the worker needs that failure.
 
 ## Set the worker's `gh` directory
 

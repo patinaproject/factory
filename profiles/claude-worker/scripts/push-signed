@@ -96,8 +96,13 @@ def read_commit(sha: str) -> Commit:
             "Bring the base branch in with gh pr update-branch, whose merges GitHub signs"
         )
     commit = Commit(sha, git("log", "-1", "--format=%s", sha), git("log", "-1", "--format=%b", sha))
-    raw = git("diff-tree", "-r", "--no-renames", "-z", "--raw", parents[0], sha)
-    fields = raw.split("\0")
+    # Read raw so stripping cannot eat whitespace at the end of the last path.
+    raw = subprocess.run(
+        ["git", "diff-tree", "-r", "--no-renames", "-z", "--raw", parents[0], sha], capture_output=True, text=True
+    )
+    if raw.returncode != 0:
+        raise Failure(f"git diff-tree {sha} failed: {raw.stderr.strip()}")
+    fields = raw.stdout.rstrip("\0").split("\0")
     for header, path in zip(fields[0::2], fields[1::2]):
         old_mode, new_mode, _, blob, status = header.lstrip(":").split()
         if SUBMODULE in (old_mode, new_mode):
@@ -190,12 +195,7 @@ def run(args: argparse.Namespace) -> dict:
         if created:
             create_ref(repository, branch, base)
             remote = base
-        published = []
-        for commit in commits:
-            remote = publish(repository, branch, remote, commit)
-            published.append({"local": commit.sha, "remote": remote})
-        if remote_tree(repository, remote) != head_tree:
-            raise Refusal(f"remote commit {remote} does not match the tree of {head}; the local branch was left unchanged")
+        remote, published = publish_all(repository, branch, remote, commits, head, head_tree, "the local branch")
     git("fetch", "--quiet", "origin", branch)
     git("update-ref", "-m", "push-signed", f"refs/heads/{branch}", remote, head)
     git("branch", "--quiet", f"--set-upstream-to=origin/{branch}", branch)
@@ -213,23 +213,34 @@ def create_ref(repository: str, branch: str, oid: str) -> None:
     gh("api", "--method", "POST", f"repos/{repository}/git/refs", "-f", f"ref=refs/heads/{branch}", "-f", f"sha={oid}")
 
 
+def publish_all(repository: str, branch: str, remote: str, commits: list, head: str, head_tree: str, untouched: str) -> tuple:
+    published = []
+    for commit in commits:
+        remote = publish(repository, branch, remote, commit)
+        published.append({"local": commit.sha, "remote": remote})
+    if remote_tree(repository, remote) != head_tree:
+        raise Refusal(f"remote commit {remote} does not match the tree of {head}; {untouched} was left unchanged")
+    return remote, published
+
+
+def delete_ref(repository: str, branch: str) -> subprocess.CompletedProcess:
+    return gh_call("api", "--method", "DELETE", f"repos/{repository}/git/refs/heads/{branch}")
+
+
 def rewrite(repository: str, branch: str, base: str, commits: list, head: str, head_tree: str) -> tuple:
     # Signed replacements are built on a scratch branch first: moving the pull
     # request's branch back to the base would leave it empty, and GitHub closes
     # a pull request whose branch has no changes.
     scratch = f"{branch}--push-signed"
+    # A scratch branch left by an interrupted run would block create_ref.
+    delete_ref(repository, scratch)
     create_ref(repository, scratch, base)
     try:
-        remote = base
-        published = []
-        for commit in commits:
-            remote = publish(repository, scratch, remote, commit)
-            published.append({"local": commit.sha, "remote": remote})
-        if remote_tree(repository, remote) != head_tree:
-            raise Refusal(f"remote commit {remote} does not match the tree of {head}; {branch} was left unchanged")
+        remote, published = publish_all(repository, scratch, base, commits, head, head_tree, branch)
         gh("api", "--method", "PATCH", f"repos/{repository}/git/refs/heads/{branch}", "-f", f"sha={remote}", "-F", "force=true")
     finally:
-        gh("api", "--method", "DELETE", f"repos/{repository}/git/refs/heads/{scratch}")
+        # Failing to delete must not hide the error that ended the rewrite.
+        delete_ref(repository, scratch)
     return remote, published
 
 
@@ -247,6 +258,8 @@ def main() -> int:
         status, report = 2, {"error": str(refusal)}
     except Failure as failure:
         status, report = 1, {"error": str(failure)}
+    except Exception as error:
+        status, report = 1, {"error": f"{type(error).__name__}: {error}"}
     print(json.dumps(report))
     return status
 

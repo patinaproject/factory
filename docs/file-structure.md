@@ -18,14 +18,14 @@
 │   ├── release-flow.md        # How releases are cut
 │   └── wiki-index.md          # Planned wiki pages
 ├── plugins/
-│   ├── linear-agent-session/  # Linear acknowledgement hook, activity and issue tools, cli.py
+│   ├── linear-agent-session/  # Linear acknowledgement hook, activity, issue, and session tools, cli.py
 │   └── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete
 ├── profiles/
 │   └── claude-worker/         # Kanban worker profile distribution
 │       ├── SOUL.md            # Worker instructions
 │       ├── config.yaml        # Toolsets, skills, plugins, and placeholder settings
 │       ├── distribution.yaml  # Profile distribution manifest
-│       └── scripts/           # claude-session, refresh-checkouts, and push-signed
+│       └── scripts/           # claude-session, push-signed, and the refresh cron scripts
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
 │   └── ...                    # Repository maintenance scripts
