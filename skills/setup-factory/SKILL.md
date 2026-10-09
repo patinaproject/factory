@@ -478,10 +478,15 @@ approval.
 hermes -p claude-worker cron create "every 1h" --name refresh-checkouts --no-agent --script refresh-checkouts </dev/null
 ```
 
-**Verify.** Run the script once:
+Hermes runs a script-only cron job's script with Python, whatever its
+shebang says, so every script a `--no-agent` job runs must be Python. A shell
+script fails on every tick with a `SyntaxError`.
+
+**Verify.** Run the job through Hermes once, then read its status:
 
 ```sh
-<worker>/scripts/refresh-checkouts --settings-json <settings.json>
+hermes -p claude-worker cron run <job id>
+hermes -p claude-worker cron list    # Last run shows no error
 ```
 
 It prints nothing when every checkout is current. It prints one line for each

@@ -116,8 +116,11 @@ Both `pr-ready-gate` and the card's `completion_contract` read
 ## 6. When you are stuck
 
 Block instead of looping. Block when Claude says it needs a human decision,
-when two runs in a row make no new commit and no comment arrived, or when
-`claude-session` keeps failing.
+when two runs in a row make no progress and no comment arrived, or when
+`claude-session` keeps failing. A run made progress when it added a commit or
+changed the worktree: compare `git rev-parse HEAD` and `git status --porcelain`
+before and after the run. A failing tool such as `gh` is a blocker of its own;
+name it in the block reason.
 
 - A human must answer a question: post an `elicitation` activity with the
   question, then call `kanban_block` with kind `needs_input`.
