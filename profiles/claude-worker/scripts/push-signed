@@ -64,7 +64,7 @@ def gh(*args: str) -> dict:
     proc = gh_call(*args)
     if proc.returncode != 0:
         raise Failure(f"gh {' '.join(args)} failed: {proc.stderr.strip()}")
-    return json.loads(proc.stdout)
+    return json.loads(proc.stdout) if proc.stdout.strip() else {}
 
 
 def repository_name() -> str:
@@ -184,19 +184,18 @@ def run(args: argparse.Namespace) -> dict:
         )
     commits = [read_commit(sha) for sha in git("rev-list", "--reverse", "--topo-order", f"{start}..{head}").split()]
 
-    if created:
-        gh("api", "--method", "POST", f"repos/{repository}/git/refs", "-f", f"ref=refs/heads/{branch}", "-f", f"sha={base}")
-        remote = base
-    elif rewritten:
-        gh("api", "--method", "PATCH", f"repos/{repository}/git/refs/heads/{branch}", "-f", f"sha={base}", "-F", "force=true")
-        remote = base
-    published = []
-    for commit in commits:
-        remote = publish(repository, branch, remote, commit)
-        published.append({"local": commit.sha, "remote": remote})
-
-    if remote_tree(repository, remote) != head_tree:
-        raise Refusal(f"remote commit {remote} does not match the tree of {head}; the local branch was left unchanged")
+    if rewritten:
+        remote, published = rewrite(repository, branch, base, commits, head, head_tree)
+    else:
+        if created:
+            create_ref(repository, branch, base)
+            remote = base
+        published = []
+        for commit in commits:
+            remote = publish(repository, branch, remote, commit)
+            published.append({"local": commit.sha, "remote": remote})
+        if remote_tree(repository, remote) != head_tree:
+            raise Refusal(f"remote commit {remote} does not match the tree of {head}; the local branch was left unchanged")
     git("fetch", "--quiet", "origin", branch)
     git("update-ref", "-m", "push-signed", f"refs/heads/{branch}", remote, head)
     git("branch", "--quiet", f"--set-upstream-to=origin/{branch}", branch)
@@ -208,6 +207,30 @@ def run(args: argparse.Namespace) -> dict:
         "published": published,
         "head": remote,
     }
+
+
+def create_ref(repository: str, branch: str, oid: str) -> None:
+    gh("api", "--method", "POST", f"repos/{repository}/git/refs", "-f", f"ref=refs/heads/{branch}", "-f", f"sha={oid}")
+
+
+def rewrite(repository: str, branch: str, base: str, commits: list, head: str, head_tree: str) -> tuple:
+    # Signed replacements are built on a scratch branch first: moving the pull
+    # request's branch back to the base would leave it empty, and GitHub closes
+    # a pull request whose branch has no changes.
+    scratch = f"{branch}--push-signed"
+    create_ref(repository, scratch, base)
+    try:
+        remote = base
+        published = []
+        for commit in commits:
+            remote = publish(repository, scratch, remote, commit)
+            published.append({"local": commit.sha, "remote": remote})
+        if remote_tree(repository, remote) != head_tree:
+            raise Refusal(f"remote commit {remote} does not match the tree of {head}; {branch} was left unchanged")
+        gh("api", "--method", "PATCH", f"repos/{repository}/git/refs/heads/{branch}", "-f", f"sha={remote}", "-F", "force=true")
+    finally:
+        gh("api", "--method", "DELETE", f"repos/{repository}/git/refs/heads/{scratch}")
+    return remote, published
 
 
 def main() -> int:

@@ -107,6 +107,9 @@ if method == "POST" and resource == "refs":
 if method == "PATCH" and resource.startswith("refs/heads/") and fields.get("force") == "true":
     git("update-ref", resource, fields["sha"])
     reply({"ref": resource, "object": {"sha": fields["sha"]}})
+if method == "DELETE" and resource.startswith("refs/heads/"):
+    git("update-ref", "-d", resource)
+    sys.exit(0)
 if method == "GET" and resource.startswith("commits/"):
     oid = resource[len("commits/"):]
     reply({"sha": oid, "tree": {"sha": git("rev-parse", oid + "^{tree}")}})
@@ -310,11 +313,15 @@ class PushSignedTest(GitFixture):
         self.assertEqual(self.origin_git("rev-list", f"{self.seed}..{head}"), head)
         self.assertEqual(self.gh_argv(), [
             self.ref_get(),
-            ["api", "--method", "PATCH", f"repos/{REPO}/git/refs/heads/feature", "-f", f"sha={self.seed}", "-F", "force=true"],
+            ["api", "--method", "POST", f"repos/{REPO}/git/refs", "-f", "ref=refs/heads/feature--push-signed", "-f", f"sha={self.seed}"],
             ["api", "graphql", "--input", self.gh_argv()[2][3]],
             self.commit_get(head),
+            ["api", "--method", "PATCH", f"repos/{REPO}/git/refs/heads/feature", "-f", f"sha={head}", "-F", "force=true"],
+            ["api", "--method", "DELETE", f"repos/{REPO}/git/refs/heads/feature--push-signed"],
         ])
         self.assertEqual([change["expectedHeadOid"] for change in self.graphql_inputs()], [self.seed])
+        self.assertEqual([change["branch"]["branchName"] for change in self.graphql_inputs()], ["feature--push-signed"])
+        self.assertIsNone(self.origin_branch("feature--push-signed"))
         self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)
 
     def test_rewrite_resigns_a_branch_already_pushed_unsigned(self) -> None:
@@ -334,11 +341,27 @@ class PushSignedTest(GitFixture):
         self.assertEqual(report["rewritten"], True)
         self.assertEqual([p["local"] for p in report["published"]], [first, second])
         self.assertNotEqual(head, second)
-        self.assertEqual(self.gh_argv()[1], [
-            "api", "--method", "PATCH", f"repos/{REPO}/git/refs/heads/feature", "-f", f"sha={self.seed}", "-F", "force=true",
-        ])
+        self.assertNotIn(
+            ["api", "--method", "PATCH", f"repos/{REPO}/git/refs/heads/feature", "-f", f"sha={self.seed}", "-F", "force=true"],
+            self.gh_argv(),
+        )
+        self.assertIn(
+            ["api", "--method", "PATCH", f"repos/{REPO}/git/refs/heads/feature", "-f", f"sha={head}", "-F", "force=true"],
+            self.gh_argv(),
+        )
         self.assertEqual(self.origin_git("rev-parse", f"{head}^{{tree}}"), git(self.main, "rev-parse", f"{second}^{{tree}}"))
         self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)
+
+    def test_failed_rewrite_leaves_the_pull_request_branch_alone(self) -> None:
+        _, remote = self.diverge(BOT_EMAIL)
+
+        status, report = self.push("--rewrite", env={"FAKE_GH_STRAY_FILE": "1"})
+
+        self.assertEqual(status, 2)
+        self.assertIn("feature was left unchanged", report["error"])
+        self.assertEqual(self.origin_branch(), remote)
+        self.assertIsNone(self.origin_branch("feature--push-signed"))
+        self.assertEqual(self.gh_argv()[-1], ["api", "--method", "DELETE", f"repos/{REPO}/git/refs/heads/feature--push-signed"])
 
     def test_rewrite_refuses_to_discard_a_person_commit(self) -> None:
         _, remote = self.diverge("person@example.com")
