@@ -109,7 +109,7 @@ class TokenTest(unittest.TestCase):
             fake.token_requests,
             [
                 {
-                    "form": {"grant_type": "client_credentials", "scope": "read,write"},
+                    "form": {"grant_type": "client_credentials", "scope": "read,write,app:assignable,app:mentionable"},
                     "authorization": expected_auth,
                     "content_type": "application/x-www-form-urlencoded",
                 }

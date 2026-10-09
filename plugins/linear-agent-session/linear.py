@@ -15,7 +15,7 @@ API_URL = "https://api.linear.app/graphql"
 TOKEN_URL = "https://api.linear.app/oauth/token"
 # Every process must request the same scopes: Linear revokes all of an app's
 # client credentials tokens when a request asks for a different scope set.
-TOKEN_SCOPE = "read,write"
+TOKEN_SCOPE = "read,write,app:assignable,app:mentionable"
 TOKEN_REFRESH_MARGIN_SECONDS = 60
 
 BODY_ACTIVITY_TYPES = ("thought", "response", "elicitation", "error")
