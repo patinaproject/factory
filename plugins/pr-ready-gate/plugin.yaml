@@ -1,0 +1,11 @@
+manifest_version: 2
+name: pr-ready-gate
+version: "0.1.0"
+description: "Blocks kanban_complete in gated worker profiles until the task's pull request is open, not a draft, mergeable (mergeStateStatus CLEAN), and at the worktree's HEAD."
+provides_hooks:
+  - pre_tool_call
+config_schema:
+  gated_profiles:
+    type: list
+    default: [claude-worker]
+    description: "Profiles whose Kanban workers must have a merge-ready pull request before kanban_complete succeeds."
