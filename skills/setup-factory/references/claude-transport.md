@@ -1,7 +1,7 @@
 # Claude Code transport
 
 `claude-session` can send Claude Code to an Anthropic-compatible endpoint, for
-example a local proxy such as EasyCLIProxyAPI. Claude Code still runs as the
+example a local proxy. Claude Code still runs as the
 harness; only the model endpoint changes. The endpoint is optional. When
 `claude_session` is empty, Claude Code uses whatever its user configuration
 says, which is its own login unless `~/.claude/settings.json` has an `env`
@@ -43,9 +43,8 @@ When the operator uses a proxy, all of these must hold:
 - `claude_session.base_url` is `http://127.0.0.1:<proxy port>` in both homes.
 - `claude_session.model` is listed by the proxy:
   `curl -s http://127.0.0.1:<proxy port>/v1/models -H "x-api-key: <token or placeholder>"`.
-- The proxy's management API does not accept remote connections. For
-  EasyCLIProxyAPI, `management.allow-remote` is `false` and `server.host` is
-  `127.0.0.1`.
+- The proxy listens only on `127.0.0.1`. If it has a management API, that API
+  does not accept remote connections.
 - If the proxy requires a token, `env_has <worker>/.env <token variable>`
   prints `1`, and `auth_token_env` holds the variable's name. The name does not
   start with `ANTHROPIC_`.
