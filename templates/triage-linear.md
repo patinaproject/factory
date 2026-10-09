@@ -95,6 +95,11 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    When the issue has the GitHub issue attachment from step 3, add the line
    `github_issue_url: <attachment url>` after the closing fence, outside the
    fenced block.
+
+   Run `date +%s` immediately before `hermes kanban create`. The command
+   returns the existing card when another run created it first; when the
+   returned `created_at` is earlier than that time, this run did not create
+   the card, so treat it as an existing card.
 6. If the card already existed, reuse it:
    - If its body names a different `linear_agent_session_id`, replace that
      line with this agent session and keep the rest of the body:
