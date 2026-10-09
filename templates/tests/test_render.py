@@ -21,7 +21,12 @@ SETTINGS = {
         {"full_name": "example-org/app", "path": "/srv/checkouts/app", "routing": "default", "worker_entry": ""},
         {"full_name": "example-org/site", "path": "/srv/checkouts/site", "routing": "synced_github", "worker_entry": ""},
     ],
-    "github": {"login": "example-factory-bot"},
+    "github": {
+        "login": "example-app[bot]",
+        "app_id": "12345",
+        "installation_id": 67890,
+        "private_key_path": "/srv/keys/example-app.pem",
+    },
 }
 
 GITHUB_EVENTS = [
@@ -44,7 +49,7 @@ CHECK_FILTER = {
         {"field": "workflow_run.conclusion", "in": FAILED},
     ]
 }
-SELF_FILTER = {"not": {"field": "sender.login", "equals": "example-factory-bot"}}
+SELF_FILTER = {"not": {"field": "sender.login", "equals": "example-app[bot]"}}
 LINEAR_FILTERS = [
     {
         "any": [
@@ -106,14 +111,10 @@ class RouteStructureTest(unittest.TestCase):
             },
         )
 
-    def test_github_app_bot_login_is_filtered(self):
-        routes = render.build_routes(settings(github={"login": "example-app[bot]"}))
-        self.assertEqual(
-            routes["github"]["filters"][-1], {"not": {"field": "sender.login", "equals": "example-app[bot]"}}
-        )
-
     def test_github_route_without_login_has_no_self_filter(self):
-        routes = render.build_routes(settings(github={"login": ""}))
+        routes = render.build_routes(
+            settings(github={"login": "", "app_id": "", "installation_id": "", "private_key_path": ""})
+        )
         self.assertEqual(routes["github"]["filters"], [REPO_FILTER, CHECK_FILTER])
 
     def test_linear_route_name_follows_settings(self):
@@ -183,6 +184,11 @@ class ValidationTest(unittest.TestCase):
         "kanban_url 'factory/kanban' must be empty or an http(s) URL": settings(kanban_url="factory/kanban"),
         "github.login 'not a login' must be empty, a GitHub login, or an App's <name>[bot] login": settings(
             github={"login": "not a login"}
+        ),
+        "github.app_id 'example' must be empty or a numeric ID": settings(github={"app_id": "example"}),
+        "github.installation_id True must be empty or a numeric ID": settings(github={"installation_id": True}),
+        "github.private_key_path 'keys/app.pem' must be empty or an absolute path": settings(
+            github={"private_key_path": "keys/app.pem"}
         ),
         "add Hermes payload placeholders to the prompt: {action}": with_repo(0, path="/srv/{action}"),
         "contains a brace outside a Hermes payload placeholder": with_repo(0, path="/srv/a}b"),

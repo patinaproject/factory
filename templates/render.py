@@ -103,6 +103,13 @@ def validate(settings: Any) -> dict:
     login = github.get("login", "")
     if not isinstance(login, str) or not re.match(r"^([A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?)?$", login):
         raise SettingsError(f"github.login {login!r} must be empty, a GitHub login, or an App's <name>[bot] login")
+    for key in ("app_id", "installation_id"):
+        value = github.get(key)
+        if value not in (None, "") and (isinstance(value, bool) or not str(value).isdigit()):
+            raise SettingsError(f"github.{key} {value!r} must be empty or a numeric ID")
+    private_key_path = github.get("private_key_path", "")
+    if private_key_path != "" and not (isinstance(private_key_path, str) and os.path.isabs(private_key_path)):
+        raise SettingsError(f"github.private_key_path {private_key_path!r} must be empty or an absolute path")
 
     kanban_url = settings.get("kanban_url", "")
     if not isinstance(kanban_url, str) or (kanban_url and not re.match(r"^https?://\S+$", kanban_url)):
