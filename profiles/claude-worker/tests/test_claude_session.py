@@ -10,6 +10,11 @@ from tests.support import SCRIPTS, GitFixture, git
 
 ISSUE_ID = "0b6c2a8e-1111-4222-8333-944455556666"
 SESSION_ID = "a62cb49b-8e77-5e0f-ba30-182967469dc0"
+PUBLISH_RULE = (
+    f"Publish commits only by running {(SCRIPTS / 'push-signed').resolve()} from the worktree, never `git push`. "
+    "It creates commits that the GitHub App signs, which repositories requiring verified signatures need. "
+    "To bring in the base branch, run `gh pr update-branch`, never a local merge."
+)
 REPO = "example-org/example-repo"
 DEFAULT_ENTRY = (
     "Work Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) in example-org/example-repo "
@@ -82,6 +87,7 @@ class ClaudeSessionTest(GitFixture):
             "--max-turns", "40",
             "--permission-mode", "bypassPermissions",
             "--session-id", SESSION_ID,
+            "--append-system-prompt", PUBLISH_RULE,
         ])
         self.assertEqual(Path(call["cwd"]).resolve(), self.worktree)
 
@@ -100,6 +106,7 @@ class ClaudeSessionTest(GitFixture):
             "--max-turns", "40",
             "--permission-mode", "bypassPermissions",
             "--resume", SESSION_ID,
+            "--append-system-prompt", PUBLISH_RULE,
         ])
 
     def test_resume_without_a_message_says_continue(self) -> None:
@@ -218,6 +225,7 @@ class ClaudeSessionTest(GitFixture):
             "--max-turns", "12",
             "--permission-mode", "acceptEdits",
             "--session-id", SESSION_ID,
+            "--append-system-prompt", PUBLISH_RULE,
             "--model", "example-model",
             "--settings", settings_path,
         ])

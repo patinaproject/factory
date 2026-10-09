@@ -22,6 +22,11 @@ DEFAULT_WORKER_ENTRY = (
     "Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
 RESUME_PROMPT = "Continue."
+PUBLISH_RULE = (
+    "Publish commits only by running {push_signed} from the worktree, never `git push`. It creates "
+    "commits that the GitHub App signs, which repositories requiring verified signatures need. To bring "
+    "in the base branch, run `gh pr update-branch`, never a local merge."
+)
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
@@ -191,6 +196,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             "--max-turns", str(transport.get("max_turns") or 40),
             "--permission-mode", transport.get("permission_mode") or "bypassPermissions",
             "--resume" if resumed else "--session-id", session_id,
+            "--append-system-prompt", PUBLISH_RULE.format(push_signed=Path(__file__).resolve().with_name("push-signed")),
         ]
         if transport.get("model"):
             command += ["--model", transport["model"]]
