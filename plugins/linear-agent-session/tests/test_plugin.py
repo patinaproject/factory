@@ -167,9 +167,9 @@ class RegisterTest(unittest.TestCase):
     def test_registered_handler_reports_missing_credentials(self):
         ctx = FakeContext()
         plugin.register(ctx)
-        with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": ""}):
+        with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": "", "LINEAR_ACCESS_TOKEN": ""}):
             output = ctx.tools["linear_issue"]["handler"]({"issue": "ABC-1"})
-        self.assertEqual(json.loads(output), {"error": "LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET must be set"})
+        self.assertEqual(json.loads(output), {"error": "set LINEAR_ACCESS_TOKEN, or LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"})
 
     def test_registered_hook_uses_configured_route(self):
         fake = FakeLinear([activity_ok()])

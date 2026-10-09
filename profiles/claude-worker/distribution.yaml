@@ -5,14 +5,17 @@ hermes_requires: ">=0.21.4"
 license: "MIT"
 
 env_requires:
+  - name: LINEAR_ACCESS_TOKEN
+    description: "Linear agent app OAuth access token (actor=app). Set this, or LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"
+    required: false
   - name: LINEAR_CLIENT_ID
-    description: "Linear agent app OAuth client ID (activities are posted as the app)"
-    required: true
+    description: "Linear agent app OAuth client ID, used with LINEAR_CLIENT_SECRET to mint client-credentials tokens"
+    required: false
   - name: LINEAR_CLIENT_SECRET
     description: "Linear agent app OAuth client secret"
-    required: true
-  - name: GITHUB_APP_PRIVATE_KEY_PATH
-    description: "Path to the factory GitHub App private key used for pushes and pull requests"
+    required: false
+  - name: GH_CONFIG_DIR
+    description: "The worker's own gh login directory, for example <profile home>/gh; Hermes strips GH_TOKEN from worker subprocesses but passes this"
     required: true
 
 # With an explicit list, only listed paths are installed. config.yaml must be

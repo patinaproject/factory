@@ -69,9 +69,10 @@ def activity_content(
 class LinearClient:
     def __init__(
         self,
-        client_id: str,
-        client_secret: str,
+        client_id: str = "",
+        client_secret: str = "",
         *,
+        access_token: str = "",
         token_cache_path: Optional[str] = None,
         urlopen: Optional[UrlOpen] = None,
         clock: Callable[[], float] = time.time,
@@ -79,6 +80,7 @@ class LinearClient:
     ) -> None:
         self._client_id = client_id
         self._client_secret = client_secret
+        self._static_token = access_token
         self._token_cache_path = token_cache_path
         self._urlopen = urlopen or urllib.request.urlopen
         self._clock = clock
@@ -123,6 +125,8 @@ class LinearClient:
         try:
             return self._post_graphql(query, variables)
         except _Unauthorized:
+            if self._static_token:
+                raise LinearError("Linear rejected LINEAR_ACCESS_TOKEN (HTTP 401)") from None
             # Client credentials tokens have no refresh token; Linear's documented recovery is a new token.
             self._discard_token()
             return self._post_graphql(query, variables)
@@ -145,6 +149,8 @@ class LinearClient:
         return document["data"]
 
     def _access_token(self) -> str:
+        if self._static_token:
+            return self._static_token
         if self._token is None:
             self._token = self._read_cached_token()
         if self._token is None or self._clock() >= self._token["expires_at"] - TOKEN_REFRESH_MARGIN_SECONDS:
@@ -219,10 +225,13 @@ def _parse_json(body: bytes, status: int) -> dict:
 
 
 def client_from_env(environ: Mapping[str, str] = os.environ, *, timeout: float = 10.0, **kwargs: Any) -> LinearClient:
+    access_token = environ.get("LINEAR_ACCESS_TOKEN", "").strip()
+    if access_token:
+        return LinearClient(access_token=access_token, timeout=timeout, **kwargs)
     client_id = environ.get("LINEAR_CLIENT_ID")
     client_secret = environ.get("LINEAR_CLIENT_SECRET")
     if not client_id or not client_secret:
-        raise LinearError("LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET must be set")
+        raise LinearError("set LINEAR_ACCESS_TOKEN, or LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET")
     return LinearClient(
         client_id,
         client_secret,

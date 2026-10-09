@@ -21,7 +21,7 @@ SETTINGS = {
         {"full_name": "example-org/app", "path": "/srv/checkouts/app", "routing": "default", "worker_entry": ""},
         {"full_name": "example-org/site", "path": "/srv/checkouts/site", "routing": "synced_github", "worker_entry": ""},
     ],
-    "github_app": {"app_id": "12345", "installation_id": "678"},
+    "github": {"login": "example-factory-bot"},
 }
 
 GITHUB_EVENTS = [
@@ -44,7 +44,7 @@ CHECK_FILTER = {
         {"field": "workflow_run.conclusion", "in": FAILED},
     ]
 }
-SELF_FILTER = {"not": {"field": "comment.performed_via_github_app.id", "equals": 12345}}
+SELF_FILTER = {"not": {"field": "sender.login", "equals": "example-factory-bot"}}
 LINEAR_FILTERS = [
     {
         "any": [
@@ -106,8 +106,8 @@ class RouteStructureTest(unittest.TestCase):
             },
         )
 
-    def test_github_route_without_app_id_has_no_self_filter(self):
-        routes = render.build_routes(settings(github_app={"app_id": "", "installation_id": ""}))
+    def test_github_route_without_login_has_no_self_filter(self):
+        routes = render.build_routes(settings(github={"login": ""}))
         self.assertEqual(routes["github"]["filters"], [REPO_FILTER, CHECK_FILTER])
 
     def test_linear_route_name_follows_settings(self):
@@ -165,8 +165,8 @@ class ValidationTest(unittest.TestCase):
         "repositories[1].routing 'github' must be one of default, synced_github": with_repo(1, routing="github"),
         "exactly one repository must have routing 'default', found 2": with_repo(1, routing="default"),
         "exactly one repository must have routing 'default', found 0": with_repo(0, routing="synced_github"),
-        "github_app must be an object": settings(github_app="12345"),
-        "github_app.app_id 'app' must be empty or a number": settings(github_app={"app_id": "app"}),
+        "github must be an object": settings(github="example-factory-bot"),
+        "github.login 'not a login' must be empty or a GitHub login": settings(github={"login": "not a login"}),
         "add Hermes payload placeholders to the prompt: {action}": with_repo(0, path="/srv/{action}"),
         "contains a brace outside a Hermes payload placeholder": with_repo(0, path="/srv/a}b"),
     }

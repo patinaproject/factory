@@ -6,9 +6,6 @@ description: >-
   the Linear agent app.
 provides_hooks: [pre_gateway_dispatch]
 provides_tools: [linear_agent_activity, linear_issue]
-requires_env:
-  - LINEAR_CLIENT_ID
-  - LINEAR_CLIENT_SECRET
 config_schema:
   app_user_id:
     type: str
@@ -22,10 +19,10 @@ config_schema:
     type: list
     default: []
     description: Repositories the factory works, each with full_name, path, routing, and worker_entry.
-  github_app:
+  github:
     type: dict
     default: {}
-    description: GitHub App identifiers (app_id, installation_id) used for pushes and pull requests.
+    description: The factory's dedicated GitHub account (login), whose own events the github route ignores.
   claude_session:
     type: dict
     default: {}

@@ -16,9 +16,8 @@ plugins:
             path: /abs/path/to/example-repo
             routing: default
             worker_entry: ""
-        github_app:
-          app_id: ""
-          installation_id: ""
+        github:
+          login: ""
         claude_session:
           base_url: ""
           model: ""

@@ -102,18 +102,18 @@ def validate(settings: Any) -> dict:
     if len(defaults) != 1:
         raise SettingsError(f"exactly one repository must have routing 'default', found {len(defaults)}")
 
-    github_app = settings.get("github_app") or {}
-    if not isinstance(github_app, dict):
-        raise SettingsError("github_app must be an object")
-    app_id = github_app.get("app_id", "")
-    if not re.match(r"^\d*$", str(app_id)):
-        raise SettingsError(f"github_app.app_id {app_id!r} must be empty or a number")
+    github = settings.get("github") or {}
+    if not isinstance(github, dict):
+        raise SettingsError("github must be an object")
+    login = github.get("login", "")
+    if not isinstance(login, str) or not re.match(r"^([A-Za-z0-9][A-Za-z0-9-]{0,38})?$", login):
+        raise SettingsError(f"github.login {login!r} must be empty or a GitHub login")
 
     return {
         "app_user_id": app_user_id,
         "webhook_route": route,
         "repositories": repositories,
-        "github_app_id": int(app_id) if str(app_id) else None,
+        "github_login": login or None,
     }
 
 
@@ -171,11 +171,10 @@ def build_routes(settings: Any) -> dict:
             ]
         },
     ]
-    if config["github_app_id"] is not None:
-        # The factory's own comments would otherwise loop back onto its cards.
-        github_filters.append(
-            {"not": {"field": "comment.performed_via_github_app.id", "equals": config["github_app_id"]}}
-        )
+    if config["github_login"] is not None:
+        # Events the factory account causes itself (pushes, PR updates, comments) would
+        # otherwise loop back onto its own cards.
+        github_filters.append({"not": {"field": "sender.login", "equals": config["github_login"]}})
 
     return {
         config["webhook_route"]: {
