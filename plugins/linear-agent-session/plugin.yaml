@@ -27,7 +27,10 @@ config_schema:
   github:
     type: dict
     default: {}
-    description: The factory's dedicated GitHub account (login), whose own events the github route ignores.
+    description: >-
+      The factory's GitHub App. login is the App's <app-slug>[bot] login, whose own events the github
+      route ignores. app_id, installation_id, and private_key_path (absolute, mode 0600) let
+      refresh-gh-app-login mint installation tokens for the worker's gh login.
   claude_session:
     type: dict
     default: {}

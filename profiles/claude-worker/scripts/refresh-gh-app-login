@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""Sign the worker's gh in as the factory's GitHub App with a fresh installation token.
+
+Mints an installation token from the App ID, installation ID, and private key in
+the factory settings' `github` object, then stores it with `gh auth login` in the
+directory that GH_CONFIG_DIR names. Installation tokens expire after one hour,
+so a Hermes script-only cron job runs this more often than that.
+
+Silent on success. On failure, prints one line that names the failed step and
+exits 1. It never prints the token or the JWT.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
+JWT_BACKDATE_SECONDS = 60
+JWT_LIFETIME_SECONDS = 540
+# gh refuses to store a login while either variable is set, because it would
+# use the variable instead of hosts.yml.
+GH_TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN")
+
+
+class StepFailed(Exception):
+    def __init__(self, step: str, reason: str) -> None:
+        super().__init__(f"{step}: {reason}")
+
+
+def read_settings_text(settings_file: str | None) -> str:
+    settings_file = settings_file or os.environ.get("FACTORY_SETTINGS_JSON")
+    if settings_file:
+        return Path(settings_file).read_text()
+    proc = subprocess.run(
+        ["hermes", "config", "get", SETTINGS_KEY, "--json", "--raw"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise StepFailed("read settings", f"hermes config get {SETTINGS_KEY} failed: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def load_settings(settings_file: str | None) -> dict:
+    try:
+        settings = json.loads(read_settings_text(settings_file))
+    except (OSError, ValueError) as exc:
+        raise StepFailed("read settings", str(exc))
+    if not isinstance(settings, dict):
+        raise StepFailed("read settings", "settings must be an object")
+    return settings
+
+
+def numeric_id(github: dict, key: str) -> str:
+    value = github.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, str)) or not str(value).isdigit():
+        raise StepFailed("read settings", f"github.{key} must be a numeric ID")
+    return str(value)
+
+
+def private_key(github: dict) -> Path:
+    value = github.get("private_key_path")
+    if not isinstance(value, str) or not os.path.isabs(value):
+        raise StepFailed("read settings", "github.private_key_path must be an absolute path")
+    path = Path(value)
+    if not path.is_file():
+        raise StepFailed("check private key", f"{path} does not exist")
+    if path.stat().st_mode & 0o077:
+        raise StepFailed("check private key", f"{path} is readable by group or others; chmod 600 it")
+    return path
+
+
+def b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def b64url_json(value: dict) -> str:
+    return b64url(json.dumps(value, separators=(",", ":")).encode())
+
+
+def app_jwt(app_id: str, key: Path) -> str:
+    now = int(time.time())
+    claims = {"iat": now - JWT_BACKDATE_SECONDS, "exp": now + JWT_LIFETIME_SECONDS, "iss": app_id}
+    signing_input = f"{b64url_json({'alg': 'RS256', 'typ': 'JWT'})}.{b64url_json(claims)}"
+    openssl = os.environ.get("OPENSSL_BIN", "openssl")
+    try:
+        proc = subprocess.run(
+            [openssl, "dgst", "-sha256", "-sign", str(key)],
+            input=signing_input.encode(),
+            capture_output=True,
+        )
+    except OSError as exc:
+        raise StepFailed("sign JWT", str(exc))
+    if proc.returncode != 0:
+        raise StepFailed("sign JWT", proc.stderr.decode(errors="replace").strip())
+    return f"{signing_input}.{b64url(proc.stdout)}"
+
+
+def installation_token(jwt: str, installation_id: str) -> str:
+    api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+    request = urllib.request.Request(
+        f"{api}/app/installations/{installation_id}/access_tokens",
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = json.load(response)
+    except urllib.error.HTTPError as exc:
+        message = exc.read().decode(errors="replace").strip()
+        raise StepFailed("mint installation token", f"HTTP {exc.code}: {message}")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise StepFailed("mint installation token", str(exc))
+    token = body.get("token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or not token:
+        raise StepFailed("mint installation token", "the response has no token")
+    return token
+
+
+def gh_login(token: str) -> None:
+    env = {key: value for key, value in os.environ.items() if key not in GH_TOKEN_VARIABLES}
+    gh = os.environ.get("GH_BIN", "gh")
+    try:
+        proc = subprocess.run(
+            [gh, "auth", "login", "--with-token", "--hostname", "github.com", "--insecure-storage"],
+            input=token,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except OSError as exc:
+        raise StepFailed("gh auth login", str(exc))
+    if proc.returncode != 0:
+        raise StepFailed("gh auth login", proc.stderr.strip() or f"exited {proc.returncode}")
+
+
+def refresh(settings_file: str | None) -> None:
+    if not os.environ.get("GH_CONFIG_DIR"):
+        raise StepFailed("check environment", "GH_CONFIG_DIR is not set; set it in the worker profile's .env")
+    github = load_settings(settings_file).get("github")
+    if not isinstance(github, dict):
+        raise StepFailed("read settings", "github must be an object")
+    app_id = numeric_id(github, "app_id")
+    installation_id = numeric_id(github, "installation_id")
+    key = private_key(github)
+    gh_login(installation_token(app_jwt(app_id, key), installation_id))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--settings-json", help="read the settings from this JSON file instead of hermes config")
+    args = parser.parse_args()
+    try:
+        refresh(args.settings_json)
+    except StepFailed as failure:
+        print(f"refresh-gh-app-login: {failure}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

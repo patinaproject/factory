@@ -18,6 +18,9 @@ plugins:
             worker_entry: ""
         github:
           login: ""
+          app_id: ""
+          installation_id: ""
+          private_key_path: ""
         claude_session:
           base_url: ""
           model: ""

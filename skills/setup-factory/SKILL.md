@@ -1,6 +1,6 @@
 ---
 name: setup-factory
-description: Set up or re-check a Hermes software factory on a machine from this repository. Installs and verifies Hermes, the Claude Code CLI and transport, the factory plugins and claude-worker profile, the Linear agent app, the factory's GitHub account and webhooks, the webhook routes, Slack, and Cloudflare Tunnel and Access ingress through the operator's SST app. Use for "set up a factory", "install the factory on this machine", "re-run factory setup", or checking that an existing factory is configured correctly.
+description: Set up or re-check a Hermes software factory on a machine from this repository. Installs and verifies Hermes, the Claude Code CLI and transport, the factory plugins and claude-worker profile, the Linear agent app, the factory's GitHub App and its webhook, the webhook routes, Slack, and Cloudflare Tunnel and Access ingress through the operator's SST app. Use for "set up a factory", "install the factory on this machine", "re-run factory setup", or checking that an existing factory is configured correctly.
 ---
 
 # Set up a factory
@@ -52,7 +52,8 @@ notes, not in the repository.
 | The operator's SST app, its stage, and its review process | Ingress |
 | Whether Claude Code uses a local proxy, and if so its base URL, model alias, and token variable name | Claude Code transport |
 | Linear workspace, and whether the operator has an existing agent app access token | Linear app |
-| The GitHub organization or account that owns the repositories, and the factory's GitHub account login | GitHub account |
+| The GitHub organization or account that owns the repositories, and a name for the factory's GitHub App | GitHub App |
+| A path outside every repository for the GitHub App's private key, for example `~/.config/factory/github-app.pem` | GitHub App |
 | Slack workspace and the channels the agent joins | Slack |
 
 ## Where each value lives
@@ -66,7 +67,8 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `LINEAR_ACCESS_TOKEN`, or `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` and `<worker>/.env` |
 | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
-| `GH_CONFIG_DIR` | `<worker>/.env`. The directory holds the factory account's `gh` login |
+| `GH_CONFIG_DIR` | `<worker>/.env`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews |
+| GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
 | The token variable that `claude_session.auth_token_env` names | `<worker>/.env`. Never name it `ANTHROPIC_*` |
 | Dashboard OIDC client secret | `<home>/.env` |
 | Cloudflare tunnel token | The `cloudflared` system service only |
@@ -128,7 +130,7 @@ Run the parts in this order. Later parts depend on values from earlier ones.
 6. [Webhook secrets and listener](#6-webhook-secrets-and-listener)
 7. [Public ingress](#7-public-ingress)
 8. [Linear agent app](#8-linear-agent-app)
-9. [GitHub account and webhooks](#9-github-account-and-webhooks)
+9. [GitHub App](#9-github-app)
 10. [Factory settings, repositories, and Kanban](#10-factory-settings-repositories-and-kanban)
 11. [Webhook routes](#11-webhook-routes)
 12. [Checkout refresh cron job](#12-checkout-refresh-cron-job)
@@ -301,8 +303,8 @@ distribution install sets no model, so now run part 4 for the worker profile.
 
 **Verify.**
 
-- `<worker>/scripts/claude-session` and `<worker>/scripts/refresh-checkouts`
-  exist and are executable.
+- `<worker>/scripts/claude-session`, `<worker>/scripts/refresh-checkouts`,
+  and `<worker>/scripts/refresh-gh-app-login` exist and are executable.
 - `<worker>/SOUL.md` matches `<repo>/profiles/claude-worker/SOUL.md`.
 - `hermes -p claude-worker config get platform_toolsets.cli` lists `terminal`,
   `kanban`, and `linear_agent_session`.
@@ -321,7 +323,7 @@ hermes config get platforms.webhook.extra.port    # the webhook port
 ```
 
 Parts 8 and 9 create the two secrets, because each one also goes into the
-Linear app's form or the GitHub webhooks. A missing secret here is expected on
+Linear app's form or the GitHub App's form. A missing secret here is expected on
 a new machine.
 
 **Enable** the listener on the loopback interface only. The default port is
@@ -348,18 +350,21 @@ Follow [`references/linear-app.md`](references/linear-app.md). It creates the
 OAuth app or uses an existing app's access token, stores the credential in
 both `.env` files, and finds the `app_user_id` for part 10.
 
-## 9. GitHub account and webhooks
+## 9. GitHub App
 
-Follow [`references/github.md`](references/github.md). It signs the worker's
-`gh` in as the factory's GitHub account, sets up `git` in each checkout to
-push as that account, and creates each repository's webhook. Part 10 needs
-the account's login.
+Follow [`references/github.md`](references/github.md) through its
+"Set the worker's `gh` directory" section. It creates the factory's GitHub
+App with its webhook, stores the App's private key, installs the App on the
+configured repositories, and points the worker's `GH_CONFIG_DIR` at its own
+directory. Part 10 needs the App's `login`, `app_id`, `installation_id`, and
+`private_key_path`.
 
 ## 10. Factory settings, repositories, and Kanban
 
 Build the settings JSON from the operator's answers, the app user ID from
-part 8, and the login from part 9. Write it to a file in your scratch
-directory. The settings hold no secrets.
+part 8, and the GitHub App values from part 9. Write it to a file in your
+scratch directory. The settings hold no secrets. `private_key_path` names the
+key file but does not contain the key.
 
 ```json
 {
@@ -368,15 +373,20 @@ directory. The settings hold no secrets.
   "repositories": [
     {"full_name": "<owner>/<name>", "path": "/abs/path/to/checkout", "routing": "default", "worker_entry": ""}
   ],
-  "github": {"login": "<factory login from part 9>"},
+  "github": {
+    "login": "<app-slug>[bot]",
+    "app_id": "<App ID from part 9>",
+    "installation_id": "<installation ID from part 9>",
+    "private_key_path": "/abs/path/to/github-app.pem"
+  },
   "kanban_url": "https://<hostname>/kanban",
   "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 40, "permission_mode": "bypassPermissions"}
 }
 ```
 
-Exactly one repository has `routing: default`. Leave `github.login` empty in
-the interim setup of part 9. Leave `claude_session.base_url`, `model`, and
-`auth_token_env` empty unless part 3 set up a proxy. An empty
+Exactly one repository has `routing: default`. Leave
+`claude_session.base_url`, `model`, and `auth_token_env` empty unless part 3
+set up a proxy. An empty
 `worker_entry` uses the built-in prompt. `kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
 empty to post no link.
@@ -413,6 +423,11 @@ git -C <path> status --porcelain --untracked-files=no # prints nothing
 
 The main checkout stays on its default branch. Kanban creates worktrees under
 `<path>/.worktrees/`.
+
+**GitHub login and checkouts.** Return to
+[`references/github.md`](references/github.md) and run its
+"Sign the worker's `gh` in" and "Configure git in each checkout" sections.
+They need the settings and the clones from this part.
 
 **Kanban.**
 

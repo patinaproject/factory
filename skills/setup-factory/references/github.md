@@ -1,69 +1,151 @@
-# GitHub account and webhooks
+# GitHub App and webhooks
 
-The worker commits, pushes, and opens ready pull requests as a dedicated
-GitHub account that belongs to the factory. Each configured repository sends
-the GitHub webhook events that the `github` route triages.
+The factory acts on GitHub as a GitHub App. The worker fetches, publishes
+commits, and opens ready pull requests as the App's bot user,
+`<app-slug>[bot]`. The App's own webhook sends the events that the `github`
+route triages. The factory has no machine user account, because a machine
+user takes a paid seat.
 
-Hermes documents this pattern in `website/docs/user-guide/features/kanban.md`
-of the Hermes install. Kanban acceptance reads as the assignee profile's own
-`gh` login, which `GH_TOKEN` or `GH_CONFIG_DIR` in that profile's `.env`
-selects. On a host with more than one profile, sign `gh` in once per profile,
-with one GitHub identity per organization.
+Hermes documents the worker's GitHub identity in
+`website/docs/user-guide/features/kanban.md` of the Hermes install. Kanban
+acceptance reads as the assignee profile's own `gh` login, which
+`GH_CONFIG_DIR` in that profile's `.env` selects.
 
-Hermes removes `GH_TOKEN`, `GITHUB_TOKEN`, and every GitHub App credential
-variable from each subprocess that a worker starts: the terminal,
-`claude-session`, and Claude Code. It passes `GH_CONFIG_DIR`. The factory
-therefore keeps the worker's `gh` login in the directory that `GH_CONFIG_DIR`
-names. A `GH_TOKEN` alone never reaches the worker's commands.
+Hermes removes `GH_TOKEN`, `GITHUB_TOKEN`, and every `GITHUB_APP_*` variable
+from each subprocess that a worker starts: the terminal, `claude-session`, and
+Claude Code. It passes `GH_CONFIG_DIR`. The factory therefore keeps an App
+installation token in the `gh` login that `GH_CONFIG_DIR` names.
+`pr-ready-gate` runs `gh pr view` inside the worker profile, so the gate uses
+the same login.
 
-`pr-ready-gate` also runs `gh pr view` inside the worker profile, so the gate
-needs the same login.
+An installation token expires after one hour. The worker profile's
+`refresh-gh-app-login` script mints a new token from the App's private key and
+stores it with `gh auth login`. A Hermes cron job runs the script every 30
+minutes.
+
+Run this reference in two passes. Part 9 runs [Create the App](#create-the-app)
+through [Set the worker's `gh` directory](#set-the-workers-gh-directory). Part
+10 writes the settings and clones the checkouts, then returns here for
+[Sign the worker's `gh` in](#sign-the-workers-gh-in) and
+[Configure git in each checkout](#configure-git-in-each-checkout).
 
 ## Check
 
-`<login>` is the factory account's GitHub login. In the
-[interim setup](#create-the-factory-account), read `<worker>/gh` as the
-operator's login directory and `<login>` as the operator's login. All of these
-must hold:
+`<app-slug>` is the App's URL name, from `https://github.com/apps/<app-slug>`.
+All of these must hold:
 
+- `github.login` in the settings of both homes is `<app-slug>[bot]`, and
+  `github.app_id`, `github.installation_id`, and `github.private_key_path` have
+  values.
+- The file at `github.private_key_path` exists and prints `0o600` for
+  `python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' <key path>`.
+  The path is outside every configured checkout and outside this repository.
 - `grep '^GH_CONFIG_DIR=' <worker>/.env` prints `GH_CONFIG_DIR=<worker>/gh`.
-- `GH_CONFIG_DIR=<worker>/gh gh api user --jq .login` prints `<login>`.
-- For each configured repository,
-  `GH_CONFIG_DIR=<worker>/gh gh repo view <full_name> --json viewerPermission --jq .viewerPermission`
-  prints `WRITE`, `MAINTAIN`, or `ADMIN`.
+- `hermes -p claude-worker cron list` shows exactly one job named
+  `refresh-gh-app-login`, and its last run shows no error.
+- `GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --paginate --jq '.repositories[].full_name'`
+  lists every configured repository.
 - For each repository's main checkout,
   `git -C <path> config --local --get-all credential.https://github.com.helper`
   prints an empty line and then `!gh auth git-credential`.
-- For each main checkout, `git -C <path> config --local user.name` and
-  `git -C <path> config --local user.email` print the factory account's name
-  and email address.
-- `github.login` in the settings of both homes is `<login>`. In the interim
-  setup below, it is empty.
+- For each main checkout, `git -C <path> config --local user.name` prints
+  `<app-slug>[bot]`, and `git -C <path> config --local user.email` prints
+  `<bot user id>+<app-slug>[bot]@users.noreply.github.com`.
+- For each main checkout, `git -C <path> config --local remote.origin.pushurl`
+  prints `no_push_use_push-signed`.
 - `env_has <home>/.env GITHUB_WEBHOOK_SECRET` prints `1`.
-- Each configured repository has an active webhook for the factory (see
-  [Verify](#verify)). Reading webhooks needs the admin access described in
-  [Create the webhooks](#create-the-webhooks).
+- The App's webhook is active and delivers to the factory (see
+  [Live test](#live-test)).
 
 If all of them hold, skip to the live test.
 
-## Create the factory account
+## Create the App
 
-> **HUMAN CHECKPOINT.** Ask the operator to create a GitHub account for the
-> factory and to give it write access to each configured repository, for
-> example as an organization member in a team with the Write role. You never
-> create accounts. Record the account's login for `github.login` in part 10.
+If `env_has <home>/.env GITHUB_WEBHOOK_SECRET` prints `1`, keep that secret.
+A new secret breaks every webhook that uses the old one.
 
-**Interim setup.** Until the dedicated account exists, the operator can point
-`GH_CONFIG_DIR` at a directory where they already signed `gh` in, such as
-`~/.config/gh`. The worker then acts as the operator. In this setup, leave
-`github.login` empty. The `github` route drops every event whose
-`sender.login` equals `github.login`, so the operator's login there would drop
-the operator's own reviews and comments. Move to the dedicated account later
-by repeating this reference.
+> **HUMAN CHECKPOINT.** Ask the operator to create a GitHub App under the
+> organization or account that owns the repositories, in
+> **Settings → Developer settings → GitHub Apps → New GitHub App**, with these
+> values:
+>
+> - **GitHub App name:** the operator's choice. GitHub derives `<app-slug>`
+>   from it.
+> - **Webhook:** active, with the URL `https://<hostname>/webhooks/github`.
+> - **Webhook secret:** copied to the clipboard in the operator's own
+>   terminal and pasted into the form. When the secret does not exist yet,
+>   this line generates it:
+>
+>   ```sh
+>   openssl rand -hex 32 | tee >(pbcopy) | env_set <home>/.env GITHUB_WEBHOOK_SECRET
+>   ```
+>
+>   When it exists, this line copies it:
+>
+>   ```sh
+>   grep '^GITHUB_WEBHOOK_SECRET=' <home>/.env | cut -d= -f2- | tr -d '\n' | pbcopy
+>   ```
+>
+> - **Repository permissions:** Contents read and write, Pull requests read
+>   and write, Issues read-only, Checks read-only, Actions read-only, and
+>   Metadata read-only.
+> - **Subscribe to events:** Issues, Issue comment, Pull request, Pull request
+>   review, Pull request review comment, Workflow run, Check run, and Check
+>   suite.
+> - **Where can this GitHub App be installed:** only on this account.
+>
+> Afterwards, ask for the **App ID** from the App's **General** page and for
+> `<app-slug>`. Neither is a secret.
 
-## Sign the worker's `gh` in
+The events are the `GITHUB_EVENTS` list in `templates/render.py`. Compare the
+list with the form when that file changes.
 
-Point the worker profile at its own `gh` configuration directory:
+## Download the private key
+
+The private key signs the token requests. Keep it outside every repository,
+in a file that only the user who runs the Hermes gateway can read. This
+reference uses `~/.config/factory/github-app.pem` as the example path.
+
+> **HUMAN CHECKPOINT.** Ask the operator to open the App's **General** page,
+> click **Generate a private key**, and move the downloaded file into place
+> from their own terminal:
+>
+> ```sh
+> mkdir -p ~/.config/factory && chmod 700 ~/.config/factory
+> mv ~/Downloads/<app-slug>.*.private-key.pem ~/.config/factory/github-app.pem
+> chmod 600 ~/.config/factory/github-app.pem
+> ```
+
+Check the mode with the `python3` line in [Check](#check). Record the absolute
+path for `github.private_key_path`.
+
+## Install the App
+
+> **HUMAN CHECKPOINT.** Ask the operator to open
+> `https://github.com/apps/<app-slug>/installations/new`, choose the
+> organization, select **Only select repositories**, and add every configured
+> repository. Afterwards, ask for the installation ID, the number at the end of
+> the installation's settings URL, `.../settings/installations/<installation id>`.
+
+Find the bot user's ID. The endpoint is public, so any `gh` login can read it:
+
+```sh
+gh api '/users/<app-slug>[bot]' --jq .id
+```
+
+Record these values for the `github` object in part 10:
+
+| Key | Value |
+| --- | --- |
+| `login` | `<app-slug>[bot]` |
+| `app_id` | The App ID |
+| `installation_id` | The installation ID |
+| `private_key_path` | The absolute path of the private key |
+
+The `github` route drops every event whose `sender.login` equals
+`github.login`, so the factory does not triage its own pushes and comments.
+
+## Set the worker's `gh` directory
 
 ```sh
 mkdir -p <worker>/gh
@@ -71,196 +153,105 @@ chmod 700 <worker>/gh
 printf '%s' <worker>/gh | env_set <worker>/.env GH_CONFIG_DIR
 ```
 
-> **HUMAN CHECKPOINT.** Ask the operator to sign in as the factory account
-> from their own terminal:
->
-> ```sh
-> GH_CONFIG_DIR=<worker>/gh gh auth login --hostname github.com --git-protocol https --web --insecure-storage
-> ```
->
-> `--insecure-storage` keeps the token in `<worker>/gh/hosts.yml` (mode `0600`
-> inside a `0700` directory) instead of the macOS keychain. A gateway that
-> launchd or systemd starts may not be able to read the login keychain.
->
-> Afterwards, check that `GH_CONFIG_DIR=<worker>/gh gh api user --jq .login`
-> prints `<login>`.
+Part 9 ends here. Continue with part 10.
+
+## Sign the worker's `gh` in
+
+Run this after part 10 has set the settings in the worker profile.
+
+The script lives in the worker profile's `scripts/` directory, so the job
+belongs to the worker profile. `cron create` does not remove duplicates. If
+`hermes -p claude-worker cron list` shows more than one `refresh-gh-app-login`
+job, show the list to the operator and remove the extras with their approval.
+Create the job only when the list has none:
+
+```sh
+hermes -p claude-worker cron create "every 30m" --name refresh-gh-app-login --no-agent --script refresh-gh-app-login </dev/null
+```
+
+Run the job through Hermes once, then check the login:
+
+```sh
+hermes -p claude-worker cron run <job id>
+hermes -p claude-worker cron list    # Last run shows no error
+GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --jq .total_count
+```
+
+The count is the number of repositories the installation covers. It is at
+least the number of configured repositories.
+
+The script prints nothing on success. On failure it prints one line that names
+the failed step, such as `check private key` or `mint installation token`, and
+Hermes delivers the line. `gh api user` fails for an installation token, so do
+not use it as the check.
 
 ## Configure git in each checkout
 
-For each repository's main checkout, set a local credential helper. Pushes
-then use the worker's `gh` login, and the global git configuration stays as
-it is. The empty first value clears any helper that another configuration
-file sets for `github.com`.
+Run this after part 10 has cloned the repositories.
+
+For each repository's main checkout, set a local credential helper. Fetches
+then use the App's installation token from the worker's `gh` login, and the
+global git configuration stays as it is. The empty first value clears any
+helper that another configuration file sets for `github.com`.
 
 ```sh
 git -C <path> config --local credential.https://github.com.helper ''
 git -C <path> config --local --add credential.https://github.com.helper '!gh auth git-credential'
 ```
 
-Set the commit author to the factory account. Use an email address that
-GitHub links to the account, such as its no-reply address
-`<id>+<login>@users.noreply.github.com`. `GH_CONFIG_DIR=<worker>/gh gh api user --jq .id`
-prints `<id>`.
+Set the commit author to the App's bot user, with the bot user ID from
+[Install the App](#install-the-app):
 
 ```sh
-git -C <path> config --local user.name '<login>'
-git -C <path> config --local user.email '<email>'
+git -C <path> config --local user.name '<app-slug>[bot]'
+git -C <path> config --local user.email '<bot user id>+<app-slug>[bot]@users.noreply.github.com'
 ```
+
+Block plain pushes:
+
+```sh
+git -C <path> config --local remote.origin.pushurl no_push_use_push-signed
+```
+
+A GitHub App cannot hold a signing key, so a commit that the worker pushes
+with `git push` is unverified. Repositories that require verified signatures
+reject such a push. Hosts such as Vercel cancel deployments for unverified
+commits. The worker therefore publishes commits only with the `push-signed`
+script, which recreates each local commit through GitHub's API as the App.
+GitHub signs and verifies commits made that way. The push URL above makes a
+plain `git push` fail with an error that names `push-signed`. Fetches still
+use the normal URL.
 
 Kanban worktrees share their main checkout's configuration, so each worktree
 uses these values.
 
-## Sign commits
+## Webhooks
 
-Repositories often require verified commits: a branch ruleset with
-`required_signatures`, or a host such as Vercel that cancels deployments for
-unverified commits. GitHub verifies a commit only when a key registered on the
-author's account signed it, so the factory account signs every commit with
-its own SSH signing key. A GitHub App identity cannot hold a signing key.
+The App's own webhook replaces per-repository and organization webhooks. It
+delivers the subscribed events for every repository the installation covers.
+The route ignores events from repositories that are not configured.
 
-**Check.** Each checkout prints `ssh`, `true`, and the key path below, and
-`<worker>/ssh/factory_signing_ed25519` exists with mode `0600`:
-
-```sh
-git -C <path> config --local gpg.format
-git -C <path> config --local commit.gpgsign
-git -C <path> config --local user.signingkey
-```
-
-**Create** the key once. It has no passphrase, because the worker signs
-without a person present:
+If a repository or organization webhook from an earlier setup also targets
+`https://<hostname>/webhooks/github`, the route receives each event twice.
+Under the operator's own admin `gh` login, without `GH_CONFIG_DIR`, list
+them:
 
 ```sh
-mkdir -p <worker>/ssh && chmod 700 <worker>/ssh
-ssh-keygen -q -t ed25519 -N "" -C "<factory name> signing" -f <worker>/ssh/factory_signing_ed25519
-cat <worker>/ssh/factory_signing_ed25519.pub
+gh api repos/<full_name>/hooks --jq '.[] | {id, url: .config.url}'
+gh api orgs/<org>/hooks --jq '.[] | {id, url: .config.url}'
 ```
 
-> **HUMAN CHECKPOINT.** Ask the operator to sign in as the factory account,
-> open **Settings → SSH and GPG keys → New SSH key**, choose key type
-> **Signing Key**, and paste the public key the command printed.
-
-**Configure** each checkout:
-
-```sh
-git -C <path> config --local gpg.format ssh
-git -C <path> config --local user.signingkey <worker>/ssh/factory_signing_ed25519
-git -C <path> config --local commit.gpgsign true
-git -C <path> config --local tag.gpgsign true
-```
-
-**Verify** on a throwaway branch, then delete it:
-
-```sh
-git -C <path> switch -c factory-signing-check origin/HEAD
-git -C <path> commit --allow-empty -m "chore: check commit signing"
-git -C <path> push origin factory-signing-check
-GH_CONFIG_DIR=<worker>/gh gh api repos/<full_name>/commits/factory-signing-check --jq .commit.verification.verified
-git -C <path> push origin --delete factory-signing-check
-git -C <path> switch - && git -C <path> branch -D factory-signing-check
-```
-
-The `gh api` call prints `true`. If it prints `false`, compare the commit's
-author email with the account's verified emails, and the key type in GitHub
-with **Signing Key**.
-
-## Create the webhooks
-
-Each configured repository needs a webhook with these values:
-
-- **Payload URL:** `https://<hostname>/webhooks/github`.
-- **Content type:** `application/json`.
-- **Secret:** the value of `GITHUB_WEBHOOK_SECRET` in `<home>/.env`.
-- **Events:** the `GITHUB_EVENTS` list in `templates/render.py`. Today these
-  are `issues`, `issue_comment`, `pull_request`, `pull_request_review`,
-  `pull_request_review_comment`, `workflow_run`, `check_run`, and
-  `check_suite`.
-
-An organization webhook with the same values covers every repository in the
-organization. The route ignores events from repositories that are not
-configured.
-
-A webhook needs admin access to the repository. The factory account has only
-write access, so ask the operator to choose one of these:
-
-- The operator creates each webhook in the repository's **Settings** page.
-- You create each webhook with `gh api` under the operator's own admin `gh`
-  login, without `GH_CONFIG_DIR`.
-
-If `env_has <home>/.env GITHUB_WEBHOOK_SECRET` prints `0`, create the secret
-first. A new secret breaks every existing webhook that uses the old one, so
-keep an existing secret.
-
-> **HUMAN CHECKPOINT.** When the operator creates the webhooks in the web
-> page, ask them to generate the secret in their own terminal with the
-> clipboard line from the skill and paste it into each webhook form:
->
-> ```sh
-> openssl rand -hex 32 | tee >(pbcopy) | env_set <home>/.env GITHUB_WEBHOOK_SECRET
-> ```
-
-When you create the webhooks, generate the secret straight into the file:
-
-```sh
-openssl rand -hex 32 | env_set <home>/.env GITHUB_WEBHOOK_SECRET
-```
-
-Then, for each repository, list the existing webhooks:
-
-```sh
-gh api repos/<full_name>/hooks --jq '.[] | {id, url: .config.url, events, active}'
-```
-
-Write the request body to a `0600` file in your scratch directory. The script
-reads the secret from `<home>/.env` and the events from `templates/render.py`,
-and prints nothing:
-
-```sh
-( umask 077
-  python3 - <home>/.env <repo>/templates <hostname> > <scratch>/hook.json <<'PY'
-import json, sys
-env, templates, hostname = sys.argv[1:]
-sys.path.insert(0, templates)
-from render import GITHUB_EVENTS
-secret = next(line.split("=", 1)[1].strip() for line in open(env) if line.startswith("GITHUB_WEBHOOK_SECRET="))
-print(json.dumps({"active": True, "events": GITHUB_EVENTS, "config": {
-    "url": f"https://{hostname}/webhooks/github", "content_type": "json", "secret": secret}}))
-PY
-)
-```
-
-If a webhook's `config.url` is `https://<hostname>/webhooks/github`, update
-that webhook. Otherwise create one:
-
-```sh
-gh api --method PATCH repos/<full_name>/hooks/<id> --input <scratch>/hook.json --jq .id
-gh api --method POST repos/<full_name>/hooks --input <scratch>/hook.json --jq .id
-```
-
-For an organization webhook, use `orgs/<org>/hooks` in place of
-`repos/<full_name>/hooks` and add `"name": "web"` to the body. Delete
-`<scratch>/hook.json` when every repository is done. The webhook API never returns the secret, so a
-second run updates each webhook again with the same values.
-
-## Verify
-
-Run the checks in [Check](#check). For the webhooks, each repository's list
-shows exactly one webhook whose `url` is `https://<hostname>/webhooks/github`,
-whose `events` equal `GITHUB_EVENTS`, and whose `active` is `true`.
+Show any match to the operator, and delete it with their approval.
 
 ## Live test
 
 Run this after part 14 has restarted the gateway.
 
 > **HUMAN CHECKPOINT.** Ask the operator to comment on a test issue in a
-> configured repository.
-
-Read the latest delivery of the factory's webhook:
-
-```sh
-gh api repos/<full_name>/hooks/<id>/deliveries --jq '.[0] | {event, status_code}'
-```
+> configured repository. Then ask them to open the App's
+> **Advanced → Recent Deliveries** page and read the delivery's response
+> code.
 
 Expect `200` for an event the route ignores and `202` for an accepted event. A
-`401` means `GITHUB_WEBHOOK_SECRET` in `<home>/.env` does not match the
-webhook's secret.
+`401` means `GITHUB_WEBHOOK_SECRET` in `<home>/.env` does not match the App's
+webhook secret.
