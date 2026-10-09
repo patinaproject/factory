@@ -110,6 +110,60 @@ git -C <path> config --local user.email '<email>'
 Kanban worktrees share their main checkout's configuration, so each worktree
 uses these values.
 
+## Sign commits
+
+Repositories often require verified commits: a branch ruleset with
+`required_signatures`, or a host such as Vercel that cancels deployments for
+unverified commits. GitHub verifies a commit only when a key registered on the
+author's account signed it, so the factory account signs every commit with
+its own SSH signing key. A GitHub App identity cannot hold a signing key.
+
+**Check.** Each checkout prints `ssh`, `true`, and the key path below, and
+`<worker>/ssh/factory_signing_ed25519` exists with mode `0600`:
+
+```sh
+git -C <path> config --local gpg.format
+git -C <path> config --local commit.gpgsign
+git -C <path> config --local user.signingkey
+```
+
+**Create** the key once. It has no passphrase, because the worker signs
+without a person present:
+
+```sh
+mkdir -p <worker>/ssh && chmod 700 <worker>/ssh
+ssh-keygen -q -t ed25519 -N "" -C "<factory name> signing" -f <worker>/ssh/factory_signing_ed25519
+cat <worker>/ssh/factory_signing_ed25519.pub
+```
+
+> **HUMAN CHECKPOINT.** Ask the operator to sign in as the factory account,
+> open **Settings → SSH and GPG keys → New SSH key**, choose key type
+> **Signing Key**, and paste the public key the command printed.
+
+**Configure** each checkout:
+
+```sh
+git -C <path> config --local gpg.format ssh
+git -C <path> config --local user.signingkey <worker>/ssh/factory_signing_ed25519
+git -C <path> config --local commit.gpgsign true
+git -C <path> config --local tag.gpgsign true
+```
+
+**Verify** on a throwaway branch, then delete it:
+
+```sh
+git -C <path> switch -c factory-signing-check origin/HEAD
+git -C <path> commit --allow-empty -m "chore: check commit signing"
+git -C <path> push origin factory-signing-check
+GH_CONFIG_DIR=<worker>/gh gh api repos/<full_name>/commits/factory-signing-check --jq .commit.verification.verified
+git -C <path> push origin --delete factory-signing-check
+git -C <path> switch - && git -C <path> branch -D factory-signing-check
+```
+
+The `gh api` call prints `true`. If it prints `false`, compare the commit's
+author email with the account's verified emails, and the key type in GitHub
+with **Signing Key**.
+
 ## Create the webhooks
 
 Each configured repository needs a webhook with these values:

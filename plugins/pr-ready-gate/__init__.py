@@ -15,7 +15,10 @@ GH_TIMEOUT_SECONDS = 20
 
 MERGE_STATE_REMEDIES = {
     "BEHIND": "update the branch from the base branch and push",
-    "BLOCKED": "required checks or reviews are not satisfied; wait for checks to pass and address reviews",
+    "BLOCKED": (
+        "a branch rule is not satisfied: required checks, reviews, or verified commit signatures; "
+        "wait for checks, address reviews, and make sure every commit is signed"
+    ),
     "DIRTY": "resolve the merge conflicts with the base branch and push",
     "UNSTABLE": "a check is pending or failing; wait for checks to finish and fix any failures",
     "UNKNOWN": "GitHub has not computed mergeability yet; wait a minute and retry",
