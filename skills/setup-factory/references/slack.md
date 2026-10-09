@@ -39,7 +39,7 @@ enabled.
 
 ## Verify
 
-Run this after part 14 has restarted the gateway.
+Run this after part 15 has restarted the gateway.
 
 > **HUMAN CHECKPOINT.** Ask the operator to mention the app in one of the
 > channels with a short question.

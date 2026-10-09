@@ -32,7 +32,7 @@
 ├── skills/
 │   └── setup-factory/         # Agent runbook that sets up a factory on a machine
 │       ├── SKILL.md
-│       └── references/        # Cloudflare and SST, Linear, GitHub, Slack, Claude transport
+│       └── references/        # Cloudflare and SST, Linear, GitHub, Slack, Claude transport, Infisical
 ├── templates/
 │   ├── render.py              # Builds the linear and github webhook routes from settings
 │   ├── triage-linear.md       # Linear triage prompt template

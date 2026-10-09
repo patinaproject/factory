@@ -81,5 +81,5 @@ claude -p "Reply with exactly: PONG" --model <model> --settings settings.json --
 Expect `"result": "PONG"` and `modelUsage` naming `<model>`. As a control,
 repeat with `base_url` set to `http://127.0.0.1:9`: the run must not succeed.
 If it does, something other than `--settings` is choosing the endpoint. The full
-`claude-session` path runs in the end-to-end checks of part 14, because it
+`claude-session` path runs in the end-to-end checks of part 15, because it
 needs a Kanban worktree.

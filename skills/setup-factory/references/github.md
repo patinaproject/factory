@@ -247,7 +247,7 @@ Show any match to the operator, and delete it with their approval.
 
 ## Live test
 
-Run this after part 14 has restarted the gateway.
+Run this after part 15 has restarted the gateway.
 
 > **HUMAN CHECKPOINT.** Ask the operator to comment on a test issue in a
 > configured repository. Then ask them to open the App's

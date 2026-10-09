@@ -100,7 +100,7 @@ not the app. Replace it with a token that Linear issued with `actor=app`.
 
 ## Live test
 
-Run this after part 14 has restarted the gateway. Delegate a new test issue to
+Run this after part 15 has restarted the gateway. Delegate a new test issue to
 the app. Expect these in the issue's agent session:
 
 1. An acknowledgement `thought` within 10 seconds.

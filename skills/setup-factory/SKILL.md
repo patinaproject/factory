@@ -1,6 +1,6 @@
 ---
 name: setup-factory
-description: Set up or re-check a Hermes software factory on a machine from this repository. Installs and verifies Hermes, the Claude Code CLI and transport, the factory plugins and claude-worker profile, the Linear agent app, the factory's GitHub App and its webhook, the webhook routes, Slack, and Cloudflare Tunnel and Access ingress through the operator's SST app. Use for "set up a factory", "install the factory on this machine", "re-run factory setup", or checking that an existing factory is configured correctly.
+description: Set up or re-check a Hermes software factory on a machine from this repository. Installs and verifies Hermes, the Claude Code CLI and transport, the factory plugins and claude-worker profile, the Linear agent app, the factory's GitHub App and its webhook, the webhook routes, Slack, an optional Infisical secret source, and Cloudflare Tunnel and Access ingress through the operator's SST app. Use for "set up a factory", "install the factory on this machine", "re-run factory setup", or checking that an existing factory is configured correctly.
 ---
 
 # Set up a factory
@@ -54,6 +54,7 @@ notes, not in the repository.
 | Linear workspace, and whether the operator already has an agent app | Linear app |
 | The GitHub organization or account that owns the repositories, and a name for the factory's GitHub App | GitHub App |
 | A path outside every repository for the GitHub App's private key, for example `~/.config/factory/github-app.pem` | GitHub App |
+| Whether secrets live in Infisical, and if so the project ID, environment, folder, and machine identity | Infisical |
 | Slack workspace and the channels the agent joins | Slack |
 
 ## Where each value lives
@@ -77,6 +78,10 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
 | `kanban.max_in_progress`, `platforms.webhook.*`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | The `default` board's `default_workdir` | Kanban board metadata, not `config.yaml` |
+
+When the factory uses Infisical, part 14 moves the Linear credentials, both
+webhook secrets, and the proxy token from `.env` into one Infisical folder.
+Earlier parts still write them to `.env` first.
 
 Write a secret into a `.env` file with this function. It reads the value from
 standard input, replaces any earlier line for the key, and keeps the file at
@@ -135,7 +140,8 @@ Run the parts in this order. Later parts depend on values from earlier ones.
 11. [Webhook routes](#11-webhook-routes)
 12. [Checkout refresh cron job](#12-checkout-refresh-cron-job)
 13. [Slack](#13-slack)
-14. [Restart and end-to-end checks](#14-restart-and-end-to-end-checks)
+14. [Infisical secret source](#14-infisical-secret-source), optional
+15. [Restart and end-to-end checks](#15-restart-and-end-to-end-checks)
 
 ## 1. Hermes
 
@@ -251,7 +257,7 @@ grep -c '^ANTHROPIC_' <home>/.env <worker>/.env
 ```
 
 A variable set in the gateway's service definition or the operator's shell
-profile also stops the provider, and the live test in part 14 then fails.
+profile also stops the provider, and the live test in part 15 then fails.
 
 ## 5. Factory plugins and the worker profile
 
@@ -328,7 +334,7 @@ hermes config set platforms.webhook.extra.host 127.0.0.1
 hermes config set platforms.webhook.extra.port 8644
 ```
 
-Part 14 verifies the listener after a restart.
+Part 15 verifies the listener after a restart.
 
 ## 7. Public ingress
 
@@ -505,7 +511,12 @@ uncommitted changes. Fix each problem it names.
 
 Follow [`references/slack.md`](references/slack.md).
 
-## 14. Restart and end-to-end checks
+## 14. Infisical secret source
+
+Skip this part when the operator does not use Infisical. Otherwise follow
+[`references/infisical.md`](references/infisical.md).
+
+## 15. Restart and end-to-end checks
 
 **Older factory on this machine.** When the machine already runs an older
 factory, do these before the restart:
