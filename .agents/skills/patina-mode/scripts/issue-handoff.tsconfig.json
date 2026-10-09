@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "esnext",
+    "types": ["bun-types"]
+  },
+  "include": [
+    "issue-handoff.ts",
+    "issue-handoff.test.ts",
+    "issue-routes/*.ts"
+  ]
+}
