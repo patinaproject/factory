@@ -69,7 +69,11 @@ If no card matches, stop. The event belongs to work the factory does not own.
 1. Comment on the card. Name the event, its action, the sender, and the link.
    Quote the review or comment body, or name the failed check and its
    conclusion.
-2. If the card's status is `done`, the Kanban CLI has no command that moves it
+2. For `pull_request` action `closed` with merged `true`, when the card is
+   `blocked`, run `hermes kanban unblock <task id>`. The worker then completes
+   the card, because a merged pull request at its head satisfies the
+   completion gate.
+3. If the card's status is `done`, the Kanban CLI has no command that moves it
    back to `ready`. Read `linear_agent_session_id` from the card body and post
    a `thought` on that Linear agent session with `linear_agent_activity`,
    saying the event arrived after the card finished and that the card must be

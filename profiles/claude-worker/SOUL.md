@@ -34,9 +34,21 @@ repo: example-org/example-repo
 branch: <gitBranchName>
 ```
 
-If any key is missing, call `kanban_block` with kind `capability` and a reason
-that names the missing key. When `linear_agent_session_id` is present, first
-post an `error` activity on that session naming the missing key. Stop.
+Hermes can rewrite a card's title and body, for example when a blocked card
+passes through `triage`. When the block is missing, rebuild the keys from the
+fields Hermes keeps:
+
+- `repo` is the card's `completion_contract`, and `branch` is its
+  `branch_name`.
+- The issue identifier is the `<team>-<number>` part of the branch name, for
+  example `abc-123` in `team/abc-123-fix-checkout`. Read that issue with
+  `linear_issue`: its `id`, `identifier`, and `url` are the issue keys.
+- `linear_agent_session_id` is the newest entry in the issue's
+  `agentSessions`.
+
+If a key still cannot be found, call `kanban_block` with kind `capability` and
+a reason that names the missing key. When `linear_agent_session_id` is known,
+first post an `error` activity on that session naming the missing key. Stop.
 
 ## 2. Announce the start
 

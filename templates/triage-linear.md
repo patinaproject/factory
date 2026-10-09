@@ -14,8 +14,11 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
   app, which is the reader the worker uses, so `gitBranchName` matches.
 - Stay read-only on GitHub. Do not run git, edit files, or write code.
 - An issue has one card for its whole life. Find it with
-  `hermes kanban list --json`: it is the task whose `body` contains the line
-  `linear_issue_id: <Linear issue UUID>`. Create a card only with the
+  `hermes kanban list --json` after reading the issue with `linear_issue`: it
+  is the task whose `branch_name` equals the issue's `gitBranchName`, or, when
+  none matches, whose `body` contains the line
+  `linear_issue_id: <Linear issue UUID>`. The branch survives when Hermes
+  rewrites a card's title and body. Create a card only with the
   `hermes kanban create` command below, never with the `kanban_create` tool,
   which cannot set the branch.
 - Add free-text card comments with the `kanban_comment` tool, not the shell.
@@ -126,8 +129,8 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
 Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
 `stop`. A human replied in the agent session.
 
-1. Find the issue's card. If there is none, handle the event as
-   "Session created" and stop.
+1. Read the issue with `linear_issue` and find its card. If there is none,
+   handle the event as "Session created" and stop.
 2. Comment on the card with the reply: the activity body, attributed to Linear.
 3. If the card's body names a different `linear_agent_session_id`, update it as
    in "Session created" step 6.
@@ -141,8 +144,8 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
 
 Type `AgentSessionEvent`, action `prompted`, activity signal `stop`.
 
-1. Find the issue's card. If there is none, post a `response` saying there was
-   no work to stop, and stop.
+1. Read the issue with `linear_issue` and find its card. If there is none,
+   post a `response` saying there was no work to stop, and stop.
 2. If the card is `ready`, `running`, `todo`, or `review`, run
    `hermes kanban block <task id> stopped`. Blocking ends the worker's run, and
    the Kanban dispatcher terminates a worker that outlives its run.

@@ -73,9 +73,20 @@ class EvaluateTest(unittest.TestCase):
     def test_clean_open_ready_pr_at_local_head_passes(self):
         self.assertEqual(gate.evaluate(CLEAN, HEAD), [])
 
+    def test_merged_pr_at_local_head_passes_whatever_its_merge_state(self):
+        merged = {**CLEAN, "state": "MERGED", "mergeStateStatus": "UNKNOWN"}
+        self.assertEqual(gate.evaluate(merged, HEAD), [])
+
+    def test_merged_pr_at_another_head_is_blocked(self):
+        merged = {**CLEAN, "state": "MERGED", "mergeStateStatus": "UNKNOWN", "headRefOid": OTHER}
+        self.assertEqual(
+            gate.evaluate(merged, HEAD),
+            [f"headRefOid is '{OTHER}' but the worktree HEAD is '{HEAD}': push the worktree's commits, or pull if the remote branch is ahead"],
+        )
+
     def test_each_failed_condition_is_reported_with_observed_value(self):
         cases = {
-            "state": ("CLOSED", "state is 'CLOSED', expected 'OPEN'"),
+            "state": ("CLOSED", "state is 'CLOSED', expected 'OPEN' or 'MERGED'"),
             "isDraft": (True, "isDraft is True, expected False"),
             "headRefOid": (OTHER, f"headRefOid is '{OTHER}' but the worktree HEAD is '{HEAD}'"),
         }
@@ -209,7 +220,7 @@ class RegisterTest(unittest.TestCase):
         self.assertEqual([name for name, _ in ctx.hooks], ["pre_tool_call"])
         hook = ctx.hooks[0][1]
         with mock.patch.dict(os.environ, WORKER_ENV, clear=True), \
-                mock.patch.object(gate.subprocess, "run", FakeShell(pr={**CLEAN, "state": "MERGED"})):
+                mock.patch.object(gate.subprocess, "run", FakeShell(pr={**CLEAN, "state": "CLOSED"})):
             result = hook(tool_name="kanban_complete", args={})
         self.assertEqual(result["action"], "block")
 

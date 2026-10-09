@@ -34,21 +34,28 @@ class GateError(Exception):
 def evaluate(pr: dict, local_head: str) -> list[str]:
     failures = []
     state = pr.get("state")
+    if state == "MERGED":
+        # A merged pull request is past ready-to-merge; only its head still has to be the worker's commit.
+        return _head_failures(pr, local_head)
     if state != "OPEN":
-        failures.append(f"state is {state!r}, expected 'OPEN': reopen the pull request or open a new one")
+        failures.append(f"state is {state!r}, expected 'OPEN' or 'MERGED': reopen the pull request or open a new one")
     if pr.get("isDraft") is not False:
         failures.append(f"isDraft is {pr.get('isDraft')!r}, expected False: {MERGE_STATE_REMEDIES['DRAFT']}")
     merge_state = pr.get("mergeStateStatus")
     if merge_state != "CLEAN":
         remedy = MERGE_STATE_REMEDIES.get(merge_state, "wait until GitHub reports CLEAN")
         failures.append(f"mergeStateStatus is {merge_state!r}, expected 'CLEAN': {remedy}")
+    return failures + _head_failures(pr, local_head)
+
+
+def _head_failures(pr: dict, local_head: str) -> list[str]:
     remote_head = pr.get("headRefOid")
-    if remote_head != local_head:
-        failures.append(
-            f"headRefOid is {remote_head!r} but the worktree HEAD is {local_head!r}: "
-            "push the worktree's commits, or pull if the remote branch is ahead"
-        )
-    return failures
+    if remote_head == local_head:
+        return []
+    return [
+        f"headRefOid is {remote_head!r} but the worktree HEAD is {local_head!r}: "
+        "push the worktree's commits, or pull if the remote branch is ahead"
+    ]
 
 
 def _run(cmd: list[str], cwd: str, timeout: int) -> str:
