@@ -504,6 +504,17 @@ factory, do these before the restart:
 - Keep the existing webhook port when a tunnel already targets it. Set
   `platforms.webhook.extra.port` to that port in part 6, and use it in place of
   `8644` in the local checks below.
+- Check `kanban.max_spawn`. It caps the running cards the gateway's dispatcher
+  allows, so `0` means the dispatcher never starts a card. An older factory can
+  set it to `0` because its own triage started cards. Factory triage only
+  queues cards, so set `kanban.max_spawn` to the same value as
+  `kanban.max_in_progress`. To keep the dispatcher from also starting the older
+  factory's cards, set `kanban.dispatch_profiles` to `[claude-worker]`. Confirm
+  with `hermes kanban dispatch --dry-run --json`: `spawned` lists only
+  `claude-worker` cards.
+- `hermes gateway restart` waits for running work, including in-process cron
+  jobs, before it restarts, and the gateway refuses webhooks while it waits.
+  Restart when no long cron job is running.
 
 > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart` from
 > a shell outside Hermes, not from a Hermes session or tool.
