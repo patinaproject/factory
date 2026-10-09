@@ -11,7 +11,6 @@ from . import linear, tools
 logger = logging.getLogger(__name__)
 
 TOOLSET = "linear_agent_session"
-REQUIRED_ENV = ["LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET"]
 ACK_BODY = "Received. Triaging now."
 # Linear marks a session unresponsive after 10 s without an activity; leave room for token minting.
 ACK_TIMEOUT_SECONDS = 5.0
@@ -31,7 +30,6 @@ def register(ctx: Any) -> None:
         toolset=TOOLSET,
         schema=tools.ACTIVITY_SCHEMA,
         handler=lambda args, **_: tools.run_activity(get_client, args),
-        requires_env=REQUIRED_ENV,
         description=tools.ACTIVITY_SCHEMA["description"],
     )
     ctx.register_tool(
@@ -39,8 +37,14 @@ def register(ctx: Any) -> None:
         toolset=TOOLSET,
         schema=tools.ISSUE_SCHEMA,
         handler=lambda args, **_: tools.run_issue(get_client, args),
-        requires_env=REQUIRED_ENV,
         description=tools.ISSUE_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="linear_agent_session_create",
+        toolset=TOOLSET,
+        schema=tools.SESSION_CREATE_SCHEMA,
+        handler=lambda args, **_: tools.run_session_create(get_client, args),
+        description=tools.SESSION_CREATE_SCHEMA["description"],
     )
     ctx.register_hook(
         "pre_gateway_dispatch",

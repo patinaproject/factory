@@ -106,9 +106,11 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
      was delegated again. The Kanban CLI has no command that moves a card from
      either status back to `ready`, so also post a `thought` on this agent
      session saying the card must be reopened from the Kanban dashboard.
-7. Post one `action` activity on this agent session with `action`
+7. If this run created the card, unblocked it, or moved it to this agent
+   session, post one `action` activity on this agent session with `action`
    `Queued as <task id>` and `parameter` `<priority name> · <repository full_name>`,
    where the priority name is Urgent, High, Medium, Low, or No priority.
+   Otherwise the card already belongs to this session: post nothing.
 
 ## Prompt
 
@@ -142,13 +144,21 @@ Type `AgentSessionEvent`, action `prompted`, activity signal `stop`.
 
 Type `Issue`. The issue is the data change issue.
 
-1. Find the issue's card. If there is none, stop.
-2. Read the issue with `linear_issue`.
-3. If its `stateType` is `completed` or `canceled`, run
-   `hermes kanban archive <task id>` and stop.
-4. If its `delegate` (a user ID) is null or is not
-   `<<app_user_id>>`, the issue was un-delegated. If the card is not `blocked`
-   and not `done`, run `hermes kanban block <task id> undelegated`. Do not
-   archive it.
-5. Otherwise do nothing. A new delegation also arrives as a "Session created"
-   event, which resumes the card.
+1. Read the issue with `linear_issue`.
+2. Find the issue's card.
+3. If the issue's `stateType` is `completed` or `canceled`, run
+   `hermes kanban archive <task id>` when a card exists, and stop.
+4. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`, the
+   issue was un-delegated. If a card exists and is not `blocked` and not
+   `done`, run `hermes kanban block <task id> undelegated`. Do not archive it.
+   Stop.
+5. Otherwise the issue was just delegated to the agent. Linear opens a new
+   agent session only for an issue's first delegation, so a re-delegation can
+   arrive with no "Session created" event.
+   - If a card exists and is `blocked`, run `hermes kanban unblock <task id>`,
+     and post a `thought` on the agent session its body names, saying the
+     issue was delegated again. Stop.
+   - If a card exists in any other status, stop.
+   - If no card exists, open a session with `linear_agent_session_create` for
+     the issue. Then follow "Session created" from step 3, using the issue
+     you read and the returned `agent_session_id` as this agent session.

@@ -56,6 +56,20 @@ ISSUE_SCHEMA = {
 }
 
 
+SESSION_CREATE_SCHEMA = {
+    "name": "linear_agent_session_create",
+    "description": (
+        "Open a new Linear agent session on an issue as the agent app, for a delegation that arrived "
+        "without one. Returns the agent_session_id."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"issue": {"type": "string", "description": "Issue UUID or identifier such as ABC-123."}},
+        "required": ["issue"],
+    },
+}
+
+
 def run_activity(client_factory: ClientFactory, args: dict) -> str:
     def run() -> dict:
         content = activity_content(
@@ -75,6 +89,10 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
         return result
 
     return _as_json(run)
+
+
+def run_session_create(client_factory: ClientFactory, args: dict) -> str:
+    return _as_json(lambda: {"agent_session_id": client_factory().create_session_on_issue(args["issue"])})
 
 
 def run_issue(client_factory: ClientFactory, args: dict) -> str:

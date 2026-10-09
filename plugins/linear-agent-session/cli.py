@@ -47,6 +47,9 @@ def main(argv: Optional[list] = None) -> int:
     issue = commands.add_parser("issue", help="read a Linear issue")
     issue.add_argument("issue")
 
+    session = commands.add_parser("session-create", help="open a new agent session on an issue")
+    session.add_argument("issue")
+
     args = parser.parse_args(argv)
     if args.command == "activity":
         tool_args = {
@@ -60,6 +63,8 @@ def main(argv: Optional[list] = None) -> int:
             "external_urls": [_external_url(value) for value in args.external_url],
         }
         output = plugin.tools.run_activity(plugin.linear.client_from_env, tool_args)
+    elif args.command == "session-create":
+        output = plugin.tools.run_session_create(plugin.linear.client_from_env, {"issue": args.issue})
     else:
         output = plugin.tools.run_issue(plugin.linear.client_from_env, {"issue": args.issue})
     print(output)

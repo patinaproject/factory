@@ -29,6 +29,10 @@ SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: A
   agentSessionUpdate(id: $id, input: $input) { success }
 }"""
 
+SESSION_CREATE_MUTATION = """mutation AgentSessionCreateOnIssue($input: AgentSessionCreateOnIssue!) {
+  agentSessionCreateOnIssue(input: $input) { success agentSession { id } }
+}"""
+
 ISSUE_QUERY = """query Issue($id: String!) {
   issue(id: $id) {
     id identifier title url branchName priority
@@ -104,6 +108,14 @@ class LinearClient:
         )["agentSessionUpdate"]
         if not payload["success"]:
             raise LinearError("agentSessionUpdate reported success: false")
+
+    def create_session_on_issue(self, id_or_identifier: str) -> str:
+        payload = self._graphql(SESSION_CREATE_MUTATION, {"input": {"issueId": id_or_identifier}})[
+            "agentSessionCreateOnIssue"
+        ]
+        if not payload["success"]:
+            raise LinearError("agentSessionCreateOnIssue reported success: false")
+        return payload["agentSession"]["id"]
 
     def get_issue(self, id_or_identifier: str) -> dict:
         issue = self._graphql(ISSUE_QUERY, {"id": id_or_identifier})["issue"]

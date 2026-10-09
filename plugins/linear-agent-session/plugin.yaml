@@ -5,7 +5,7 @@ description: >-
   and gives agents the linear_agent_activity and linear_issue tools, acting as
   the Linear agent app.
 provides_hooks: [pre_gateway_dispatch]
-provides_tools: [linear_agent_activity, linear_issue]
+provides_tools: [linear_agent_activity, linear_issue, linear_agent_session_create]
 config_schema:
   app_user_id:
     type: str

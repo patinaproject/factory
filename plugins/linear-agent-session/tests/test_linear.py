@@ -193,6 +193,22 @@ class TokenTest(unittest.TestCase):
         )
 
 
+class SessionCreateTest(unittest.TestCase):
+    def test_creates_a_session_on_the_issue(self):
+        fake = FakeLinear(
+            [(200, {"data": {"agentSessionCreateOnIssue": {"success": True, "agentSession": {"id": "session-77"}}}})]
+        )
+        output = json.loads(tools.run_session_create(lambda: make_client(fake), {"issue": "ABC-123"}))
+        self.assertEqual(output, {"agent_session_id": "session-77"})
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"input": {"issueId": "ABC-123"}})
+        self.assertIn("agentSessionCreateOnIssue", fake.graphql_requests[0]["query"])
+
+    def test_unsuccessful_create_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"agentSessionCreateOnIssue": {"success": False, "agentSession": None}}})])
+        output = json.loads(tools.run_session_create(lambda: make_client(fake), {"issue": "ABC-123"}))
+        self.assertEqual(output, {"error": "agentSessionCreateOnIssue reported success: false"})
+
+
 class IssueTest(unittest.TestCase):
     RESPONSE = {
         "data": {

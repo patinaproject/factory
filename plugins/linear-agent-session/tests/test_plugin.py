@@ -148,11 +148,10 @@ class RegisterTest(unittest.TestCase):
     def test_registers_tools_and_hook(self):
         ctx = FakeContext()
         plugin.register(ctx)
-        self.assertEqual(sorted(ctx.tools), ["linear_agent_activity", "linear_issue"])
+        self.assertEqual(sorted(ctx.tools), ["linear_agent_activity", "linear_agent_session_create", "linear_issue"])
         for name, tool in ctx.tools.items():
             self.assertEqual(tool["toolset"], "linear_agent_session")
             self.assertEqual(tool["schema"]["name"], name)
-            self.assertEqual(tool["requires_env"], ["LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET"])
         self.assertEqual([name for name, _ in ctx.hooks], ["pre_gateway_dispatch"])
 
     def test_registered_handlers_call_linear(self):
