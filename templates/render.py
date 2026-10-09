@@ -106,8 +106,8 @@ def validate(settings: Any) -> dict:
     if not isinstance(github, dict):
         raise SettingsError("github must be an object")
     login = github.get("login", "")
-    if not isinstance(login, str) or not re.match(r"^([A-Za-z0-9][A-Za-z0-9-]{0,38})?$", login):
-        raise SettingsError(f"github.login {login!r} must be empty or a GitHub login")
+    if not isinstance(login, str) or not re.match(r"^([A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?)?$", login):
+        raise SettingsError(f"github.login {login!r} must be empty, a GitHub login, or an App's <name>[bot] login")
 
     return {
         "app_user_id": app_user_id,

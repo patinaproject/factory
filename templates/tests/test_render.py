@@ -106,6 +106,12 @@ class RouteStructureTest(unittest.TestCase):
             },
         )
 
+    def test_github_app_bot_login_is_filtered(self):
+        routes = render.build_routes(settings(github={"login": "example-app[bot]"}))
+        self.assertEqual(
+            routes["github"]["filters"][-1], {"not": {"field": "sender.login", "equals": "example-app[bot]"}}
+        )
+
     def test_github_route_without_login_has_no_self_filter(self):
         routes = render.build_routes(settings(github={"login": ""}))
         self.assertEqual(routes["github"]["filters"], [REPO_FILTER, CHECK_FILTER])
@@ -166,7 +172,9 @@ class ValidationTest(unittest.TestCase):
         "exactly one repository must have routing 'default', found 2": with_repo(1, routing="default"),
         "exactly one repository must have routing 'default', found 0": with_repo(0, routing="synced_github"),
         "github must be an object": settings(github="example-factory-bot"),
-        "github.login 'not a login' must be empty or a GitHub login": settings(github={"login": "not a login"}),
+        "github.login 'not a login' must be empty, a GitHub login, or an App's <name>[bot] login": settings(
+            github={"login": "not a login"}
+        ),
         "add Hermes payload placeholders to the prompt: {action}": with_repo(0, path="/srv/{action}"),
         "contains a brace outside a Hermes payload placeholder": with_repo(0, path="/srv/a}b"),
     }
