@@ -2,25 +2,17 @@
 
 The factory acts in Linear as an OAuth application with agent session events.
 Every comment and activity comes from the app. The `linear-agent-session`
-plugin accepts one of two credentials:
-
-- `LINEAR_ACCESS_TOKEN`: an OAuth access token that Linear issued to an
-  existing agent app with `actor=app`. The plugin uses it as it is and never
-  mints a new one. When Linear rejects it with `401`, the plugin reports the
-  error and does not retry.
-- `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET`: the plugin mints client
-  credentials tokens with the scopes `read,write,app:assignable,app:mentionable`.
-
-When `LINEAR_ACCESS_TOKEN` has a value, the plugin uses it and ignores the
-client credentials. Put the credential you use in both `<home>/.env` and
+plugin authenticates with the app's `LINEAR_CLIENT_ID` and
+`LINEAR_CLIENT_SECRET`. It mints client credentials tokens with the scopes
+`read,write,app:assignable,app:mentionable`, and mints a new one when a token
+expires or Linear rejects it. Put both values in `<home>/.env` and
 `<worker>/.env`.
 
 ## Check
 
 All of these must hold:
 
-- In both `<home>/.env` and `<worker>/.env`, either
-  `env_has <file> LINEAR_ACCESS_TOKEN` prints `1`, or
+- In both `<home>/.env` and `<worker>/.env`,
   `env_has <file> LINEAR_CLIENT_ID` and `env_has <file> LINEAR_CLIENT_SECRET`
   each print `1`.
 - The token acts as the app (see [Verify](#verify)).
@@ -45,14 +37,10 @@ If all of them hold, skip to the live test.
 > `read -rs` line from the skill, once per key, into both `<home>/.env` and
 > `<worker>/.env`.
 
-**Existing app.** If the operator already has an agent app and an access token
-that Linear issued to it with `actor=app`, use that token in place of the
-checkpoint above. The app's webhook URL and events must still match the
-values above.
-
-> **HUMAN CHECKPOINT.** Ask the operator to store the token as
-> `LINEAR_ACCESS_TOKEN` with the `read -rs` line from the skill, into both
-> `<home>/.env` and `<worker>/.env`. Skip the install below.
+**Existing app.** If the operator already has an agent app, keep it. Ask
+the operator to turn on **Client credentials** in the app's settings, confirm
+that its webhook URL and events match the values above, and store its client
+ID and client secret the same way.
 
 Check both files with `env_has` afterwards.
 

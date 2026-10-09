@@ -135,12 +135,11 @@ class RegisterTest(unittest.TestCase):
         env = {
             "LINEAR_CLIENT_ID": "client-id",
             "LINEAR_CLIENT_SECRET": "client-secret",
-            "LINEAR_TOKEN_CACHE": os.path.join(self.tmp.name, "token.json"),
+            "HERMES_HOME": self.tmp.name,
         }
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
         self.addCleanup(patcher.stop)
-        os.environ.pop("HERMES_HOME", None)
         network = mock.patch("urllib.request.urlopen", side_effect=AssertionError("unexpected network call"))
         network.start()
         self.addCleanup(network.stop)
@@ -166,9 +165,9 @@ class RegisterTest(unittest.TestCase):
     def test_registered_handler_reports_missing_credentials(self):
         ctx = FakeContext()
         plugin.register(ctx)
-        with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": "", "LINEAR_ACCESS_TOKEN": ""}):
+        with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": ""}):
             output = ctx.tools["linear_issue"]["handler"]({"issue": "ABC-1"})
-        self.assertEqual(json.loads(output), {"error": "set LINEAR_ACCESS_TOKEN, or LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"})
+        self.assertEqual(json.loads(output), {"error": "set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"})
 
     def test_registered_hook_uses_configured_route(self):
         fake = FakeLinear([activity_ok()])
@@ -200,7 +199,7 @@ class CliTest(unittest.TestCase):
             {
                 "LINEAR_CLIENT_ID": "client-id",
                 "LINEAR_CLIENT_SECRET": "client-secret",
-                "LINEAR_TOKEN_CACHE": os.path.join(tmp, "token.json"),
+                "HERMES_HOME": tmp,
             },
         ), mock.patch("urllib.request.urlopen", fake), contextlib.redirect_stdout(out):
             code = cli.main(argv)

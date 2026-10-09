@@ -174,31 +174,11 @@ class TokenTest(unittest.TestCase):
         )
 
     def test_missing_credentials(self):
-        with self.assertRaisesRegex(linear.LinearError, "set LINEAR_ACCESS_TOKEN, or LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"):
+        with self.assertRaisesRegex(linear.LinearError, "set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"):
             linear.client_from_env({})
-
-    def test_access_token_is_used_as_is_and_never_minted(self):
-        fake = FakeLinear([activity_ok(), activity_ok()])
-        client = linear.client_from_env(
-            {"LINEAR_ACCESS_TOKEN": "app-token", "LINEAR_CLIENT_ID": "id", "LINEAR_CLIENT_SECRET": "secret"},
-            urlopen=fake,
-        )
-        client.create_activity("session-1", {"type": "thought", "body": "x"})
-        client.create_activity("session-1", {"type": "thought", "body": "x"})
-        self.assertEqual(fake.token_requests, [])
-        self.assertEqual([r["authorization"] for r in fake.graphql_requests], ["Bearer app-token", "Bearer app-token"])
-
-    def test_rejected_access_token_is_reported_without_retry(self):
-        fake = FakeLinear([(401, {"errors": [{"message": "Authentication required"}]})])
-        client = linear.client_from_env({"LINEAR_ACCESS_TOKEN": "app-token"}, urlopen=fake)
-        with self.assertRaisesRegex(linear.LinearError, "Linear rejected LINEAR_ACCESS_TOKEN"):
-            client.create_activity("session-1", {"type": "thought", "body": "x"})
-        self.assertEqual(len(fake.graphql_requests), 1)
-        self.assertEqual(fake.token_requests, [])
 
     def test_token_cache_path_resolution(self):
         self.assertIsNone(linear.token_cache_path({}))
-        self.assertEqual(linear.token_cache_path({"LINEAR_TOKEN_CACHE": "/x/t.json", "HERMES_HOME": "/h"}), "/x/t.json")
         self.assertEqual(
             linear.token_cache_path({"HERMES_HOME": "/h"}), "/h/plugin-data/linear-agent-session/token.json"
         )

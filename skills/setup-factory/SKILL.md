@@ -51,7 +51,7 @@ notes, not in the repository.
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
 | The operator's SST app, its stage, and its review process | Ingress |
 | Whether Claude Code uses a local proxy, and if so its base URL, model alias, and token variable name | Claude Code transport |
-| Linear workspace, and whether the operator has an existing agent app access token | Linear app |
+| Linear workspace, and whether the operator already has an agent app | Linear app |
 | The GitHub organization or account that owns the repositories, and a name for the factory's GitHub App | GitHub App |
 | A path outside every repository for the GitHub App's private key, for example `~/.config/factory/github-app.pem` | GitHub App |
 | Slack workspace and the channels the agent joins | Slack |
@@ -64,7 +64,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 
 | Value | Location |
 | --- | --- |
-| `LINEAR_ACCESS_TOKEN`, or `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` and `<worker>/.env` |
+| `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` and `<worker>/.env` |
 | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
 | `GH_CONFIG_DIR` | `<worker>/.env`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews |
@@ -340,7 +340,7 @@ the external checks that this part must pass.
 ## 8. Linear agent app
 
 Follow [`references/linear-app.md`](references/linear-app.md). It creates the
-OAuth app or uses an existing app's access token, stores the credential in
+OAuth app or reuses an existing one, stores its client credentials in
 both `.env` files, and finds the `app_user_id` for part 10.
 
 ## 9. GitHub App
