@@ -317,6 +317,29 @@ class PushSignedTest(GitFixture):
         self.assertEqual([change["expectedHeadOid"] for change in self.graphql_inputs()], [self.seed])
         self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)
 
+    def test_rewrite_resigns_a_branch_already_pushed_unsigned(self) -> None:
+        git(self.main, "checkout", "-q", "-b", "feature")
+        published = []
+        for name in ("one", "two"):
+            self.commit(f"{name}.txt", f"{name}\n", f"Add {name}")
+            git(self.main, "commit", "-q", "--amend", "--no-edit", f"--author=Bot <{BOT_EMAIL}>")
+            published.append(git(self.main, "rev-parse", "HEAD"))
+        first, second = published
+        git(self.main, "push", "-q", "origin", "feature")
+
+        status, report = self.push("--rewrite")
+
+        self.assertEqual(status, 0, report)
+        head = self.origin_branch()
+        self.assertEqual(report["rewritten"], True)
+        self.assertEqual([p["local"] for p in report["published"]], [first, second])
+        self.assertNotEqual(head, second)
+        self.assertEqual(self.gh_argv()[1], [
+            "api", "--method", "PATCH", f"repos/{REPO}/git/refs/heads/feature", "-f", f"sha={self.seed}", "-F", "force=true",
+        ])
+        self.assertEqual(self.origin_git("rev-parse", f"{head}^{{tree}}"), git(self.main, "rev-parse", f"{second}^{{tree}}"))
+        self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)
+
     def test_rewrite_refuses_to_discard_a_person_commit(self) -> None:
         _, remote = self.diverge("person@example.com")
 

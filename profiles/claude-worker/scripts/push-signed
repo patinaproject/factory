@@ -169,19 +169,19 @@ def run(args: argparse.Namespace) -> dict:
     start = remote
     if created:
         start = base
+    elif args.rewrite:
+        refuse_human_commits(remote, default)
+        rewritten = True
+        start = base
     elif subprocess.run(["git", "merge-base", "--is-ancestor", remote, head]).returncode == 0:
         pass
     elif git("rev-parse", f"{remote}^{{tree}}") == head_tree:
         start = head
-    elif not args.rewrite:
+    else:
         raise Refusal(
             f"{branch} on {repository} has commits this branch lacks; "
             "update from the remote (for example git pull --ff-only) or pass --rewrite"
         )
-    else:
-        refuse_human_commits(remote, default)
-        rewritten = True
-        start = base
     commits = [read_commit(sha) for sha in git("rev-list", "--reverse", "--topo-order", f"{start}..{head}").split()]
 
     if created:
