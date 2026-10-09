@@ -10,6 +10,15 @@
             "command": "bash scripts/worktree-setup.sh"
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh\" claude"
+          }
+        ]
       }
     ]
   }

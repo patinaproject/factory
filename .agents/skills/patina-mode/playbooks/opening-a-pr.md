@@ -1,0 +1,32 @@
+### Opening a PR
+
+Invoked at the end of every other playbook.
+
+**Worktree.** Work from a git worktree off main; subagents inherit it. Multiple `Agent` calls on the same branch each get their own worktree. To reuse one branch across worktrees, resolve and validate `<head-url>` through Shipping step 1, capture it as `head_url`, then run `git fetch -- "$head_url" "refs/heads/$branch" && git reset --hard FETCH_HEAD` between them. Dirty branch with unrelated work: patch out, fresh worktree, apply. Snarled worktree: reset from main, redo minimally.
+
+**Commits.** Commit liberally; rebase into small, ordered commits before opening PRs. Each commit is a future PR: landable, ordered to tell the story. Amend when the fix belongs in a just-made commit; new commit when separable.
+
+**PRs.** Run `/deslop` over the diff before commit. Run `/no-comments` before review. Write every PR title, PR description, and commit body with `/technical-writing`, then apply `/unslop`. Apply every technical-writing layer except Diátaxis. Use one word for each action, keep articles, and avoid `-ing` when a plain verb works.
+
+**Titles.** The project owns the title format, the commit types, and the scopes. Take them from its commit-type definitions, commit tooling configuration, and agent instructions. Keep the subject short and imperative. Apply the same `/technical-writing` and `/unslop` pass as the body. Name a real symbol when one carries the change. Do not add a trailing period.
+
+**Descriptions.** Invoke **engineering:pr** ([the bundled skill](../../pr/SKILL.md)) whenever you create or rewrite a PR body. It owns the body structure. Preserve the repository's title and issue-closing rules. Use the ticket, current diff, relevant code, and verification evidence as sources.
+
+**Forge.** Resolve the forge before the first PR operation and keep that choice for create, edit, view, watch, and merge. GitHub CLI (`gh`) is the default. If `command -v origin` succeeds and Origin can resolve the repository, prefer `origin pr ...`; if Origin is absent or cannot resolve the repository, stay on `gh` and record the fallback. Record the intended PR base repository as canonical `<base-repo>` and validate it through the active forge. Do not infer it from the checkout's default remote. Capture it as a shell variable and pass `--repo "$base_repo"` to every `gh pr` command. When the head repository is a fork, validate its identity and record its owner and repository name as `<fork-owner>` and `<head-name>`. Do not require Graphite (`gt`).
+
+**Built-in PR tool.** If the runtime provides a built-in PR tool, use it for supported create, edit, and retarget operations unless repository instructions require a forge command. Route every ready operation through `pr-readiness publish`. Use the resolved forge for operations the tool does not cover. Preserve the repository identity, fork handling, readiness gates, and attachment requirements below. Set the tool's draft flag explicitly to match those gates.
+
+**Size and stacks.** Prefer five narrow PRs to one large PR. Rebase each child branch onto its parent's exact tip and freeze the bottom-to-top order. When the head and base repositories are the same, make a base-branch chain. The root PR targets trunk and each child PR targets the parent branch. Create a same-repository child with `origin pr create --status open --base "$parent_branch"` or `gh pr create --base "$parent_branch" --repo "$base_repo"` according to the resolved forge. When the head repository is a fork, every PR targets trunk in the base repository while stacked local branches retain parent ancestry. Create every fork PR with the resolved Origin command. With GitHub, capture the approved PR title and body as `<title>` and `<body>`, then run `gh api --method POST "repos/$base_repo/pulls" -f "title=$title" -f "body=$body" -f "head=$fork_owner:$branch" -f "head_repo=$head_name" -f "base=$trunk" --jq .html_url`; add `-F draft=true` only when the readiness rule requires a draft. A fork-only parent branch cannot be a PR base. Before rebasing, force-pushing, or retargeting an existing child, apply Shipping step 4's disarm-and-confirm rule to that child and every descendant. Retarget a same-repository child with `origin pr edit "$pr" --base "$parent_branch"` or `gh pr edit "$pr" --base "$parent_branch" --repo "$base_repo"`. Retarget a fork child with the resolved Origin command or `gh pr edit "$pr" --base "$trunk" --repo "$base_repo"`. Branch from trunk only for independent work. Rebase on trunk before substantial stack work.
+
+**GitHub-native stacks.** The branch chain above does not create stack metadata.
+For a GitHub stack suggestion, explicit stack creation, or any topology change,
+follow [Create and verify GitHub stacks](../references/github-stacks.md).
+It owns the UI and REST creation steps, membership checks, fork limitation,
+and disarm-and-confirm procedure. Preserve the Origin commands above when
+Origin is the resolved forge.
+
+**Readiness.** The caller selects the creation mode. Before publication, run `/deslop`, `/no-comments`, then `code-review` against the merge-base, issue body, and requirement-change comments. Keep Standards and Spec findings separate. A no-issue PR records `Spec: skipped, no linked issue.` Producers publish typed observations, and `pr-readiness publish --repo "$base_repo" --pr "$pr"` evaluates them against the current candidate, records the immutable packet, and owns the only ready transition. Check-only paths use `pr-readiness check`; they never take over a human draft. The evaluator preserves capture identities and labels reused evidence as `valid-by-equivalence`. If requirements change, rerun the evaluator; an already-ready PR stays ready while its required readiness check blocks merge until a current packet exists. Inspect the PR after publication with `origin pr view "$pr"` or `gh pr view "$pr" --repo "$base_repo"` before reporting status.
+
+**Babysit.** Opening a PR does not start a babysit. Post the URL and keep building. Finish the phase or stack first. Run a separate babysit pass only when the user asks for one after the whole stack exists, per `babysit.md`. A babysit for each new PR stalls the build and spends checks on commits that later waves restart. Push back when feedback drifts from intent.
+
+A subagent that opens a PR runs `interrogate`, `/deslop`, and `/no-comments`. It returns the URL and does not babysit. Return to the parent.
