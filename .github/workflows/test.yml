@@ -1,0 +1,20 @@
+name: Test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Component tests
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - name: Check out repository
+        # actions/checkout@v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Run component tests
+        run: bash scripts/test.sh
