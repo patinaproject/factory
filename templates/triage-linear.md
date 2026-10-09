@@ -61,7 +61,13 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    repository. Otherwise use the repository with routing `default`.
 4. Map the Linear priority to the card priority: Urgent (1) is 4, High (2) is 3,
    Medium (3) is 2, Low (4) is 1, and No priority (0) is 0.
-5. Find the issue's card. If there is none, create it. Use the chosen
+5. Find the issue's card. If there is none, look for cards this factory did
+   not create: tasks whose status is not `done` or `archived`, whose `body`
+   has no `linear_issue_id:` line, and whose `title` or `body` contains the
+   issue identifier. If any exist, the issue is still being worked outside
+   this factory. Post one `thought` on this agent session naming those task
+   IDs and saying no new card was created, then stop. Otherwise create the
+   card. Use the chosen
    repository's card flags, the issue's `gitBranchName` as the branch, and a
    title made of the identifier, a colon, and the issue title with every
    character except letters, digits, spaces, `.` and `-` removed:
