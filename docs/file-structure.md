@@ -25,7 +25,7 @@
 │       ├── SOUL.md            # Worker instructions
 │       ├── config.yaml        # Toolsets, skills, plugins, and placeholder settings
 │       ├── distribution.yaml  # Profile distribution manifest
-│       └── scripts/           # claude-session and refresh-checkouts
+│       └── scripts/           # claude-session, refresh-checkouts, and push-signed
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
 │   └── ...                    # Repository maintenance scripts

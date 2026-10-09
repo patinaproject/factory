@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""Publish the current branch's local commits to GitHub as signed commits.
+
+Replays each commit oldest first through the GraphQL createCommitOnBranch
+mutation, which GitHub signs when the caller authenticates as a GitHub App
+installation. All GitHub calls go through the gh CLI with the caller's auth.
+After publishing, the local branch moves to the signed remote commits, and
+uncommitted changes stay in place. Prints exactly one JSON line on stdout.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
+
+CREATE_COMMIT = (
+    "mutation($input: CreateCommitOnBranchInput!)"
+    "{ createCommitOnBranch(input: $input){ commit { oid } } }"
+)
+GITHUB_URL = re.compile(
+    r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+?)(?:\.git)?/?$"
+)
+BOT_EMAIL_SUFFIX = "[bot]@users.noreply.github.com"
+EXECUTABLE_FILE = "100755"
+SYMLINK = "120000"
+SUBMODULE = "160000"
+
+
+class Refusal(Exception):
+    pass
+
+
+class Failure(Exception):
+    pass
+
+
+@dataclass
+class Commit:
+    sha: str
+    headline: str
+    body: str
+    additions: list = field(default_factory=list)
+    deletions: list = field(default_factory=list)
+
+
+def git(*args: str) -> str:
+    proc = subprocess.run(["git", *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Failure(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def gh_call(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([os.environ.get("GH_BIN", "gh"), *args], capture_output=True, text=True)
+
+
+def gh(*args: str) -> dict:
+    proc = gh_call(*args)
+    if proc.returncode != 0:
+        raise Failure(f"gh {' '.join(args)} failed: {proc.stderr.strip()}")
+    return json.loads(proc.stdout)
+
+
+def repository_name() -> str:
+    url = git("config", "--get", "remote.origin.url")
+    match = GITHUB_URL.match(url)
+    if not match:
+        raise Refusal(f"origin {url} is not a GitHub repository URL")
+    return f"{match.group(1)}/{match.group(2)}"
+
+
+def remote_head(repository: str, branch: str) -> str | None:
+    proc = gh_call("api", f"repos/{repository}/git/ref/heads/{branch}")
+    if proc.returncode != 0:
+        if "HTTP 404" in proc.stderr:
+            return None
+        raise Failure(f"reading {branch} on {repository} failed: {proc.stderr.strip()}")
+    return json.loads(proc.stdout)["object"]["sha"]
+
+
+def remote_tree(repository: str, oid: str) -> str:
+    return gh("api", f"repos/{repository}/git/commits/{oid}")["tree"]["sha"]
+
+
+def read_commit(sha: str) -> Commit:
+    parents = git("rev-list", "--parents", "-n", "1", sha).split()[1:]
+    if len(parents) != 1:
+        raise Refusal(
+            f"commit {sha} has {len(parents)} parents; push-signed replays only single-parent commits. "
+            "Bring the base branch in with gh pr update-branch, whose merges GitHub signs"
+        )
+    commit = Commit(sha, git("log", "-1", "--format=%s", sha), git("log", "-1", "--format=%b", sha))
+    raw = git("diff-tree", "-r", "--no-renames", "-z", "--raw", parents[0], sha)
+    fields = raw.split("\0")
+    for header, path in zip(fields[0::2], fields[1::2]):
+        old_mode, new_mode, _, blob, status = header.lstrip(":").split()
+        if SUBMODULE in (old_mode, new_mode):
+            raise Refusal(f"commit {sha} changes submodule {path}; the API cannot write submodules")
+        if status == "D":
+            commit.deletions.append({"path": path})
+            continue
+        if new_mode == SYMLINK:
+            raise Refusal(f"commit {sha} writes symlink {path}; the API cannot create symlinks")
+        if status == "A" and new_mode == EXECUTABLE_FILE:
+            raise Refusal(f"commit {sha} adds executable {path}; the API cannot set file modes")
+        if status != "A" and old_mode != new_mode:
+            raise Refusal(f"commit {sha} changes the mode of {path}; the API cannot set file modes")
+        blob_read = subprocess.run(["git", "cat-file", "blob", blob], capture_output=True)
+        if blob_read.returncode != 0:
+            raise Failure(f"git cat-file blob {blob} failed: {blob_read.stderr.decode().strip()}")
+        contents = blob_read.stdout
+        commit.additions.append({"path": path, "contents": base64.b64encode(contents).decode()})
+    return commit
+
+
+def publish(repository: str, branch: str, expected_head: str, commit: Commit) -> str:
+    message = {"headline": commit.headline}
+    if commit.body:
+        message["body"] = commit.body
+    request = {
+        "query": CREATE_COMMIT,
+        "variables": {"input": {
+            "branch": {"repositoryNameWithOwner": repository, "branchName": branch},
+            "message": message,
+            "expectedHeadOid": expected_head,
+            "fileChanges": {"additions": commit.additions, "deletions": commit.deletions},
+        }},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+        json.dump(request, handle)
+        handle.flush()
+        response = gh("api", "graphql", "--input", handle.name)
+    return response["data"]["createCommitOnBranch"]["commit"]["oid"]
+
+
+def refuse_human_commits(remote: str, default: str) -> None:
+    for line in git("log", "--format=%H %ae", f"origin/{default}..{remote}").splitlines():
+        sha, email = line.split(" ", 1)
+        if not email.endswith(BOT_EMAIL_SUFFIX):
+            raise Refusal(f"--rewrite would discard commit {sha} by {email}, which no bot authored")
+
+
+def run(args: argparse.Namespace) -> dict:
+    inside = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True)
+    if inside.stdout.strip() != "true":
+        raise Refusal("push-signed runs only inside a git worktree")
+    symbolic = subprocess.run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], capture_output=True, text=True)
+    branch = symbolic.stdout.strip()
+    if not branch:
+        raise Refusal("HEAD is detached; check out the branch to publish")
+    repository = repository_name()
+    git("fetch", "--quiet", "origin")
+    default = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").split("/", 1)[1]
+    if branch == default:
+        raise Refusal(f"{branch} is the default branch; push-signed publishes only feature branches")
+
+    head = git("rev-parse", "HEAD")
+    head_tree = git("rev-parse", "HEAD^{tree}")
+    base = git("merge-base", "HEAD", f"origin/{default}")
+    remote = remote_head(repository, branch)
+    created = remote is None
+    rewritten = False
+    start = remote
+    if created:
+        start = base
+    elif subprocess.run(["git", "merge-base", "--is-ancestor", remote, head]).returncode == 0:
+        pass
+    elif git("rev-parse", f"{remote}^{{tree}}") == head_tree:
+        start = head
+    elif not args.rewrite:
+        raise Refusal(
+            f"{branch} on {repository} has commits this branch lacks; "
+            "update from the remote (for example git pull --ff-only) or pass --rewrite"
+        )
+    else:
+        refuse_human_commits(remote, default)
+        rewritten = True
+        start = base
+    commits = [read_commit(sha) for sha in git("rev-list", "--reverse", "--topo-order", f"{start}..{head}").split()]
+
+    if created:
+        gh("api", "--method", "POST", f"repos/{repository}/git/refs", "-f", f"ref=refs/heads/{branch}", "-f", f"sha={base}")
+        remote = base
+    elif rewritten:
+        gh("api", "--method", "PATCH", f"repos/{repository}/git/refs/heads/{branch}", "-f", f"sha={base}", "-F", "force=true")
+        remote = base
+    published = []
+    for commit in commits:
+        remote = publish(repository, branch, remote, commit)
+        published.append({"local": commit.sha, "remote": remote})
+
+    if remote_tree(repository, remote) != head_tree:
+        raise Refusal(f"remote commit {remote} does not match the tree of {head}; the local branch was left unchanged")
+    git("fetch", "--quiet", "origin", branch)
+    git("update-ref", "-m", "push-signed", f"refs/heads/{branch}", remote, head)
+    git("branch", "--quiet", f"--set-upstream-to=origin/{branch}", branch)
+    return {
+        "repository": repository,
+        "branch": branch,
+        "created_branch": created,
+        "rewritten": rewritten,
+        "published": published,
+        "head": remote,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--rewrite",
+        action="store_true",
+        help="reset a diverged remote branch whose own commits are all bot-authored, then republish",
+    )
+    args = parser.parse_args()
+    try:
+        status, report = 0, run(args)
+    except Refusal as refusal:
+        status, report = 2, {"error": str(refusal)}
+    except Failure as failure:
+        status, report = 1, {"error": str(failure)}
+    print(json.dumps(report))
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())
