@@ -154,6 +154,20 @@ class PromptSubstitutionTest(unittest.TestCase):
         )
         self.assertIn("Leave `external_urls` unset.", self.prompts["linear"])
 
+    def test_own_pull_requests_match_both_forms_of_the_app_login(self):
+        self.assertIn(
+            "A pull request is the factory's own when its `author.login` is `example-app[bot]` or `app/example-app`.",
+            self.prompts["linear"],
+        )
+
+    def test_without_an_app_login_no_pull_request_is_the_factorys_own(self):
+        routes = render.build_routes(settings(github={"login": ""}))
+        self.assertIn(
+            "No GitHub App login is configured, so every open pull request counts as someone else's.",
+            routes["linear"]["prompt"],
+        )
+        self.assertNotIn("`author.login` is", routes["linear"]["prompt"])
+
     def test_linear_prompt_names_the_app_user(self):
         self.assertIn("00000000-0000-4000-8000-000000000001", self.prompts["linear"])
 

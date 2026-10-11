@@ -125,6 +125,15 @@ def queued_link_sentence(kanban_url) -> str:
     return f"Set `external_urls` to one link labeled `Kanban card <task id>` whose URL is `{kanban_url}`."
 
 
+def own_pull_request_sentence(github_login) -> str:
+    if github_login is None:
+        return "No GitHub App login is configured, so every open pull request counts as someone else's."
+    logins = [github_login]
+    if github_login.endswith("[bot]"):
+        logins.append(f"app/{github_login[: -len('[bot]')]}")
+    return f"A pull request is the factory's own when its `author.login` is {' or '.join(f'`{login}`' for login in logins)}."
+
+
 def repository_lines(repositories: list) -> str:
     return "\n".join(
         f"- `{repo['full_name']}`: routing `{repo['routing']}`, checkout `{repo['path']}`, "
@@ -199,6 +208,7 @@ def build_routes(settings: Any) -> dict:
                     "app_user_id": config["app_user_id"],
                     "repositories": repos,
                     "queued_link": queued_link_sentence(config["kanban_url"]),
+                    "github_login": own_pull_request_sentence(config["github_login"]),
                 },
             ),
         },

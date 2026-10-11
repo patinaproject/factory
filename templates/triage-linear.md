@@ -12,7 +12,8 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
   `linear_agent_activity`.
 - Read Linear issues only with the `linear_issue` tool. It reads as the agent
   app, which is the reader the worker uses, so `gitBranchName` matches.
-- Stay read-only on GitHub. Do not run git, edit files, or write code.
+- Stay read-only on GitHub. Read pull requests only with `gh pr view`. Do not
+  run git, edit files, or write code.
 - An issue has one card for its whole life. Find it with
   `hermes kanban list --json` after reading the issue with `linear_issue`: it
   is the task whose `branch_name` equals the issue's `gitBranchName`, or, when
@@ -69,18 +70,37 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    has no `linear_issue_id:` line, and whose `title` or `body` contains the
    issue identifier. If any exist, the issue is still being worked outside
    this factory. Post one `thought` on this agent session naming those task
-   IDs and saying no new card was created, then stop. Otherwise create the
-   card. Use the chosen
-   repository's card flags, the issue's `gitBranchName` as the branch, and a
-   title made of the identifier, a colon, and the issue title with every
-   character except letters, digits, spaces, `.` and `-` removed:
+   IDs and saying no new card was created, then stop. Otherwise check the
+   issue for an open pull request, then create the card.
+
+   Take each URL in the issue's `attachments` of the form
+   `https://github.com/<owner>/<name>/pull/<number>` whose `<owner>/<name>`
+   matches the chosen repository, ignoring case. Read each one with
+   `gh pr view '<url>' --json state,author,headRefName,isCrossRepository,updatedAt`
+   and keep those whose `state` is `OPEN`. <<github_login>>
+
+   - If one is the factory's own pull request and its `isCrossRepository` is
+     false, use its `headRefName` as the branch. The worker continues that
+     pull request.
+   - Otherwise use the issue's `gitBranchName` as the branch. If any open
+     pull request remains, the issue has someone else's pull request. Pick
+     the one with the latest `updatedAt` and add the line
+     `takeover_pr: <url>` after the `branch:` line inside the fenced block
+     below. The worker starts from it and opens its own pull request.
+
+   Never write a pull request URL in a card comment. Hermes treats a card
+   whose comments name a pull request as already having one.
+
+   Create the card with the chosen repository's card flags, the branch you
+   chose, and a title made of the identifier, a colon, and the issue title
+   with every character except letters, digits, spaces, `.` and `-` removed:
 
    ````sh
    hermes kanban create '<title>' \
      --assignee claude-worker \
      --priority <card priority> \
      <card flags> \
-     --branch '<gitBranchName>' \
+     --branch '<branch>' \
      --idempotency-key 'linear:<issue id>' \
      --body-file - \
      --json <<'CARD'
@@ -90,7 +110,7 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    linear_issue_url: <issue url>
    linear_agent_session_id: <agent session id>
    repo: <repository full_name>
-   branch: <gitBranchName>
+   branch: <branch>
    ```
    CARD
    ````
