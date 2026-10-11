@@ -134,7 +134,7 @@ def run_delegated_issues(client_factory: ClientFactory, args: dict) -> str:
 
 
 def run_undelegate(client_factory: ClientFactory, args: dict) -> str:
-    return _tool_result_or_error(lambda: client_factory().remove_own_delegation(args["issue"]))
+    return _tool_result_or_error(lambda: client_factory().undelegate_self(args["issue"]))
 
 
 def _tool_result_or_error(run: Callable[[], dict]) -> str:

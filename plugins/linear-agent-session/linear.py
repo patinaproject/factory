@@ -140,18 +140,9 @@ class LinearClient:
     def get_issue(self, id_or_identifier: str) -> dict:
         issue = self._graphql(ISSUE_QUERY, {"id": id_or_identifier})["issue"]
         return {
-            "id": issue["id"],
-            "identifier": issue["identifier"],
-            "title": issue["title"],
-            "url": issue["url"],
-            "gitBranchName": issue["branchName"],
+            **_issue_summary(issue),
             "priority": int(issue["priority"]),
-            "state": issue["state"]["name"],
-            "stateType": issue["state"]["type"],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
-            "attachments": [
-                {"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]
-            ],
             "agentSessions": sorted(
                 (
                     {"id": n["id"], "status": n["status"], "createdAt": n["createdAt"], "appUserId": n["appUser"]["id"]}
@@ -170,34 +161,23 @@ class LinearClient:
         after: Optional[str] = None
         while True:
             page = self._graphql(DELEGATED_ISSUES_QUERY, {"filter": issue_filter, "after": after})["issues"]
-            issues.extend(
-                {
-                    "id": n["id"],
-                    "identifier": n["identifier"],
-                    "title": n["title"],
-                    "url": n["url"],
-                    "gitBranchName": n["branchName"],
-                    "state": n["state"]["name"],
-                    "stateType": n["state"]["type"],
-                    "attachments": [
-                        {"url": a["url"], "sourceType": a["sourceType"]} for a in n["attachments"]["nodes"]
-                    ],
-                }
-                for n in page["nodes"]
-            )
+            issues.extend(_issue_summary(n) for n in page["nodes"])
             if not page["pageInfo"]["hasNextPage"]:
                 return issues
             after = page["pageInfo"]["endCursor"]
 
-    def remove_own_delegation(self, id_or_identifier: str) -> dict:
+    def undelegate_self(self, id_or_identifier: str) -> dict:
         data = self._graphql(ISSUE_DELEGATE_QUERY, {"id": id_or_identifier})
         issue = data["issue"]
         delegate = issue["delegate"]["id"] if issue["delegate"] else None
         if delegate is None:
             return {"identifier": issue["identifier"], "removed": False}
         if delegate != data["viewer"]["id"]:
-            raise LinearError(f"{issue['identifier']} is delegated to another agent; only its own delegation can be removed")
-        payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": {"delegateId": None}})["issueUpdate"]
+            raise LinearError(
+                f"{issue['identifier']} is delegated to another agent; only its own delegation can be removed"
+            )
+        update = {"id": issue["id"], "input": {"delegateId": None}}
+        payload = self._graphql(ISSUE_UPDATE_MUTATION, update)["issueUpdate"]
         if not payload["success"]:
             raise LinearError("issueUpdate reported success: false")
         return {"identifier": issue["identifier"], "removed": True}
@@ -294,6 +274,19 @@ class LinearClient:
 
 class _Unauthorized(Exception):
     pass
+
+
+def _issue_summary(issue: dict) -> dict:
+    return {
+        "id": issue["id"],
+        "identifier": issue["identifier"],
+        "title": issue["title"],
+        "url": issue["url"],
+        "gitBranchName": issue["branchName"],
+        "state": issue["state"]["name"],
+        "stateType": issue["state"]["type"],
+        "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]],
+    }
 
 
 def _parse_json(body: bytes, status: int) -> dict:
