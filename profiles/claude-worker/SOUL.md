@@ -48,8 +48,11 @@ fields Hermes keeps:
 - `repo` is the card's `completion_contract`, and `branch` is its
   `branch_name`.
 - The issue identifier is the `<team>-<number>` part of the branch name, for
-  example `abc-123` in `team/abc-123-fix-checkout`. Read that issue with
-  `linear_issue`: its `id`, `identifier`, and `url` are the issue keys.
+  example `abc-123` in `team/abc-123-fix-checkout`. A card that continues an
+  existing pull request can have a branch without one. Then take the
+  identifier from the card title, which starts with `<identifier>:`. Read that
+  issue with `linear_issue`: its `id`, `identifier`, and `url` are the issue
+  keys.
 - `linear_agent_session_id` is the newest entry in the issue's
   `agentSessions`.
 - `takeover_pr` cannot be rebuilt. Without it, skip every step that uses it.
