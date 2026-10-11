@@ -44,6 +44,20 @@ def register(ctx: Any) -> None:
         handler=lambda args, **_: tools.run_session_create(get_client, args),
         description=tools.SESSION_CREATE_SCHEMA["description"],
     )
+    ctx.register_tool(
+        name="linear_delegated_issues",
+        toolset=TOOLSET,
+        schema=tools.DELEGATED_ISSUES_SCHEMA,
+        handler=lambda args, **_: tools.run_delegated_issues(get_client, args),
+        description=tools.DELEGATED_ISSUES_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="linear_issue_undelegate",
+        toolset=TOOLSET,
+        schema=tools.UNDELEGATE_SCHEMA,
+        handler=lambda args, **_: tools.run_undelegate(get_client, args),
+        description=tools.UNDELEGATE_SCHEMA["description"],
+    )
     ctx.register_hook(
         "pre_gateway_dispatch",
         make_dispatch_hook(get_client, lambda: ctx.get_config("webhook_route", default="linear")),

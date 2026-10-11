@@ -47,6 +47,12 @@ def main(argv: Optional[list] = None) -> int:
     session = commands.add_parser("session-create", help="open a new agent session on an issue")
     session.add_argument("issue")
 
+    delegated = commands.add_parser("delegated", help="list issues delegated to the agent app")
+    delegated.add_argument("--include-closed", action="store_true")
+
+    undelegate = commands.add_parser("undelegate", help="remove the agent app as an issue's delegate")
+    undelegate.add_argument("issue")
+
     args = parser.parse_args(argv)
     if args.command == "activity":
         tool_args = {
@@ -62,6 +68,12 @@ def main(argv: Optional[list] = None) -> int:
         output = plugin.tools.run_activity(plugin.linear.client_from_env, tool_args)
     elif args.command == "session-create":
         output = plugin.tools.run_session_create(plugin.linear.client_from_env, {"issue": args.issue})
+    elif args.command == "delegated":
+        output = plugin.tools.run_delegated_issues(
+            plugin.linear.client_from_env, {"include_closed": args.include_closed}
+        )
+    elif args.command == "undelegate":
+        output = plugin.tools.run_undelegate(plugin.linear.client_from_env, {"issue": args.issue})
     else:
         output = plugin.tools.run_issue(plugin.linear.client_from_env, {"issue": args.issue})
     print(output)

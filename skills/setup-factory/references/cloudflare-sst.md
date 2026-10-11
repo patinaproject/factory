@@ -21,7 +21,8 @@ Reproduce this model exactly.
 | DNS | A proxied `CNAME` from the factory hostname to `<tunnel-id>.cfargotunnel.com`. |
 | Access | One `self_hosted` Access application covers the whole hostname. It has an `allow` policy for the operator's identities, such as an email domain, and a bounded session, such as `24h`. Every path requires an allowed identity by default, including the dashboard and the proxy's management UI. |
 | Webhook bypass | One path-scoped `self_hosted` Access application for each webhook path, each with a single `bypass` policy for `everyone`. Nothing broader than the exact webhook paths is exempt. These paths rely on Hermes' signature check: `GET` returns `405` and an unsigned `POST` returns `401`. |
-| Dashboard sign-in | A `saas` Access application with OIDC is the Hermes dashboard's identity provider. Its issuer and client ID go in `dashboard.oauth.self_hosted`. Its client secret goes in `<home>/.env`. The dashboard checks identity even behind the edge. |
+| Dashboard sign-in | A `saas` Access application with OIDC is the Hermes dashboard's identity provider. It is a public client: the authorization code grant with PKCE, without a client secret. Its issuer and client ID go in `dashboard.oauth.self_hosted`. The machine never receives the client secret. The dashboard checks identity even behind the edge. |
+| Dashboard host | `dashboard.public_url` is `https://<hostname>`. The tunnel keeps the public `Host` header, and a loopback-bound dashboard rejects every host except loopback and this one with `400 Invalid Host header`. Setting it also turns on the dashboard's sign-in gate, so it needs the dashboard sign-in above. |
 | Local binding | The webhook listener, the dashboard, and any proxy listen on `127.0.0.1` only. Nothing is reachable except through the tunnel and Access. |
 
 ## Check
@@ -34,6 +35,9 @@ and run [Verify](#verify) only.
 - `sst diff --stage <stage>` reports no changes.
 - `cloudflared` runs as a system service, and the tunnel shows a healthy
   connector.
+- `hermes config get dashboard --json --raw` shows `public_url` equal to
+  `https://<hostname>`, and an `issuer` and `client_id` under
+  `oauth.self_hosted`.
 - The external checks in [Verify](#verify) pass.
 
 ## 1. Find or create the SST app
@@ -103,9 +107,11 @@ between provider versions.
    `domain: <hostname><path>` for each entry in `webhookPaths`. Each has a
    single `bypass` policy whose include rule is `everyone`.
 6. `cloudflare.ZeroTrustAccessApplication` with type `saas` and OIDC for the
-   dashboard. Its redirect URI is the dashboard's OAuth callback URL on
-   `<hostname>`. Find the callback path in the Hermes dashboard documentation
-   for the pinned release.
+   dashboard. Allow only the `authorization_code_with_pkce` grant, allow PKCE
+   without a client secret, and request the `openid`, `email`, and `profile`
+   scopes. Its only redirect URI is the dashboard's OAuth callback,
+   `https://<hostname>/auth/callback`. Confirm the callback path in the Hermes
+   dashboard documentation for the pinned release.
 
 The proxy's management UI paths come from the proxy's documentation. Ask the
 operator to confirm them.
@@ -115,14 +121,13 @@ operator to confirm them.
 Output only non-secret values as SST outputs: the tunnel ID, the OIDC issuer,
 and the OIDC client ID.
 
-Two values are secrets: the tunnel token and the OIDC client secret. Read them
-through the provider at deploy time and write them straight into the machine's
-secret storage:
+The tunnel token is a secret. Read it through the provider at deploy time and
+write it straight into the `cloudflared` system service. It never goes into an
+SST output, a log line, or the repository.
 
-- The tunnel token goes into the `cloudflared` system service.
-- The OIDC client secret goes into `<home>/.env`, with `env_set`.
-
-Neither value goes into an SST output, a log line, or the repository.
+Cloudflare also generates a client secret for the `saas` application. Hermes is
+a public PKCE client and never uses it. Leave it in SST state and give it to no
+consumer, including the factory machine.
 
 ## 5. Deploy
 
@@ -147,11 +152,24 @@ output or the Cloudflare API, and that the service is enabled at boot
 
 ## 6. Configure the dashboard sign-in
 
-Set the issuer and client ID from the SST outputs under
-`dashboard.oauth.self_hosted` in `<home>/config.yaml`. Take the exact key names
-and the `.env` variable for the client secret from the Hermes dashboard
-documentation for the pinned release. Read the values back with
-`hermes config get dashboard.oauth.self_hosted --json --raw`.
+Take the client ID from the SST outputs. Cloudflare's OIDC issuer for a `saas`
+application is `https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client ID>`.
+Both values are public, so they go in `<home>/config.yaml`, not in a secret
+store:
+
+```sh
+hermes config set dashboard.public_url "https://<hostname>"
+hermes config set dashboard.oauth.self_hosted.issuer "<issuer>"
+hermes config set dashboard.oauth.self_hosted.client_id "<client ID>"
+```
+
+`hermes config set` can warn that the `self_hosted` keys are not recognized.
+The bundled self-hosted provider reads them, so the warning is harmless. Check
+the key names against the Hermes dashboard documentation for the pinned release.
+
+Set all three together. With `public_url` alone, the dashboard refuses to
+start because no sign-in provider is configured. Restart the dashboard service,
+then read the values back with `hermes config get dashboard --json --raw`.
 
 ## Verify
 
@@ -193,13 +211,22 @@ signed_post <home>/.env LINEAR_WEBHOOK_SECRET https://<hostname>/webhooks/linear
 signed_post <home>/.env GITHUB_WEBHOOK_SECRET https://<hostname>/webhooks/github X-Hub-Signature-256 ping
 ```
 
+On the factory machine, the dashboard accepts the public host and sends it to
+the sign-in. Each request returns `302` to `/auth/login`, not `400`:
+
+```sh
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -H 'Host: <hostname>' http://127.0.0.1:<dashboardPort>/
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -H 'Host: <hostname>' http://127.0.0.1:<dashboardPort>/kanban
+```
+
 Then check these:
 
 - Another hostname routed to the tunnel returns `404` from the catch-all. If
   the zone has no other such hostname, read the tunnel's remote configuration
   and confirm that the `http_status:404` rule is last.
-- Opening `https://<hostname>/` in a browser asks for the Access sign-in, then
-  the dashboard's own OIDC sign-in through the `saas` application.
+- Opening `https://<hostname>/kanban` in a browser asks for the Access sign-in,
+  then the dashboard's own OIDC sign-in through the `saas` application, then
+  shows the Kanban board.
 - On the factory machine, `lsof -nP -iTCP -sTCP:LISTEN` shows the webhook
   listener, the dashboard, and any proxy on `127.0.0.1` only.
 - After a reboot, the tunnel reconnects without anyone signing in.
