@@ -71,12 +71,11 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `GH_CONFIG_DIR` | `<worker>/.env`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
 | The token variable that `claude_session.auth_token_env` names | `<worker>/.env`. Never name it `ANTHROPIC_*` |
-| Dashboard OIDC client secret | `<home>/.env` |
 | Cloudflare tunnel token | The `cloudflared` system service only |
 | `CLOUDFLARE_API_TOKEN` | The SST app's own secret storage or environment |
 | `plugins.entries.linear-agent-session.settings` | `config.yaml` of both homes, same JSON |
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
-| `kanban.max_in_progress`, `platforms.webhook.*`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
+| `kanban.max_in_progress`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
 | The `default` board's `default_workdir` | Kanban board metadata, not `config.yaml` |
 
