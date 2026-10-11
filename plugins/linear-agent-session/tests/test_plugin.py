@@ -147,7 +147,16 @@ class RegisterTest(unittest.TestCase):
     def test_registers_tools_and_hook(self):
         ctx = FakeContext()
         plugin.register(ctx)
-        self.assertEqual(sorted(ctx.tools), ["linear_agent_activity", "linear_agent_session_create", "linear_issue"])
+        self.assertEqual(
+            sorted(ctx.tools),
+            [
+                "linear_agent_activity",
+                "linear_agent_session_create",
+                "linear_delegated_issues",
+                "linear_issue",
+                "linear_issue_undelegate",
+            ],
+        )
         for name, tool in ctx.tools.items():
             self.assertEqual(tool["toolset"], "linear_agent_session")
             self.assertEqual(tool["schema"]["name"], name)
@@ -238,6 +247,15 @@ class CliTest(unittest.TestCase):
         code, output = self.run_cli(["issue", "ABC-404"], fake)
         self.assertEqual(code, 1)
         self.assertEqual(output, {"error": "Entity not found: Issue"})
+
+    def test_delegated_and_undelegate_commands(self):
+        page = {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}
+        code, output = self.run_cli(["delegated", "--include-closed"], FakeLinear([(200, {"data": {"issues": page}})]))
+        self.assertEqual((code, output), (0, {"issues": []}))
+        issue = {"id": "issue-uuid", "identifier": "ABC-1", "delegate": None}
+        fake = FakeLinear([(200, {"data": {"viewer": {"id": "app-user-1"}, "issue": issue}})])
+        code, output = self.run_cli(["undelegate", "ABC-1"], fake)
+        self.assertEqual((code, output), (0, {"identifier": "ABC-1", "removed": False}))
 
 
 def _load_cli():

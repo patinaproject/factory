@@ -262,5 +262,87 @@ class IssueTest(unittest.TestCase):
         self.assertIsNone(make_client(fake).get_issue("ABC-123")["delegate"])
 
 
+def issue_node(identifier, attachments=()):
+    return {
+        "id": f"id-{identifier}",
+        "identifier": identifier,
+        "title": f"Title {identifier}",
+        "url": f"https://linear.app/example/issue/{identifier}",
+        "branchName": identifier.lower(),
+        "state": {"name": "In Progress", "type": "started"},
+        "attachments": {"nodes": [{"url": u, "sourceType": "github"} for u in attachments]},
+    }
+
+
+def issues_page(nodes, end_cursor=None):
+    page_info = {"hasNextPage": end_cursor is not None, "endCursor": end_cursor}
+    return 200, {"data": {"issues": {"nodes": nodes, "pageInfo": page_info}}}
+
+
+class DelegatedIssuesTest(unittest.TestCase):
+    def test_lists_open_delegated_issues_across_pages(self):
+        pr = "https://github.com/example-org/example-repo/pull/3"
+        fake = FakeLinear([issues_page([issue_node("ABC-1", [pr])], "cursor-1"), issues_page([issue_node("ABC-2")])])
+        output = json.loads(tools.run_delegated_issues(lambda: make_client(fake), {}))
+        self.assertEqual([i["identifier"] for i in output["issues"]], ["ABC-1", "ABC-2"])
+        self.assertEqual(
+            output["issues"][0],
+            {
+                "id": "id-ABC-1",
+                "identifier": "ABC-1",
+                "title": "Title ABC-1",
+                "url": "https://linear.app/example/issue/ABC-1",
+                "gitBranchName": "abc-1",
+                "state": "In Progress",
+                "stateType": "started",
+                "attachments": [{"url": pr, "sourceType": "github"}],
+            },
+        )
+        open_filter = {"delegate": {"isMe": {"eq": True}}, "state": {"type": {"nin": ["completed", "canceled"]}}}
+        self.assertEqual(
+            [r["variables"] for r in fake.graphql_requests],
+            [{"filter": open_filter, "after": None}, {"filter": open_filter, "after": "cursor-1"}],
+        )
+
+    def test_include_closed_drops_the_state_filter(self):
+        fake = FakeLinear([issues_page([])])
+        output = json.loads(tools.run_delegated_issues(lambda: make_client(fake), {"include_closed": True}))
+        self.assertEqual(output, {"issues": []})
+        self.assertEqual(fake.graphql_requests[0]["variables"]["filter"], {"delegate": {"isMe": {"eq": True}}})
+
+
+def issue_delegate(delegate_id, viewer_id="app-user-1"):
+    delegate = {"id": delegate_id} if delegate_id else None
+    issue = {"id": "issue-uuid", "identifier": "ABC-1", "delegate": delegate}
+    return 200, {"data": {"viewer": {"id": viewer_id}, "issue": issue}}
+
+
+class UndelegateTest(unittest.TestCase):
+    def run_undelegate(self, responses):
+        fake = FakeLinear(responses)
+        return fake, json.loads(tools.run_undelegate(lambda: make_client(fake), {"issue": "ABC-1"}))
+
+    def test_clears_its_own_delegation(self):
+        fake, output = self.run_undelegate([issue_delegate("app-user-1"), (200, {"data": {"issueUpdate": {"success": True}}})])
+        self.assertEqual(output, {"identifier": "ABC-1", "removed": True})
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
+        self.assertIn("issueUpdate(id: $id, input: $input)", fake.graphql_requests[1]["query"])
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "issue-uuid", "input": {"delegateId": None}})
+
+    def test_no_delegate_is_a_no_op(self):
+        fake, output = self.run_undelegate([issue_delegate(None)])
+        self.assertEqual(output, {"identifier": "ABC-1", "removed": False})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_refuses_another_agents_delegation(self):
+        fake, output = self.run_undelegate([issue_delegate("other-agent")])
+        self.assertIn("delegated to another agent", output["error"])
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_unsuccessful_update_is_an_error(self):
+        _, output = self.run_undelegate([issue_delegate("app-user-1"), (200, {"data": {"issueUpdate": {"success": False}}})])
+        self.assertEqual(output, {"error": "issueUpdate reported success: false"})
+
+
 if __name__ == "__main__":
     unittest.main()
