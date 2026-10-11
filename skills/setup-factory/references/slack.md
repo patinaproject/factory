@@ -1,7 +1,7 @@
 # Slack
 
 The factory talks to the operator in Slack through Hermes Agent's own Slack
-integration. This repository adds no code to it, only two display settings.
+integration. This repository adds no code to it, only display settings.
 Follow the Slack page in the Hermes install's messaging documentation for the
 app manifest, the scopes, and the token names that the pinned release expects.
 
@@ -13,8 +13,8 @@ All of these must hold:
   in `<home>/.env`. Check each token with `env_has`, using the names from the
   Hermes Slack documentation.
 - The Slack app is a member of each channel the operator listed.
-- Replies stream and tool calls show as task cards (see
-  [Show progress](#show-progress)).
+- `streaming.enabled` and `platforms.slack.extra.native_task_cards` are `true`
+  in `<home>/config.yaml` (see [Show progress](#show-progress)).
 - A message round-trip works (see [Verify](#verify)).
 
 If all of them hold, report Slack as already configured.
@@ -46,7 +46,9 @@ tool progress off, because bot posts cannot be edited in place and each step
 would stay in the channel as its own line. The operator then cannot see what
 the agent is doing. Two settings fix this:
 
-- `streaming.enabled` edits the reply in place while it is written.
+- `streaming.enabled` edits the reply in place while it is written. It is a
+  top-level key, so it also turns on streaming for every other gateway
+  platform that supports it.
 - `platforms.slack.extra.native_task_cards` shows each tool call as a Slack
   plan or task card, which updates in place.
 
@@ -60,8 +62,8 @@ hermes config get platforms.slack.extra.native_task_cards    # true
 Set any that differ:
 
 ```sh
-hermes config set streaming.enabled true
-hermes config set platforms.slack.extra.native_task_cards true
+hermes config set streaming.enabled true </dev/null
+hermes config set platforms.slack.extra.native_task_cards true </dev/null
 ```
 
 The gateway reads both at startup, so part 15's restart applies them.
