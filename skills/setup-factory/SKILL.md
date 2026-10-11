@@ -560,6 +560,40 @@ curl -s -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:864
 lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(8644|<dashboard port>|<proxy port>) '                    # 127.0.0.1 only
 ```
 
+Then prove that each route's secret is a real value and not an unexpanded
+`${...}` reference. When the secret source fails at startup, Hermes still
+starts, and a route then uses the public literal string as its secret. These
+lines sign a delivery with each literal string. Each must print `401`. They
+print no secret.
+
+```sh
+forged_post() {
+  python3 - "$@" <<'PY'
+import hashlib, hmac, sys, urllib.error, urllib.request
+route, literal, header, event = sys.argv[1:]
+body = b'{"type": "SetupCheck"}'
+digest = hmac.new(literal.encode(), body, hashlib.sha256).hexdigest()
+headers = {"Content-Type": "application/json", header: digest if header == "Linear-Signature" else "sha256=" + digest}
+if event:
+    headers["X-GitHub-Event"] = event
+try:
+    with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:8644/webhooks/{route}", data=body, headers=headers)) as resp:
+        print(route, resp.status)
+except urllib.error.HTTPError as err:
+    print(route, err.code)
+PY
+}
+forged_post linear '${LINEAR_WEBHOOK_SECRET}' Linear-Signature ""     # linear 401
+forged_post github '${GITHUB_WEBHOOK_SECRET}' X-Hub-Signature-256 ping # github 401
+```
+
+A `401` proves something only when the same request signed with the real
+secret is accepted. The signed checks in
+[`references/cloudflare-sst.md`](references/cloudflare-sst.md) show that. If a
+forged line prints anything but `401`, stop the gateway and fix the secret
+source before it serves traffic. Run these lines after every gateway restart.
+A startup guard that refuses such a route is not yet enforced in code.
+
 **External checks.** Run the checks at the end of
 [`references/cloudflare-sst.md`](references/cloudflare-sst.md).
 
