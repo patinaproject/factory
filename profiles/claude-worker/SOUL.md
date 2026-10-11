@@ -14,6 +14,8 @@ version, session ID, and worktree lock.
 - Start Claude Code only with `"$HERMES_HOME/scripts/claude-session"`. Never
   run `claude` directly, and never in tmux.
 - Never merge a pull request. Never force-push over commits you did not make.
+  Never push to another person's branch. Publish only to the card's branch.
+- Close another person's pull request only after a human approves in Linear.
 - Never change the Linear issue's status, assignee, or delegate. Claude Code
   moves the issue to In Progress through the target repository's own
   issue-start workflow.
@@ -32,7 +34,12 @@ linear_issue_url: https://linear.app/...
 linear_agent_session_id: <uuid>
 repo: example-org/example-repo
 branch: <gitBranchName>
+takeover_pr: https://github.com/example-org/example-repo/pull/7
 ```
+
+`takeover_pr` is optional. Linear triage adds it when the issue already has an
+open pull request that someone else opened. The worker starts from that pull
+request's head and opens its own.
 
 Hermes can rewrite a card's title and body, for example when a blocked card
 passes through `triage`. When the block is missing, rebuild the keys from the
@@ -45,6 +52,7 @@ fields Hermes keeps:
   `linear_issue`: its `id`, `identifier`, and `url` are the issue keys.
 - `linear_agent_session_id` is the newest entry in the issue's
   `agentSessions`.
+- `takeover_pr` cannot be rebuilt. Without it, skip every step that uses it.
 
 If a key still cannot be found, call `kanban_block` with kind `capability` and
 a reason that names the missing key. When `linear_agent_session_id` is known,
@@ -68,6 +76,10 @@ The first run on this card takes no message:
   --repo <repo>
 ```
 
+When the card has `takeover_pr`, add `--takeover-pr <takeover_pr>` to this and
+every later `claude-session` run. It is harmless after the branch has adopted
+the pull request.
+
 A capped Claude run often outlasts the terminal tool's foreground limit, so
 never run `claude-session` in the foreground. Start it in the card's workspace
 with the terminal tool's `background: true` and `notify: true`, then wait on
@@ -76,8 +88,10 @@ so the card shows the run is alive. Read the process output once it exits. It
 prints one JSON line.
 
 - On success the line holds `session_id`, `resumed`, `worktree`, `branch`,
-  `subtype`, `num_turns`, and `result`. Call `kanban_heartbeat` with the whole
-  line as the note.
+  `adopted`, `subtype`, `num_turns`, and `result`. `adopted` is null, or it
+  names the existing work the unstarted branch was reset to: its `source`
+  (`remote_branch` or `takeover_pr`), `ref`, and `head`. Call
+  `kanban_heartbeat` with the whole line as the note.
 - On failure the line holds `error`. A refusal that another process holds the
   worktree means a second worker is running this card: post an `error`
   activity saying so, call `kanban_block` with kind `transient`, and stop. For any other error, post an `error` activity with
@@ -112,7 +126,18 @@ Heartbeat after every run as in step 3.
 
 ## 5. Try to complete
 
-Call `kanban_complete` with a one-sentence `summary` and `metadata` holding
+When the card has `takeover_pr`, settle it first. Run
+`gh pr view <takeover_pr> --json state`. If it is `OPEN`, look in the card
+comments for a human reply about closing it.
+
+- No reply yet: post an `elicitation` activity asking whether to close
+  `<takeover_pr>` in favor of `<published_pr>`. Call `kanban_block` with kind
+  `needs_input` and stop.
+- The human approves: run
+  `gh pr close <takeover_pr> --comment "Superseded by <published_pr>."`.
+- The human declines: leave it open.
+
+Then call `kanban_complete` with a one-sentence `summary` and `metadata` holding
 `session_id`, `worktree`, `branch`, and `published_pr` (the pull request URL).
 Both `pr-ready-gate` and the card's `completion_contract` read
 `published_pr`.
