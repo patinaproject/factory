@@ -425,6 +425,43 @@ git -C <path> status --porcelain --untracked-files=no # prints nothing
 The main checkout stays on its default branch. Kanban creates worktrees under
 `<path>/.worktrees/`.
 
+**Node version.** The gateway's service puts Hermes' own Node first on
+`PATH`, and Hermes refuses a `PATH` override in config. That Node can be newer
+than a repository allows. `claude-session` corrects this for each run:
+
+- It reads `.nvmrc` at the root of the card's worktree. The file must hold a
+  numeric version or prefix, such as `24` or `24.21.0`, with or without a
+  leading `v`.
+- It picks the highest version under `$NVM_DIR/versions/node` that matches
+  the prefix, and puts its `bin` first on `PATH` for Claude Code. When the
+  worker's environment has no `NVM_DIR`, it uses `~/.nvm`.
+- When no installed version matches, it refuses to start Claude Code, exits
+  `2`, and names the version in its error:
+  `Node <version> from .nvmrc is not installed under <dir>; run nvm install <version>`.
+- It refuses an alias such as `lts/*` or `node` as not a numeric version
+  prefix.
+- Without an `.nvmrc`, it leaves `PATH` alone, so the run uses Hermes' Node.
+
+It does not read `engines.node` in `package.json`, and it does not find Node
+installed by Homebrew, fnm, asdf, or Volta. A repository that pins Node only
+through `engines.node` runs with Hermes' Node. Ask the operator to add an
+`.nvmrc` to that repository.
+
+For each repository, check the pin and the install. The installed list must
+include a version that matches the `.nvmrc`:
+
+```sh
+cat <path>/.nvmrc                                    # a numeric version, such as 24
+ls "${NVM_DIR:-$HOME/.nvm}/versions/node"            # includes a matching v<version>
+python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("engines", {}).get("node", "-"))' <path>/package.json
+```
+
+The last line runs only when the repository has a `package.json`. It prints
+the repository's `engines.node` range, and the `.nvmrc` version must satisfy
+it. When no installed version matches, install it as the operator's user, in
+a shell where nvm is loaded: `nvm install <version>`. Install any other tool
+a repository needs, such as `pnpm`, before the first card runs.
+
 **GitHub login and checkouts.** Return to
 [`references/github.md`](references/github.md) and run its
 "Sign the worker's `gh` in" and "Configure git in each checkout" sections.
