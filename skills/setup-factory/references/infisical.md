@@ -187,11 +187,14 @@ sets `helper_timeout_seconds` to 100 to cover it. The Hermes default of 3
 seconds is too short.
 
 Hermes discards the helper's stderr. To see why a run fails, run the script
-with the two `FACTORY_INFISICAL_` values from `.env`. Send stdout to
-`/dev/null` so no secret prints. Exit `0` means the helper works:
+with the two `FACTORY_INFISICAL_` values from `.env`. These lines read only
+those two keys with `sed` and pass them in the script's environment, never as
+command arguments, which other users can see in the process list. Send stdout
+to `/dev/null` so no secret prints. Exit `0` means the helper works:
 
 ```sh
-env $(grep -E '^FACTORY_INFISICAL_CLIENT_(ID|SECRET)=' <home>/.env) \
+FACTORY_INFISICAL_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' <home>/.env)" \
+FACTORY_INFISICAL_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' <home>/.env)" \
   <home>/bin/factory-secrets >/dev/null; echo "exit $?"
 ```
 
