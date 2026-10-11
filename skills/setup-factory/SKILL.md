@@ -75,7 +75,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `CLOUDFLARE_API_TOKEN` | The SST app's own secret storage or environment |
 | `plugins.entries.linear-agent-session.settings` | `config.yaml` of both homes, same JSON |
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
-| `kanban.max_in_progress`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
+| `kanban.max_in_progress`, `platforms.webhook.*`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | The `default` board's `default_workdir` | Kanban board metadata, not `config.yaml` |
 
 When the factory uses Infisical, part 14 moves the Linear credentials, both
