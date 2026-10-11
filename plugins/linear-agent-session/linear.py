@@ -42,6 +42,28 @@ ISSUE_QUERY = """query Issue($id: String!) {
   }
 }"""
 
+DELEGATED_ISSUES_QUERY = """query DelegatedIssues($filter: IssueFilter!, $after: String) {
+  issues(filter: $filter, first: 50, after: $after) {
+    nodes {
+      id identifier title url branchName
+      state { name type }
+      attachments { nodes { url sourceType } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
+
+ISSUE_DELEGATE_QUERY = """query IssueDelegate($id: String!) {
+  viewer { id }
+  issue(id: $id) { id identifier delegate { id } }
+}"""
+
+ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) { success }
+}"""
+
+CLOSED_STATE_TYPES = ("completed", "canceled")
+
 UrlOpen = Callable[..., Any]
 
 
@@ -139,6 +161,46 @@ class LinearClient:
                 reverse=True,
             ),
         }
+
+    def list_delegated_issues(self, *, include_closed: bool = False) -> list:
+        issue_filter: dict = {"delegate": {"isMe": {"eq": True}}}
+        if not include_closed:
+            issue_filter["state"] = {"type": {"nin": list(CLOSED_STATE_TYPES)}}
+        issues: list = []
+        after: Optional[str] = None
+        while True:
+            page = self._graphql(DELEGATED_ISSUES_QUERY, {"filter": issue_filter, "after": after})["issues"]
+            issues.extend(
+                {
+                    "id": n["id"],
+                    "identifier": n["identifier"],
+                    "title": n["title"],
+                    "url": n["url"],
+                    "gitBranchName": n["branchName"],
+                    "state": n["state"]["name"],
+                    "stateType": n["state"]["type"],
+                    "attachments": [
+                        {"url": a["url"], "sourceType": a["sourceType"]} for a in n["attachments"]["nodes"]
+                    ],
+                }
+                for n in page["nodes"]
+            )
+            if not page["pageInfo"]["hasNextPage"]:
+                return issues
+            after = page["pageInfo"]["endCursor"]
+
+    def remove_own_delegation(self, id_or_identifier: str) -> dict:
+        data = self._graphql(ISSUE_DELEGATE_QUERY, {"id": id_or_identifier})
+        issue = data["issue"]
+        delegate = issue["delegate"]["id"] if issue["delegate"] else None
+        if delegate is None:
+            return {"identifier": issue["identifier"], "removed": False}
+        if delegate != data["viewer"]["id"]:
+            raise LinearError(f"{issue['identifier']} is delegated to another agent; only its own delegation can be removed")
+        payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": {"delegateId": None}})["issueUpdate"]
+        if not payload["success"]:
+            raise LinearError("issueUpdate reported success: false")
+        return {"identifier": issue["identifier"], "removed": True}
 
     def _graphql(self, query: str, variables: dict) -> dict:
         try:

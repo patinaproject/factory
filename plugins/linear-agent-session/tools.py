@@ -69,6 +69,35 @@ SESSION_CREATE_SCHEMA = {
 }
 
 
+DELEGATED_ISSUES_SCHEMA = {
+    "name": "linear_delegated_issues",
+    "description": (
+        "List the Linear issues delegated to the agent app, open ones only unless include_closed is set: "
+        "id, identifier, title, url, gitBranchName, state, stateType, and attachments (pull requests "
+        "appear here)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "include_closed": {"type": "boolean", "description": "Also list completed and canceled issues."}
+        },
+    },
+}
+
+UNDELEGATE_SCHEMA = {
+    "name": "linear_issue_undelegate",
+    "description": (
+        "Remove the agent app as an issue's delegate. Refuses an issue delegated to a different agent. "
+        "Returns removed: false when the issue had no delegate."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"issue": {"type": "string", "description": "Issue UUID or identifier such as ABC-123."}},
+        "required": ["issue"],
+    },
+}
+
+
 def run_activity(client_factory: ClientFactory, args: dict) -> str:
     def run() -> dict:
         content = activity_content(
@@ -96,6 +125,16 @@ def run_session_create(client_factory: ClientFactory, args: dict) -> str:
 
 def run_issue(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(lambda: client_factory().get_issue(args["issue"]))
+
+
+def run_delegated_issues(client_factory: ClientFactory, args: dict) -> str:
+    return _tool_result_or_error(
+        lambda: {"issues": client_factory().list_delegated_issues(include_closed=bool(args.get("include_closed")))}
+    )
+
+
+def run_undelegate(client_factory: ClientFactory, args: dict) -> str:
+    return _tool_result_or_error(lambda: client_factory().remove_own_delegation(args["issue"]))
 
 
 def _tool_result_or_error(run: Callable[[], dict]) -> str:
