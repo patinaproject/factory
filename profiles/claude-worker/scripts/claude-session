@@ -26,7 +26,9 @@ DEFAULT_WORKER_ENTRY = (
 TAKEOVER_ENTRY = (
     "The issue already has an open pull request, {url}, opened by someone else. This branch starts from "
     "its head. Open your own ready pull request, and in its body credit the original author and link {url}. "
-    "Do not close {url}. The worker closes it after a human approves."
+    "Do not close {url}. The worker closes it after a human approves. If push-signed refuses one of its "
+    "commits, such as a merge commit, rebase them onto the default branch before you publish. Credit the "
+    "original author with a Co-authored-by trailer on the commits you publish."
 )
 RESUME_PROMPT = "Continue."
 PUBLISH_RULE = (
@@ -37,8 +39,6 @@ PUBLISH_RULE = (
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
-
-
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 
 

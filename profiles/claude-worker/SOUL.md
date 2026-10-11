@@ -55,7 +55,10 @@ fields Hermes keeps:
   keys.
 - `linear_agent_session_id` is the newest entry in the issue's
   `agentSessions`.
-- `takeover_pr` cannot be rebuilt. Without it, skip every step that uses it.
+- `takeover_pr` is the open pull request in the issue's `attachments` that is
+  in `repo` and whose head branch is not the card's branch. Check each with
+  `gh pr view <url> --json state,headRefName`. When none exists, the card has
+  no `takeover_pr`.
 
 If a key still cannot be found, call `kanban_block` with kind `capability` and
 a reason that names the missing key. When `linear_agent_session_id` is known,

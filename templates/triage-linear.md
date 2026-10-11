@@ -77,7 +77,7 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    `https://github.com/<owner>/<name>/pull/<number>` whose `<owner>/<name>`
    matches the chosen repository, ignoring case. Read each one with
    `gh pr view '<url>' --json state,author,headRefName,isCrossRepository,updatedAt`
-   and keep those whose `state` is `OPEN`. <<github_login>>
+   and keep those whose `state` is `OPEN`. <<own_pull_request>>
 
    - If one is the factory's own pull request and its `isCrossRepository` is
      false, use its `headRefName` as the branch. The worker continues that
@@ -86,7 +86,10 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
      pull request remains, the issue has someone else's pull request. Pick
      the one with the latest `updatedAt` and add the line
      `takeover_pr: <url>` after the `branch:` line inside the fenced block
-     below. The worker starts from it and opens its own pull request.
+     below. The worker starts from it and opens its own pull request. If that
+     pull request's `headRefName` equals the issue's `gitBranchName`, use
+     `<gitBranchName>-takeover` as the branch instead, so the worker never
+     publishes to the other person's branch.
 
    Never write a pull request URL in a card comment. Hermes treats a card
    whose comments name a pull request as already having one.
@@ -147,6 +150,8 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
 1. Read the issue with `linear_issue` and find its card. If there is none,
    handle the event as "Session created" and stop.
 2. Comment on the card with the reply: the activity body, attributed to Linear.
+   Replace each `https://github.com/<owner>/<name>/pull/<number>` URL in it
+   with `<owner>/<name>#<number>`, so the comment names no pull request URL.
 3. If the card's body names a different `linear_agent_session_id`, update it as
    in "Session created" step 6.
 4. If the card is `blocked`, read the issue with `linear_issue`. If its

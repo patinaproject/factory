@@ -26,7 +26,9 @@ TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
 TAKEOVER_ENTRY = (
     f"The issue already has an open pull request, {TAKEOVER_PR}, opened by someone else. This branch starts "
     f"from its head. Open your own ready pull request, and in its body credit the original author and link "
-    f"{TAKEOVER_PR}. Do not close {TAKEOVER_PR}. The worker closes it after a human approves."
+    f"{TAKEOVER_PR}. Do not close {TAKEOVER_PR}. The worker closes it after a human approves. If push-signed "
+    "refuses one of its commits, such as a merge commit, rebase them onto the default branch before you publish. "
+    "Credit the original author with a Co-authored-by trailer on the commits you publish."
 )
 
 

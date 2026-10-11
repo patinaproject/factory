@@ -130,7 +130,7 @@ def own_pull_request_sentence(github_login) -> str:
         return "No GitHub App login is configured, so every open pull request counts as someone else's."
     logins = [github_login]
     if github_login.endswith("[bot]"):
-        logins.append(f"app/{github_login[: -len('[bot]')]}")
+        logins.append(f"app/{github_login.removesuffix('[bot]')}")
     return f"A pull request is the factory's own when its `author.login` is {' or '.join(f'`{login}`' for login in logins)}."
 
 
@@ -208,7 +208,7 @@ def build_routes(settings: Any) -> dict:
                     "app_user_id": config["app_user_id"],
                     "repositories": repos,
                     "queued_link": queued_link_sentence(config["kanban_url"]),
-                    "github_login": own_pull_request_sentence(config["github_login"]),
+                    "own_pull_request": own_pull_request_sentence(config["github_login"]),
                 },
             ),
         },
