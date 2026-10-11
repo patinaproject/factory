@@ -354,6 +354,16 @@ The configured checkouts set `remote.origin.pushurl` to
 `no_push_use_push-signed`, so a plain `git push` fails with that name. A
 session in another clone has no such guard, so follow the rule there too.
 
+When the remote branch does not exist, `push-signed` creates it at the merge
+base with the default branch and replays every commit after that point. For a
+branch stacked on another unmerged branch, create the remote branch at the
+parent's signed head first, so only the new commits are replayed:
+
+```sh
+GH_CONFIG_DIR=<worker>/gh gh api --method POST repos/<full_name>/git/refs \
+  -f ref=refs/heads/<branch> -f sha=<parent head>
+```
+
 `push-signed` only adds commits on top of the remote branch. It cannot rewrite
 one. If unsigned commits already reached a pull request, squash the change
 locally onto the base, point the remote branch back at the base, then run
