@@ -390,7 +390,9 @@ Exactly one repository has `routing: default`. Leave
 set up a proxy. An empty
 `worker_entry` uses the built-in prompt. `kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
-empty to post no link.
+empty to post no link. Set `github.login` so triage can tell the factory's own
+open pull requests from a person's. When it is empty, triage treats every open
+pull request as someone else's.
 
 **Check**, for each home:
 
@@ -629,6 +631,20 @@ each check. Report each result.
     still the pinned tag.
 12. `git -C <repo> status --porcelain` prints nothing. This repository holds no
     factory value.
+13. Push an issue's `gitBranchName` to GitHub with one commit, without a local
+    copy in the checkout, then delegate the issue. The first `claude-session`
+    line reports `adopted` with `source` `remote_branch`, the branch starts at
+    that commit, and the first `push-signed` publishes.
+14. Open a pull request as the GitHub App on a branch other than the issue's
+    `gitBranchName`, link it to the issue, and delegate the issue. The card's
+    branch is that pull request's head branch, and no second pull request
+    opens.
+15. Open a pull request as a person, link it to the issue, and delegate the
+    issue. The card body carries `takeover_pr`, the worker starts from that
+    pull request's head, and its own pull request links the original. Before
+    it completes, the worker asks in Linear whether to close the original and
+    blocks with `needs_input`. It closes the original only after a human
+    approves.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` or `triage`
 card. The operator drags the card to Ready, which Hermes documents as a
