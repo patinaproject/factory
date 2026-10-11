@@ -22,6 +22,12 @@ DEFAULT_ENTRY = (
     "on branch abc-123-fix. First start the issue through this repository's own issue-start workflow, "
     "which moves it to In Progress. Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
+TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
+TAKEOVER_ENTRY = (
+    f"The issue already has an open pull request, {TAKEOVER_PR}, opened by someone else. This branch starts "
+    f"from its head. Open your own ready pull request, and in its body credit the original author and link "
+    f"{TAKEOVER_PR}. Do not close {TAKEOVER_PR}. The worker closes it after a human approves."
+)
 
 
 class ClaudeSessionTest(GitFixture):
@@ -80,6 +86,7 @@ class ClaudeSessionTest(GitFixture):
             "resumed": False,
             "worktree": str(self.worktree),
             "branch": "abc-123-fix",
+            "adopted": None,
             "subtype": "success",
             "num_turns": 7,
             "result": "Opened the pull request.",
@@ -291,3 +298,92 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(status, 1)
         self.assertEqual(report["error"], "claude run ended with error_during_execution (exit 0)")
         self.assertEqual(report["session_id"], SESSION_ID)
+
+    def head(self) -> str:
+        return git(self.worktree, "rev-parse", "HEAD")
+
+    def test_unstarted_branch_adopts_the_remote_branch(self) -> None:
+        remote = self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": remote})
+        self.assertEqual(self.head(), remote)
+        self.assertEqual(self.claude_call()["argv"][1], DEFAULT_ENTRY)
+
+    def test_unstarted_branch_adopts_the_takeover_pull_request(self) -> None:
+        pull = self.push_upstream_commit("pull", "refs/pull/7/head")
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["adopted"], {"source": "takeover_pr", "ref": TAKEOVER_PR, "head": pull})
+        self.assertEqual(self.head(), pull)
+        self.assertEqual(self.claude_call()["argv"][1], f"{DEFAULT_ENTRY}\n\n{TAKEOVER_ENTRY}")
+
+    def test_remote_branch_wins_over_the_takeover_pull_request(self) -> None:
+        remote = self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
+        self.push_upstream_commit("pull", "refs/pull/7/head")
+
+        _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(report["adopted"]["source"], "remote_branch")
+        self.assertEqual(self.head(), remote)
+
+    def test_adoption_runs_once(self) -> None:
+        pull = self.push_upstream_commit("pull", "refs/pull/7/head")
+        self.run_session("--takeover-pr", TAKEOVER_PR)
+        self.push_upstream_commit("pull-again", "refs/pull/7/head")
+
+        _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertIsNone(report["adopted"])
+        self.assertEqual(self.head(), pull)
+
+    def test_started_branch_is_left_alone(self) -> None:
+        self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
+        (self.worktree / "local.txt").write_text("local")
+        git(self.worktree, "add", "local.txt")
+        git(self.worktree, "commit", "-q", "-m", "local")
+        local = self.head()
+
+        _, report = self.run_session()
+
+        self.assertIsNone(report["adopted"])
+        self.assertEqual(self.head(), local)
+
+    def test_dirty_worktree_is_left_alone(self) -> None:
+        self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
+        start = self.head()
+        (self.worktree / "draft.txt").write_text("draft")
+
+        _, report = self.run_session()
+
+        self.assertIsNone(report["adopted"])
+        self.assertEqual(self.head(), start)
+        self.assertTrue((self.worktree / "draft.txt").exists())
+
+    def test_takeover_pull_request_of_another_repository_is_refused(self) -> None:
+        url = "https://github.com/someone-else/example-repo/pull/7"
+
+        status, report = self.run_session("--takeover-pr", url)
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": f"--takeover-pr {url} is not a pull request URL in {REPO}"})
+        self.assertFalse(self.log.exists())
+
+    def test_missing_takeover_pull_ref_is_refused(self) -> None:
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(status, 2)
+        self.assertIn("git fetch --quiet origin refs/pull/7/head failed", report["error"])
+        self.assertFalse(self.log.exists())
+
+    def test_resumed_session_gets_no_takeover_paragraph(self) -> None:
+        self.push_upstream_commit("pull", "refs/pull/7/head")
+        self.write_transcript()
+
+        self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(self.claude_call()["argv"][1], "Continue.")

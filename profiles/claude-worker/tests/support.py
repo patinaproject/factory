@@ -57,13 +57,13 @@ class GitFixture(unittest.TestCase):
         git(self.main, "worktree", "add", "-q", "-b", branch, str(path))
         return path
 
-    def push_upstream_commit(self, name: str) -> str:
+    def push_upstream_commit(self, name: str, ref: str = "refs/heads/main") -> str:
         other = self.tmp / f"other-{name}"
         git(self.tmp, "clone", "-q", str(self.origin), str(other))
         (other / f"{name}.txt").write_text(name)
         git(other, "add", f"{name}.txt")
         git(other, "commit", "-q", "-m", name)
-        git(other, "push", "-q", "origin", "main")
+        git(other, "push", "-q", "origin", f"+HEAD:{ref}")
         return git(other, "rev-parse", "HEAD")
 
     def write_settings(self, repositories: list, claude_session: dict | None = None) -> Path:
