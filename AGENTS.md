@@ -43,6 +43,14 @@ Follow it directly for claiming, labels, lifecycle, relationships, and closure.
 `docs/issue-publishing.md` governs issue body framing, and the adapter owns
 readiness and priority.
 
+### GitHub CLI on a factory machine
+
+On a machine that runs a factory, act on GitHub as the factory's GitHub App,
+never as a personal login. Run `gh` with `GH_CONFIG_DIR` set to the worker
+profile's `gh` directory, and never run `gh auth login`. See
+"Use `gh` on a factory machine" in
+`skills/setup-factory/references/github.md`.
+
 ### Working an issue
 
 When you begin or resume issue-linked work, run the `working-on-issues` skill

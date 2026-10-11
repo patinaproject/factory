@@ -87,7 +87,7 @@ A new secret breaks every webhook that uses the old one.
 >   ```
 >
 > - **Repository permissions:** Contents read and write, Pull requests read
->   and write, Issues read-only, Checks read-only, Actions read-only, and
+>   and write, Issues read and write, Checks read-only, Actions read-only, and
 >   Metadata read-only.
 > - **Subscribe to events:** Issues, Issue comment, Pull request, Pull request
 >   review, Pull request review comment, Workflow run, Check run, and Check
@@ -99,6 +99,21 @@ A new secret breaks every webhook that uses the old one.
 
 The events are the `GITHUB_EVENTS` list in `templates/render.py`. Compare the
 list with the form when that file changes.
+
+### Upgrade an existing App's permissions
+
+An App created before Issues became read and write cannot label, comment on,
+or edit issues. The [live test](#live-test) fails for it.
+
+> **HUMAN CHECKPOINT.** Ask the operator to open the App's
+> **Permissions & events** page, set **Issues** to **Read and write**, and save.
+> GitHub then asks the installation's owner to accept the new permissions.
+> Ask the operator to accept them on the installation's settings page,
+> `.../settings/installations/<installation id>`.
+
+The worker's next token, at most 30 minutes later, carries the new
+permission. To use it at once, run the `refresh-gh-app-login` job as in
+[Sign the worker's `gh` in](#sign-the-workers-gh-in).
 
 ## Download the private key
 
@@ -257,3 +272,101 @@ Run this after part 15 has restarted the gateway.
 Expect `200` for an event the route ignores and `202` for an accepted event. A
 `401` means `GITHUB_WEBHOOK_SECRET` in `<home>/.env` does not match the App's
 webhook secret.
+
+Then check that the App can change issues. Add and remove an existing label on
+the same test issue as the App:
+
+```sh
+GH_CONFIG_DIR=<worker>/gh gh issue edit <issue number> --repo <full_name> --add-label <label>
+GH_CONFIG_DIR=<worker>/gh gh issue edit <issue number> --repo <full_name> --remove-label <label>
+```
+
+Both commands must succeed. `Resource not accessible by integration` means the
+App still has Issues read-only; follow
+[Upgrade an existing App's permissions](#upgrade-an-existing-apps-permissions).
+The `github` route drops both label events, because their sender is the App.
+
+## Use `gh` on a factory machine
+
+Every agent session on a factory machine acts on GitHub as the factory's App.
+This covers the worker and any interactive agent session that the operator
+starts, in this repository or in a configured checkout. The App's login is the
+worker's `gh` directory, so select it on each command:
+
+```sh
+GH_CONFIG_DIR=<worker>/gh gh <command>
+```
+
+The configured checkouts' git credential helper already uses the same login,
+as set in [Configure git in each checkout](#configure-git-in-each-checkout).
+
+Follow these rules:
+
+- Do not run `gh auth login`, and do not ask the operator to run it. The
+  `refresh-gh-app-login` job owns the worker's login.
+- Do not set `GH_TOKEN` or `GITHUB_TOKEN`. Either one overrides the login that
+  `GH_CONFIG_DIR` selects.
+- Do not fall back to the operator's personal login when a command fails. Only
+  the steps in this reference that name the operator's own admin login use it.
+- Publish commits only with `push-signed`, never with `git push`.
+- When `gh` is not on the session's `PATH`, find it through the login shell,
+  for example `zsh -lc 'command -v gh'`, and call it by that path.
+
+The App can do what its repository permissions allow:
+
+| Permission | Access | Examples |
+| --- | --- | --- |
+| Contents | Read and write | Fetch, create branches, publish commits with `push-signed` |
+| Pull requests | Read and write | Open, edit, label, and comment on pull requests |
+| Issues | Read and write | Open, edit, label, and comment on issues |
+| Checks, Actions | Read-only | Read check runs and workflow logs |
+| Metadata | Read-only | Read repository names, settings, and collaborators |
+
+When a command fails:
+
+- `Resource not accessible by integration` (HTTP 403) means the App lacks the
+  permission. Report the command and the missing permission to the operator.
+- `Bad credentials` (HTTP 401) means the token expired. Run the
+  `refresh-gh-app-login` job, then retry once.
+- `gh api user` always fails for an installation token. Do not treat that as a
+  broken login.
+
+### Publish commits
+
+On a factory machine, publish commits only with the worker profile's
+`push-signed` script, never with `git push`:
+
+```sh
+GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/push-signed
+```
+
+It recreates each local commit through GitHub's `createCommitOnBranch` API as
+the App, and GitHub signs those commits. A commit is verified only when it is
+signed with a key that GitHub links to the committer's account, or when GitHub
+itself creates the commit. A GitHub App cannot register a signing key, so a
+bot commit made locally and pushed with `git push` is never verified. A
+repository whose ruleset requires signed commits then refuses to merge the pull
+request, and a squash merge does not help, because GitHub checks every commit
+in the pull request. Signing with the operator's personal key would verify the
+commit as the operator, not the App.
+
+The configured checkouts set `remote.origin.pushurl` to
+`no_push_use_push-signed`, so a plain `git push` fails with that name. A
+session in another clone has no such guard, so follow the rule there too.
+
+When the remote branch does not exist, `push-signed` creates it at the merge
+base with the default branch and replays every commit after that point. For a
+branch stacked on another unmerged branch, create the remote branch at the
+parent's signed head first, so only the new commits are replayed:
+
+```sh
+GH_CONFIG_DIR=<worker>/gh gh api --method POST repos/<full_name>/git/refs \
+  -f ref=refs/heads/<branch> -f sha=<parent head>
+```
+
+`push-signed` only adds commits on top of the remote branch. It cannot rewrite
+one. If unsigned commits already reached a pull request, squash the change
+locally onto the base, point the remote branch back at the base, then run
+`push-signed`. GitHub closes a pull request whose head equals its base, so
+reopen it afterwards. Bring the base branch in with `gh pr update-branch`;
+GitHub signs that merge.
