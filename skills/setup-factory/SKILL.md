@@ -1,6 +1,6 @@
 ---
 name: setup-factory
-description: Set up or re-check a Hermes software factory on a machine from this repository. Installs and verifies Hermes, the Claude Code CLI and transport, the factory plugins and claude-worker profile, the Linear agent app, the factory's GitHub App and its webhook, the webhook routes, Slack, an optional Infisical secret source, and Cloudflare Tunnel and Access ingress through the operator's SST app. Use for "set up a factory", "install the factory on this machine", "re-run factory setup", or checking that an existing factory is configured correctly.
+description: Set up or re-check a Hermes software factory on a machine from this repository. Installs and verifies Hermes, the Claude Code CLI and transport, the factory plugins and claude-worker profile, the Linear agent app, the factory's GitHub App and its webhook, the webhook routes, Slack, an optional Infisical secret source, Cloudflare Tunnel and Access ingress through the operator's SST app, and the machine-wide agent instructions. Use for "set up a factory", "install the factory on this machine", "re-run factory setup", or checking that an existing factory is configured correctly.
 ---
 
 # Set up a factory
@@ -56,6 +56,7 @@ notes, not in the repository.
 | A path outside every repository for the GitHub App's private key, for example `~/.config/factory/github-app.pem` | GitHub App |
 | Whether secrets live in Infisical, and if so the project ID, environment, folder, and machine identity | Infisical |
 | Slack workspace and the channels the agent joins | Slack |
+| Where the factory's private configuration record lives, and the credentials on the machine that Hermes agents must never receive | Agent instructions |
 
 ## Where each value lives
 
@@ -142,6 +143,7 @@ Run the parts in this order. Later parts depend on values from earlier ones.
 13. [Slack](#13-slack)
 14. [Infisical secret source](#14-infisical-secret-source), optional
 15. [Restart and end-to-end checks](#15-restart-and-end-to-end-checks)
+16. [Agent instructions](#16-agent-instructions)
 
 ## 1. Hermes
 
@@ -597,6 +599,14 @@ deliberate re-queue. Hermes v0.21.5 has no CLI command or tool for it. When a
 GitHub event arrives for a done card, triage comments on the card and asks the
 operator to reopen the card from the Kanban dashboard. A failed check after
 completion therefore waits for the operator before the worker resumes.
+
+## 16. Agent instructions
+
+Follow [`references/agent-instructions.md`](references/agent-instructions.md).
+It writes the factory's operating rules into `~/.claude/CLAUDE.md`, so every
+Claude Code session on the machine acts on GitHub as the App, publishes
+commits with `push-signed`, and knows where the private configuration record
+lives.
 
 ## Report
 
