@@ -31,7 +31,8 @@ All of these must hold:
 - `grep -c '^<!-- factory:begin -->$' ~/.claude/CLAUDE.md` and
   `grep -c '^<!-- factory:end -->$' ~/.claude/CLAUDE.md` each print `1`.
 - The text between the markers equals the [block](#block) below with every
-  placeholder filled in from this run's values. No `<` placeholder is left.
+  placeholder filled in from this run's values. No unfilled placeholder,
+  such as `<worker>` or `<app-slug>`, is left.
 - The block contains no secret value.
 
 If all of them hold, skip to [Verify](#verify).
