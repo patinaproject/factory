@@ -112,6 +112,7 @@ rule that only docs enforce is a candidate for a script, check, or test.
 | A new script is committed without the executable bit and run with `python3` | `push-signed` refuses a commit that adds an executable file, because GitHub's commit API cannot set file modes |
 | Commit type follows the changed paths | Docs only: "Commit type selection" below; commitlint checks only the format |
 | Tests never assert on documentation prose | Docs only: "Testing Guidelines" below |
+| The pstack model sheet's include appears once in `CLAUDE.md`, outside the factory block, and the block's marker pair stays intact | `skills/setup-factory/scripts/pstack-include`, run in setup part 17, with tests in `skills/setup-factory/tests/`; docs only for the sheet's values, which stay in the private record |
 | Outside Access, a factory machine exposes only SSH, and SSH never accepts a password | `skills/setup-factory/scripts/check-host-exposure` in setup part 16, with tests in `skills/setup-factory/tests/` |
 | No sharing service is reachable, and the macOS firewall is on | `check-host-exposure` |
 | The SSH allowlist is one list of emails, never a domain; the sshd principals file mirrors it | `check-host-exposure --ssh-users`, which fails on drift and refuses a domain |

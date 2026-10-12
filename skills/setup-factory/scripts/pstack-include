@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Check, or add, the pstack model sheet include in a Claude Code CLAUDE.md.
+
+The include `@<config>/pstack-models.md` must appear exactly once, outside the
+`<!-- factory:begin -->` and `<!-- factory:end -->` block that setup part 17
+owns, and the block's marker pair must be intact. `--write` adds a missing
+include after the block and backs up CLAUDE.md first. Prints one PASS or FAIL
+line per check and exits 1 when any check fails.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import sys
+import time
+from pathlib import Path
+
+BEGIN = "<!-- factory:begin -->"
+END = "<!-- factory:end -->"
+SHEET = "pstack-models.md"
+ROLE_LINE = re.compile(r"^([a-z][^:\n]*?):\s*(\S.*)$")
+FREE_TEXT_LINES = ("default effort", "session hook")
+
+
+def include_forms(config: Path, home: Path) -> list[str]:
+    """The `@` lines that name the sheet: absolute, plus `~` form under home."""
+    sheet = config / SHEET
+    forms = [f"@{sheet}"]
+    if sheet.is_relative_to(home):
+        forms.append(f"@~/{sheet.relative_to(home)}")
+    return forms
+
+
+def marker_problem(lines: list[str]) -> str | None:
+    begins = [i for i, line in enumerate(lines) if line == BEGIN]
+    ends = [i for i, line in enumerate(lines) if line == END]
+    if len(begins) != 1 or len(ends) != 1:
+        return f"expected one {BEGIN} and one {END}, found {len(begins)} and {len(ends)}"
+    if begins[0] > ends[0]:
+        return f"{END} comes before {BEGIN}"
+    return None
+
+
+def outside_block(lines: list[str]) -> list[str]:
+    begin, end = lines.index(BEGIN), lines.index(END)
+    return lines[:begin] + lines[end + 1 :]
+
+
+def count_includes(lines: list[str], forms: list[str]) -> int:
+    return sum(1 for line in lines if line.strip() in forms)
+
+
+def add_include(text: str, form: str) -> str:
+    return text.rstrip("\n") + f"\n\n{form}\n"
+
+
+def sheet_problems(text: str) -> list[str]:
+    """Role lines that name a slug the `Agent` tool rejects, or keep a placeholder."""
+    problems = []
+    for line in text.splitlines():
+        match = ROLE_LINE.match(line)
+        if not match or match.group(1) in FREE_TEXT_LINES:
+            continue
+        role, value = match.groups()
+        if "<" in value:
+            problems.append(f"{role}: unfilled placeholder")
+        elif re.search(r"\bclaude-", value):
+            problems.append(f"{role}: use the family name, not a full model ID")
+    return problems
+
+
+def check(config: Path, home: Path) -> list[tuple[bool, str]]:
+    results: list[tuple[bool, str]] = []
+    claude_md, sheet = config / "CLAUDE.md", config / SHEET
+    if sheet.is_file():
+        problems = sheet_problems(sheet.read_text())
+        results.append((not problems, f"{sheet} names only usable models" if not problems else f"{sheet}: " + "; ".join(problems)))
+    else:
+        results.append((False, f"{sheet} is missing; write it from the operator's choices"))
+    if not claude_md.is_file():
+        results.append((False, f"{claude_md} is missing; run setup part 17 first"))
+        return results
+    lines = claude_md.read_text().splitlines()
+    problem = marker_problem(lines)
+    results.append((problem is None, "the factory block's marker pair is intact" if problem is None else f"{claude_md}: {problem}"))
+    if problem is None:
+        found = count_includes(outside_block(lines), include_forms(config, home))
+        results.append((found == 1, f"{claude_md} includes the sheet {found} times outside the factory block; expected 1"))
+    return results
+
+
+def write(config: Path, home: Path) -> str:
+    """Add the include outside the block when absent; returns what happened."""
+    claude_md = config / "CLAUDE.md"
+    if not claude_md.is_file():
+        raise ValueError(f"{claude_md} is missing; run setup part 17 first")
+    text = claude_md.read_text()
+    lines = text.splitlines()
+    problem = marker_problem(lines)
+    if problem:
+        raise ValueError(f"{claude_md}: {problem}")
+    found = count_includes(outside_block(lines), include_forms(config, home))
+    if found > 1:
+        raise ValueError(f"{claude_md} includes the sheet {found} times; remove the duplicates by hand")
+    if found == 1:
+        return "unchanged"
+    backup = claude_md.with_name(f"CLAUDE.md.bak-{time.strftime('%Y%m%d%H%M%S')}")
+    shutil.copy2(claude_md, backup)
+    new_text = add_include(text, include_forms(config, home)[-1])
+    if marker_problem(new_text.splitlines()):
+        raise ValueError("the edit would break the marker pair")
+    claude_md.write_text(new_text)
+    return f"added the include; backup at {backup}"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--config-dir", help="Claude config directory; default $CLAUDE_CONFIG_DIR or ~/.claude")
+    parser.add_argument("--write", action="store_true", help="add the include when absent, then check")
+    args = parser.parse_args()
+    home = Path.home()
+    config = Path(args.config_dir or os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude").expanduser().resolve()
+    if args.write:
+        try:
+            print(f"{config / 'CLAUDE.md'}: {write(config, home)}")
+        except ValueError as error:
+            print(f"FAIL {error}")
+            return 1
+    results = check(config, home)
+    for ok, message in results:
+        print(f"{'PASS' if ok else 'FAIL'} {message}")
+    return 0 if all(ok for ok, _ in results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
