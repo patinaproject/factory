@@ -25,13 +25,14 @@
 │       ├── SOUL.md            # Worker instructions
 │       ├── config.yaml        # Toolsets, skills, plugins, and placeholder settings
 │       ├── distribution.yaml  # Profile distribution manifest
-│       └── scripts/           # claude-session, push-signed, and the refresh cron scripts
+│       └── scripts/           # claude-session, push-signed, worker-secrets, check-install, and the refresh cron scripts
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
 │   └── ...                    # Repository maintenance scripts
 ├── skills/
 │   └── setup-factory/         # Agent runbook that sets up a factory on a machine
 │       ├── SKILL.md
+│       ├── scripts/           # check-host-exposure, linear-mcp-headers, and the factory-secrets template
 │       └── references/        # Cloudflare and SST, Linear, GitHub, Slack, Claude transport, Infisical, 1Password, agent instructions
 ├── templates/
 │   ├── render.py              # Builds the webhook routes and rate limit from settings

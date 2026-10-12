@@ -19,10 +19,19 @@ These values move to Infisical:
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>` |
 | The token variable that `claude_session.auth_token_env` names | `<worker>` |
 
+The default home loads the whole folder. The worker loads only the three
+values in its rows, `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, and the token
+variable, through `<worker>/scripts/worker-secrets`, and signs in as its own
+machine identity, which can read only those three. A worker never holds a
+webhook secret, a Slack token, or the default home's identity, so nothing it
+runs can print them.
+
 These values stay in `.env`:
 
 - `FACTORY_INFISICAL_CLIENT_ID` and `FACTORY_INFISICAL_CLIENT_SECRET`, the
-  machine identity credential that the command uses to sign in.
+  credential of the machine identity that the home's helper signs in as. Each
+  home holds its own identity: `<home>/.env` the default home's, and
+  `<worker>/.env` the worker's.
 - Settings that are not secrets: `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` and
   `GH_CONFIG_DIR`.
 
@@ -37,7 +46,8 @@ Ask the operator for these. None of them is a secret.
 | Infisical project ID | `<project id>` |
 | Environment slug | `development` |
 | Folder for the factory's secrets | `/factory` |
-| The machine identity the factory signs in as | `<identity name>` |
+| The machine identity the default home signs in as | `<identity name>` |
+| The machine identity the worker signs in as | `<worker identity name>` |
 | Infisical API URL, when it is not US Cloud | `https://eu.infisical.com` |
 
 ## Check
@@ -47,38 +57,45 @@ All of these must hold:
 - `env_has <file> FACTORY_INFISICAL_CLIENT_ID` and
   `env_has <file> FACTORY_INFISICAL_CLIENT_SECRET` print `1` for both
   `<home>/.env` and `<worker>/.env`.
-- `hermes config get secrets.command --json` and
-  `hermes -p claude-worker config get secrets.command --json` each show
-  `"enabled": true` and the command from
-  [Configure both homes](#configure-both-homes). When the factory uses
-  [1Password](1password.md), the helper also carries that part's filter.
-- Each of those commands prints `Command helper: applied <n> secrets` on its
-  first line, where `<n>` is the number of values in the folder. When the
-  folder holds `OP_SERVICE_ACCOUNT_TOKEN` for [1Password](1password.md),
-  `<n>` is the number of values minus one.
+- `hermes config get secrets.command --json` shows `"enabled": true` and the
+  command from [Configure both homes](#configure-both-homes). When the factory
+  uses [1Password](1password.md), the helper also carries that part's filter.
+- `hermes -p claude-worker config get secrets.command --json` shows
+  `"enabled": true` and the command `python3 <worker>/scripts/worker-secrets`.
+  `HERMES_HOME=<worker> python3 <worker>/scripts/check-install` reports any
+  other worker command as a `config secrets.command` line.
+- `hermes config get secrets.command --json` prints
+  `Command helper: applied <n> secrets` on its first line, where `<n>` is the
+  number of values in the folder. When the folder holds
+  `OP_SERVICE_ACCOUNT_TOKEN` for [1Password](1password.md), `<n>` is the number
+  of values minus one. The worker's command prints `applied 3 secrets`, or
+  `2` when the proxy needs no token.
 - `<home>/bin/factory-secrets` exists, and the `cmp -s` check in
   [Configure both homes](#configure-both-homes) prints `same`, or the operator
   approved the differences there. When the factory uses
   [1Password](1password.md), the only other change is that part's filter.
 - `hermes -p claude-worker config get terminal.env_passthrough --json` lists
-  the token variable that `claude_session.auth_token_env` names.
+  the token variable that `claude_session.auth_token_env` names,
+  `LINEAR_CLIENT_ID`, and `LINEAR_CLIENT_SECRET`.
 - No moved value remains in a `.env` file: `env_has` prints `0` for each value
   in the first table, in both files.
-- The machine identity reads one environment and nothing else, as
+- Each machine identity reads one environment and nothing else, and the
+  worker's reads only its three keys, as
   [Check the identity's scope](#check-the-identitys-scope) shows.
 
 If all of them hold, skip to [Verify](#verify).
 
-## Create the machine identity
+## Create the machine identities
 
-The factory signs in as one machine identity through Universal Auth. Give it
-read access to the factory's environment and nothing else. Infisical adds
+Each home signs in as its own machine identity through Universal Auth. The
+default home's identity reads the factory's environment. The worker's
+identity reads only the three keys the worker loads. Infisical adds
 permissions together, so a role such as `Viewer` would widen any narrower
 grant.
 
-> **HUMAN CHECKPOINT.** Ask the operator to create the identity, or reuse an
-> existing one, in **Organization → Access Control → Identities**. In the
-> project, set these values:
+> **HUMAN CHECKPOINT.** Ask the operator to create two identities, or reuse
+> existing ones, in **Organization → Access Control → Identities**. In the
+> project, set these values for `<identity name>`:
 >
 > - **Project role:** `No Access`.
 > - **Additional privilege:** permanent, on subject `secrets`, with the actions
@@ -86,33 +103,43 @@ grant.
 >   `<environment>`.
 > - **Authentication:** Universal Auth.
 >
-> Then ask the operator to create a Universal Auth client secret for this
-> machine, and store the client ID and the client secret with the `read -rs`
-> line from the skill. Run it once per key, into both `<home>/.env` and
-> `<worker>/.env`, under the names `FACTORY_INFISICAL_CLIENT_ID` and
+> For `<worker identity name>`, the same, except that the additional
+> privilege also has the conditions `secretPath` equals `<folder>` and
+> `secretName` in `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, and
+> `<token variable>`. Leave out `<token variable>` when the proxy needs no
+> token.
+>
+> Then ask the operator to create a Universal Auth client secret for each
+> identity, and store each client ID and client secret with the `read -rs`
+> line from the skill. Run it once per key: the default home's identity into
+> `<home>/.env` only, and the worker's identity into `<worker>/.env` only,
+> under the names `FACTORY_INFISICAL_CLIENT_ID` and
 > `FACTORY_INFISICAL_CLIENT_SECRET`.
 
 Use the `FACTORY_INFISICAL_` names, not `INFISICAL_UNIVERSAL_AUTH_CLIENT_ID`
-and `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET`. Hermes passes both names to the
-processes a worker starts, which include Claude Code. A repository's own
-Infisical tooling can change how it signs in when it sees the Universal Auth
-names.
+and `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET`. A repository's own Infisical
+tooling can change how it signs in when it sees the Universal Auth names.
 
-The worker's processes can still read the `FACTORY_INFISICAL_` values. Keep
-the identity's access to one environment, so a worker can read no other
-secrets with it.
+The worker runs its helper in its own process, so its identity has to be in
+`<worker>/.env`. That is why the worker gets an identity of its own: the
+worker's agent can read its own environment, and the processes it starts
+inherit parts of it. A leaked worker identity reads the three keys the worker
+already holds and nothing else. The default home's identity is in no
+environment the worker or Claude Code holds. Both homes run as the same user,
+so a file read of `<home>/.env` is not prevented; keep the default home's
+identity scoped to one environment for that reason.
 
 ### Check the identity's scope
 
-Run this for a new identity and for a reused one. A reused identity often
-carries grants from its earlier use, such as a project role or a second
+Run this for each new identity and for each reused one. A reused identity
+often carries grants from its earlier use, such as a project role or a second
 project.
 
-> **HUMAN CHECKPOINT.** Ask the operator to open the identity in
+> **HUMAN CHECKPOINT.** Ask the operator to open each identity in
 > **Organization → Access Control → Identities** and read its projects. It
 > belongs to exactly one project, with project role `No Access`, and its only
 > additional privilege is the one in
-> [Create the machine identity](#create-the-machine-identity).
+> [Create the machine identities](#create-the-machine-identities).
 
 Then sign in as the identity and try each other environment of the project.
 New projects have `dev`, `staging`, and `prod`. The project's settings page
@@ -133,6 +160,20 @@ else from the file. This prints nothing when the scope is right:
 Each `readable:` line fails the check. Remove the extra grant, or create a new
 identity for the factory. Reuse its client ID only after the check passes, and
 give this machine its own client secret.
+
+Run the same lines with `<worker>/.env` for the worker's identity. Then list
+the keys it can read in the folder. The command prints only
+`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, and `<token variable>`; any other
+name fails the check:
+
+```sh
+( t=$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' <worker>/.env)" \
+    INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' <worker>/.env)" \
+    infisical login --method=universal-auth --silent --plain)
+  INFISICAL_TOKEN="$t" infisical export --silent --projectId <project id> --env <environment> \
+    --path <folder> --format json |
+    python3 -c 'import json, sys; [print(s["key"]) for s in json.load(sys.stdin)]' )
+```
 
 ## Store the secrets
 
@@ -176,11 +217,18 @@ infisical export --silent --projectId <project id> --env <environment> \
 
 ## Configure both homes
 
-The helper is a script at `<home>/bin/factory-secrets`. Both homes run the
-same script. It signs in as the machine identity, then exports the folder.
-When sign-in fails, it exports nothing, so it never falls back to the
-operator's own Infisical login. Add `--domain <api url>` to both `infisical`
-calls when the operator does not use US Cloud.
+The default home's helper is a script at `<home>/bin/factory-secrets`,
+rendered from
+[`scripts/factory-secrets`](../scripts/factory-secrets) in this skill. It
+signs in as the machine identity, then exports the folder. When sign-in
+fails, it exports nothing, so it never falls back to the operator's own
+Infisical login. Add `--domain <api url>` to both `infisical` calls when the
+operator does not use US Cloud.
+
+The script prints secrets only to Hermes. It refuses any argument, so a
+`--help` run prints nothing, and it refuses to run when its standard output is
+a terminal. Both refusals exit `2`. Hermes reads it through a pipe, and so does
+the diagnostic run below, which sends stdout to `/dev/null`.
 
 The script guards against a slow or failed run:
 
@@ -193,33 +241,15 @@ The script guards against a slow or failed run:
   it prints nothing to stdout and exits `1`, so Hermes never reads partial
   output.
 
-The commands below write the script to `<home>/bin/factory-secrets.new`
+The commands below render the template into `<home>/bin/factory-secrets.new`
 first, so they never overwrite a helper that an operator has tuned for this
 machine:
 
 ```sh
 mkdir -p <home>/bin
-cat > <home>/bin/factory-secrets.new <<'SH'
-#!/bin/sh
-export INFISICAL_DISABLE_UPDATE_CHECK=true
-bounded() { perl -e 'alarm shift; exec @ARGV or exit 127' 15 "$@"; }
-attempt() {
-  t="$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$FACTORY_INFISICAL_CLIENT_ID" \
-    INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$FACTORY_INFISICAL_CLIENT_SECRET" \
-    bounded infisical login --method=universal-auth --silent --plain)" && [ -n "$t" ] || return 1
-  INFISICAL_TOKEN="$t" bounded infisical export --silent --projectId=<project id> \
-    --env=<environment> --path=<folder> --format=dotenv
-}
-for n in 1 2 3; do
-  if out="$(attempt)" && [ -n "$out" ]; then
-    printf '%s\n' "$out"
-    exit 0
-  fi
-  [ "$n" = 3 ] || sleep 2
-done
-echo "factory-secrets: Infisical export failed after 3 attempts" >&2
-exit 1
-SH
+sed -e 's|<project id>|<project id>|g' -e 's|<environment>|<environment>|g' -e 's|<folder>|<folder>|g' \
+  <repo>/skills/setup-factory/scripts/factory-secrets > <home>/bin/factory-secrets.new
+grep -c '<[a-z ]*>' <home>/bin/factory-secrets.new   # 0: every placeholder is rendered
 chmod 700 <home>/bin/factory-secrets.new
 if [ ! -e <home>/bin/factory-secrets ]; then
   mv <home>/bin/factory-secrets.new <home>/bin/factory-secrets
@@ -244,13 +274,22 @@ tuned on this machine can hold a secret inline. When the command prints
 > confirm that `<home>/bin/factory-secrets.new` is gone and that
 > `<home>/bin/factory-secrets` exists with mode `700`.
 
-Then point both homes at the helper:
+The worker's helper is `<worker>/scripts/worker-secrets`, which part 5
+installs with the profile. It runs `<home>/bin/factory-secrets` with the
+worker's own identity and prints only `LINEAR_CLIENT_ID`,
+`LINEAR_CLIENT_SECRET`, and the variable that `claude_session.auth_token_env`
+names in `<worker>/config.yaml`. It refuses arguments and a terminal the same
+way. `check-install` reports a worker whose `secrets.command` is anything
+else.
+
+Then point each home at its helper:
 
 ```sh
 value="$(python3 -c 'import json, sys; print(json.dumps({"enabled": True, "helper_timeout_seconds": 100, "command": sys.argv[1]}))' "<home>/bin/factory-secrets")"
 hermes config set secrets.command "$value" </dev/null
+value="$(python3 -c 'import json, sys; print(json.dumps({"enabled": True, "helper_timeout_seconds": 100, "command": sys.argv[1]}))' "python3 <worker>/scripts/worker-secrets")"
 hermes -p claude-worker config set secrets.command "$value" </dev/null
-hermes -p claude-worker config set terminal.env_passthrough '["<token variable>"]' </dev/null
+hermes -p claude-worker config set terminal.env_passthrough '["<token variable>", "LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET"]' </dev/null
 ```
 
 A healthy run takes about two seconds. The worst case is 3 attempts of two
@@ -281,10 +320,14 @@ FACTORY_INFISICAL_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//
 `infisical` must be on the `PATH` that the gateway's service definition sets.
 Check with `command -v infisical`, and compare the directory with that `PATH`.
 
-`terminal.env_passthrough` keeps the proxy token reaching `claude-session`.
-Hermes documents that the processes a worker starts receive only declared
-credentials. Current Hermes also forwards an undeclared token, but the
-declaration keeps it working when Hermes enforces the documented rule.
+`terminal.env_passthrough` keeps the proxy token and the Linear app
+credentials reaching `claude-session`, which puts the proxy token and a Linear
+token it gets through the plugin's client into Claude Code's per-run settings
+file. Hermes documents that the processes a worker starts receive only
+declared credentials. Current Hermes also forwards undeclared variables, but
+the declaration keeps the run working when Hermes enforces the documented
+rule. Claude Code itself receives none of them in its environment:
+`claude-session` starts it from an allowlist of names.
 
 ## Verify
 

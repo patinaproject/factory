@@ -87,6 +87,10 @@ private record, never to the repository.
   Never print, copy, or move a secret, and never ask for one in chat. When
   a new secret is needed, ask the operator to enter it in their own
   terminal.
+- Never run `hermes config get` with `--raw`, and never run a secrets
+  helper such as `factory-secrets` or `worker-secrets` by hand. Both print
+  secret values. To check a secret, compare it in memory and print a
+  boolean, or list variable names only.
 - These credentials are for the operator only, and Hermes agents never
   receive them: <operator-only credentials>.
 - Never run `op`, and never read the operator-only credentials, even when a
