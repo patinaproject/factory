@@ -51,6 +51,11 @@ WORKER_SECRETS = {
 ALLOWED_NAMES = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TZ", "NVM_DIR",
     "GH_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+    "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "DEVELOPER_DIR",
+}
+TOOLCHAIN = {
+    "JAVA_HOME": "/opt/jdk", "ANDROID_HOME": "/opt/android-sdk", "ANDROID_SDK_ROOT": "/opt/android-sdk",
+    "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
 }
 TAKEOVER_INTRO = f"The issue already has an open pull request, {TAKEOVER_PR}, opened by someone else."
 TAKEOVER_RULES = (
@@ -361,6 +366,51 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(env["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"], "1")
         self.assertEqual(env["HOME"], os.environ["HOME"])
         self.assertIn("PATH", env)
+
+    def test_claude_gets_the_mobile_toolchain_locations(self) -> None:
+        self.run_session(env=TOOLCHAIN)
+
+        env = self.claude_call()["env"]
+        self.assertEqual({name: env.get(name) for name in TOOLCHAIN}, TOOLCHAIN)
+        self.assertEqual(set(env) & set(WORKER_SECRETS), set())
+
+    def test_toolchain_checks_run_in_the_worktree_with_the_environment_claude_gets(self) -> None:
+        marker = self.tmp / "checked"
+        self.repository["toolchain_checks"] = [
+            'test "$ANDROID_HOME" = /opt/android-sdk',
+            'test -z "$LINEAR_CLIENT_SECRET$GITHUB_WEBHOOK_SECRET"',
+            f'pwd > {marker}',
+        ]
+        self.settings = self.write_settings([self.repository])
+
+        status, report = self.run_session(env=TOOLCHAIN)
+
+        self.assertEqual((status, report.get("error")), (0, None))
+        self.assertEqual(marker.read_text().strip(), str(self.worktree.resolve()))
+        self.assertTrue(self.log.exists())
+
+    def test_a_failing_toolchain_check_refuses_the_run_before_claude_starts(self) -> None:
+        self.repository["toolchain_checks"] = ["true", 'echo "no JAVA_HOME" >&2; exit 3']
+        self.settings = self.write_settings([self.repository])
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {
+            "error": "toolchain check 'echo \"no JAVA_HOME\" >&2; exit 3' failed with exit 3 "
+            "in the environment Claude Code gets: no JAVA_HOME",
+        })
+        self.assertFalse(self.log.exists())
+
+    def test_toolchain_checks_must_be_a_list_of_commands(self) -> None:
+        self.repository["toolchain_checks"] = "xcrun simctl help"
+        self.settings = self.write_settings([self.repository])
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": "toolchain_checks 'xcrun simctl help' must be a list of shell commands"})
+        self.assertFalse(self.log.exists())
 
     def test_linear_token_comes_from_the_plugin_cache_in_the_settings_file(self) -> None:
         self.run_session()

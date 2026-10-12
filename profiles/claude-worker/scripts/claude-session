@@ -84,6 +84,7 @@ LINEAR_MCP_CONFIG = json.dumps({"mcpServers": {"linear": {
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 QUIET_SECONDS = 1.0
 GRACE_SECONDS = 10.0
+TOOLCHAIN_CHECK_SECONDS = 120
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
@@ -299,11 +300,13 @@ MODEL_TIER_VARIABLES = (
 )
 
 
-# What Claude Code and the tools it runs need: a shell, locale, temp dir, the worker's gh login, and its
-# own config dir. Nothing else from the worker's environment crosses, so no secret can.
+# What Claude Code and the tools it runs need: a shell, locale, temp dir, the worker's gh login, its
+# own config dir, and where the Java, Android, and Xcode toolchains live. Nothing else from the worker's
+# environment crosses, so no secret can.
 CHILD_ENV_NAMES = frozenset({
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TZ", "NVM_DIR",
     "GH_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+    "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "DEVELOPER_DIR",
 })
 CHILD_ENV_PREFIXES = ("LC_",)
 
@@ -317,6 +320,28 @@ def child_env(worktree: Path) -> dict:
     if node_bin:
         env["PATH"] = f"{node_bin}{os.pathsep}{env.get('PATH', '')}"
     return env
+
+
+def check_toolchain(repo: dict, worktree: Path) -> None:
+    """Run the repository's toolchain checks in the environment Claude Code gets, and refuse on a failure."""
+    checks = repo.get("toolchain_checks") or []
+    if not isinstance(checks, list) or not all(isinstance(check, str) for check in checks):
+        raise Refusal(f"toolchain_checks {checks!r} must be a list of shell commands")
+    env = child_env(worktree)
+    for check in checks:
+        try:
+            result = subprocess.run(
+                ["/bin/sh", "-c", check], cwd=worktree, env=env, stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=TOOLCHAIN_CHECK_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            raise Refusal(f"toolchain check {check!r} did not finish in {TOOLCHAIN_CHECK_SECONDS}s") from None
+        if result.returncode != 0:
+            output = (result.stderr or result.stdout).strip()[-500:] or "no output"
+            raise Refusal(
+                f"toolchain check {check!r} failed with exit {result.returncode} "
+                f"in the environment Claude Code gets: {output}"
+            )
 
 
 def linear_api_key() -> str:
@@ -519,6 +544,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     turn_limit = max_turns_args(transport)
     prefix = worker_entry_prefix(repo)
     worktree = resolve_worktree(workspace, repo["path"])
+    check_toolchain(repo, worktree)
     session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{args.issue_id}"))
 
     lock_path = Path(git(worktree, "rev-parse", "--absolute-git-dir")) / LOCK_NAME

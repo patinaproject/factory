@@ -559,6 +559,24 @@ it to the prefix. `claude_session.max_turns`
 caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
 one run can finish a whole task. A positive limit pauses a long task, such as
 a dependency upgrade, and the worker resumes it in a second run.
+
+A repository whose workers verify on a simulator or emulator sets
+`toolchain_checks`, a list of shell commands, on its entry. Before each run,
+`claude-session` runs them in the worktree with the environment that Claude
+Code gets. It refuses the run and names the check when one fails. This catches
+a toolchain that the worker run cannot reach before a worker reports that the
+host cannot verify. Claude Code gets `JAVA_HOME`, `ANDROID_HOME`,
+`ANDROID_SDK_ROOT`, and `DEVELOPER_DIR` from the worker's environment, with
+`PATH`. For example:
+
+```json
+"toolchain_checks": [
+  "xcrun simctl help >/dev/null",
+  "java -version",
+  "test -d \"$ANDROID_HOME/build-tools\""
+]
+```
+
 `kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
 empty to post no link. Set `github.login` so triage can tell the factory's own
