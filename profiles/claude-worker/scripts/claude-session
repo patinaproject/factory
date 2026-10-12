@@ -12,8 +12,12 @@ import fcntl
 import json
 import os
 import re
+import select
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -39,7 +43,16 @@ PUBLISH_RULE = (
     "commits that the GitHub App signs, which repositories requiring verified signatures need. To bring "
     "in the base branch, run `gh pr update-branch`, never a local merge."
 )
+FINISH_RULE = (
+    "Stop every background command, monitor, and watcher you started before you write your final result. "
+    "The run ends when you finish, and anything still running is killed. To wait for CI, run a foreground "
+    "command that ends on its own, such as `gh pr checks <number> --watch --fail-fast` with the tool's "
+    "timeout set, and run it again when it times out."
+)
+SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{FINISH_RULE}"
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
+QUIET_SECONDS = 1.0
+GRACE_SECONDS = 10.0
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
@@ -251,6 +264,102 @@ def build_prompt(args: argparse.Namespace, prefix: str, branch: str, resumed: bo
     return f"{entry}\n\n{message}" if message else entry
 
 
+def run_claude(command: list[str], worktree: Path) -> tuple[dict | None, int, str]:
+    """Run claude in its own process group, stop reading at its result, and end every process it leaves.
+
+    Returns the parsed result, claude's exit code, and the tail of its output for an error report.
+    """
+    with tempfile.TemporaryFile() as stderr:
+        proc = subprocess.Popen(
+            command,
+            cwd=worktree,
+            env=child_env(worktree),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            start_new_session=True,
+        )
+        with proc:
+            output, stdout = read_result(proc)
+            leftovers = end_run(proc)
+        if leftovers:
+            print(f"claude-session: ended {len(leftovers)} process(es) left by claude: {sorted(leftovers)}", file=sys.stderr)
+        stderr.seek(0)
+        detail = (stderr.read() or stdout).decode(errors="replace").strip()[-2000:]
+    return output, proc.returncode, detail
+
+
+def read_result(proc: subprocess.Popen) -> tuple[dict | None, bytes]:
+    # Stop at the first complete JSON document instead of waiting for EOF: claude may keep running
+    # after it prints its result, and a child that inherited the pipe keeps it open after claude exits.
+    fd = proc.stdout.fileno()
+    buffer = b""
+    while True:
+        readable, _, _ = select.select([fd], [], [], QUIET_SECONDS)
+        if not readable:
+            if proc.poll() is not None:
+                return None, buffer
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return None, buffer
+        buffer += chunk
+        try:
+            output = json.loads(buffer)
+        except ValueError:
+            continue
+        if isinstance(output, dict):
+            return output, buffer
+
+
+def run_processes(root: int) -> set[int]:
+    """Every process in claude's process group, plus its descendants that moved to their own group."""
+    listing = subprocess.run(["ps", "-Ao", "pid=,ppid=,pgid="], capture_output=True, text=True, check=True)
+    rows = [tuple(int(field) for field in line.split()) for line in listing.stdout.splitlines() if line.strip()]
+    pids = {pid for pid, _, pgid in rows if pgid == root}
+    pending = [root]
+    while pending:
+        parent = pending.pop()
+        for pid, ppid, _ in rows:
+            if ppid == parent and pid not in pids:
+                pids.add(pid)
+                pending.append(pid)
+    return pids
+
+
+def process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def all_gone(proc: subprocess.Popen, pids: set[int]) -> bool:
+    deadline = time.monotonic() + GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if proc.poll() is not None and not any(process_exists(pid) for pid in pids):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def end_run(proc: subprocess.Popen) -> set[int]:
+    """Terminate claude and everything it started, with SIGKILL after a grace period. Returns the leftovers."""
+    leftovers: set[int] = set()
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        leftovers |= run_processes(proc.pid) - {proc.pid}
+        for pid in leftovers | {proc.pid}:
+            try:
+                os.kill(pid, signum)
+            except ProcessLookupError:
+                pass
+        if all_gone(proc, leftovers):
+            break
+    proc.wait()
+    return leftovers
+
+
 def run(args: argparse.Namespace) -> tuple[int, dict]:
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
@@ -282,7 +391,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             *turn_limit,
             "--permission-mode", "bypassPermissions",
             "--resume" if resumed else "--session-id", session_id,
-            "--append-system-prompt", PUBLISH_RULE.format(push_signed=Path(__file__).resolve().with_name("push-signed")),
+            "--append-system-prompt", SYSTEM_PROMPT.format(push_signed=Path(__file__).resolve().with_name("push-signed")),
         ]
         if transport.get("model"):
             command += ["--model", transport["model"]]
@@ -294,26 +403,16 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
                 json.dump(overrides, handle)
             command += ["--settings", str(settings_path)]
         try:
-            proc = subprocess.run(
-                command,
-                cwd=worktree,
-                env=child_env(worktree),
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-            )
+            output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
 
     report = {"session_id": session_id, "resumed": resumed, "worktree": str(worktree), "branch": branch, "adopted": adopted}
-    try:
-        output = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        detail = (proc.stderr or proc.stdout).strip()[-2000:]
-        return 1, {"error": f"claude exited {proc.returncode} without JSON output: {detail}", **report}
+    if output is None:
+        return 1, {"error": f"claude exited {exit_code} without JSON output: {detail}", **report}
     report.update(subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"))
     if report["subtype"] not in COMPLETED_SUBTYPES:
-        return 1, {"error": f"claude run ended with {report['subtype']} (exit {proc.returncode})", **report}
+        return 1, {"error": f"claude run ended with {report['subtype']} (exit {exit_code})", **report}
     return 0, report
 
 
