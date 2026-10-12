@@ -102,6 +102,7 @@ rule that only docs enforce is a candidate for a script, check, or test.
 | No webhook delivery is lost to the gateway's rate limit | `templates/render.py --check`, which reports a missing or different `platforms.webhook.extra.rate_limit`; the HTTP 429 line in `profiles/claude-worker/scripts/check-install` |
 | A worker completes a card only when its pull request is ready to merge | `plugins/pr-ready-gate` |
 | Unblocking a card whose pull request exists ends with `reopen-review`, the handoff that lifts Hermes' `active_pr` hold, so the card respawns after a Linear reply | Docs only: the unblock rule in `templates/triage-linear.md` and end-to-end check 18 in setup part 15 |
+| A worker refreshes a stale pull request head with `gh pr update-branch` before it judges the ready gate again, because a finished check never re-runs on its own | `CHECKS_RULE` in `profiles/claude-worker/scripts/claude-session`, appended to every run's system prompt; its tests in `profiles/claude-worker/tests/test_claude_session.py` |
 | A takeover never publishes to another person's branch | The `-takeover` branch rule in `templates/triage-linear.md`; adoption tests in `profiles/claude-worker/tests/test_claude_session.py` |
 | When `gh issue develop` fails with `createLinkedBranch`, derive the branch name from the adapter's rule | Docs only: `docs/agents/issue-tracker.md` and the machine-wide block |
 | A repository with the Engineering plugin has Bun for its issue-handoff gate | Setup part 10 check |
