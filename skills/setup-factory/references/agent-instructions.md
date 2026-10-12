@@ -53,6 +53,12 @@ This machine runs a Hermes software factory. Its private configuration
 record is <record location>. Read it before you change the machine's
 configuration, and update it in the same change.
 
+Keep the factory replicable. Every change to a factory environment also
+lands in the factory repository in the same change, as a runbook step,
+template, script, or check, so a fresh install reproduces it. A machine
+state the runbook cannot reproduce is a defect. Real values go only to the
+private record, never to the repository.
+
 ### GitHub
 
 - Act on GitHub only as the factory's GitHub App, `<app-slug>[bot]`. Run
