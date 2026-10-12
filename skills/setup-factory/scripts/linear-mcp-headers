@@ -10,9 +10,11 @@ the gateway's token cache. Never mint the token another way: Linear revokes all 
 an app's client credentials tokens when a request asks for a different scope
 set, and the gateway would lose its token.
 
-The app credentials come from <home>/.env, or from <home>/bin/factory-secrets
-when the factory keeps its secrets in Infisical. <home> is $HERMES_HOME, or
-~/.hermes.
+In a worker's Claude Code session, claude-session has already issued the run's
+token as LINEAR_API_KEY in Claude Code's settings, and the script sends that.
+Otherwise the app credentials come from <home>/.env, or from
+<home>/bin/factory-secrets when the factory keeps its secrets in Infisical.
+<home> is $HERMES_HOME, or ~/.hermes.
 """
 from __future__ import annotations
 
@@ -53,6 +55,8 @@ def environment(home: Path) -> dict:
 
 
 def headers(home: Path) -> dict:
+    if os.environ.get("LINEAR_API_KEY"):
+        return {"Authorization": f"Bearer {os.environ['LINEAR_API_KEY']}"}
     plugin = home / "plugins" / "linear-agent-session"
     if not plugin.is_dir():
         return {}

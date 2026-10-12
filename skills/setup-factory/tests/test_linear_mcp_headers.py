@@ -27,9 +27,10 @@ class LinearMcpHeadersTest(unittest.TestCase):
         plugin.mkdir(parents=True)
         (plugin / "linear.py").write_text(FAKE_PLUGIN)
 
-    def run_script(self) -> dict:
+    def run_script(self, **extra: str) -> dict:
         env = {key: value for key, value in os.environ.items() if not key.startswith("LINEAR_")}
         env["HERMES_HOME"] = str(self.home)
+        env.update(extra)
         result = subprocess.run([sys.executable, "-I", str(SCRIPT)], env=env, capture_output=True, text=True, check=True)
         return json.loads(result.stdout)
 
@@ -44,6 +45,9 @@ class LinearMcpHeadersTest(unittest.TestCase):
         helper.write_text('#!/bin/sh\necho "LINEAR_CLIENT_ID=$HELPER_INPUT"\necho "LINEAR_CLIENT_SECRET=\'s2\'"\necho "OTHER=x"\n')
         helper.chmod(0o700)
         self.assertEqual(self.run_script(), {"Authorization": f"Bearer token-for-from-env-s2@{self.home}"})
+
+    def test_sends_the_run_token_a_worker_session_already_holds(self) -> None:
+        self.assertEqual(self.run_script(LINEAR_API_KEY="run-token"), {"Authorization": "Bearer run-token"})
 
     def test_prints_no_headers_without_the_factory_plugin(self) -> None:
         empty = Path(tempfile.mkdtemp())
