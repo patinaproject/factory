@@ -24,6 +24,8 @@ ACTIVITY_MUTATION = """mutation AgentActivityCreate($input: AgentActivityCreateI
   agentActivityCreate(input: $input) { success agentActivity { id } }
 }"""
 
+VIEWER_QUERY = "query { viewer { id } }"
+
 SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: AgentSessionUpdateInput!) {
   agentSessionUpdate(id: $id, input: $input) { success }
 }"""
@@ -189,13 +191,25 @@ class LinearClient:
             raise LinearError("issueUpdate reported success: false")
         return {"identifier": issue["identifier"], "removed": True}
 
+    def access_token(self) -> str:
+        """A token Linear accepts now, for a process that calls Linear without this client.
+
+        A cached token can be revoked before it expires, so a cheap query proves it first.
+        A rejected token is replaced the same way any other call replaces it.
+        """
+        self._graphql(VIEWER_QUERY, {})
+        return self._access_token()
+
     def _graphql(self, query: str, variables: dict) -> dict:
         try:
             return self._post_graphql(query, variables)
         except _Unauthorized:
             # Client credentials tokens have no refresh token; Linear's documented recovery is a new token.
             self._discard_token()
+        try:
             return self._post_graphql(query, variables)
+        except _Unauthorized:
+            raise LinearError("Linear rejected a newly issued token") from None
 
     def _post_graphql(self, query: str, variables: dict) -> dict:
         request = urllib.request.Request(
@@ -277,6 +291,8 @@ class LinearClient:
                 return response.status, response.read()
         except urllib.error.HTTPError as e:
             return e.code, e.read()
+        except urllib.error.URLError as e:
+            raise LinearError(f"Linear is unreachable: {e.reason}") from None
 
 
 class _Unauthorized(Exception):

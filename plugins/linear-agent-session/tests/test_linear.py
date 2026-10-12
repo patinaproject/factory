@@ -138,6 +138,35 @@ class TokenTest(unittest.TestCase):
         self.assertEqual(activity_id, "activity-7")
         self.assertEqual([r["authorization"] for r in fake.graphql_requests], ["Bearer token-1", "Bearer token-2"])
 
+    def test_access_token_replaces_a_revoked_cached_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "token.json")
+            with open(path, "w") as f:
+                json.dump({"client_id": "client-id", "access_token": "revoked", "expires_at": 1e12}, f)
+            viewer_ok = (200, {"data": {"viewer": {"id": "app-user"}}})
+            fake = FakeLinear([(401, {"errors": [{"message": "Authentication required"}]}), viewer_ok])
+            self.assertEqual(make_client(fake, token_cache_path=path).access_token(), "token-1")
+            self.assertEqual([r["authorization"] for r in fake.graphql_requests], ["Bearer revoked", "Bearer token-1"])
+            self.assertEqual([r["form"]["scope"] for r in fake.token_requests], ["read,write,app:assignable,app:mentionable"])
+            with open(path) as f:
+                self.assertEqual(json.load(f)["access_token"], "token-1")
+
+    def test_a_rejected_new_token_is_a_linear_error(self):
+        unauthorized = (401, {"errors": [{"message": "Authentication required"}]})
+        fake = FakeLinear([unauthorized, unauthorized])
+        with self.assertRaisesRegex(linear.LinearError, "Linear rejected a newly issued token"):
+            make_client(fake).access_token()
+        self.assertEqual(len(fake.token_requests), 2)
+
+    def test_an_unreachable_linear_is_a_linear_error(self):
+        import urllib.error
+
+        def offline(request, timeout=None):
+            raise urllib.error.URLError("nodename nor servname provided")
+
+        with self.assertRaisesRegex(linear.LinearError, "Linear is unreachable: nodename nor servname provided"):
+            make_client(offline).access_token()
+
     def test_persisted_token_is_private_and_shared_across_clients(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "state", "token.json")

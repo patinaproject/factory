@@ -314,7 +314,7 @@ def linear_api_key() -> str:
     import linear
 
     try:
-        return linear.client_from_env()._access_token()
+        return linear.client_from_env().access_token()
     except linear.LinearError as error:
         raise Refusal(f"Linear token: {error}") from None
 
