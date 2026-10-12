@@ -617,8 +617,93 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"plugin p1 in {self.root}: __init__.py differs from main at {merged}\n"
-                f"plugin p1 in {self.worker}: __init__.py differs from main at {merged}\n"),
+                f"plugin p1 in {self.worker}: __init__.py differs from main at {merged}\n"
+                f"source checkout {self.repo}: is behind main at {merged}. Fast-forward only this checkout "
+                f"with git -C {self.repo} merge --ff-only {git(self.repo, 'rev-parse', 'origin/main')}. "
+                "Leave the worker-owned checkouts to refresh-checkouts.\n"),
         )
+
+    def advance_origin(self) -> str:
+        seed = self.tmp / "seed"
+        (seed / "plugins" / "p1" / "__init__.py").write_text("merged\n")
+        git(seed, "commit", "-qam", "merge")
+        return git(seed, "rev-parse", "HEAD")
+
+    def commit_locally(self) -> None:
+        (self.repo / "local.txt").write_text("local\n")
+        git(self.repo, "add", "local.txt")
+        git(self.repo, "commit", "-qm", "local")
+
+    def source_lines(self) -> list:
+        return [line for line in self.check()[1].splitlines() if line.startswith("source checkout")]
+
+    def assert_fast_forward_line(self, sha: str) -> None:
+        (line,) = self.source_lines()
+        self.assertIn(str(self.repo), line)
+        self.assertIn(f"git -C {self.repo} merge --ff-only {sha}", line)
+
+    def assert_manual_line(self, reason: str) -> None:
+        (line,) = self.source_lines()
+        self.assertIn(str(self.repo), line)
+        self.assertIn(reason, line)
+        self.assertNotIn("merge --ff-only", line)
+
+    def test_clean_source_checkout_on_main_that_is_behind_gets_the_fast_forward_command(self) -> None:
+        sha = self.advance_origin()
+
+        self.assert_fast_forward_line(sha)
+
+    def test_source_checkout_ahead_of_origin_gets_no_merge_command(self) -> None:
+        self.install(self.worker, "SOUL.md", "stale\n")
+        self.commit_locally()
+
+        self.assert_manual_line("is ahead of main")
+
+    def test_diverged_source_checkout_gets_no_merge_command(self) -> None:
+        self.advance_origin()
+        self.commit_locally()
+
+        self.assert_manual_line("has diverged from main")
+
+    def test_source_checkout_on_another_branch_gets_no_merge_command(self) -> None:
+        self.advance_origin()
+        git(self.repo, "checkout", "-q", "-b", "side")
+
+        self.assert_manual_line("is on side, not main")
+
+    def test_dirty_source_checkout_gets_no_merge_command(self) -> None:
+        self.advance_origin()
+        (self.repo / "plugins" / "p1" / "__init__.py").write_text("dirty\n")
+
+        self.assert_manual_line("has uncommitted changes")
+
+    def test_print_source_prints_the_checkout_the_distribution_names(self) -> None:
+        self.assertEqual(self.check("--print-source"), (0, f"{self.repo}\n"))
+
+    def test_source_checkout_at_origin_head_gets_no_fast_forward_line(self) -> None:
+        self.install(self.worker, "SOUL.md", "stale\n")
+
+        code, out = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("source checkout", out)
+
+    def test_an_explicit_ref_gets_no_source_checkout_line(self) -> None:
+        merged = self.advance_origin()[:7]
+
+        self.assertEqual(
+            self.check("--ref", "origin/main"),
+            (1, f"plugin p1 in {self.root}: __init__.py differs from origin/main at {merged}\n"
+                f"plugin p1 in {self.worker}: __init__.py differs from origin/main at {merged}\n"),
+        )
+
+    def test_behind_source_checkout_without_drift_is_silent(self) -> None:
+        seed = self.tmp / "seed"
+        (seed / "README.md").write_text("docs only\n")
+        git(seed, "add", "README.md")
+        git(seed, "commit", "-qm", "docs")
+
+        self.assertEqual(self.check(), (0, ""))
 
     def test_checkout_state_does_not_matter(self) -> None:
         git(self.repo, "checkout", "-q", "-b", "side")
