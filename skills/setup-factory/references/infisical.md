@@ -170,7 +170,8 @@ Check the folder by key names only:
 
 ```sh
 infisical export --silent --projectId <project id> --env <environment> \
-  --path <folder> --format dotenv | sed 's/=.*//'
+  --path <folder> --format json |
+  python3 -c 'import json, sys; [print(s["key"]) for s in json.load(sys.stdin)]'
 ```
 
 ## Configure both homes
