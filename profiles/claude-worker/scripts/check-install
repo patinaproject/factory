@@ -4,8 +4,9 @@
 Compares the worker profile, the plugins in the root and worker homes, and the
 webhook config against a commit of the repository, read with git plumbing so
 the checkout's working tree and branch do not matter. Also checks that the
-dashboard's OIDC sign-in can keep a user signed in, and that the gateway
-rejected no webhook delivery with 429 in the last hour. Silent when the install
+dashboard's OIDC sign-in can keep a user signed in, that the gateway rejected
+no webhook delivery with 429 in the last hour, and that the owned-refs file
+the `github` route reads is present and fresh. Silent when the install
 matches. Prints one line per difference and exits 1, or exits 2 when it cannot
 run.
 
@@ -29,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from collections import Counter
 from datetime import datetime, timedelta
@@ -37,6 +39,7 @@ from typing import Callable, NamedTuple
 
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
+OWNED_REFS = "owned-refs.json"
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -138,8 +141,10 @@ CONFIG = (
 CRON = (
     CronJob(10, "refresh-gh-app-login", 30, equal("local")),
     CronJob(12, "refresh-checkouts", 60, equal("local")),
+    CronJob(12, "refresh-owned-refs", 1, equal("local")),
     CronJob(12, "check-install", 60, declared("the operator's chat platform", besides=("local",))),
 )
+OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
 
 # macOS only. `plist` is a glob; the runbook lets the operator name the cloudflared plist.
 SERVICES = (
@@ -425,6 +430,19 @@ def check_services(launchd_root: Path, launchctl: str) -> list:
     return drifts
 
 
+def check_owned_refs(root: Path) -> list:
+    path = root / OWNED_REFS
+    if not path.is_file():
+        return [Drift("owned refs", str(path), "is missing; create or run the refresh-owned-refs cron job (part 12)")]
+    age = time.time() - path.stat().st_mtime
+    if age > OWNED_REFS_MAX_AGE:
+        return [Drift(
+            "owned refs", str(path),
+            f"is {int(age // 60)} minutes old; the refresh-owned-refs cron job is not running (part 12)",
+        )]
+    return []
+
+
 def homes() -> tuple:
     if not os.environ.get("HERMES_HOME"):
         raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
@@ -486,6 +504,7 @@ def main() -> int:
             *check_routes(commit, root, hermes),
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
+            *check_owned_refs(root),
         ]
         if sys.platform == "darwin":
             launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))

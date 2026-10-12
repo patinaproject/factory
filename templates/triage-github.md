@@ -37,7 +37,6 @@ issue it belongs to, as a card comment. Do not do the work it describes.
 - Review body: {review.body}
 - Workflow run: {workflow_run.name} concluded {workflow_run.conclusion} on branch {workflow_run.head_branch}, {workflow_run.html_url}
 - Check run: {check_run.name} concluded {check_run.conclusion} on branch {check_run.check_suite.head_branch}, {check_run.html_url}
-- Check suite: concluded {check_suite.conclusion} on branch {check_suite.head_branch}
 
 A field still shown as a dotted name in braces is absent from this payload. The
 full payload, truncated to 4000 characters:
@@ -46,14 +45,11 @@ full payload, truncated to 4000 characters:
 
 ## Decide whether the event matters
 
-Continue only for these events. Otherwise stop without changing anything.
+The route delivers only these events, so an event outside this list never
+arrives. Continue only for these events. Otherwise stop without changing
+anything.
 
-- `pull_request_review` with action `submitted`.
-- `pull_request_review_comment` and `issue_comment` with action `created`.
-- `check_run`, `check_suite`, and `workflow_run` with action `completed`. The
-  route only delivers failed conclusions.
-- `pull_request` with action `closed`, `reopened`, or `converted_to_draft`.
-- `issues` with action `closed`, `reopened`, or `edited`.
+<<events_that_matter>>
 
 ## Find the card
 
