@@ -45,7 +45,7 @@ notes, not in the repository.
 | Hermes home directory (default `~/.hermes`) and install checkout | Every part |
 | Hermes release tag to pin, `v0.21.4` or later | Hermes |
 | Model alias for Hermes' own agent loop, for example `sonnet` | DirectSDK provider |
-| Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` | Settings, clones, routes |
+| Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
 | `kanban.max_in_progress` | Kanban |
 | Factory hostname, Cloudflare account, and zone | Ingress |
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
@@ -402,8 +402,10 @@ key file but does not contain the key.
 
 Exactly one repository has `routing: default`. Leave
 `claude_session.base_url`, `model`, and `auth_token_env` empty unless part 3
-set up a proxy. An empty
-`worker_entry` uses the built-in prompt. `kanban_url` is the dashboard's
+set up a proxy. `worker_entry` is a prefix, such as `/patina-mode`, that
+`claude-session` puts before the built-in task prompt. The task prompt names
+the issue, its URL, the repository, and the branch, and is always sent. An
+empty `worker_entry` sends the task prompt alone. `kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
 empty to post no link. Set `github.login` so triage can tell the factory's own
 open pull requests from a person's. When it is empty, triage treats every open

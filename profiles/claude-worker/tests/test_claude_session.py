@@ -141,15 +141,23 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(self.claude_call()["argv"][:2], ["-p", "Continue."])
 
+    def test_worker_entry_prefixes_the_default_entry(self) -> None:
+        self.repository["worker_entry"] = "/patina-mode"
+        self.settings = self.write_settings([self.repository])
+
+        self.run_session()
+
+        self.assertEqual(self.claude_call()["argv"][1], f"/patina-mode {DEFAULT_ENTRY}")
+
     def test_worker_entry_template_is_rendered(self) -> None:
-        self.repository["worker_entry"] = "Run /work-issue {issue_identifier} {issue_id} {issue_url} {branch} {repo}"
+        self.repository["worker_entry"] = "/work-issue {issue_identifier} {issue_id} {issue_url} {branch} {repo}"
         self.settings = self.write_settings([self.repository])
 
         self.run_session()
 
         self.assertEqual(
             self.claude_call()["argv"][1],
-            f"Run /work-issue ABC-123 {ISSUE_ID} https://linear.app/example/issue/ABC-123 abc-123-fix {REPO}",
+            f"/work-issue ABC-123 {ISSUE_ID} https://linear.app/example/issue/ABC-123 abc-123-fix {REPO} {DEFAULT_ENTRY}",
         )
 
     def test_unexpected_error_is_reported_as_one_json_line(self) -> None:

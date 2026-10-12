@@ -218,7 +218,8 @@ def build_prompt(args: argparse.Namespace, repo: dict, branch: str, resumed: boo
     message = Path(args.message_file).read_text() if args.message_file else ""
     if resumed:
         return message or RESUME_PROMPT
-    entry = (repo.get("worker_entry") or DEFAULT_WORKER_ENTRY).format(
+    prefix = repo.get("worker_entry")
+    entry = (f"{prefix} {DEFAULT_WORKER_ENTRY}" if prefix else DEFAULT_WORKER_ENTRY).format(
         issue_id=args.issue_id,
         issue_identifier=args.issue_identifier,
         issue_url=args.issue_url,
