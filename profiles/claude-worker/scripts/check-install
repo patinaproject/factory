@@ -12,8 +12,9 @@ run.
 
 It also checks that the config keys, cron jobs, and launchd services the setup
 runbook creates still match what it creates (the CONFIG, CRON, and SERVICES
-tables), and that the worker home's secrets.command is the worker helper
-whenever the root home has a secret source.
+tables), that the worker home's secrets.command is the worker helper
+whenever the root home has a secret source, and that each configured
+repository checkout exists and has origin/HEAD set.
 
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd check at another file system
 root and launchctl, for tests.
@@ -45,6 +46,7 @@ OWNED_REFS = "owned-refs.json"
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
+SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 # aiohttp's access line in the gateway log, stamped in local time by Hermes' log format.
 REJECTED = re.compile(r'^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ .*"POST /webhooks/([^ ?"]+)[^"]*" 429 ')
 
@@ -128,7 +130,7 @@ CONFIG = (
     ConfigKey(6, "platforms.webhook.extra.host", (ROOT,), equal("127.0.0.1")),
     ConfigKey(6, "platforms.webhook.extra.port", (ROOT,), declared("set to the webhook port")),
     ConfigKey(
-        10, "plugins.entries.linear-agent-session.settings", BOTH, declared("set to the factory settings"),
+        10, SETTINGS_KEY, BOTH, declared("set to the factory settings"),
         same_in_homes=True,
     ),
     ConfigKey(10, "kanban.max_in_progress", (ROOT,), declared("set to the operator's card limit")),
@@ -461,6 +463,26 @@ def check_owned_refs(root: Path) -> list:
     return []
 
 
+def check_checkouts(settings) -> list:
+    # Missing or malformed settings are check_config's to report.
+    if not isinstance(settings, dict):
+        return []
+    drifts = []
+    for repository in settings.get("repositories") or []:
+        path = repository["path"]
+        if not Path(path).is_dir():
+            drifts.append(Drift("checkout", path, "does not exist (part 10)"))
+            continue
+        head = subprocess.run(
+            ["git", "-C", path, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], capture_output=True
+        )
+        if head.returncode != 0:
+            drifts.append(Drift(
+                "checkout", path, f"origin/HEAD is not set; run git -C {path} remote set-head origin -a (part 10)"
+            ))
+    return drifts
+
+
 def homes() -> tuple:
     if not os.environ.get("HERMES_HOME"):
         raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
@@ -524,6 +546,7 @@ def main() -> int:
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
             *check_owned_refs(root),
+            *check_checkouts(config_value(worker, hermes, SETTINGS_KEY)),
         ]
         if sys.platform == "darwin":
             launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))

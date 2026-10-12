@@ -25,6 +25,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from typing import NamedTuple
 
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_WORKER_ENTRY = (
@@ -32,9 +33,13 @@ DEFAULT_WORKER_ENTRY = (
     "First start the issue through this repository's own issue-start workflow, which moves it to In Progress. "
     "Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
-TAKEOVER_ENTRY = (
-    "The issue already has an open pull request, {url}, opened by someone else. This branch starts from "
-    "its head. Open your own ready pull request, and in its body credit the original author and link {url}. "
+TAKEOVER_INTRO = "The issue already has an open pull request, {url}, opened by someone else."
+TAKEOVER_START = {
+    "takeover_pr": "This branch starts from its head.",
+    "remote_branch": "This branch holds the factory's own earlier commits, not that pull request's.",
+}
+TAKEOVER_RULES = (
+    "Open your own ready pull request, and in its body credit the original author and link {url}. "
     "Do not close {url}. The worker closes it after a human approves. If push-signed refuses one of its "
     "commits, such as a merge commit, squash the pull request onto the default branch before you publish: "
     "check out the default branch under this branch's name, run `git merge --squash` with the pull "
@@ -74,8 +79,32 @@ SETTINGS_FILE_NAME = "claude-session.settings.json"
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 
 
+FACTORY, OTHER = "factory", "other"
+REFUSE = "refuse"
+# Keyed on (takeover pull request given, owner of origin/<branch> or None when it is missing).
+ADOPTION = {
+    (False, None): None,
+    (False, FACTORY): "remote_branch",
+    (False, OTHER): REFUSE,
+    (True, None): "takeover_pr",
+    (True, FACTORY): "remote_branch",
+    (True, OTHER): REFUSE,
+}
+
+
 class Refusal(Exception):
     pass
+
+
+class RemoteBranch(NamedTuple):
+    head: str
+    owner: str
+
+
+class Adoption(NamedTuple):
+    source: str
+    ref: str
+    head: str
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -102,21 +131,55 @@ def takeover_pull_ref(takeover_pr: str, repo: str) -> str:
     return f"refs/pull/{match.group(2)}/head"
 
 
-def adopt_existing_work(worktree: Path, branch: str, repo: str, takeover_pr: str | None) -> dict | None:
+def origin_default(worktree: Path) -> str:
+    proc = subprocess.run(
+        ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=worktree, capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        raise Refusal(f"origin/HEAD is not set in {worktree}; run git remote set-head origin -a in the checkout")
+    return proc.stdout.strip()
+
+
+def remote_branch(worktree: Path, branch: str, default: str, login: str | None) -> RemoteBranch | None:
+    """origin/<branch> and who created it, judged by the author of the branch's own first commit."""
+    if not remote_branch_exists(worktree, branch):
+        return None
+    if not login:
+        raise Refusal(
+            "github.login is not set in the settings, so claude-session cannot tell the factory's branches from a person's"
+        )
+    # Refresh the default branch first, or merges from `gh pr update-branch` look like the branch's own commits.
+    git(worktree, "fetch", "--quiet", "origin")
+    git(worktree, "fetch", "--quiet", "origin", f"refs/heads/{branch}")
+    head = git(worktree, "rev-parse", "FETCH_HEAD")
+    own = git(worktree, "rev-list", "--first-parent", "--reverse", f"{default}..{head}").splitlines()
+    factory = not own or git(worktree, "log", "-1", "--format=%an", own[0]) == login
+    return RemoteBranch(head, FACTORY if factory else OTHER)
+
+
+def adopt_existing_work(
+    worktree: Path, branch: str, repo: str, takeover_pr: str | None, login: str | None
+) -> Adoption | None:
     pull_ref = takeover_pull_ref(takeover_pr, repo) if takeover_pr else None
-    default = git(worktree, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    default = origin_default(worktree)
     if git(worktree, "rev-list", f"{default}..HEAD") or git(worktree, "status", "--porcelain"):
         return None
-    if remote_branch_exists(worktree, branch):
-        source, ref, fetch_ref = "remote_branch", branch, f"refs/heads/{branch}"
-    elif pull_ref:
-        source, ref, fetch_ref = "takeover_pr", takeover_pr, pull_ref
-    else:
+    remote = remote_branch(worktree, branch, default, login)
+    source = ADOPTION[(pull_ref is not None, remote.owner if remote else None)]
+    if source is None:
         return None
-    git(worktree, "fetch", "--quiet", "origin", fetch_ref)
-    head = git(worktree, "rev-parse", "FETCH_HEAD")
-    git(worktree, "reset", "--quiet", "--hard", head)
-    return {"source": source, "ref": ref, "head": head}
+    if source == REFUSE:
+        raise Refusal(
+            f"origin/{branch} was not created by {login}, so the factory cannot publish to it; a person must rename "
+            "that branch or open a pull request from it, which triage hands over as takeover_pr"
+        )
+    if source == "remote_branch":
+        adoption = Adoption(source, branch, remote.head)
+    else:
+        git(worktree, "fetch", "--quiet", "origin", pull_ref)
+        adoption = Adoption(source, takeover_pr, git(worktree, "rev-parse", "FETCH_HEAD"))
+    git(worktree, "reset", "--quiet", "--hard", adoption.head)
+    return adoption
 
 
 def load_settings(settings_file: str | None) -> dict:
@@ -297,7 +360,7 @@ def worker_entry_prefix(repo: dict) -> str:
     return prefix
 
 
-def build_prompt(args: argparse.Namespace, prefix: str, branch: str, resumed: bool) -> str:
+def build_prompt(args: argparse.Namespace, prefix: str, branch: str, resumed: bool, adopted: Adoption | None) -> str:
     message = Path(args.message_file).read_text() if args.message_file else ""
     if resumed:
         return message or RESUME_PROMPT
@@ -311,7 +374,9 @@ def build_prompt(args: argparse.Namespace, prefix: str, branch: str, resumed: bo
     if prefix:
         entry = f"{prefix} {entry}"
     if args.takeover_pr:
-        entry = f"{entry}\n\n{TAKEOVER_ENTRY.format(url=args.takeover_pr)}"
+        start = TAKEOVER_START.get(adopted.source) if adopted else None
+        takeover = " ".join(filter(None, [TAKEOVER_INTRO, start, TAKEOVER_RULES]))
+        entry = f"{entry}\n\n{takeover.format(url=args.takeover_pr)}"
     return f"{entry}\n\n{message}" if message else entry
 
 
@@ -433,11 +498,12 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             raise Refusal(f"a process for Claude session {session_id} is already running")
 
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
-        adopted = adopt_existing_work(worktree, branch, args.repo, args.takeover_pr)
+        login = (settings.get("github") or {}).get("login")
+        adopted = adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
         resumed = transcript_exists(session_id, worktree)
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),
-            "-p", build_prompt(args, prefix, branch, resumed),
+            "-p", build_prompt(args, prefix, branch, resumed, adopted),
             "--output-format", "json",
             *turn_limit,
             "--permission-mode", "bypassPermissions",
@@ -454,7 +520,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         finally:
             settings_path.unlink(missing_ok=True)
 
-    report = {"session_id": session_id, "resumed": resumed, "worktree": str(worktree), "branch": branch, "adopted": adopted}
+    report = {"session_id": session_id, "resumed": resumed, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None}
     if output is None:
         return 1, {"error": f"claude exited {exit_code} without JSON output: {detail}", **report}
     report.update(subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"))

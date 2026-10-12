@@ -15,13 +15,17 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 - Stay read-only on GitHub. Read pull requests only with `gh pr view`. Do not
   run git, edit files, or write code.
 - An issue has one card for its whole life. Find it with
-  `hermes kanban list --json` after reading the issue with `linear_issue`: it
-  is the task whose `branch_name` equals the issue's `gitBranchName`, or, when
-  none matches, whose `body` contains the line
-  `linear_issue_id: <Linear issue UUID>`. The branch survives when Hermes
-  rewrites a card's title and body. Create a card only with the
-  `hermes kanban create` command below, never with the `kanban_create` tool,
-  which cannot set the branch.
+  `hermes kanban list --json` after reading the issue with `linear_issue`. Try
+  these keys in order and take the first task that matches:
+  1. `branch_name` equals the issue's `gitBranchName`.
+  2. `branch_name` equals `<gitBranchName>-takeover`.
+  3. `body` contains the line `linear_issue_id: <Linear issue UUID>`.
+  4. `title` starts with `<issue identifier>:`.
+
+  The branch survives when Hermes rewrites a card's title and body. A card on
+  the factory's own pull request branch has no branch key, so keys 3 and 4
+  find it. Create a card only with the `hermes kanban create` command below,
+  never with the `kanban_create` tool, which cannot set the branch.
 - Add free-text card comments with the `kanban_comment` tool, not the shell.
 - To unblock a card, first read its `branch:` and `repo:` lines and run
   `gh pr view '<branch>' -R '<repo>' --json state`. When no pull request
@@ -87,19 +91,25 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    `https://github.com/<owner>/<name>/pull/<number>` whose `<owner>/<name>`
    matches the chosen repository, ignoring case. Read each one with
    `gh pr view '<url>' --json state,author,headRefName,isCrossRepository,updatedAt`
-   and keep those whose `state` is `OPEN`. <<own_pull_request>>
+   and keep those whose `state` is `OPEN`. <<own_pull_request>> An own pull
+   request counts only when its `isCrossRepository` is false. When several
+   pull requests of one kind remain, the newest `updatedAt` wins. Then read
+   the first matching row:
 
-   - If one is the factory's own pull request and its `isCrossRepository` is
-     false, use its `headRefName` as the branch. The worker continues that
-     pull request.
-   - Otherwise use the issue's `gitBranchName` as the branch. If any open
-     pull request remains, the issue has someone else's pull request. Pick
-     the one with the latest `updatedAt` and add the line
-     `takeover_pr: <url>` after the `branch:` line inside the fenced block
-     below. The worker starts from it and opens its own pull request. If that
-     pull request's `headRefName` equals the issue's `gitBranchName`, use
-     `<gitBranchName>-takeover` as the branch instead, so the worker never
-     publishes to the other person's branch.
+   | Open pull requests | `branch` | `takeover_pr` |
+   | --- | --- | --- |
+   | An own pull request | its `headRefName` | none |
+   | A person's pull request whose `headRefName` is `gitBranchName` | `<gitBranchName>-takeover` | its URL |
+   | A person's pull request on another branch | `gitBranchName` | its URL |
+   | None | `gitBranchName` | none |
+
+   The worker continues an own pull request. With `takeover_pr`, it starts
+   from that pull request's head and opens its own pull request, and the
+   branch rule keeps it off the other person's branch. The worker also refuses
+   a branch on GitHub that the factory did not create, so a person's branch
+   reaches the factory only through a pull request on this table. Write
+   `takeover_pr: <url>` after the `branch:` line inside the fenced block
+   below.
 
    Never write a pull request URL in a card comment. Hermes treats a card
    whose comments name a pull request as already having one.
