@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -15,6 +16,9 @@ from tests.support import BOT_AUTHOR, BOT_LOGIN, SCRIPTS, GitFixture, git
 # A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
 ISSUE_ID = str(uuid.uuid4())
 SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}"))
+NEXT_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}:1"))
+THIRD_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}:2"))
+HOUR = 3600
 SYSTEM_PROMPT = (
     f"Publish commits only by running {(SCRIPTS / 'push-signed').resolve()} from the worktree, never `git push`. "
     "It creates commits that the GitHub App signs, which repositories requiring verified signatures need. "
@@ -132,12 +136,34 @@ class ClaudeSessionTest(GitFixture):
     def worktree_git_dir(self) -> Path:
         return Path(git(self.worktree, "rev-parse", "--absolute-git-dir"))
 
-    def write_transcript(self, worktree: Path | None = None) -> None:
+    def write_transcript(
+        self, worktree: Path | None = None, *, session_id: str = SESSION_ID, idle: float = 0,
+        context: tuple[int, int, int] | None = None, said: str | None = None, raw: str | None = None,
+    ) -> Path:
         project = self.claude_config / "projects" / f"project-{uuid.uuid4()}"
         project.mkdir(parents=True)
         cwd = str((worktree or self.worktree).resolve())
         lines = [{"type": "summary"}, {"type": "user", "cwd": cwd}, {"type": "assistant", "cwd": "/elsewhere"}]
-        (project / f"{SESSION_ID}.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+        if context:
+            fresh, read, created = context
+            lines.append({"type": "assistant", "message": {
+                "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": said or "done"}],
+                "usage": {"input_tokens": fresh, "cache_read_input_tokens": read, "cache_creation_input_tokens": created},
+            }})
+            lines.append({"type": "assistant", "isSidechain": True, "message": {
+                "model": "claude-sonnet-5-5", "content": [{"type": "text", "text": "subagent text"}],
+                "usage": {"input_tokens": 1, "cache_read_input_tokens": 1, "cache_creation_input_tokens": 1},
+            }})
+            lines.append({"type": "assistant", "message": {
+                "model": "<synthetic>", "content": [{"type": "text", "text": "No response requested."}],
+                "usage": {"input_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            }})
+        path = project / f"{session_id}.jsonl"
+        path.write_text(raw if raw is not None else "".join(json.dumps(line) + "\n" for line in lines))
+        then = time.time() - idle
+        os.utime(path, (then, then))
+        return path
 
     def test_first_run_starts_a_pinned_session_with_the_default_entry(self) -> None:
         status, report = self.run_session()
@@ -146,6 +172,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report, {
             "session_id": SESSION_ID,
             "resumed": False,
+            "reason": "new",
             "worktree": str(self.worktree),
             "branch": "abc-123-fix",
             "adopted": None,
@@ -175,6 +202,7 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(status, 0)
         self.assertTrue(report["resumed"])
+        self.assertEqual(report["reason"], "warm")
         self.assertEqual(self.claude_call()["argv"], [
             "-p", "Reviewer asked for a test.",
             "--output-format", "json",
@@ -201,6 +229,131 @@ class ClaudeSessionTest(GitFixture):
         self.run_session()
 
         self.assertEqual(self.claude_call()["argv"][:2], ["-p", "Continue."])
+
+    def test_idle_run_with_a_small_context_resumes(self) -> None:
+        self.write_transcript(idle=HOUR, context=(10, 60_000, 39_989))
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertEqual((report["session_id"], report["resumed"], report["reason"]), (SESSION_ID, True, "small"))
+        argv = self.claude_call()["argv"]
+        self.assertEqual(argv[:2], ["-p", "Continue."])
+        self.assertEqual(argv[argv.index("--resume") + 1], SESSION_ID)
+
+    def test_warm_run_resumes_whatever_the_context_size(self) -> None:
+        self.write_transcript(idle=299, context=(10, 900_000, 0))
+
+        _, report = self.run_session()
+
+        self.assertEqual((report["session_id"], report["resumed"], report["reason"]), (SESSION_ID, True, "warm"))
+
+    def test_idle_run_with_a_large_context_starts_a_fresh_session_with_a_handoff(self) -> None:
+        transcript = self.write_transcript(idle=HOUR, context=(10, 90_000, 10_000), said="Opened PR 7 and waited on review.")
+        message = self.tmp / "message.txt"
+        message.write_text("Reviewer asked for a test.")
+        head = git(self.worktree, "rev-parse", "HEAD")
+
+        status, report = self.run_session("--message-file", str(message))
+
+        self.assertEqual(status, 0)
+        self.assertEqual((report["session_id"], report["resumed"], report["reason"]), (NEXT_SESSION_ID, False, "fresh-large-idle"))
+        argv = self.claude_call()["argv"]
+        self.assertNotIn("--resume", argv)
+        self.assertEqual(argv[argv.index("--session-id") + 1], NEXT_SESSION_ID)
+        self.assertEqual(argv[1], (
+            f"{DEFAULT_ENTRY}\n\n"
+            "This card continues earlier work. Its previous Claude session sat idle past the prompt cache and had "
+            "grown large, so this session starts fresh. "
+            f"The branch is abc-123-fix, at commit {head}. Read the pull request's live state, review threads, "
+            "and checks on that branch with `gh pr view` and `gh pr checks` before you act. "
+            f"The previous session's transcript is {transcript}; read it only for a decision you cannot find on "
+            "GitHub or in the code. The previous session ended with this message:\n\n"
+            "Opened PR 7 and waited on review.\n\n"
+            "Reviewer asked for a test."
+        ))
+
+    def test_context_at_the_threshold_starts_fresh(self) -> None:
+        self.write_transcript(idle=HOUR, context=(0, 100_000, 0))
+
+        _, report = self.run_session()
+
+        self.assertEqual(report["reason"], "fresh-large-idle")
+
+    def test_the_threshold_comes_from_the_settings(self) -> None:
+        self.settings = self.write_settings([self.repository], {"fresh_after_tokens": 50_000})
+        self.write_transcript(idle=HOUR, context=(0, 60_000, 0))
+
+        _, report = self.run_session()
+
+        self.assertEqual((report["session_id"], report["reason"]), (NEXT_SESSION_ID, "fresh-large-idle"))
+
+    def test_an_idle_transcript_without_a_readable_context_starts_fresh(self) -> None:
+        cwd = json.dumps({"type": "user", "cwd": str(self.worktree.resolve())})
+        big = json.dumps({"type": "assistant", "message": {"usage": {
+            "input_tokens": 1, "cache_read_input_tokens": 1, "cache_creation_input_tokens": 1}}})
+        cut = json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 1}}})
+        cases = (
+            ("no assistant usage", None),
+            ("corrupt tail", f"{cwd}\nnot json\n{{broken"),
+            ("last usage incomplete", f"{cwd}\n{big}\n{cut}\n"),
+        )
+        for name, raw in cases:
+            with self.subTest(name):
+                shutil.rmtree(self.claude_config / "projects", ignore_errors=True)
+                self.write_transcript(idle=HOUR, raw=raw)
+
+                _, report = self.run_session()
+
+                self.assertEqual((report["session_id"], report["resumed"], report["reason"]), (NEXT_SESSION_ID, False, "fresh-unreadable"))
+                self.assertIn("The previous session left no final message.", self.claude_call()["argv"][1])
+
+    def test_a_fresh_start_never_reuses_a_session_id(self) -> None:
+        self.write_transcript(idle=3 * HOUR, context=(0, 200_000, 0))
+        self.write_transcript(session_id=NEXT_SESSION_ID, idle=2 * HOUR, context=(0, 200_000, 0))
+
+        _, report = self.run_session()
+
+        self.assertEqual((report["session_id"], report["reason"]), (THIRD_SESSION_ID, "fresh-large-idle"))
+
+    def test_the_latest_generation_decides_whether_to_resume(self) -> None:
+        self.write_transcript(idle=3 * HOUR, context=(0, 200_000, 0))
+        self.write_transcript(session_id=NEXT_SESSION_ID, idle=2 * HOUR, context=(0, 20_000, 0))
+
+        _, report = self.run_session()
+
+        self.assertEqual((report["session_id"], report["resumed"], report["reason"]), (NEXT_SESSION_ID, True, "small"))
+
+    def test_refuses_while_a_process_runs_the_session_that_a_fresh_start_replaces(self) -> None:
+        self.write_transcript(idle=HOUR, context=(0, 200_000, 0))
+        sleeper = subprocess.Popen(["python3", "-c", "import time; time.sleep(30)", "--resume", SESSION_ID])
+        self.addCleanup(sleeper.wait)
+        self.addCleanup(sleeper.kill)
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": f"a process for Claude session {SESSION_ID} is already running"})
+
+    def test_invalid_fresh_after_tokens_is_refused(self) -> None:
+        for value in (0, -1, "100000", True, 1.5):
+            with self.subTest(fresh_after_tokens=value):
+                self.settings = self.write_settings([self.repository], {"fresh_after_tokens": value})
+
+                status, report = self.run_session()
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": f"claude_session.fresh_after_tokens {value!r} must be a positive integer"})
+
+    def test_a_fresh_start_after_adoption_keeps_the_takeover_paragraph_before_the_handoff(self) -> None:
+        self.push_upstream_commit("pull", "refs/pull/7/head")
+        self.write_transcript(idle=HOUR, context=(0, 200_000, 0))
+
+        self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        prompt = self.claude_call()["argv"][1]
+        self.assertTrue(prompt.startswith(f"{DEFAULT_ENTRY}\n\n{TAKEOVER_INTRO}"))
+        self.assertLess(prompt.index(TAKEOVER_RULES), prompt.index("This card continues earlier work."))
 
     def test_worker_entry_prefixes_the_default_entry(self) -> None:
         self.repository["worker_entry"] = "/patina-mode"
@@ -349,6 +502,54 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
         self.assertNotIn("EXAMPLE_PROXY_TOKEN", call["env"])
         self.assertFalse(Path(settings_path).exists())
+
+    def model_env(self, claude_session: dict) -> dict:
+        self.settings = self.write_settings([self.repository], {"model": "transport-model", **claude_session})
+        self.run_session()
+        env = self.claude_call()["settings"]["content"]["env"]
+        self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", env)
+        return {name: value for name, value in env.items() if name.endswith("_MODEL")}
+
+    def test_tiers_without_models_stay_on_the_transport_model(self) -> None:
+        self.assertEqual(self.model_env({}), {
+            "ANTHROPIC_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "transport-model",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "transport-model",
+        })
+
+    def test_tier_models_route_subagents_off_the_transport_model(self) -> None:
+        tiers = {"sonnet": "sonnet-model", "haiku": "haiku-model", "fable": "fable-model"}
+        self.assertEqual(self.model_env({"tier_models": tiers}), {
+            "ANTHROPIC_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "sonnet-model",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "haiku-model",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "fable-model",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+        })
+
+    def test_a_tier_without_a_model_stays_on_the_transport_model(self) -> None:
+        env = self.model_env({"tier_models": {"haiku": "haiku-model"}})
+
+        self.assertEqual(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "haiku-model")
+        self.assertEqual(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "transport-model")
+        self.assertEqual(env["CLAUDE_CODE_SUBAGENT_MODEL"], "transport-model")
+
+    def test_invalid_tier_models_are_refused(self) -> None:
+        invalid = ({"opus": "x"}, {"sonnet": 5}, {"sonnet": ""}, ["sonnet"], "sonnet")
+        for model, value in [("transport-model", each) for each in invalid] + [("", {"opus": "x"})]:
+            with self.subTest(model=model, tier_models=value):
+                self.settings = self.write_settings([self.repository], {"model": model, "tier_models": value})
+
+                status, report = self.run_session()
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {
+                    "error": f"claude_session.tier_models {value!r} must map sonnet, haiku, fable to non-empty model ids",
+                })
 
     def test_claude_gets_only_the_allowlisted_environment(self) -> None:
         self.run_session(env={"LC_ALL": "C", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1", "SOME_API_KEY": "x"})

@@ -15,7 +15,8 @@ Configure the transport only through these settings in
 | Setting | Effect in the Claude Code process |
 | --- | --- |
 | `base_url` | Sets `ANTHROPIC_BASE_URL` |
-| `model` | Passes `--model` and sets `ANTHROPIC_MODEL`, every `ANTHROPIC_DEFAULT_*_MODEL` tier, and `CLAUDE_CODE_SUBAGENT_MODEL` to the same alias |
+| `model` | Passes `--model` and sets `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_OPUS_MODEL`. The main agent runs on it. Any tier without a `tier_models` entry, and the subagent default, also use it |
+| `tier_models` | Optional map from `sonnet`, `haiku`, and `fable` to model ids the endpoint serves. Each sets that `ANTHROPIC_DEFAULT_<TIER>_MODEL`. When `sonnet` is set, `CLAUDE_CODE_SUBAGENT_MODEL` is the alias `sonnet`, so a subagent that names no model runs on the Sonnet model and an explicit `opus` still runs on `model`. Any other key or a non-string value refuses the run |
 | `auth_token_env` | Names a variable in `<worker>/.env`. `claude-session` copies its value into `ANTHROPIC_AUTH_TOKEN` |
 
 `claude-session` writes these into a per-run `0600` file and passes it with
@@ -30,7 +31,9 @@ start when it finds one.
 `unknown provider for model ...` for any other model, and Claude Code retries
 until the run times out. Mapping every tier matters for the same reason:
 Claude Code sends background and subagent requests to its Haiku and subagent
-models.
+models. A tier with no `tier_models` entry falls back to `model`,
+which keeps a one-model proxy working but sends every subagent to the main
+agent's model. `check-install` reports a `model` with no `tier_models.sonnet`.
 
 ## Check
 
@@ -47,7 +50,8 @@ When the operator uses a proxy, all of these must hold:
 - It listens on `127.0.0.1` only:
   `lsof -nP -iTCP:<proxy port> -sTCP:LISTEN` shows `127.0.0.1:<proxy port>`.
 - `claude_session.base_url` is `http://127.0.0.1:<proxy port>` in both homes.
-- `claude_session.model` is listed by the proxy:
+- `claude_session.model` and each `claude_session.tier_models` value is listed
+  by the proxy:
   `curl -s http://127.0.0.1:<proxy port>/v1/models -H "x-api-key: <token or placeholder>"`.
 - The proxy listens only on `127.0.0.1`. If it has a management API, that API
   does not accept remote connections.
@@ -96,3 +100,12 @@ repeat with `base_url` set to `http://127.0.0.1:9`: the run must not succeed.
 If it does, something other than `--settings` is choosing the endpoint. The full
 `claude-session` path runs in the end-to-end checks of part 15, because it
 needs a Kanban worktree.
+
+When `tier_models` is set, also prove the routing. Write a settings file whose
+`env` holds `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_OPUS_MODEL` as `<model>`,
+`ANTHROPIC_DEFAULT_SONNET_MODEL` as `<sonnet id>`, and
+`CLAUDE_CODE_SUBAGENT_MODEL` as `sonnet`. Run `claude -p` with `--model <model>`
+and a prompt that spawns one `Agent` with `model: "sonnet"`, one with no
+`model`, and one with `model: "opus"`. In the session's
+`subagents/agent-*.jsonl`, `message.model` must be `<sonnet id>`,
+`<sonnet id>`, and `<model>`.
