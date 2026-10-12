@@ -10,6 +10,8 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 REPO = SCRIPTS.parents[2]
+BOT_LOGIN = "factory-app[bot]"
+BOT_AUTHOR = (BOT_LOGIN, f"123+{BOT_LOGIN}@users.noreply.github.com")
 
 FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys
@@ -68,18 +70,33 @@ class GitFixture(unittest.TestCase):
         git(self.main, "worktree", "add", "-q", "-b", branch, str(path))
         return path
 
-    def push_upstream_commit(self, name: str, ref: str = "refs/heads/main") -> str:
+    def push_upstream_commit(
+        self, name: str, ref: str = "refs/heads/main", author: tuple[str, str] | None = None, base: str | None = None
+    ) -> str:
+        """Push one commit to ref, on top of base when given, else on the default branch."""
         other = self.tmp / f"other-{name}"
         git(self.tmp, "clone", "-q", str(self.origin), str(other))
+        if base:
+            git(other, "fetch", "-q", "origin", base)
+            git(other, "reset", "-q", "--hard", "FETCH_HEAD")
         (other / f"{name}.txt").write_text(name)
         git(other, "add", f"{name}.txt")
-        git(other, "commit", "-q", "-m", name)
+        if author:
+            git(other, "-c", "user.name=GitHub", "-c", "user.email=noreply@github.com",
+                "commit", "-q", "-m", name, f"--author={author[0]} <{author[1]}>")
+        else:
+            git(other, "commit", "-q", "-m", name)
         git(other, "push", "-q", "origin", f"+HEAD:{ref}")
         return git(other, "rev-parse", "HEAD")
 
-    def write_settings(self, repositories: list, claude_session: dict | None = None) -> Path:
+    def write_settings(
+        self, repositories: list, claude_session: dict | None = None, login: str | None = BOT_LOGIN
+    ) -> Path:
         path = self.tmp / "settings.json"
-        path.write_text(json.dumps({"repositories": repositories, "claude_session": claude_session or {}}))
+        settings = {"repositories": repositories, "claude_session": claude_session or {}}
+        if login:
+            settings["github"] = {"login": login}
+        path.write_text(json.dumps(settings))
         return path
 
     def make_fake_claude(self, log: Path) -> Path:
@@ -94,12 +111,20 @@ class GitFixture(unittest.TestCase):
         self.fake_claude_options.update(options)
         (self.tmp / "fake-claude.json").write_text(json.dumps(self.fake_claude_options))
 
-    def install_linear_plugin(self, home: Path, cached_token: str | None = "cached-token") -> None:
-        """The real plugin client under a worker home, with a token in its cache so no request reaches Linear."""
+    def install_linear_plugin(
+        self, home: Path, cached_token: str | None = "cached-token", *, accepted: tuple = ("cached-token",)
+    ) -> None:
+        """The real plugin client under a worker home, against a fake Linear that accepts the accepted tokens."""
         plugin = home / "plugins" / "linear-agent-session"
         plugin.mkdir(parents=True)
-        (plugin / "linear.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "linear.py")
+        (plugin / "linear.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "tests" / "staged_linear.py")
+        (home / "linear-fake.json").write_text(json.dumps({"accepted": list(accepted)}))
         if cached_token:
             cache = home / "plugin-data" / "linear-agent-session" / "token.json"
             cache.parent.mkdir(parents=True)
             cache.write_text(json.dumps({"client_id": "id1", "access_token": cached_token, "expires_at": 4102444800}))
+
+    @staticmethod
+    def linear_requests(home: Path) -> list:
+        log = home / "linear-fake.log"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []

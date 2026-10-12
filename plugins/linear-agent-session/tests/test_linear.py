@@ -138,6 +138,35 @@ class TokenTest(unittest.TestCase):
         self.assertEqual(activity_id, "activity-7")
         self.assertEqual([r["authorization"] for r in fake.graphql_requests], ["Bearer token-1", "Bearer token-2"])
 
+    def test_access_token_replaces_a_revoked_cached_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "token.json")
+            with open(path, "w") as f:
+                json.dump({"client_id": "client-id", "access_token": "revoked", "expires_at": 1e12}, f)
+            viewer_ok = (200, {"data": {"viewer": {"id": "app-user"}}})
+            fake = FakeLinear([(401, {"errors": [{"message": "Authentication required"}]}), viewer_ok])
+            self.assertEqual(make_client(fake, token_cache_path=path).access_token(), "token-1")
+            self.assertEqual([r["authorization"] for r in fake.graphql_requests], ["Bearer revoked", "Bearer token-1"])
+            self.assertEqual([r["form"]["scope"] for r in fake.token_requests], ["read,write,app:assignable,app:mentionable"])
+            with open(path) as f:
+                self.assertEqual(json.load(f)["access_token"], "token-1")
+
+    def test_a_rejected_new_token_is_a_linear_error(self):
+        unauthorized = (401, {"errors": [{"message": "Authentication required"}]})
+        fake = FakeLinear([unauthorized, unauthorized])
+        with self.assertRaisesRegex(linear.LinearError, "Linear rejected a newly issued token"):
+            make_client(fake).access_token()
+        self.assertEqual(len(fake.token_requests), 2)
+
+    def test_an_unreachable_linear_is_a_linear_error(self):
+        import urllib.error
+
+        def offline(request, timeout=None):
+            raise urllib.error.URLError("nodename nor servname provided")
+
+        with self.assertRaisesRegex(linear.LinearError, "Linear is unreachable: nodename nor servname provided"):
+            make_client(offline).access_token()
+
     def test_persisted_token_is_private_and_shared_across_clients(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "state", "token.json")
@@ -198,6 +227,46 @@ class SessionCreateTest(unittest.TestCase):
         fake = FakeLinear([(200, {"data": {"agentSessionCreateOnIssue": {"success": False, "agentSession": None}}})])
         output = json.loads(tools.run_session_create(lambda: make_client(fake), {"issue": "ABC-123"}))
         self.assertEqual(output, {"error": "agentSessionCreateOnIssue reported success: false"})
+
+
+class IssueArgumentTest(unittest.TestCase):
+    """Hermes defers these tools, so models call them without the schema and guess the argument name."""
+
+    RUNNERS = {
+        "linear_issue": lambda fake, args: tools.run_issue(lambda: make_client(fake), args),
+        "linear_agent_session_create": lambda fake, args: tools.run_session_create(lambda: make_client(fake), args),
+        "linear_issue_undelegate": lambda fake, args: tools.run_undelegate(lambda: make_client(fake), args),
+    }
+
+    def test_issue_tools_take_the_names_models_guess(self):
+        for tool, run in self.RUNNERS.items():
+            for name in ("issue", "id", "issue_id"):
+                with self.subTest(tool=tool, name=name):
+                    fake = FakeLinear([(200, {"errors": [{"message": "stop after the request"}]})])
+                    run(fake, {name: "ABC-9"})
+                    self.assertIn("ABC-9", json.dumps(fake.graphql_requests[0]["variables"]))
+
+    def test_issue_tools_without_an_issue_name_the_argument(self):
+        for tool, run in self.RUNNERS.items():
+            with self.subTest(tool=tool):
+                fake = FakeLinear([])
+                output = json.loads(run(fake, {}))
+                self.assertEqual(output, {"error": "pass issue: the issue UUID or identifier such as ABC-123"})
+                self.assertEqual(fake.graphql_requests, [])
+
+    def test_hermes_lets_every_guessed_name_reach_the_handler(self):
+        # Hermes refuses a deferred tool_call that lacks a name in the schema's "required" list.
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA):
+            for name in ("issue", "id", "issue_id"):
+                with self.subTest(tool=schema["name"], name=name):
+                    missing = [r for r in schema["parameters"].get("required", []) if r not in {name: "ABC-9"}]
+                    self.assertEqual(missing, [])
+
+    def test_the_deferred_catalog_line_names_the_argument(self):
+        # Hermes lists a deferred tool by the first 60 characters of its description.
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA):
+            with self.subTest(tool=schema["name"]):
+                self.assertIn("`issue`", schema["description"][:60])
 
 
 class IssueTest(unittest.TestCase):

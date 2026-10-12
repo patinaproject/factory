@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Callable
 
-from .linear import ACTIVITY_TYPES, LinearClient, activity_content
+from .linear import ACTIVITY_TYPES, LinearClient, LinearError, activity_content
 
 ClientFactory = Callable[[], LinearClient]
 
@@ -40,33 +40,36 @@ ACTIVITY_SCHEMA = {
     },
 }
 
+# Hermes defers plugin tools and lists each one by the first 60 characters of its
+# description, so a model calls it without the schema. Each issue tool's description
+# opens with its argument, and the handlers also take the names models guess instead.
+# No "required" here: Hermes would refuse a guessed name before the handler runs.
+ISSUE_PARAMETERS = {
+    "type": "object",
+    "properties": {"issue": {"type": "string", "description": "Required. Issue UUID or identifier such as ABC-123."}},
+}
+ISSUE_ARGUMENT_NAMES = ("issue", "id", "issue_id")
+
 ISSUE_SCHEMA = {
     "name": "linear_issue",
     "description": (
-        "Read a Linear issue as the agent app: id, identifier, title, url, gitBranchName, priority, "
-        "priorityName, cardPriority (the Kanban card priority for this issue), "
+        "Read the Linear issue named by `issue` (UUID or ABC-123). Reads as the agent app and returns "
+        "id, identifier, title, url, gitBranchName, priority, priorityName, "
+        "cardPriority (the Kanban card priority for this issue), "
         "state, stateType, delegate (the delegate's user ID, or null), attachments, and agentSessions "
         "(id, status, createdAt, appUserId; newest first)."
     ),
-    "parameters": {
-        "type": "object",
-        "properties": {"issue": {"type": "string", "description": "Issue UUID or identifier such as ABC-123."}},
-        "required": ["issue"],
-    },
+    "parameters": ISSUE_PARAMETERS,
 }
 
 
 SESSION_CREATE_SCHEMA = {
     "name": "linear_agent_session_create",
     "description": (
-        "Open a new Linear agent session on an issue as the agent app, for a delegation that arrived "
-        "without one. Returns the agent_session_id."
+        "Open an agent session on `issue` (UUID or ABC-123). Acts as the agent app, for a delegation "
+        "that arrived without a session. Returns the agent_session_id."
     ),
-    "parameters": {
-        "type": "object",
-        "properties": {"issue": {"type": "string", "description": "Issue UUID or identifier such as ABC-123."}},
-        "required": ["issue"],
-    },
+    "parameters": ISSUE_PARAMETERS,
 }
 
 
@@ -88,14 +91,10 @@ DELEGATED_ISSUES_SCHEMA = {
 UNDELEGATE_SCHEMA = {
     "name": "linear_issue_undelegate",
     "description": (
-        "Remove the agent app as an issue's delegate. Refuses an issue delegated to a different agent. "
-        "Returns removed: false when the issue had no delegate."
+        "Undelegate the agent app from `issue` (UUID or ABC-123). Refuses an issue delegated to a "
+        "different agent. Returns removed: false when the issue had no delegate."
     ),
-    "parameters": {
-        "type": "object",
-        "properties": {"issue": {"type": "string", "description": "Issue UUID or identifier such as ABC-123."}},
-        "required": ["issue"],
-    },
+    "parameters": ISSUE_PARAMETERS,
 }
 
 
@@ -121,11 +120,13 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
 
 
 def run_session_create(client_factory: ClientFactory, args: dict) -> str:
-    return _tool_result_or_error(lambda: {"agent_session_id": client_factory().create_session_on_issue(args["issue"])})
+    return _tool_result_or_error(
+        lambda: {"agent_session_id": client_factory().create_session_on_issue(_issue_argument(args))}
+    )
 
 
 def run_issue(client_factory: ClientFactory, args: dict) -> str:
-    return _tool_result_or_error(lambda: client_factory().get_issue(args["issue"]))
+    return _tool_result_or_error(lambda: client_factory().get_issue(_issue_argument(args)))
 
 
 def run_delegated_issues(client_factory: ClientFactory, args: dict) -> str:
@@ -135,7 +136,14 @@ def run_delegated_issues(client_factory: ClientFactory, args: dict) -> str:
 
 
 def run_undelegate(client_factory: ClientFactory, args: dict) -> str:
-    return _tool_result_or_error(lambda: client_factory().undelegate_self(args["issue"]))
+    return _tool_result_or_error(lambda: client_factory().undelegate_self(_issue_argument(args)))
+
+
+def _issue_argument(args: dict) -> str:
+    for name in ISSUE_ARGUMENT_NAMES:
+        if args.get(name):
+            return args[name]
+    raise LinearError("pass issue: the issue UUID or identifier such as ABC-123")
 
 
 def _tool_result_or_error(run: Callable[[], dict]) -> str:
