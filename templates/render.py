@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 ROUTES_KEY = "platforms.webhook.extra.routes"
@@ -23,17 +23,8 @@ GITHUB_ROUTE = "github"
 ROUTINGS = ("default", "synced_github")
 TOOLSETS = ["terminal", "kanban", "linear_agent_session"]
 LINEAR_EVENTS = ["AgentSessionEvent", "Issue"]
-GITHUB_EVENTS = [
-    "issues",
-    "issue_comment",
-    "pull_request",
-    "pull_request_review",
-    "pull_request_review_comment",
-    "workflow_run",
-    "check_run",
-    "check_suite",
-]
-GITHUB_CHECK_EVENTS = ["check_run", "check_suite", "workflow_run"]
+# Relative to the gateway's Hermes home. The worker's refresh-owned-refs cron job writes it.
+OWNED_REFS_FILE = "owned-refs.json"
 FAILED_CONCLUSIONS = ["failure", "timed_out", "action_required", "startup_failure"]
 LINEAR_SECRET = "${LINEAR_WEBHOOK_SECRET}"
 GITHUB_SECRET = "${GITHUB_WEBHOOK_SECRET}"
@@ -42,6 +33,86 @@ FULL_NAME = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 ROUTE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 MARKER = re.compile(r"<<([a-z_]+)>>")
 REFERENCE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+
+class GithubEvent(NamedTuple):
+    """One event the `github` route delivers and triage acts on.
+
+    `actions` are the actions triage acts on. `owned_when` completes "only when ..."
+    in the triage prompt. `keep` maps the App login to the filter clauses that must
+    all hold for the route to keep the event.
+    """
+
+    name: str
+    actions: tuple
+    owned_when: str
+    keep: Callable[[str], list]
+
+
+def by_app(field: str) -> Callable[[str], list]:
+    return lambda login: [{"field": field, "equals": login}]
+
+
+def owned(field: str) -> dict:
+    return {"field": field, "in_file": OWNED_REFS_FILE}
+
+
+def failed(event: str) -> dict:
+    return {"field": f"{event}.conclusion", "in": FAILED_CONCLUSIONS}
+
+
+def keeps_issue_comment(login: str) -> list:
+    return [{"any": [{"field": "issue.user.login", "equals": login}, owned("issue.html_url")]}]
+
+
+def keeps_workflow_run(login: str) -> list:
+    return [{"field": "workflow_run.triggering_actor.login", "equals": login}, failed("workflow_run")]
+
+
+def keeps_check_run(login: str) -> list:
+    # GitHub Actions jobs arrive as workflow_run events, which name the actor who triggered them.
+    return [
+        owned("check_run.check_suite.head_branch"),
+        {"field": "check_run.app.slug", "not_equals": "github-actions"},
+        failed("check_run"),
+    ]
+
+
+GITHUB_EVENT_TABLE = (
+    GithubEvent(
+        "pull_request",
+        ("closed", "reopened", "converted_to_draft"),
+        "the App opened the pull request",
+        by_app("pull_request.user.login"),
+    ),
+    GithubEvent(
+        "pull_request_review", ("submitted",), "the App opened the pull request", by_app("pull_request.user.login")
+    ),
+    GithubEvent(
+        "pull_request_review_comment",
+        ("created",),
+        "the App opened the pull request",
+        by_app("pull_request.user.login"),
+    ),
+    GithubEvent(
+        "issue_comment",
+        ("created",),
+        "the App opened the pull request, or the issue is a card's GitHub issue",
+        keeps_issue_comment,
+    ),
+    GithubEvent("workflow_run", ("completed",), "the App triggered the run and it failed", keeps_workflow_run),
+    GithubEvent(
+        "check_run",
+        ("completed",),
+        "it failed on a card's branch and is not a GitHub Actions job",
+        keeps_check_run,
+    ),
+    GithubEvent(
+        "issues", ("closed", "reopened", "edited"), "the issue is a card's GitHub issue", lambda login: [owned("issue.html_url")]
+    ),
+)
+GITHUB_EVENTS = [event.name for event in GITHUB_EVENT_TABLE]
+GITHUB_CHECK_EVENTS = ["check_run", "workflow_run"]
 
 
 class SettingsError(Exception):
@@ -104,9 +175,12 @@ def validate(settings: Any) -> dict:
     github = settings.get("github") or {}
     if not isinstance(github, dict):
         raise SettingsError("github must be an object")
-    login = github.get("login", "")
-    if not isinstance(login, str):
-        raise SettingsError(f"github.login {login!r} must be a string")
+    login = github.get("login")
+    if not isinstance(login, str) or not login.strip():
+        raise SettingsError(
+            "github.login must be the App's login, such as my-app[bot]; "
+            "the github route keeps only the App's own events"
+        )
 
     kanban_url = settings.get("kanban_url", "")
     if not isinstance(kanban_url, str):
@@ -116,7 +190,7 @@ def validate(settings: Any) -> dict:
         "app_user_id": app_user_id,
         "webhook_route": route,
         "repositories": repositories,
-        "github_login": login or None,
+        "github_login": login.strip(),
         "kanban_url": kanban_url or None,
     }
 
@@ -132,13 +206,25 @@ def queued_link_sentence(kanban_url) -> str:
     return f"Set `external_urls` to one link labeled `Kanban card <task id>` whose URL is `{kanban_url}`."
 
 
-def own_pull_request_sentence(github_login) -> str:
-    if github_login is None:
-        return "No GitHub App login is configured, so every open pull request counts as someone else's."
+def own_pull_request_sentence(github_login: str) -> str:
     logins = [github_login]
     if github_login.endswith("[bot]"):
         logins.append(f"app/{github_login.removesuffix('[bot]')}")
     return f"A pull request is the factory's own when its `author.login` is {' or '.join(f'`{login}`' for login in logins)}."
+
+
+def _or_list(items: list) -> str:
+    if len(items) <= 2:
+        return " or ".join(items)
+    return f"{', '.join(items[:-1])}, or {items[-1]}"
+
+
+def events_that_matter(table) -> str:
+    return "\n".join(
+        f"- `{event.name}` with action {_or_list([f'`{action}`' for action in event.actions])}, "
+        f"only when {event.owned_when}."
+        for event in table
+    )
 
 
 def repository_lines(repositories: list) -> str:
@@ -181,22 +267,27 @@ def _exclude_events_sent_by(login: str) -> dict:
     }
 
 
+def event_filter(event: GithubEvent, login: str) -> dict:
+    return {
+        "all": [
+            {"field": "event", "equals": event.name},
+            {"field": "action", "in": list(event.actions)},
+            *event.keep(login),
+        ]
+    }
+
+
 def build_routes(settings: Any) -> dict:
     config = validate(settings)
     repos = repository_lines(config["repositories"])
     full_names = [repo["full_name"] for repo in config["repositories"]]
+    login = config["github_login"]
 
-    github_filters: list = [
+    github_filters = [
         {"field": "repository.full_name", "in": full_names},
-        {
-            "any": [
-                {"not": {"field": "event", "in": GITHUB_CHECK_EVENTS}},
-                *({"field": f"{event}.conclusion", "in": FAILED_CONCLUSIONS} for event in GITHUB_CHECK_EVENTS),
-            ]
-        },
+        {"any": [event_filter(event, login) for event in GITHUB_EVENT_TABLE]},
+        _exclude_events_sent_by(login),
     ]
-    if config["github_login"] is not None:
-        github_filters.append(_exclude_events_sent_by(config["github_login"]))
 
     return {
         config["webhook_route"]: {
@@ -232,7 +323,10 @@ def build_routes(settings: Any) -> dict:
             "secret": GITHUB_SECRET,
             "filters": github_filters,
             "toolsets": TOOLSETS,
-            "prompt": render_prompt(_read_template("triage-github.md"), {"repositories": repos}),
+            "prompt": render_prompt(
+                _read_template("triage-github.md"),
+                {"repositories": repos, "events_that_matter": events_that_matter(GITHUB_EVENT_TABLE)},
+            ),
         },
     }
 

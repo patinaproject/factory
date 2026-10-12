@@ -34,28 +34,77 @@ SETTINGS = {
 }
 
 GITHUB_EVENTS = [
-    "issues",
-    "issue_comment",
     "pull_request",
     "pull_request_review",
     "pull_request_review_comment",
+    "issue_comment",
     "workflow_run",
     "check_run",
-    "check_suite",
+    "issues",
 ]
 FAILED = ["failure", "timed_out", "action_required", "startup_failure"]
+APP_PR = {"field": "pull_request.user.login", "equals": "example-app[bot]"}
+OWNED_ISSUE = {"field": "issue.html_url", "in_file": "owned-refs.json"}
 REPO_FILTER = {"field": "repository.full_name", "in": ["example-org/app", "example-org/site"]}
-CHECK_FILTER = {
+EVENT_FILTER = {
     "any": [
-        {"not": {"field": "event", "in": ["check_run", "check_suite", "workflow_run"]}},
-        {"field": "check_run.conclusion", "in": FAILED},
-        {"field": "check_suite.conclusion", "in": FAILED},
-        {"field": "workflow_run.conclusion", "in": FAILED},
+        {
+            "all": [
+                {"field": "event", "equals": "pull_request"},
+                {"field": "action", "in": ["closed", "reopened", "converted_to_draft"]},
+                APP_PR,
+            ]
+        },
+        {
+            "all": [
+                {"field": "event", "equals": "pull_request_review"},
+                {"field": "action", "in": ["submitted"]},
+                APP_PR,
+            ]
+        },
+        {
+            "all": [
+                {"field": "event", "equals": "pull_request_review_comment"},
+                {"field": "action", "in": ["created"]},
+                APP_PR,
+            ]
+        },
+        {
+            "all": [
+                {"field": "event", "equals": "issue_comment"},
+                {"field": "action", "in": ["created"]},
+                {"any": [{"field": "issue.user.login", "equals": "example-app[bot]"}, OWNED_ISSUE]},
+            ]
+        },
+        {
+            "all": [
+                {"field": "event", "equals": "workflow_run"},
+                {"field": "action", "in": ["completed"]},
+                {"field": "workflow_run.triggering_actor.login", "equals": "example-app[bot]"},
+                {"field": "workflow_run.conclusion", "in": FAILED},
+            ]
+        },
+        {
+            "all": [
+                {"field": "event", "equals": "check_run"},
+                {"field": "action", "in": ["completed"]},
+                {"field": "check_run.check_suite.head_branch", "in_file": "owned-refs.json"},
+                {"field": "check_run.app.slug", "not_equals": "github-actions"},
+                {"field": "check_run.conclusion", "in": FAILED},
+            ]
+        },
+        {
+            "all": [
+                {"field": "event", "equals": "issues"},
+                {"field": "action", "in": ["closed", "reopened", "edited"]},
+                OWNED_ISSUE,
+            ]
+        },
     ]
 }
 SELF_FILTER = {
     "any": [
-        {"field": "event", "in": ["check_run", "check_suite", "workflow_run"]},
+        {"field": "event", "in": ["check_run", "workflow_run"]},
         {
             "all": [
                 {"field": "event", "equals": "pull_request"},
@@ -122,16 +171,28 @@ class RouteStructureTest(unittest.TestCase):
             {
                 "events": GITHUB_EVENTS,
                 "secret": "${GITHUB_WEBHOOK_SECRET}",
-                "filters": [REPO_FILTER, CHECK_FILTER, SELF_FILTER],
+                "filters": [REPO_FILTER, EVENT_FILTER, SELF_FILTER],
                 "toolsets": TOOLSETS,
             },
         )
 
-    def test_github_route_without_login_has_no_self_filter(self):
-        routes = render.build_routes(
-            settings(github={"login": "", "app_id": "", "installation_id": "", "private_key_path": ""})
-        )
-        self.assertEqual(routes["github"]["filters"], [REPO_FILTER, CHECK_FILTER])
+    def test_route_events_list_matches_the_table(self):
+        self.assertEqual(self.routes["github"]["events"], [row.name for row in render.GITHUB_EVENT_TABLE])
+
+    def test_prompt_list_and_filter_cover_the_same_event_actions(self):
+        prompt = self.routes["github"]["prompt"]
+        listed = set()
+        for match in re.finditer(r"^- `([a-z_]+)` with action ((?:`[a-z_]+`(?:, |, or | or )?)+), only when ", prompt, re.M):
+            listed.update((match.group(1), action) for action in re.findall(r"`([a-z_]+)`", match.group(2)))
+        filtered = set()
+        for clause in self.routes["github"]["filters"][1]["any"]:
+            event, actions = clause["all"][0], clause["all"][1]
+            self.assertEqual((event["field"], actions["field"]), ("event", "action"))
+            filtered.update((event["equals"], action) for action in actions["in"])
+
+        self.assertTrue(listed)
+        self.assertEqual(listed, filtered)
+        self.assertEqual({event for event, _ in listed}, {row.name for row in render.GITHUB_EVENT_TABLE})
 
     def test_linear_route_name_follows_settings(self):
         routes = render.build_routes(settings(webhook_route="linear-agent"))
@@ -204,14 +265,6 @@ class PromptSubstitutionTest(unittest.TestCase):
             self.prompts["linear"],
         )
 
-    def test_without_an_app_login_no_pull_request_is_the_factorys_own(self):
-        routes = render.build_routes(settings(github={"login": ""}))
-        self.assertIn(
-            "No GitHub App login is configured, so every open pull request counts as someone else's.",
-            routes["linear"]["prompt"],
-        )
-        self.assertNotIn("`author.login` is", routes["linear"]["prompt"])
-
     def test_linear_prompt_names_the_app_user(self):
         self.assertIn("00000000-0000-4000-8000-000000000001", self.prompts["linear"])
 
@@ -245,8 +298,19 @@ class ValidationTest(unittest.TestCase):
         "exactly one repository must have routing 'default', found 0": with_repo(0, routing="synced_github"),
         "github must be an object": settings(github="example-factory-bot"),
         "kanban_url 7 must be a string": settings(kanban_url=7),
-        "github.login 7 must be a string": settings(github={"login": 7}),
     }
+    NO_LOGIN = "github.login must be the App's login, such as my-app[bot]; the github route keeps only the App's own events"
+
+    def test_a_missing_app_login_is_rejected(self):
+        for name, value in {
+            "missing github": settings(github=None),
+            "missing login": settings(github={"app_id": "12345"}),
+            "empty login": settings(github={"login": " "}),
+            "non-string login": settings(github={"login": 7}),
+        }.items():
+            with self.subTest(name), self.assertRaises(render.SettingsError) as raised:
+                render.build_routes(value)
+            self.assertEqual(str(raised.exception), self.NO_LOGIN)
 
     def test_each_invalid_setting_is_rejected(self):
         for message, value in self.CASES.items():
@@ -410,6 +474,130 @@ class RouteCheckTest(unittest.TestCase):
             "route github: not installed",
             "rate_limit: matches 600",
         ]))
+
+
+HERMES_AGENT_DIR = Path(os.environ.get("HERMES_AGENT_DIR") or Path.home() / ".hermes" / "hermes-agent")
+WEBHOOK_FILTERS = HERMES_AGENT_DIR / "gateway" / "platforms" / "webhook_filters.py"
+
+APP = "example-app[bot]"
+HUMAN = "octocat"
+OWNED_BRANCH = "goodyear/pat-1-fix"
+OWNED_ISSUE_URL = "https://github.com/example-org/site/issues/7"
+OWNED_REFS = [OWNED_BRANCH, OWNED_ISSUE_URL]
+
+
+def payload(action: str, sender: str = HUMAN, repo: str = "example-org/app", **fields) -> dict:
+    return {"action": action, "repository": {"full_name": repo}, "sender": {"login": sender}, **fields}
+
+
+def pull_request(author: str, merged: bool = False) -> dict:
+    return {
+        "number": 12,
+        "user": {"login": author},
+        "merged": merged,
+        "html_url": "https://github.com/example-org/app/pull/12",
+        "head": {"ref": "goodyear/pat-1-fix"},
+    }
+
+
+def issue(author: str, html_url: str = "https://github.com/example-org/app/pull/12", is_pull: bool = True) -> dict:
+    fields = {"number": 12, "user": {"login": author}, "html_url": html_url}
+    if is_pull:
+        fields["pull_request"] = {"html_url": html_url}
+    return fields
+
+
+def workflow_run(actor: str, conclusion: str) -> dict:
+    return {
+        "name": "CI",
+        "conclusion": conclusion,
+        "head_branch": OWNED_BRANCH,
+        "triggering_actor": {"login": actor},
+        "html_url": "https://github.com/example-org/app/actions/runs/1",
+    }
+
+
+def check_run(branch: str, conclusion: str, app_slug: str = "vercel") -> dict:
+    return {
+        "name": "Vercel",
+        "conclusion": conclusion,
+        "app": {"slug": app_slug},
+        "check_suite": {"head_branch": branch},
+        "html_url": "https://github.com/example-org/app/runs/1",
+    }
+
+
+FILTER_CASES = [
+    ("review submitted on an App PR", "pull_request_review", payload("submitted", pull_request=pull_request(APP)), True),
+    ("review submitted on a human PR", "pull_request_review", payload("submitted", pull_request=pull_request(HUMAN)), False),
+    ("review edited on an App PR", "pull_request_review", payload("edited", pull_request=pull_request(APP)), False),
+    ("review comment on an App PR", "pull_request_review_comment", payload("created", pull_request=pull_request(APP)), True),
+    ("review comment on a human PR", "pull_request_review_comment", payload("created", pull_request=pull_request(HUMAN)), False),
+    ("issue comment on an App PR", "issue_comment", payload("created", issue=issue(APP)), True),
+    ("issue comment on a human PR", "issue_comment", payload("created", issue=issue(HUMAN)), False),
+    (
+        "issue comment on a card's GitHub issue",
+        "issue_comment",
+        payload("created", repo="example-org/site", issue=issue(HUMAN, OWNED_ISSUE_URL, is_pull=False)),
+        True,
+    ),
+    ("issue comment edited on an App PR", "issue_comment", payload("edited", issue=issue(APP)), False),
+    ("the App's own comment on its PR", "issue_comment", payload("created", sender=APP, issue=issue(APP)), False),
+    ("failed workflow run triggered by the App", "workflow_run", payload("completed", sender=APP, workflow_run=workflow_run(APP, "failure")), True),
+    ("failed workflow run triggered by a human", "workflow_run", payload("completed", workflow_run=workflow_run(HUMAN, "failure")), False),
+    ("successful workflow run triggered by the App", "workflow_run", payload("completed", sender=APP, workflow_run=workflow_run(APP, "success")), False),
+    ("failed check run on an owned branch", "check_run", payload("completed", sender=APP, check_run=check_run(OWNED_BRANCH, "failure")), True),
+    ("failed check run on another branch", "check_run", payload("completed", sender=APP, check_run=check_run("main", "failure")), False),
+    ("failed Actions check run on an owned branch", "check_run", payload("completed", sender=APP, check_run=check_run(OWNED_BRANCH, "failure", "github-actions")), False),
+    ("successful check run on an owned branch", "check_run", payload("completed", sender=APP, check_run=check_run(OWNED_BRANCH, "success")), False),
+    ("the App merges its own PR", "pull_request", payload("closed", sender=APP, pull_request=pull_request(APP, merged=True)), True),
+    ("push to an App PR", "pull_request", payload("synchronize", sender=APP, pull_request=pull_request(APP)), False),
+    ("human PR closed", "pull_request", payload("closed", pull_request=pull_request(HUMAN)), False),
+    ("card's GitHub issue closed", "issues", payload("closed", repo="example-org/site", issue=issue(HUMAN, OWNED_ISSUE_URL, is_pull=False)), True),
+    ("another issue closed", "issues", payload("closed", issue=issue(HUMAN, "https://github.com/example-org/app/issues/8", is_pull=False)), False),
+    ("card's GitHub issue labeled", "issues", payload("labeled", repo="example-org/site", issue=issue(HUMAN, OWNED_ISSUE_URL, is_pull=False)), False),
+    ("failed check suite", "check_suite", payload("completed", sender=APP, check_suite={"conclusion": "failure", "head_branch": OWNED_BRANCH}), False),
+    ("review on an App PR in an unconfigured repository", "pull_request_review", payload("submitted", repo="other-org/app", pull_request=pull_request(APP)), False),
+]
+
+
+@unittest.skipUnless(WEBHOOK_FILTERS.is_file(), f"needs the Hermes checkout at {HERMES_AGENT_DIR}; CI skips this class")
+class HermesFilterTest(unittest.TestCase):
+    """Run the rendered github route through Hermes' own filter evaluator."""
+
+    @classmethod
+    def setUpClass(cls):
+        # webhook_filters imports hermes_constants lazily from the checkout root.
+        if str(HERMES_AGENT_DIR) not in sys.path:
+            sys.path.insert(0, str(HERMES_AGENT_DIR))
+        spec = importlib.util.spec_from_file_location("webhook_filters", WEBHOOK_FILTERS)
+        cls.filters = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.filters)
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.home)
+        env = mock.patch.dict(os.environ, {"HERMES_HOME": str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.route = render.build_routes(SETTINGS)["github"]
+        self.processor = self.filters.WebhookRouteProcessor()
+
+    def matches(self, event_type: str, body: dict) -> bool:
+        return self.processor.route_filters_match(self.route, body, event_type, {})
+
+    def test_each_event_is_kept_or_dropped(self):
+        (self.home / "owned-refs.json").write_text(json.dumps(OWNED_REFS))
+        self.assertNotIn("check_suite", self.route["events"])
+        for name, event_type, body, expected in FILTER_CASES:
+            with self.subTest(name):
+                self.assertIs(self.matches(event_type, body), expected)
+
+    def test_a_missing_owned_refs_file_drops_only_ref_keyed_events(self):
+        with self.assertLogs(self.filters.logger, "WARNING"):
+            dropped = self.matches("check_run", payload("completed", sender=APP, check_run=check_run(OWNED_BRANCH, "failure")))
+        self.assertIs(dropped, False)
+        self.assertIs(self.matches("pull_request_review", payload("submitted", pull_request=pull_request(APP))), True)
 
 
 if __name__ == "__main__":
