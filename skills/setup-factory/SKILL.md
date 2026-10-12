@@ -708,7 +708,7 @@ Hermes moves a card that blocks twice for the same reason to its `triage`
 column, and by default its decomposer then splits the card into child cards.
 A factory card is one Linear issue, and its children would lack the key block
 the worker needs, so turn the decomposer off. A looping card then waits in
-`triage` for a person.
+`triage` for a person, and a reply on its Linear issue resumes it.
 
 **Check.** `hermes config get kanban.review_dispatch` and
 `hermes config get kanban.auto_decompose` each print `false`.
@@ -1019,14 +1019,21 @@ each check. Report each result.
     `review_reopened`. The next dispatcher tick starts a worker, no
     `respawn_guarded` event with reason `active_pr` follows, and the card
     completes without operator action.
+19. Move a card whose pull request is open to `triage`, for example by letting
+    it block twice for the same reason, then reply in its Linear agent session.
+    In `hermes kanban show <task id> --json`, the events after the reply are
+    `specified`, `edited`, `review_requested`, and `review_reopened`. The card's
+    title and body are unchanged, the next dispatcher tick starts a worker, and
+    no `respawn_guarded` event with reason `active_pr` follows.
 
-**Known limitation.** Only the Kanban dashboard reopens a `done` or `triage`
-card. The operator drags the card to Ready, which Hermes documents as a
-deliberate re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a
-GitHub event arrives for a done card, triage comments on the card and asks the
-operator to reopen the card from the Kanban dashboard. A card reaches `done`
-only when its pull request merges, so this applies to follow-up work after the
-merge.
+**Known limitation.** Only the Kanban dashboard reopens a `done` card. The
+operator drags the card to Ready, which Hermes documents as a deliberate
+re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a GitHub event
+arrives for a done card, triage comments on the card and asks the operator to
+reopen the card from the Kanban dashboard. A card reaches `done` only when its
+pull request merges, so this applies to follow-up work after the merge. A
+`triage` card needs no dashboard: its Linear reply runs `specify`, restores the
+title and body, and hands the card back through `reopen-review`.
 
 ## 16. Host exposure
 
