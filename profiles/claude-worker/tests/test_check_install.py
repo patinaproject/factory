@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -79,6 +80,7 @@ def cron_job(name: str, minutes: int, deliver: str = "local", **fields) -> dict:
 WORKER_JOBS = [
     cron_job("refresh-gh-app-login", 30),
     cron_job("refresh-checkouts", 60),
+    cron_job("refresh-owned-refs", 1),
     cron_job("check-install", 60, "slack"),
 ]
 
@@ -125,6 +127,8 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps({**ROUTE, "secret": "abc...1234"}))
         self.install(self.root, f"installed-config/{RATE_LIMIT_KEY}.json", "600")
         self.install(self.root, "logs/agent.log", "")
+        self.owned_refs = self.root / "owned-refs.json"
+        self.install(self.root, "owned-refs.json", '["goodyear/abc-1-fix"]\n')
 
         self.issuer = self.tmp / "issuer"
         self.discovery(["authorization_code_with_pkce", "refresh_tokens"])
@@ -369,7 +373,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_missing_and_duplicated_cron_jobs(self) -> None:
-        self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2], WORKER_JOBS[2]])
+        self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2], WORKER_JOBS[3], WORKER_JOBS[3]])
 
         self.assertEqual(
             self.check(),
@@ -381,6 +385,7 @@ class CheckInstallTest(unittest.TestCase):
         self.cron(self.worker, [
             cron_job("refresh-gh-app-login", 30, enabled=False),
             cron_job("refresh-checkouts", 15, no_agent=False),
+            cron_job("refresh-owned-refs", 1),
             cron_job("check-install", 60, "local"),
         ])
 
@@ -402,6 +407,23 @@ class CheckInstallTest(unittest.TestCase):
             self.check(),
             (1, f"cron job refresh-checkouts in {self.root}: belongs to the worker profile (part 12)\n"
                 f"cron job nightly-cleanup in {self.worker}: is not a job the setup runbook creates\n"),
+        )
+
+    def test_missing_owned_refs_file(self) -> None:
+        self.owned_refs.unlink()
+
+        self.assertEqual(
+            self.check(),
+            (1, f"owned refs {self.owned_refs}: is missing; create or run the refresh-owned-refs cron job (part 12)\n"),
+        )
+
+    def test_stale_owned_refs_file(self) -> None:
+        stale = time.time() - 600
+        os.utime(self.owned_refs, (stale, stale))
+
+        self.assertEqual(
+            self.check(),
+            (1, f"owned refs {self.owned_refs}: is 10 minutes old; the refresh-owned-refs cron job is not running (part 12)\n"),
         )
 
     def test_a_merge_after_the_last_fetch_is_seen(self) -> None:
