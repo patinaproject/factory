@@ -7,3 +7,6 @@ node_modules/
 # creating these, but ignore them defensively so they are never staged.
 .skills-install.lock
 .skills-install.lock.*.tmp
+
+# Python bytecode caches from running the tests.
+__pycache__/
