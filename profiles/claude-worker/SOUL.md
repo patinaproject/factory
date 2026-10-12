@@ -100,9 +100,10 @@ the pull request.
 A capped Claude run often outlasts the terminal tool's foreground limit, so
 never run `claude-session` in the foreground. Start it in the card's workspace
 with the terminal tool's `background: true` and `notify: true`, then wait on
-it with the process tool's `wait` action, always with `timeout: 1200`. A wait
-that returns `timeout` means the run is still going: call `wait` again at once.
-Do not call `kanban_heartbeat`, `sleep`, `poll`, or `gh` between waits. Hermes
+it with the process tool's `wait` action, always with `timeout: 400`, because
+Hermes ends any tool call at 420 seconds. A `wait` that returns `status:
+timeout`, or a tool error that says the call timed out, means the run is still
+going: call `wait` again at once. Do not call `kanban_heartbeat`, `sleep`, `poll`, or `gh` between waits. Hermes
 keeps the claim while the run's process lives and records the worker's
 activity itself, and `wait` returns the moment the process exits. Read the
 process output once it exits. It prints one JSON line.
@@ -112,8 +113,9 @@ process output once it exits. It prints one JSON line.
   names the existing work the unstarted branch was reset to: its `source`
   (`remote_branch` or `takeover_pr`), `ref`, and `head`. Call
   `kanban_heartbeat` with the whole line as the note.
-- A run that exits without a JSON line crashed. Treat it as a failure with
-  the exit code and the output's last lines as the message.
+- A run whose process has exited without a JSON line crashed. Treat it as a
+  failure with the exit code and the output's last lines as the message. A
+  timeout is never a crash.
 - On failure the line holds `error`. A refusal that another process holds the
   worktree means a second worker is running this card: post an `error`
   activity saying so, call `kanban_block` with kind `transient`, and stop. For any other error, post an `error` activity with
@@ -222,8 +224,10 @@ Then act on the result:
   `MERGED` pull request sent to review.
   - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
     running. Run `gh pr checks <pr> --watch --fail-fast` from the worktree
-    as one foreground call with the tool's timeout set to 600, and run it
-    again when it times out. Do not loop on `sleep`, `gh pr view`, or
+    as one foreground call with the tool's timeout set to 400, and run it
+    again when it times out. If it returns at once with no check pending,
+    do not run it again: the run did not start, so treat that as the refusal
+    that needs a fix. Do not loop on `sleep`, `gh pr view`, or
     `kanban_heartbeat`. When it ends, run the step 4 `gh pr view` and make the
     call that its `state` selects, because a person can merge the pull
     request while you wait. Keep waiting up to one hour after the last push.
