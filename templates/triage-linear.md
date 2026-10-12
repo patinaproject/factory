@@ -189,7 +189,7 @@ Type `Issue`. The issue is the data change issue.
 1. Read the issue with `linear_issue`.
 2. Find the issue's card.
 3. If the issue's `stateType` is `completed` and the card is not `done`, read
-   the pull request for the card's `branch:` line with
+   the pull request for the card's `branch:` and `repo:` lines with
    `gh pr view '<branch>' -R '<repo>' --json state,url`. If it is open or
    merged, comment on the card that the Linear issue is done, and stop. Do not
    archive it. Merging the pull request usually marks the issue done, and
