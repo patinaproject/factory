@@ -279,13 +279,17 @@ Record these values for the `github` object in part 10:
 | `installation_id` | The installation ID |
 | `private_key_path` | The absolute path of the private key |
 
-The `github` route keeps an event only when it belongs to the App's own work.
-A `pull_request`, `pull_request_review`, `pull_request_review_comment`, or
-`issue_comment` event passes when the App, as `github.login`, opened the pull
-request. A `workflow_run` event passes when the App triggered it and it
-failed. A `check_run` event passes when it failed on a branch listed in
-`<home>/owned-refs.json` and is not a GitHub Actions job, and an `issues` or
-`issue_comment` event passes when its issue URL is listed there. The route
+The `github` route keeps an event only when it belongs to a card. A
+`pull_request`, `pull_request_review`, or `pull_request_review_comment` event
+passes when the App, as `github.login`, opened the pull request from a branch
+listed in `<home>/owned-refs.json`. A `workflow_run` event passes when the App
+triggered it on a listed branch and it failed. A `check_run` event passes when
+it failed on a listed branch and is not a GitHub Actions job. An `issues`
+event passes when its issue URL is listed. An `issue_comment` event passes
+when the App opened the pull request, or when the issue URL is listed. Its
+payload has no branch, so a comment on any App pull request passes. Linear's
+linkback comment and Cloudflare's deploy notice never pass: the linkback asks
+for nothing, and a failed Cloudflare build already arrives as a `check_run`. The route
 also drops events the App itself sends, so the factory does not triage its
 own pushes and comments. Failed checks and the App's own merges are the
 exceptions, because the worker needs the failure and the card has to

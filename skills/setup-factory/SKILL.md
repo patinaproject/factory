@@ -778,14 +778,15 @@ Hermes runs a script-only cron job's script with Python, whatever its
 shebang says, so every script a `--no-agent` job runs must be Python. A shell
 script fails on every tick with a `SyntaxError`.
 
-**Owned refs job.** The `github` route keeps a `check_run` event only when
-its branch, and an `issues` or `issue_comment` event only when its issue URL,
-is listed in `<home>/owned-refs.json`, which the route reads on every delivery
-through Hermes' `in_file` operator. `refresh-owned-refs` rewrites that file
+**Owned refs job.** The `github` route keeps a pull request, review,
+`workflow_run`, or `check_run` event only when its branch, and an `issues`
+event or an `issue_comment` on an issue only when its issue URL, is listed in
+`<home>/owned-refs.json`, which the route reads on every delivery through
+Hermes' `in_file` operator. `refresh-owned-refs` rewrites that file
 every minute from `hermes kanban list --json` with the `branch_name` and
 `github_issue_url` of every card not archived, in one atomic step. Without the
-file the route drops every `check_run` and `issues` event, and every
-`issue_comment` on a card's GitHub issue. `check-install` reports the file when it
+file the route drops every GitHub event except an `issue_comment` on the
+App's pull request. `check-install` reports the file when it
 is missing or older than 5 minutes. Create the job when `cron list` has no
 `refresh-owned-refs` job:
 
