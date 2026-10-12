@@ -51,6 +51,13 @@ TAKEOVER_RULES = (
     "Co-authored-by trailer on the commits you publish."
 )
 RESUME_PROMPT = "Continue."
+HANDOFF = (
+    "This card continues earlier work. Its previous Claude session sat idle past the prompt cache and had "
+    "grown large, so this session starts fresh. The branch is {branch}, at commit {head}. Read the pull "
+    "request's live state, review threads, and checks on that branch with `gh pr view` and `gh pr checks` "
+    "before you act. The previous session's transcript is {transcript}; read it only for a decision you "
+    "cannot find on GitHub or in the code. {result}"
+)
 PUBLISH_RULE = (
     "Publish commits only by running {push_signed} from the worktree, never `git push`. It creates "
     "commits that the GitHub App signs, which repositories requiring verified signatures need. To bring "
@@ -82,6 +89,9 @@ LINEAR_MCP_CONFIG = json.dumps({"mcpServers": {"linear": {
     "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
 }}})
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
+CACHE_TTL_SECONDS = 300
+DEFAULT_FRESH_AFTER_TOKENS = 100_000
+HANDOFF_RESULT_CHARS = 2000
 QUIET_SECONDS = 1.0
 GRACE_SECONDS = 10.0
 TOOLCHAIN_CHECK_SECONDS = 120
@@ -117,6 +127,15 @@ class Adoption(NamedTuple):
     source: str
     ref: str
     head: str
+
+
+class SessionPlan(NamedTuple):
+    session_id: str
+    resumed: bool
+    reason: str
+    previous_id: str | None
+    previous: Path | None
+    last_result: str | None
 
 
 class Stopped(BaseException):
@@ -253,11 +272,67 @@ def transcript_cwd(transcript: Path) -> str | None:
     return None
 
 
-def transcript_exists(session_id: str, worktree: Path) -> bool:
+def find_transcript(session_id: str, worktree: Path) -> Path | None:
     # Claude Code resumes only a session started in the same working directory, so a new card's
     # worktree starts a fresh session even though the issue's session ID is the same.
     transcripts = (claude_config_dir() / "projects").glob(f"*/{session_id}.jsonl")
-    return any(transcript_cwd(transcript) == str(worktree) for transcript in transcripts)
+    return next((t for t in transcripts if transcript_cwd(t) == str(worktree)), None)
+
+
+def session_id_for(issue_id: str, generation: int) -> str:
+    # Generation 0 keeps the ID every earlier run used. A fresh start takes the next generation,
+    # because `--session-id` refuses an ID whose transcript exists.
+    key = f"linear-issue:{issue_id}" if generation == 0 else f"linear-issue:{issue_id}:{generation}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+
+def last_assistant(transcript: Path) -> tuple[int | None, str | None]:
+    """Context size of the last assistant turn that reported usage, and the last assistant text."""
+    tokens = text = None
+    with open(transcript, encoding="utf-8") as lines:
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            message = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
+            if not isinstance(message, dict) or entry.get("isSidechain") or message.get("model") == "<synthetic>":
+                continue
+            usage = message.get("usage")
+            if isinstance(usage, dict):
+                parts = [usage.get(key) for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
+                if all(isinstance(part, int) and not isinstance(part, bool) for part in parts):
+                    tokens = sum(parts)
+            content = message.get("content")
+            blocks = content if isinstance(content, list) else []
+            said = "\n".join(b["text"] for b in blocks if isinstance(b, dict) and isinstance(b.get("text"), str)).strip()
+            if said:
+                text = said
+    return tokens, text
+
+
+def fresh_after_tokens(transport: dict) -> int:
+    value = transport.get("fresh_after_tokens", DEFAULT_FRESH_AFTER_TOKENS)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise Refusal(f"claude_session.fresh_after_tokens {value!r} must be a positive integer")
+    return value
+
+
+def plan_session(issue_id: str, worktree: Path, threshold: int, now: float) -> SessionPlan:
+    """Resume while the prompt cache is warm or the context is small; otherwise start a new session."""
+    generation, latest = 0, None
+    while found := find_transcript(session_id_for(issue_id, generation), worktree):
+        latest, generation = found, generation + 1
+    if latest is None:
+        return SessionPlan(session_id_for(issue_id, 0), False, "new", None, None, None)
+    previous_id = session_id_for(issue_id, generation - 1)
+    if now - latest.stat().st_mtime <= CACHE_TTL_SECONDS:
+        return SessionPlan(previous_id, True, "warm", previous_id, latest, None)
+    tokens, text = last_assistant(latest)
+    if tokens is not None and tokens < threshold:
+        return SessionPlan(previous_id, True, "small", previous_id, latest, None)
+    reason = "fresh-unreadable" if tokens is None else "fresh-large-idle"
+    return SessionPlan(session_id_for(issue_id, generation), False, reason, previous_id, latest, text)
 
 
 def session_process_running(session_id: str) -> bool:
@@ -436,7 +511,20 @@ def worker_entry_prefix(repo: dict) -> str:
     return prefix
 
 
-def build_prompt(args: argparse.Namespace, prefix: str, branch: str, resumed: bool, adopted: Adoption | None) -> str:
+def handoff_text(plan: SessionPlan, branch: str, head: str) -> str | None:
+    if plan.previous is None or plan.resumed:
+        return None
+    last = plan.last_result
+    result = (
+        f"The previous session ended with this message:\n\n{last[-HANDOFF_RESULT_CHARS:]}"
+        if last else "The previous session left no final message."
+    )
+    return HANDOFF.format(branch=branch, head=head, transcript=plan.previous, result=result)
+
+
+def build_prompt(
+    args: argparse.Namespace, prefix: str, branch: str, resumed: bool, adopted: Adoption | None, handoff: str | None
+) -> str:
     message = Path(args.message_file).read_text() if args.message_file else ""
     if resumed:
         return message or RESUME_PROMPT
@@ -453,7 +541,7 @@ def build_prompt(args: argparse.Namespace, prefix: str, branch: str, resumed: bo
         start = TAKEOVER_START.get(adopted.source) if adopted else None
         takeover = " ".join(filter(None, [TAKEOVER_INTRO, start, TAKEOVER_RULES]))
         entry = f"{entry}\n\n{takeover.format(url=args.takeover_pr)}"
-    return f"{entry}\n\n{message}" if message else entry
+    return "\n\n".join(filter(None, [entry, handoff, message]))
 
 
 def run_claude(command: list[str], worktree: Path) -> tuple[dict | None, int, str]:
@@ -562,10 +650,12 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     repo = find_repository(settings, args.repo)
     transport = settings.get("claude_session") or {}
     turn_limit = max_turns_args(transport)
+    threshold = fresh_after_tokens(transport)
     prefix = worker_entry_prefix(repo)
     worktree = resolve_worktree(workspace, repo["path"])
     check_toolchain(repo, worktree)
-    session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{args.issue_id}"))
+    plan = plan_session(args.issue_id, worktree, threshold, time.time())
+    session_id = plan.session_id
 
     lock_path = Path(git(worktree, "rev-parse", "--absolute-git-dir")) / LOCK_NAME
     with open(lock_path, "w") as lock:
@@ -577,20 +667,21 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         # A killed run leaves its file behind; os.open would also keep that file's mode.
         settings_path.unlink(missing_ok=True)
         remove_on_stop(settings_path)
-        if session_process_running(session_id):
-            raise Refusal(f"a process for Claude session {session_id} is already running")
+        for running_id in filter(None, [plan.previous_id, session_id]):
+            if session_process_running(running_id):
+                raise Refusal(f"a process for Claude session {running_id} is already running")
 
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         login = (settings.get("github") or {}).get("login")
         adopted = adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
-        resumed = transcript_exists(session_id, worktree)
+        handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"))
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),
-            "-p", build_prompt(args, prefix, branch, resumed, adopted),
+            "-p", build_prompt(args, prefix, branch, plan.resumed, adopted, handoff),
             "--output-format", "json",
             *turn_limit,
             "--permission-mode", "bypassPermissions",
-            "--resume" if resumed else "--session-id", session_id,
+            "--resume" if plan.resumed else "--session-id", session_id,
             "--append-system-prompt", SYSTEM_PROMPT.format(push_signed=Path(__file__).resolve().with_name("push-signed")),
             "--mcp-config", LINEAR_MCP_CONFIG,
         ]
@@ -603,7 +694,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         finally:
             settings_path.unlink(missing_ok=True)
 
-    report = {"session_id": session_id, "resumed": resumed, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None}
+    report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None}
     if output is None:
         return 1, {"error": f"claude exited {exit_code} without JSON output: {detail}", **report}
     report.update(subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"))
