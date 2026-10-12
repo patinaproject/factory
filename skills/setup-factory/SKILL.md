@@ -534,17 +534,31 @@ command, and confirm the path.
 in part 10. [`templates/README.md`](../../templates/README.md) describes the
 output.
 
-**Check.** Render the routes, then compare each with the installed one:
+**Check.** Compare each rendered route with the installed one:
+
+```sh
+python3 <repo>/templates/render.py --check
+```
+
+It prints one line per route, such as
+`route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference`, and
+exits `0` only when every route matches and every secret is its reference. A
+`differs in <keys>` line names the keys that differ. A secret line other than
+`is the ... reference` means the route holds a literal secret, or Hermes has no
+value for the reference.
+
+Never compare or print an installed route with
+`hermes config get ... --raw`. That command expands each `${...}` reference,
+so its output holds the live signing secret. `--check` reads it inside the
+process and prints only route names, key names, and the reference names.
+
+Render the routes for the install step:
 
 ```sh
 python3 <repo>/templates/render.py > <scratch>/routes.json
-for name in $(python3 -c 'import json, sys; print(*json.load(sys.stdin))' < <scratch>/routes.json); do
-  diff <(hermes config get "platforms.webhook.extra.routes.$name" --json --raw | python3 -m json.tool --sort-keys) \
-       <(python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)[sys.argv[1]], sort_keys=True, indent=4))' "$name" < <scratch>/routes.json)
-done
 ```
 
-**Install** each route whose diff is not empty:
+**Install** each route that `--check` reports as not installed, as differing, or with the wrong secret:
 
 ```sh
 hermes config set "platforms.webhook.extra.routes.$name" \
