@@ -180,7 +180,12 @@ def main() -> int:
         "--principals-file", default=f"/etc/ssh/authorized_principals/{getpass.getuser()}",
         help="sshd AuthorizedPrincipalsFile for the account people SSH into",
     )
-    results = evaluate(gather(parser.parse_args()))
+    try:
+        facts = gather(parser.parse_args())
+    except ValueError as error:
+        print(f"FAIL {error}")
+        return 1
+    results = evaluate(facts)
     for ok, message in results:
         print(f"{'PASS' if ok else 'FAIL'} {message}")
     return 0 if all(ok for ok, _ in results) else 1
