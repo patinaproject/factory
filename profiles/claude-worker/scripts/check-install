@@ -163,8 +163,11 @@ def check_dashboard(root: Path, hermes: str) -> list:
         env={**os.environ, "HERMES_HOME": str(root)}, capture_output=True, text=True,
     )
     if proc.returncode != 0:
-        return [Drift("dashboard sign-in", where, "dashboard is not configured")]
-    dashboard = json.loads(proc.stdout)
+        return [Drift("dashboard sign-in", where, f"hermes config get dashboard failed: {proc.stderr.strip()}")]
+    try:
+        dashboard = json.loads(proc.stdout)
+    except ValueError:
+        return [Drift("dashboard sign-in", where, "hermes config get dashboard did not return JSON")]
     self_hosted = (dashboard.get("oauth") or {}).get("self_hosted") or {}
     issuer = (self_hosted.get("issuer") or "").rstrip("/")
     drifts = []
@@ -172,6 +175,8 @@ def check_dashboard(root: Path, hermes: str) -> list:
         drifts.append(Drift("dashboard sign-in", where, "dashboard.public_url is not set"))
     if not issuer:
         return [*drifts, Drift("dashboard sign-in", where, "dashboard.oauth.self_hosted.issuer is not set")]
+    if not self_hosted.get("client_id"):
+        drifts.append(Drift("dashboard sign-in", where, "dashboard.oauth.self_hosted.client_id is not set"))
     if "offline_access" not in (self_hosted.get("scopes") or DEFAULT_OIDC_SCOPES).split():
         drifts.append(Drift(
             "dashboard sign-in", where,

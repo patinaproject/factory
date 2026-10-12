@@ -174,6 +174,23 @@ class CheckInstallTest(unittest.TestCase):
             self.check(), (1, f"dashboard sign-in {self.root}: dashboard.oauth.self_hosted.issuer is not set\n")
         )
 
+    def test_dashboard_without_client_id(self) -> None:
+        self.dashboard(client_id="", scopes="openid profile email offline_access")
+
+        self.assertEqual(
+            self.check(), (1, f"dashboard sign-in {self.root}: dashboard.oauth.self_hosted.client_id is not set\n")
+        )
+
+    def test_dashboard_config_that_is_not_json_does_not_hide_other_drift(self) -> None:
+        self.install(self.root, "installed-dashboard.json", "not json")
+        self.install(self.worker, "SOUL.md", "old soul\n")
+
+        self.assertEqual(
+            self.check(),
+            (1, f"profile claude-worker: SOUL.md differs from main at {self.sha}\n"
+                f"dashboard sign-in {self.root}: hermes config get dashboard did not return JSON\n"),
+        )
+
     def test_unreadable_issuer_discovery(self) -> None:
         (self.issuer / ".well-known" / "openid-configuration").unlink()
 
