@@ -64,6 +64,10 @@ configuration, and update it in the same change.
   Never use `git push`.
 - `Resource not accessible by integration` means the App lacks a
   permission. Report it to the operator. Do not switch identities.
+- The App cannot create linked branches, so `gh issue develop` fails with a
+  `createLinkedBranch` permission error. Derive the branch name with the
+  repository's issue-tracker rule instead, and create the branch from the
+  fetched default branch.
 
 ### Tools
 
@@ -109,6 +113,10 @@ configuration, and update it in the same change.
   <worker checkout paths>. Change them only through a Kanban card.
 - The gateway runs as a service. Restart it only when the operator asks,
   from a shell outside Hermes.
+- A merged factory change is not live until it is deployed. Follow the
+  setup-factory runbook's "Deploy a merged factory change" section.
+  `HERMES_HOME=<worker> python3 <worker>/scripts/check-install` lists what is out of
+  date.
 <!-- factory:end -->
 ```
 

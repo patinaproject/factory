@@ -27,8 +27,11 @@ TAKEOVER_ENTRY = (
     f"The issue already has an open pull request, {TAKEOVER_PR}, opened by someone else. This branch starts "
     f"from its head. Open your own ready pull request, and in its body credit the original author and link "
     f"{TAKEOVER_PR}. Do not close {TAKEOVER_PR}. The worker closes it after a human approves. If push-signed "
-    "refuses one of its commits, such as a merge commit, rebase them onto the default branch before you publish. "
-    "Credit the original author with a Co-authored-by trailer on the commits you publish."
+    "refuses one of its commits, such as a merge commit, squash the pull request onto the default branch before "
+    "you publish: check out the default branch under this branch's name, run `git merge --squash` with the pull "
+    "request's head (fetch it again with `git fetch origin refs/pull/<number>/head` and use FETCH_HEAD), resolve "
+    "conflicts once, and commit. Credit the original author with a Co-authored-by trailer "
+    "on the commits you publish."
 )
 
 
