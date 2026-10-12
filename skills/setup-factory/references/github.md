@@ -317,7 +317,7 @@ The App can do what its repository permissions allow:
 | Permission | Access | Examples |
 | --- | --- | --- |
 | Contents | Read and write | Fetch, create branches, publish commits with `push-signed` |
-| Pull requests | Read and write | Open, edit, label, and comment on pull requests |
+| Pull requests | Read and write | Open, edit, label, and comment on pull requests, and resolve review threads |
 | Issues | Read and write | Open, edit, label, and comment on issues |
 | Checks, Actions | Read-only | Read check runs and workflow logs |
 | Metadata | Read-only | Read repository names, settings, and collaborators |

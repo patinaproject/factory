@@ -76,7 +76,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `CLOUDFLARE_API_TOKEN` | The SST app's own secret storage or environment |
 | `plugins.entries.linear-agent-session.settings` | `config.yaml` of both homes, same JSON |
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
-| `kanban.max_in_progress`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
+| `kanban.max_in_progress`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
 | The `default` board's `default_workdir` | Kanban board metadata, not `config.yaml` |
 
@@ -473,8 +473,18 @@ They need the settings and the clones from this part.
 
 ```sh
 hermes config set kanban.max_in_progress <n>
+hermes config set kanban.review_dispatch false
 hermes kanban boards set-default-workdir default <path of the default repository>
 ```
+
+A worker hands a card with a merge-ready pull request to the `review` lane.
+With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,
+so the card waits there for a person. GitHub triage moves it to `done` when the
+pull request merges, and back to the worker when a review requests changes.
+Cards in `review` run no worker, so they do not count against
+`kanban.max_in_progress`.
+
+**Check.** `hermes config get kanban.review_dispatch` prints `false`.
 
 `default_workdir` is board metadata, so `hermes config get` does not show it.
 Read the board metadata with `hermes kanban boards --help` to find the listing
@@ -614,32 +624,38 @@ each check. Report each result.
 3. The worker moves the issue to In Progress through the repository's own
    issue-start workflow. Hermes makes no status change.
 4. While the pull request is a draft, has a pending or failing non-required
-   check, has a conflict, or is `BLOCKED` or `BEHIND`, `kanban_complete` is
-   refused. `hermes kanban complete` from the worker's shell is also refused.
-5. A `CLEAN`, non-draft pull request completes the card. The final `response`
+   check, has a conflict, or is `BLOCKED` or `BEHIND`, `kanban_request_review`
+   and `kanban_complete` are refused. `hermes kanban complete` from the
+   worker's shell is also refused.
+5. A `CLEAN`, non-draft pull request moves the card to `review`, not `done`.
+   An `action` activity with the pull request link appears in the same Linear
+   session, and no reviewer worker starts for the card.
+6. A "changes requested" review on GitHub returns the card to `ready`. A worker
+   run starts, and the card returns to `review` after the fix.
+7. Merging the pull request moves the card to `done`. The final `response`
    with the pull request link appears in the same Linear session.
-6. A reply in Linear during a run is picked up when the run ends, and the next
+8. A reply in Linear during a run is picked up when the run ends, and the next
    run resumes the same Claude session ID.
-7. A Linear `stop` stops the worker and blocks the card.
-8. Un-delegating stops the worker and blocks the card with reason
-   `undelegated`. Delegating again unblocks the same card, which resumes the
-   same branch, worktree, and session.
-9. A mention without delegation gets an answer and creates no card.
-10. No more than `kanban.max_in_progress` workers run at once, and no `claude`
+9. A Linear `stop` stops the worker and blocks the card.
+10. Un-delegating stops the worker and blocks the card with reason
+    `undelegated`. Delegating again unblocks the same card, which resumes the
+    same branch, worktree, and session.
+11. A mention without delegation gets an answer and creates no card.
+12. No more than `kanban.max_in_progress` workers run at once, and no `claude`
     process runs outside a Kanban worker.
-11. `git -C <install> status --porcelain` still prints nothing, and `HEAD` is
+13. `git -C <install> status --porcelain` still prints nothing, and `HEAD` is
     still the pinned tag.
-12. `git -C <repo> status --porcelain` prints nothing. This repository holds no
+14. `git -C <repo> status --porcelain` prints nothing. This repository holds no
     factory value.
-13. Push an issue's `gitBranchName` to GitHub with one commit, without a local
+15. Push an issue's `gitBranchName` to GitHub with one commit, without a local
     copy in the checkout, then delegate the issue. The first `claude-session`
     line reports `adopted` with `source` `remote_branch`, the branch starts at
     that commit, and the first `push-signed` publishes.
-14. Open a pull request as the GitHub App on a branch other than the issue's
+16. Open a pull request as the GitHub App on a branch other than the issue's
     `gitBranchName`, link it to the issue, and delegate the issue. The card's
     branch is that pull request's head branch, and no second pull request
     opens.
-15. Open a pull request as a person, link it to the issue, and delegate the
+17. Open a pull request as a person, link it to the issue, and delegate the
     issue. The card body carries `takeover_pr`, the worker starts from that
     pull request's head, and its own pull request links the original. Before
     it completes, the worker asks in Linear whether to close the original and
@@ -648,10 +664,11 @@ each check. Report each result.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` or `triage`
 card. The operator drags the card to Ready, which Hermes documents as a
-deliberate re-queue. Hermes v0.21.5 has no CLI command or tool for it. When a
+deliberate re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a
 GitHub event arrives for a done card, triage comments on the card and asks the
-operator to reopen the card from the Kanban dashboard. A failed check after
-completion therefore waits for the operator before the worker resumes.
+operator to reopen the card from the Kanban dashboard. A card reaches `done`
+only when its pull request merges, so this applies to follow-up work after the
+merge.
 
 ## 16. Agent instructions
 

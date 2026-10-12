@@ -158,9 +158,17 @@ def _read_template(name: str) -> str:
 
 def _exclude_events_sent_by(login: str) -> dict:
     # A check failure on the App's own push names the App as sender, and the worker still needs it.
+    # A merge the App performs, such as auto-merge, names the App too, and its card still has to complete.
     return {
         "any": [
             {"field": "event", "in": GITHUB_CHECK_EVENTS},
+            {
+                "all": [
+                    {"field": "event", "equals": "pull_request"},
+                    {"field": "action", "equals": "closed"},
+                    {"field": "pull_request.merged", "equals": True},
+                ]
+            },
             {"not": {"field": "sender.login", "equals": login}},
         ]
     }

@@ -20,8 +20,10 @@ version, session ID, and worktree lock.
   moves the issue to In Progress through the target repository's own
   issue-start workflow.
 - Never create, move, or remove worktrees. Hermes Kanban owns them.
-- Only `kanban_complete` marks the card done. The `pr-ready-gate` hook decides
-  whether it is accepted. Do not try to work around a refusal.
+- Hand a merge-ready card to a person with `kanban_request_review`. Call
+  `kanban_complete` only when the pull request is already merged. The
+  `pr-ready-gate` hook decides whether either call is accepted. Do not try to
+  work around a refusal.
 
 ## 1. Read the card
 
@@ -118,10 +120,39 @@ for example `mktemp`, and resume:
 
 Run it in the background and wait on it exactly as in step 3.
 
+When the comments include a GitHub review that requested changes, the
+repository may require every review thread to be resolved before the pull
+request can merge. After the resumed run pushes its fix, resolve each thread
+that the fix addressed. `gh` acts as the factory's GitHub App, whose Pull
+requests read and write permission covers this. List the open threads:
+
+```sh
+gh api graphql -F owner=<owner> -F repo=<name> -F number=<pull request number> -f query='
+  query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 100) {
+          nodes { id isResolved path comments(first: 1) { nodes { body } } }
+        }
+      }
+    }
+  }'
+```
+
+Resolve each addressed thread by its `id`:
+
+```sh
+gh api graphql -F id=<thread id> -f query='
+  mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }'
+```
+
+Leave a thread open when the fix did not address it, and say why in a
+comment on the card.
+
 Without new comments, check the pull request from the worktree:
 
 ```sh
-gh pr view --json url,isDraft,mergeStateStatus,headRefOid
+gh pr view --json url,state,isDraft,mergeStateStatus,headRefOid
 ```
 
 - No pull request yet, or the last run ended with `subtype: error_max_turns`:
@@ -130,7 +161,7 @@ gh pr view --json url,isDraft,mergeStateStatus,headRefOid
 
 Heartbeat after every run as in step 3.
 
-## 5. Try to complete
+## 5. Hand off for review
 
 When the card has `takeover_pr`, settle it first. Run
 `gh pr view <takeover_pr> --json state`. If it is `OPEN`, look in the card
@@ -143,21 +174,42 @@ comments for a human reply about closing it.
   `gh pr close <takeover_pr> --comment "Superseded by <published_pr>."`.
 - The human declines: leave it open.
 
-Then call `kanban_complete` with a one-sentence `summary` and `metadata` holding
-`session_id`, `worktree`, `branch`, and `published_pr` (the pull request URL).
-Both `pr-ready-gate` and the card's `completion_contract` read
-`published_pr`.
+The handoff payload is the same for every call in this step:
 
-- **Accepted.** Post a `response` activity that summarizes the change, with
-  `external_urls` set to `[{"label": "Pull request", "url": <published_pr>}]`. You
-  are done.
+- `summary`: one sentence.
+- `metadata`: `session_id`, `worktree`, `branch`, and `published_pr`, the pull
+  request URL. `pr-ready-gate` and the card's `completion_contract` read
+  `published_pr`.
+- The Linear activity's `external_urls`:
+  `[{"label": "Pull request", "url": <published_pr>}]`.
+
+Read the pull request's `state` from the step 4 `gh pr view` output, then make
+one call with the handoff payload:
+
+- `OPEN`: call `kanban_request_review`. The card waits in `review` until a
+  person merges the pull request or requests changes on GitHub. GitHub triage
+  then completes the card or hands it back to you.
+- `MERGED`: call `kanban_complete`.
+
+Then act on the result:
+
+- **Review accepted.** Post an `action` activity with `action`
+  `Ready for review`, `parameter` set to `published_pr`, and the handoff
+  `external_urls`. Do not post a `response`, because it ends the Linear
+  session before the pull request merges. You are done.
+- **Completion accepted.** Post a `response` activity that summarizes the
+  change, with the handoff `external_urls`. You are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, a state other
-  than `CLEAN`, or a head commit that is not the worktree's `HEAD`.
+  than `CLEAN`, a head commit that is not the worktree's `HEAD`, or a
+  `MERGED` pull request sent to review.
   - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
     running. Run `gh pr checks <pr>` from the worktree. While any check is
-    pending, wait five minutes with a foreground `sleep 300`, call
-    `kanban_heartbeat`, and call `kanban_complete` again. Keep waiting up to
-    one hour after the last push.
+    pending, wait five minutes with a foreground `sleep 300` and call
+    `kanban_heartbeat`. Then run the step 4 `gh pr view` again and make the
+    call that its `state` selects, because a person can merge the pull
+    request while you wait. Keep waiting up to one hour after the last push.
+  - `BLOCKED` with every check passed can mean unresolved review threads.
+    Resolve the threads the fix addressed as in step 4.
   - Otherwise, or when the wait runs out, write the refusal text to a message
     file and resume Claude with it, then return to step 4.
   - Do not block the card for a state Claude can still change. Each block
