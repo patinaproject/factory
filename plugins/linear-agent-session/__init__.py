@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Optional
+import re
+from typing import Any, Callable, Mapping, Optional
 
 from . import linear, tools
 
@@ -12,9 +13,20 @@ TOOLSET = "linear_agent_session"
 ACK_BODY = "Received. Triaging now."
 # Linear marks a session unresponsive after 10 s without an activity; leave room for token minting.
 ACK_TIMEOUT_SECONDS = 5.0
+# Hermes leaves a secret like this verbatim when its variable is unset, and anyone can sign with that text.
+UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 
 def register(ctx: Any) -> None:
+    from hermes_cli.config import load_config_readonly
+
+    for route, variable in unresolved_routes(load_config_readonly()).items():
+        logger.error(
+            "linear-agent-session: route %s secret is the unresolved reference ${%s}; its deliveries will be dropped",
+            route,
+            variable,
+        )
+
     client: Optional[linear.LinearClient] = None
 
     def get_client() -> linear.LinearClient:
@@ -60,16 +72,47 @@ def register(ctx: Any) -> None:
     )
     ctx.register_hook(
         "pre_gateway_dispatch",
-        make_dispatch_hook(get_client, lambda: ctx.get_config("webhook_route", default="linear")),
+        make_dispatch_hook(
+            get_client, lambda: ctx.get_config("webhook_route", default="linear"), load_config_readonly
+        ),
     )
 
 
+def unresolved_routes(config: Mapping[str, Any]) -> dict[str, str]:
+    extra = ((config.get("platforms") or {}).get("webhook") or {}).get("extra") or {}
+    global_secret = extra.get("secret", "")
+    unresolved = {}
+    for name, route in (extra.get("routes") or {}).items():
+        secret = route.get("secret", global_secret)
+        match = UNRESOLVED_REFERENCE.match(secret) if isinstance(secret, str) else None
+        if match:
+            unresolved[name] = match.group(1)
+    return unresolved
+
+
 def make_dispatch_hook(
-    get_client: Callable[[], linear.LinearClient], webhook_route: Callable[[], str]
+    get_client: Callable[[], linear.LinearClient],
+    webhook_route: Callable[[], str],
+    load_config: Callable[[], Mapping[str, Any]],
 ) -> Callable[..., Any]:
-    async def acknowledge_agent_session_best_effort(event: Any, **_: Any) -> None:
+    async def guard_then_acknowledge(event: Any, **_: Any) -> Optional[dict[str, str]]:
+        route = _delivery_route(event)
+        if route is None:
+            return None
+        variable = unresolved_routes(load_config()).get(route)
+        if variable is not None:
+            logger.error(
+                "linear-agent-session: dropped a delivery on route %s: secret is the unresolved reference ${%s}",
+                route,
+                variable,
+            )
+            return {"action": "skip", "reason": f"route {route} secret is the unresolved reference ${{{variable}}}"}
+        await acknowledge_best_effort(event, route)
+        return None
+
+    async def acknowledge_best_effort(event: Any, route: str) -> None:
         try:
-            session_id = _ack_session_id(event, webhook_route())
+            session_id = _ack_session_id(event, route, webhook_route())
             if session_id is None:
                 return None
             loop = asyncio.get_running_loop()
@@ -84,13 +127,19 @@ def make_dispatch_hook(
             )
         except Exception:
             logger.exception("linear-agent-session: agent session acknowledgement failed")
+
+    return guard_then_acknowledge
+
+
+def _delivery_route(event: Any) -> Optional[str]:
+    source = event.source
+    if source.platform.value != "webhook" or not source.user_id.startswith("webhook:"):
         return None
+    return source.user_id.removeprefix("webhook:")
 
-    return acknowledge_agent_session_best_effort
 
-
-def _ack_session_id(event: Any, webhook_route: str) -> Optional[str]:
-    if event.source.platform.value != "webhook" or event.source.user_id != f"webhook:{webhook_route}":
+def _ack_session_id(event: Any, route: str, webhook_route: str) -> Optional[str]:
+    if route != webhook_route:
         return None
     payload = event.raw_message
     if not isinstance(payload, dict) or payload.get("type") != "AgentSessionEvent":

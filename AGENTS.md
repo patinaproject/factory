@@ -95,7 +95,7 @@ rule that only docs enforce is a candidate for a script, check, or test.
 | Hermes' own agent knows that credentials live in the gateway and how to check GitHub, Linear, and Slack | `templates/memory.py --check` in setup part 17 |
 | A factory's dashboard is reachable through its public hostname and keeps a signed-in user signed in past the first access token | `check_dashboard` in `profiles/claude-worker/scripts/check-install`: `dashboard.public_url` set, scopes include `offline_access`, and the issuer offers `refresh_tokens` |
 | A worker completes a card only when its pull request is ready to merge | `plugins/pr-ready-gate` |
-| A webhook delivery never starts an agent run while its route's secret is an unresolved `${NAME}` reference | `plugins/webhook-secret-guard`, whose tests cover a resolved and an unresolved secret; `render.py --check` and the part 15 forged-signature lines report the state |
+| A webhook delivery never starts an agent run while its route's secret is an unresolved `${NAME}` reference | The `pre_gateway_dispatch` hook in `plugins/linear-agent-session`, whose tests cover a resolved and an unresolved secret; `render.py --check` and the part 15 forged-signature lines report the state |
 | A takeover never publishes to another person's branch | The `-takeover` branch rule in `templates/triage-linear.md`; adoption tests in `profiles/claude-worker/tests/test_claude_session.py` |
 | When `gh issue develop` fails with `createLinkedBranch`, derive the branch name from the adapter's rule | Docs only: `docs/agents/issue-tracker.md` and the machine-wide block |
 | A repository with the Engineering plugin has Bun for its issue-handoff gate | Setup part 10 check |

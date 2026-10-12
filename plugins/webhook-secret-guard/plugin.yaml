@@ -1,6 +1,0 @@
-manifest_version: 2
-name: webhook-secret-guard
-version: "0.1.0"
-description: "Drops a webhook delivery before any agent run when its route's secret is still an unresolved ${NAME} reference, because anyone can sign a delivery with that public text."
-provides_hooks:
-  - pre_gateway_dispatch

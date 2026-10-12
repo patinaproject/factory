@@ -331,8 +331,8 @@ restart, not only during setup. If either prints anything but `401`, follow
 the HUMAN CHECKPOINT in part 15 to stop the gateway, run the helper by hand as
 shown above, and fix it before the operator starts the gateway again.
 
-The `webhook-secret-guard` plugin drops a delivery on a route whose secret is
-still a `${...}` reference before any agent run, and logs the route and the
+The `linear-agent-session` plugin drops a delivery on any route whose secret
+is still a `${...}` reference before any agent run, and logs the route and the
 variable name. It does not fix the secret source, so the forged-signature
 check and the restart still apply.
 
