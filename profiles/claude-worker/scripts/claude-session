@@ -74,6 +74,13 @@ FINISH_RULE = (
     "timeout set, and run it again when it times out."
 )
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{FINISH_RULE}"
+# Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
+# expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
+LINEAR_MCP_CONFIG = json.dumps({"mcpServers": {"linear": {
+    "type": "http",
+    "url": "https://mcp.linear.app/mcp",
+    "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
+}}})
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 QUIET_SECONDS = 1.0
 GRACE_SECONDS = 10.0
@@ -539,6 +546,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             "--permission-mode", "bypassPermissions",
             "--resume" if resumed else "--session-id", session_id,
             "--append-system-prompt", SYSTEM_PROMPT.format(push_signed=Path(__file__).resolve().with_name("push-signed")),
+            "--mcp-config", LINEAR_MCP_CONFIG,
         ]
         if transport.get("model"):
             command += ["--model", transport["model"]]
