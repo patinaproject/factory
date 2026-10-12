@@ -63,7 +63,7 @@ def headers(home: Path) -> dict:
     sys.path.insert(0, str(plugin))
     import linear
 
-    return {"Authorization": f"Bearer {linear.client_from_env(environment(home))._access_token()}"}
+    return {"Authorization": f"Bearer {linear.client_from_env(environment(home)).access_token()}"}
 
 
 def main() -> int:

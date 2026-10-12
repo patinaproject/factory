@@ -24,6 +24,8 @@ ACTIVITY_MUTATION = """mutation AgentActivityCreate($input: AgentActivityCreateI
   agentActivityCreate(input: $input) { success agentActivity { id } }
 }"""
 
+VIEWER_QUERY = "query { viewer { id } }"
+
 SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: AgentSessionUpdateInput!) {
   agentSessionUpdate(id: $id, input: $input) { success }
 }"""
@@ -188,6 +190,15 @@ class LinearClient:
         if not payload["success"]:
             raise LinearError("issueUpdate reported success: false")
         return {"identifier": issue["identifier"], "removed": True}
+
+    def access_token(self) -> str:
+        """A token Linear accepts now, for a process that calls Linear without this client.
+
+        A cached token can be revoked before it expires, so a cheap query proves it first.
+        A rejected token is replaced the same way any other call replaces it.
+        """
+        self._graphql(VIEWER_QUERY, {})
+        return self._access_token()
 
     def _graphql(self, query: str, variables: dict) -> dict:
         try:

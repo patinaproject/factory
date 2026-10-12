@@ -94,12 +94,20 @@ class GitFixture(unittest.TestCase):
         self.fake_claude_options.update(options)
         (self.tmp / "fake-claude.json").write_text(json.dumps(self.fake_claude_options))
 
-    def install_linear_plugin(self, home: Path, cached_token: str | None = "cached-token") -> None:
-        """The real plugin client under a worker home, with a token in its cache so no request reaches Linear."""
+    def install_linear_plugin(
+        self, home: Path, cached_token: str | None = "cached-token", *, accepted: tuple = ("cached-token",)
+    ) -> None:
+        """The real plugin client under a worker home, against a fake Linear that accepts the accepted tokens."""
         plugin = home / "plugins" / "linear-agent-session"
         plugin.mkdir(parents=True)
-        (plugin / "linear.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "linear.py")
+        (plugin / "linear.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "tests" / "staged_linear.py")
+        (home / "linear-fake.json").write_text(json.dumps({"accepted": list(accepted)}))
         if cached_token:
             cache = home / "plugin-data" / "linear-agent-session" / "token.json"
             cache.parent.mkdir(parents=True)
             cache.write_text(json.dumps({"client_id": "id1", "access_token": cached_token, "expires_at": 4102444800}))
+
+    @staticmethod
+    def linear_requests(home: Path) -> list:
+        log = home / "linear-fake.log"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
