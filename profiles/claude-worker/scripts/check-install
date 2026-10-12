@@ -2,9 +2,10 @@
 """Report where the live factory install differs from the repository.
 
 Compares the worker profile, the plugins in the root and worker homes, and the
-webhook routes against a commit of the repository, read with git plumbing so
+webhook config against a commit of the repository, read with git plumbing so
 the checkout's working tree and branch do not matter. Also checks that the
-dashboard's OIDC sign-in can keep a user signed in. Silent when the install
+dashboard's OIDC sign-in can keep a user signed in, and that the gateway
+rejected no webhook delivery with 429 in the last hour. Silent when the install
 matches. Prints one line per difference and exits 1, or exits 2 when it cannot
 run.
 """
@@ -19,15 +20,19 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
-ROUTES_KEY = "platforms.webhook.extra.routes"
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
+# aiohttp's access line in the gateway log, stamped in local time by Hermes' log format.
+REJECTED = re.compile(r'^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ .*"POST /webhooks/([^ ?"]+)[^"]*" 429 ')
 
 
 class Drift(NamedTuple):
@@ -140,20 +145,38 @@ def check_routes(commit: Commit, root: Path, hermes: str) -> list:
             [sys.executable, str(work / "templates" / "render.py")], env=env, capture_output=True, text=True
         )
     if render.returncode != 0:
-        return [Drift("webhook routes", str(root), f"render.py failed at {commit.short}: {render.stderr.strip()}")]
+        return [Drift("webhook config", str(root), f"render.py failed at {commit.short}: {render.stderr.strip()}")]
 
     drifts = []
     env = {**os.environ, "HERMES_HOME": str(root)}
-    for name, route in json.loads(render.stdout).items():
+    for key, value in json.loads(render.stdout).items():
         # Without --raw, Hermes masks secrets; matches() never compares them.
-        proc = subprocess.run(
-            [hermes, "config", "get", f"{ROUTES_KEY}.{name}", "--json"], env=env, capture_output=True, text=True
-        )
+        proc = subprocess.run([hermes, "config", "get", key, "--json"], env=env, capture_output=True, text=True)
         if proc.returncode != 0:
-            drifts.append(Drift("webhook route", name, f"not installed in {root}"))
-        elif not matches(route, json.loads(proc.stdout)):
-            drifts.append(Drift("webhook route", name, f"differs from the route rendered at {commit.short}"))
+            drifts.append(Drift("webhook config", key, f"not installed in {root}"))
+        elif not matches(value, json.loads(proc.stdout)):
+            drifts.append(Drift("webhook config", key, f"differs from the value rendered at {commit.short}"))
     return drifts
+
+
+def check_rejected_deliveries(root: Path) -> list:
+    log = root / "logs" / "agent.log"
+    if not log.is_file():
+        return [Drift("webhook deliveries", str(root), f"cannot read {log} to count 429 responses")]
+    since = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    rejected: Counter = Counter()
+    for path in (log.with_name("agent.log.1"), log):
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8", errors="replace") as lines:
+            for line in lines:
+                match = REJECTED.match(line)
+                if match and match.group(1) >= since:
+                    rejected[match.group(2)] += 1
+    return [
+        Drift("webhook route", route, f"{count} rejected with HTTP 429 in the last hour; check {RATE_LIMIT_KEY}")
+        for route, count in sorted(rejected.items())
+    ]
 
 
 def check_dashboard(root: Path, hermes: str) -> list:
@@ -250,6 +273,7 @@ def main() -> int:
             *check_plugins(commit, [root, worker]),
             *check_routes(commit, root, hermes),
             *check_dashboard(root, hermes),
+            *check_rejected_deliveries(root),
         ]
     except Refusal as exc:
         print(f"check-install: {exc}", file=sys.stderr)
