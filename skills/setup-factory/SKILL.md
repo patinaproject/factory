@@ -790,6 +790,52 @@ curl -s -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:864
 lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(8644|<dashboard port>|<proxy port>) '                    # 127.0.0.1 only
 ```
 
+Then prove that each route's secret is a real value and not an unexpanded
+`${...}` reference. When the secret source fails at startup, Hermes still
+starts, and a route then uses the public literal string as its secret. These
+lines sign a delivery with each literal string. Each must print `401`. They
+print no secret.
+
+```sh
+forged_post() {
+  python3 - "$@" <<'PY'
+import hashlib, hmac, sys, urllib.error, urllib.request
+route, literal, header, event = sys.argv[1:]
+body = b'{"type": "SetupCheck"}'
+digest = hmac.new(literal.encode(), body, hashlib.sha256).hexdigest()
+headers = {"Content-Type": "application/json", header: digest if header == "Linear-Signature" else "sha256=" + digest}
+if event:
+    headers["X-GitHub-Event"] = event
+try:
+    with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:8644/webhooks/{route}", data=body, headers=headers)) as resp:
+        print(route, resp.status)
+except urllib.error.HTTPError as err:
+    print(route, err.code)
+PY
+}
+forged_post linear '${LINEAR_WEBHOOK_SECRET}' Linear-Signature ""     # linear 401
+forged_post github '${GITHUB_WEBHOOK_SECRET}' X-Hub-Signature-256 ping # github 401
+```
+
+A `401` proves something only when the same request signed with the real
+secret is accepted. The signed checks in
+[`references/cloudflare-sst.md`](references/cloudflare-sst.md) show that. Run
+these lines after every gateway restart. A startup guard that refuses such a
+route is not yet enforced in code.
+
+If a forged line prints anything but `401`, the gateway is serving a route
+that anyone can sign for. Stop it before you fix the secret source.
+
+> **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway stop` from a
+> shell outside Hermes, not from a Hermes session or tool. Then confirm that
+> `hermes gateway status` no longer shows a gateway PID and that
+> `lsof -nP -iTCP:8644 -sTCP:LISTEN` prints nothing.
+
+Fix the secret source, for example with the manual helper run in
+[`references/infisical.md`](references/infisical.md#configure-both-homes).
+Then ask the operator to start the gateway with `hermes gateway start` from a
+shell outside Hermes, and run the forged lines again.
+
 **External checks.** Run the checks at the end of
 [`references/cloudflare-sst.md`](references/cloudflare-sst.md).
 
@@ -863,8 +909,10 @@ python3 skills/setup-factory/scripts/check-host-exposure --ssh-users <email>,<em
 ```
 
 It probes each of the machine's LAN and public addresses, including public
-IPv6 addresses that a router may not block. If every line starts with `PASS`,
-report the part as already configured.
+IPv6 addresses that a router may not block. Add
+`--principals-file /etc/ssh/authorized_principals/<account>` when people SSH
+in as a different account from the one running the check. If every line
+starts with `PASS`, report the part as already configured.
 
 Each `FAIL` line names its fix. Turn off a sharing service in System Settings.
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -122,6 +123,20 @@ class EvaluateTest(unittest.TestCase):
             ],
         )
 
+
+
+class MainTest(unittest.TestCase):
+    def test_a_domain_in_the_allowlist_is_a_fail_line(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--address", "127.0.0.1", "--ssh-users", "example.com"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            result.stdout,
+            "FAIL 'example.com' is not an email address; the SSH allowlist names people, never a domain\n",
+        )
+        self.assertEqual(result.stderr, "")
 
 if __name__ == "__main__":
     unittest.main()

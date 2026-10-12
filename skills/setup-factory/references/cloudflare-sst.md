@@ -262,14 +262,43 @@ curl -s -X POST -H 'content-type: application/json' -d '{}' https://<hostname>/w
 ```
 
 A signed delivery of an event the routes ignore proves the whole path without
-starting work. Each request returns `200` with `ignored`:
+starting work. Run these lines on the factory machine, because they read the
+webhook secrets. Each request returns `200` with `ignored`.
+
+`signed_post` reads the secret from `<home>/.env`. On a factory that uses
+[Infisical](infisical.md), the webhook secrets are not in `.env`, so it runs
+the configured secret helper from `hermes config get secrets.command`, with
+the values from `.env` in its environment, and reads the secret from the
+helper's output. It uses the secret only to sign the request and prints no
+secret.
 
 ```sh
 signed_post() {
   python3 - "$@" <<'PY'
-import hashlib, hmac, sys, urllib.request
-env_file, key, url, header, event = sys.argv[1:]
-secret = next(l.split("=", 1)[1].strip() for l in open(env_file) if l.startswith(key + "="))
+import hashlib, hmac, json, os, subprocess, sys, urllib.request
+home, key, url, header, event = sys.argv[1:]
+
+def read_dotenv(lines):
+    pairs = {}
+    for line in lines:
+        name, sep, value = line.strip().partition("=")
+        if sep and not name.startswith("#"):
+            pairs[name] = value.strip().strip("'\"")
+    return pairs
+
+dotenv = read_dotenv(open(os.path.join(home, ".env")))
+secret = dotenv.get(key)
+if not secret:
+    config = subprocess.run(["hermes", "config", "get", "secrets.command", "--json"],
+                            capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
+    helper = json.loads(config.stdout)
+    run = subprocess.run(["sh", "-c", helper["command"]], env={**os.environ, **dotenv},
+                         capture_output=True, text=True, timeout=helper["helper_timeout_seconds"])
+    if run.returncode != 0:
+        sys.exit(f"{key}: the secret helper exited {run.returncode}")
+    secret = read_dotenv(run.stdout.splitlines()).get(key)
+if not secret:
+    sys.exit(f"{key}: not in .env or the secret helper's output")
 body = b'{"type": "SetupCheck"}'
 digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 headers = {"Content-Type": "application/json", header: digest if header == "Linear-Signature" else "sha256=" + digest}
@@ -279,8 +308,8 @@ with urllib.request.urlopen(urllib.request.Request(url, data=body, headers=heade
     print(resp.status, resp.read().decode())
 PY
 }
-signed_post <home>/.env LINEAR_WEBHOOK_SECRET https://<hostname>/webhooks/linear Linear-Signature ""
-signed_post <home>/.env GITHUB_WEBHOOK_SECRET https://<hostname>/webhooks/github X-Hub-Signature-256 ping
+signed_post <home> LINEAR_WEBHOOK_SECRET https://<hostname>/webhooks/linear Linear-Signature ""
+signed_post <home> GITHUB_WEBHOOK_SECRET https://<hostname>/webhooks/github X-Hub-Signature-256 ping
 ```
 
 On the factory machine, the dashboard accepts the public host and sends it to
