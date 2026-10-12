@@ -52,8 +52,11 @@ and run [Verify](#verify) only.
 ## 1. Find or create the SST app
 
 Ask the operator where their SST app lives and which stage the factory belongs
-to. If they have none, create an SST v3 app with `home: 'cloudflare'` in the
-location they choose.
+to. Read the app's SST version from its `package.json`, and use that version's
+documentation for every syntax question. If they have none, create an SST app
+with `home: 'cloudflare'` in the location they choose. Use the SST major
+version that the operator's other apps use, or the current release when they
+have no other app.
 
 Add a typed stage setting for the factory. Follow the app's existing
 stage-config conventions. For example:
@@ -138,6 +141,47 @@ between provider versions.
 
 The proxy's management UI paths come from the proxy's documentation. Ask the
 operator to confirm them.
+
+### Adopt existing resources
+
+Before you add a resource, look for it. Search the SST app's code, and list
+the account's tunnels, the zone's DNS records, and the Access applications
+through the Cloudflare API with `CLOUDFLARE_API_TOKEN`. Sort each resource in
+the list above into one of three cases:
+
+| Case | Action |
+| --- | --- |
+| The SST app already defines it | Keep it. Reference it from the factory's code, and change it only to match the table above. |
+| It exists, but outside SST | A DNS record or an Access application: import it into SST with the provider's import option, so its ID stays the same. The tunnel: replace it, as below. |
+| It does not exist | Add it. |
+
+Replace a tunnel that was created outside SST rather than importing it.
+Cloudflare does not return a tunnel's secret, so an imported tunnel cannot
+match SST's state, and `sst diff` keeps reporting a change. Add the new
+tunnel and its configuration to SST, deploy, then switch the machine and the
+DNS record to it:
+
+1. Deploy the new tunnel with its ingress rules. Do not change the DNS record
+   yet.
+2. Install the `cloudflared` service with the new tunnel's token, as in
+   [Deploy](#5-deploy). Uninstall the old service first, because a machine
+   runs one `cloudflared` service.
+3. Point the DNS record at the new tunnel's ID and deploy again.
+4. Run [Verify](#verify).
+
+Steps 2 and 3 cause downtime. From the moment the old service stops until the
+DNS change in step 3 takes effect, the hostname still points at the old
+tunnel, which has no connector, so Linear and GitHub deliveries fail. Run
+steps 2 and 3 back to back, in a quiet window that the operator chooses, and
+tell the operator before step 2. GitHub does not retry a failed delivery, so
+after Verify, redeliver each GitHub delivery that failed in that window from
+the App's recent deliveries list.
+
+> **HUMAN CHECKPOINT.** After Verify passes, ask the operator to delete the old
+> tunnel in the Cloudflare dashboard. Deleting a tunnel cannot be undone.
+
+The factory's resources are adopted when `sst diff --stage <stage>` reports no
+changes and the account has no factory resource outside the SST app.
 
 ## 4. Keep secrets out of outputs
 

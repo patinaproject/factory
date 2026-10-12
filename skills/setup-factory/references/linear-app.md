@@ -56,6 +56,10 @@ paste it into the form:
 openssl rand -hex 32 | tee >(pbcopy) | env_set <home>/.env LINEAR_WEBHOOK_SECRET
 ```
 
+When the Infisical folder already exists, the Linear credentials and this
+secret go there. Replace each `env_set <file> <KEY>` with `infisical_set <KEY>`,
+once per key.
+
 ## Install the app in the workspace
 
 > **HUMAN CHECKPOINT.** Ask the operator to install the app through Linear's
