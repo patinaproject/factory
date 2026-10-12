@@ -139,7 +139,7 @@ Run the parts in this order. Later parts depend on values from earlier ones.
 9. [GitHub App](#9-github-app)
 10. [Factory settings, repositories, and Kanban](#10-factory-settings-repositories-and-kanban)
 11. [Webhook routes](#11-webhook-routes)
-12. [Checkout refresh cron job](#12-checkout-refresh-cron-job)
+12. [Checkout refresh and drift cron jobs](#12-checkout-refresh-and-drift-cron-jobs)
 13. [Slack](#13-slack)
 14. [Infisical secret source](#14-infisical-secret-source), optional
 15. [Restart and end-to-end checks](#15-restart-and-end-to-end-checks)
@@ -273,8 +273,23 @@ hermes plugins list
 hermes -p claude-worker plugins list
 ```
 
-Both list `linear-agent-session` and `pr-ready-gate`, enabled. If a plugin is
-listed and enabled, skip its install.
+Both list `linear-agent-session` and `pr-ready-gate`, enabled. On a fresh
+machine, install both now and skip the content check.
+
+On a re-run, `<worker>` already exists, and a listed plugin can still be
+older than the repository. First bring `<repo>` to an up-to-date default
+branch, as in step 1 of
+[Deploy a merged factory change](#deploy-a-merged-factory-change). Then
+compare content:
+
+```sh
+HERMES_HOME=<worker> python3 <worker>/scripts/check-install
+```
+
+Read only its `plugin <name> in <home>` lines here. Parts 10 and 11 handle
+routes. Skip a plugin's install only when it is listed, enabled, and absent
+from those lines. Reinstall a plugin it names with the install command below
+plus `--force`.
 
 **Install** each missing plugin into each home:
 
@@ -464,6 +479,21 @@ it. When no installed version matches, install it as the operator's user, in
 a shell where nvm is loaded: `nvm install <version>`. Install any other tool
 a repository needs, such as `pnpm`, before the first card runs.
 
+A repository that enables the Engineering plugin runs its issue-handoff gate
+with Bun. `<bin dir>` is the directory that holds `gh` and the other tools
+setup installs, such as `~/.local/bin`. Check with `command -v bun` and with
+`ls <bin dir>/bun`, because a non-login shell can lack `<bin dir>` on `PATH`.
+When both fail, install Bun as the gateway's user. The installer puts the
+binary in `$BUN_INSTALL/bin`, so set `BUN_INSTALL` to the parent of
+`<bin dir>`:
+
+```sh
+curl -fsSL https://bun.sh/install | BUN_INSTALL="$(dirname <bin dir>)" bash
+<bin dir>/bun --version
+```
+
+The installer also adds lines to the user's shell startup file. Leave them.
+
 **GitHub login and checkouts.** Return to
 [`references/github.md`](references/github.md) and run its
 "Sign the worker's `gh` in" and "Configure git in each checkout" sections.
@@ -527,7 +557,7 @@ configuration remains.
 Render and install again whenever the settings change, then restart the
 gateway.
 
-## 12. Checkout refresh cron job
+## 12. Checkout refresh and drift cron jobs
 
 The script lives in the worker profile's `scripts/` directory, so the job
 belongs to the worker profile.
@@ -547,15 +577,33 @@ Hermes runs a script-only cron job's script with Python, whatever its
 shebang says, so every script a `--no-agent` job runs must be Python. A shell
 script fails on every tick with a `SyntaxError`.
 
-**Verify.** Run the job through Hermes once, then read its status:
+**Install drift job.** `check-install` compares the live worker profile, the
+factory plugins in both homes, and the installed webhook routes with
+`origin/HEAD` of the checkout the profile was installed from. It prints one
+line per difference and nothing when the install is current. It fetches
+first, so a merge shows up within the hour. Deliver it where the operator
+reads it: the home channel of the platform from part 13, such as `slack`.
+On a first install, create it after part 13. Create the job when `cron list`
+has no `check-install` job:
+
+```sh
+hermes -p claude-worker cron create "every 1h" --name check-install --no-agent --script check-install --deliver <platform> </dev/null
+```
+
+The job exits non-zero while drift exists, so its failure notice goes to the
+same platform.
+
+**Verify.** Run each job through Hermes once, then read its status:
 
 ```sh
 hermes -p claude-worker cron run <job id>
-hermes -p claude-worker cron list    # Last run shows no error
+hermes -p claude-worker cron list    # read each Last run line
 ```
 
-It prints nothing when every checkout is current. It prints one line for each
-checkout it left alone, such as a checkout on another branch or with
+`refresh-checkouts` prints nothing when every checkout is current, and its
+last run shows no error. `check-install` shows an error until the install
+matches, which the Deploy section below fixes. `refresh-checkouts` prints one
+line for each checkout it left alone, such as a checkout on another branch or with
 uncommitted changes. Fix each problem it names.
 
 ## 13. Slack
@@ -677,6 +725,36 @@ It writes the factory's operating rules into `~/.claude/CLAUDE.md`, so every
 Claude Code session on the machine acts on GitHub as the App, publishes
 commits with `push-signed`, and knows where the private configuration record
 lives.
+
+## Deploy a merged factory change
+
+A merged change to `plugins/`, `profiles/`, or `templates/` is not live until
+it is installed. Hermes loads plugins and webhook routes only when the gateway
+starts. The worker reads `SOUL.md` and its scripts on each run.
+
+1. Bring the checkout the profile was installed from up to date. Its path is
+   the `source` line of `<worker>/distribution.yaml`, two levels up. It must be
+   on the default branch with no uncommitted changes. Fast-forward it to
+   `origin/HEAD`.
+2. List what is out of date:
+
+   ```sh
+   HERMES_HOME=<worker> python3 <worker>/scripts/check-install
+   ```
+
+3. Install each item it names:
+   - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
+   - A `plugin <name> in <home>` line: run the part 5 install command for that
+     home with `--force`.
+   - A `webhook route <name>` line: run the part 11 install for that route.
+4. Run `check-install` again. It prints nothing.
+5. If step 3 changed a plugin or a webhook route:
+
+   > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
+   > from a shell outside Hermes. Then confirm that
+   > `~/.hermes/logs/gateway.log` shows a startup after the install.
+
+6. Record the deployed commit in the private configuration record.
 
 ## Report
 
