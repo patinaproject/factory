@@ -61,7 +61,7 @@ class CheckInstallTest(unittest.TestCase):
         self.install(
             self.worker, "distribution.yaml", f"name: claude-worker\nsource: {self.repo}/profiles/claude-worker\n"
         )
-        installed = {**ROUTES["linear"], "secret": "lin_...f7ea"}
+        installed = {**ROUTES["linear"], "secret": "abc...1234"}
         self.install(self.root, "installed-routes/linear.json", json.dumps(installed))
 
         self.hermes = self.tmp / "bin" / "fake-hermes"
@@ -114,7 +114,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_route_differences(self) -> None:
-        stale = {**ROUTES["linear"], "prompt": "old triage", "secret": "lin_...f7ea"}
+        stale = {**ROUTES["linear"], "prompt": "old triage", "secret": "abc...1234"}
         self.install(self.root, "installed-routes/linear.json", json.dumps(stale))
 
         self.assertEqual(
@@ -125,6 +125,19 @@ class CheckInstallTest(unittest.TestCase):
         (self.root / "installed-routes" / "linear.json").unlink()
 
         self.assertEqual(self.check(), (1, f"webhook route linear: not installed in {self.root}\n"))
+
+    def test_a_merge_after_the_last_fetch_is_seen(self) -> None:
+        seed = self.tmp / "seed"
+        (seed / "plugins" / "p1" / "__init__.py").write_text("merged\n")
+        git(seed, "commit", "-qam", "merge")
+        merged = git(seed, "rev-parse", "--short=7", "HEAD")
+
+        self.assertEqual(self.check("--no-fetch"), (0, ""))
+        self.assertEqual(
+            self.check(),
+            (1, f"plugin p1 in {self.root}: __init__.py differs from main at {merged}\n"
+                f"plugin p1 in {self.worker}: __init__.py differs from main at {merged}\n"),
+        )
 
     def test_checkout_state_does_not_matter(self) -> None:
         git(self.repo, "checkout", "-q", "-b", "side")

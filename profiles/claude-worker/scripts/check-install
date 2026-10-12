@@ -195,12 +195,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", type=Path, help="factory checkout; defaults to the worker's distribution source")
     parser.add_argument("--ref", help="commit to compare against; defaults to origin/HEAD")
-    parser.add_argument("--fetch", action="store_true", help="run git fetch origin first")
+    parser.add_argument("--no-fetch", action="store_true", help="compare without running git fetch origin first")
     args = parser.parse_args()
     try:
         root, worker = homes()
         repo = args.repo or default_repo(worker)
-        if args.fetch:
+        if not args.no_fetch:
             git(repo, "fetch", "--quiet", "origin")
         commit = resolve_commit(repo, args.ref)
         hermes = find_hermes()
