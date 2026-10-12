@@ -26,8 +26,10 @@ minutes.
 Run this reference in two passes. Part 9 runs [Create the App](#create-the-app)
 through [Set the worker's `gh` directory](#set-the-workers-gh-directory). Part
 10 writes the settings and clones the checkouts, then returns here for
-[Sign the worker's `gh` in](#sign-the-workers-gh-in) and
-[Configure git in each checkout](#configure-git-in-each-checkout).
+[Sign the worker's `gh` in](#sign-the-workers-gh-in),
+[Check the App's access](#check-the-apps-access),
+[Configure git in each checkout](#configure-git-in-each-checkout), and
+[Block plain pushes on the machine](#block-plain-pushes-on-the-machine).
 
 ## Check
 
@@ -40,11 +42,14 @@ All of these must hold:
 - The file at `github.private_key_path` exists and prints `0o600` for
   `python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' <key path>`.
   The path is outside every configured checkout and outside this repository.
-- `grep '^GH_CONFIG_DIR=' <worker>/.env` prints `GH_CONFIG_DIR=<worker>/gh`.
+- `grep '^GH_CONFIG_DIR=' <worker>/.env <home>/.env` prints
+  `GH_CONFIG_DIR=<worker>/gh` for each file.
 - `hermes -p claude-worker cron list` shows exactly one job named
   `refresh-gh-app-login`, and its last run shows no error.
 - `GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --paginate --jq '.repositories[].full_name'`
   lists every configured repository.
+- `GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/check-github-access`
+  prints nothing. See [Check the App's access](#check-the-apps-access).
 - For each repository's main checkout,
   `git -C <path> config --local --get-all credential.https://github.com.helper`
   prints an empty line and then `!gh auth git-credential`.
@@ -53,6 +58,8 @@ All of these must hold:
   `<bot user id>+<app-slug>[bot]@users.noreply.github.com`.
 - For each main checkout, `git -C <path> config --local remote.origin.pushurl`
   prints `no_push_use_push-signed`.
+- `python3 <worker>/scripts/guard-git-push --check` prints nothing. See
+  [Block plain pushes on the machine](#block-plain-pushes-on-the-machine).
 - `env_has <home>/.env GITHUB_WEBHOOK_SECRET` prints `1`.
 - The App's webhook is active and delivers to the factory (see
   [Live test](#live-test)).
@@ -87,8 +94,8 @@ A new secret breaks every webhook that uses the old one.
 >   ```
 >
 > - **Repository permissions:** Contents read and write, Pull requests read
->   and write, Issues read and write, Checks read-only, Actions read-only, and
->   Metadata read-only.
+>   and write, Issues read and write, Checks read-only, Commit statuses
+>   read-only, Actions read-only, and Metadata read-only.
 > - **Subscribe to events:** Issues, Issue comment, Pull request, Pull request
 >   review, Pull request review comment, Workflow run, Check run, and Check
 >   suite.
@@ -102,11 +109,17 @@ list with the form when that file changes.
 
 ### Upgrade an existing App's permissions
 
-An App created before Issues became read and write cannot label, comment on,
-or edit issues. The [live test](#live-test) fails for it.
+An App created before a permission joined the list above lacks it. Without
+Issues read and write, it cannot label, comment on, or edit issues, and the
+[live test](#live-test) fails. Without Checks or Commit statuses, the
+completion gate cannot read the pull request's checks, and refuses the first
+ready pull request only after the worker has finished.
+[Check the App's access](#check-the-apps-access) names each missing
+permission.
 
 > **HUMAN CHECKPOINT.** Ask the operator to open the App's
-> **Permissions & events** page, set **Issues** to **Read and write**, and save.
+> **Permissions & events** page, set each permission that the check names to
+> the access it names, and save.
 > GitHub then asks the installation's owner to accept the new permissions.
 > Ask the operator to accept them on the installation's settings page,
 > `.../settings/installations/<installation id>`.
@@ -168,7 +181,11 @@ as sender, and the worker needs that failure.
 mkdir -p <worker>/gh
 chmod 700 <worker>/gh
 printf '%s' <worker>/gh | env_set <worker>/.env GH_CONFIG_DIR
+printf '%s' <worker>/gh | env_set <home>/.env GH_CONFIG_DIR
 ```
+
+The default home uses the same login, so Hermes' own agent acts on GitHub as
+the App, for example when it answers a question in Slack.
 
 Part 9 ends here. Continue with part 10.
 
@@ -201,6 +218,27 @@ The script prints nothing on success. On failure it prints one line that names
 the failed step, such as `check private key` or `mint installation token`, and
 Hermes delivers the line. `gh api user` fails for an installation token, so do
 not use it as the check.
+
+### Check the App's access
+
+`pr-ready-gate` and Hermes' Kanban completion contract read each pull
+request, its base branch rules, its check runs, and its commit statuses as the
+worker's `gh` login. A missing permission shows up only when the worker tries
+to complete a card. `check-github-access` makes the same reads now, for every
+configured repository, and compares the App's permissions with the
+[permission table](#use-gh-on-a-factory-machine):
+
+```sh
+GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/check-github-access
+```
+
+It prints nothing when every read succeeds. Otherwise it prints one line for
+each problem and exits `1`. A line such as
+`grant the App "Commit statuses: Read-only"` names the permission to add with
+[Upgrade an existing App's permissions](#upgrade-an-existing-apps-permissions).
+A `not found (HTTP 404)` line means the installation does not cover the
+repository. After the operator accepts a new permission, run the
+`refresh-gh-app-login` job, then run the check again.
 
 ## Configure git in each checkout
 
@@ -241,6 +279,31 @@ use the normal URL.
 
 Kanban worktrees share their main checkout's configuration, so each worktree
 uses these values.
+
+## Block plain pushes on the machine
+
+The push URL above guards only the configured checkouts. An agent session in
+another clone, such as an operator's interactive session, can still run
+`git push`, and its unsigned commits then block the pull request's merge.
+`guard-git-push` closes that gap for every repository of the user that runs
+the factory. It adds global `url.no_push_use_push-signed/.pushInsteadOf`
+entries for `https://github.com/`, `git@github.com:`, and
+`ssh://git@github.com/`, so git rewrites any push to GitHub to a path that
+does not exist:
+
+```sh
+python3 <worker>/scripts/guard-git-push           # adds the missing entries, prints nothing
+python3 <worker>/scripts/guard-git-push --check   # prints nothing when all entries exist
+```
+
+A plain `git push` then fails with
+`fatal: 'no_push_use_push-signed/<owner>/<repo>.git' does not appear to be a git repository`,
+also with `--no-verify` and in a repository with its own hooks. Fetches keep
+the normal URL, and `push-signed` publishes through GitHub's API, so neither
+changes. This changes the user's global git configuration, `~/.gitconfig`.
+Tell the operator before you run it. A remote with its own `pushurl` keeps
+that URL. To remove the guard, run
+`git config --global --unset-all url.no_push_use_push-signed/.pushInsteadOf`.
 
 ## Webhooks
 
@@ -317,9 +380,11 @@ The App can do what its repository permissions allow:
 | Permission | Access | Examples |
 | --- | --- | --- |
 | Contents | Read and write | Fetch, create branches, publish commits with `push-signed` |
-| Pull requests | Read and write | Open, edit, label, and comment on pull requests |
+| Pull requests | Read and write | Open, edit, label, and comment on pull requests, and resolve review threads |
 | Issues | Read and write | Open, edit, label, and comment on issues |
-| Checks, Actions | Read-only | Read check runs and workflow logs |
+| Checks | Read-only | Read check runs, which the completion gate needs |
+| Commit statuses | Read-only | Read commit statuses, which the completion gate needs |
+| Actions | Read-only | Read workflow runs and logs |
 | Metadata | Read-only | Read repository names, settings, and collaborators |
 
 When a command fails:
@@ -351,8 +416,10 @@ in the pull request. Signing with the operator's personal key would verify the
 commit as the operator, not the App.
 
 The configured checkouts set `remote.origin.pushurl` to
-`no_push_use_push-signed`, so a plain `git push` fails with that name. A
-session in another clone has no such guard, so follow the rule there too.
+`no_push_use_push-signed`, and
+[Block plain pushes on the machine](#block-plain-pushes-on-the-machine) does
+the same for every other clone, so a plain `git push` to GitHub fails with
+that name.
 
 When the remote branch does not exist, `push-signed` creates it at the merge
 base with the default branch and replays every commit after that point. For a
