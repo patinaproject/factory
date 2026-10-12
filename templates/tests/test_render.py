@@ -276,21 +276,10 @@ class PromptSubstitutionTest(unittest.TestCase):
         )
         self.assertIn("Leave `external_urls` unset.", self.prompts["linear"])
 
-    def test_own_pull_requests_match_both_forms_of_the_app_login(self):
-        self.assertIn(
-            "A pull request is the factory's own when its `author.login` is `example-app[bot]` or `app/example-app` "
-            "and the App started its branch",
-            self.prompts["linear"],
-        )
-
-    def test_own_pull_request_needs_a_branch_the_app_started(self):
-        prompt = self.prompts["linear"]
-        self.assertIn("`commits[0].authors[0].name` is `example-app[bot]`", prompt)
-
-    def test_own_pull_request_on_a_takeover_branch_is_read_with_its_commits(self):
-        prompt = self.prompts["linear"]
-        self.assertIn("--json state,author,headRefName,isCrossRepository,updatedAt,commits", prompt)
-        self.assertIn("`headRefName` is `<gitBranchName>-takeover`", prompt)
+    def test_the_linear_prompt_runs_card_branch_from_the_worker_profile_as_the_app(self):
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
+            prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        self.assertIn("python3 /srv/hermes/profiles/claude-worker/scripts/card_branch.py --app 'example-app[bot]'", prompt)
 
     def test_linear_prompt_names_the_app_user(self):
         self.assertIn("00000000-0000-4000-8000-000000000001", self.prompts["linear"])
@@ -403,7 +392,8 @@ class RouteCheckTest(unittest.TestCase):
         hermes.write_text(FAKE_HERMES.replace("PYTHON", sys.executable))
         hermes.chmod(0o755)
         (self.tmp / "routes").mkdir()
-        self.routes = render.build_routes(SETTINGS)
+        with mock.patch.dict(os.environ, {"HERMES_HOME": str(self.tmp)}):
+            self.routes = render.build_routes(SETTINGS)
         self.env = {
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             "HERMES_HOME": str(self.tmp),

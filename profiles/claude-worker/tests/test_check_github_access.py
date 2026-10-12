@@ -56,6 +56,9 @@ elif endpoint == f"repos/{repo}/commits/{state['sha']}/check-runs?per_page=1":
 elif endpoint == f"repos/{repo}/commits/{state['sha']}/statuses?per_page=1":
     refuse("statuses")
     print(json.dumps([]))
+elif endpoint == f"repos/{repo}/activity?activity_type=branch_creation&per_page=1":
+    refuse("activity")
+    print(json.dumps([]))
 else:
     sys.exit("gh: Not Found (HTTP 404)")
 """
@@ -109,6 +112,7 @@ class CheckGithubAccessTest(unittest.TestCase):
             f"repos/{REPO}/rules/branches/main",
             f"repos/{REPO}/commits/{SHA}/check-runs?per_page=1",
             f"repos/{REPO}/commits/{SHA}/statuses?per_page=1",
+            f"repos/{REPO}/activity?activity_type=branch_creation&per_page=1",
         ])
 
     def test_missing_commit_statuses_names_the_permission(self) -> None:
@@ -120,6 +124,17 @@ class CheckGithubAccessTest(unittest.TestCase):
         self.assertEqual(lines, [
             f"{REPO}: reading commit statuses of aaaaaaa refused (HTTP 403): "
             'grant the App "Commit statuses: Read-only" and accept it on the installation',
+        ])
+
+    def test_refused_branch_creation_activity_names_the_permission(self) -> None:
+        self.state["deny"] = ["activity"]
+
+        status, lines, _ = self.check()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, [
+            f"{REPO}: reading the branch creation activity refused (HTTP 403): "
+            'grant the App "Contents: Read and write" and accept it on the installation',
         ])
 
     def test_missing_checks_names_the_permission(self) -> None:

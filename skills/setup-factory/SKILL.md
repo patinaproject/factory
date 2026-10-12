@@ -1051,9 +1051,9 @@ each check. Report each result.
     issue. The first `claude-session` line reports `adopted` with `source`
     `remote_branch`, the branch starts at that commit, and the first
     `push-signed` publishes. Then repeat with a branch a person pushed under
-    another issue's `gitBranchName` and no pull request. `claude-session`
-    refuses with a line that names the branch and the App, the card blocks,
-    and the person's branch is unchanged.
+    the issue's `gitBranchName` and no pull request. Triage creates no card
+    and posts a `thought` that tells the person to open a pull request from
+    the branch or to rename or delete it. The person's branch is unchanged.
 16. Open a pull request as the GitHub App on a branch other than the issue's
     `gitBranchName`, link it to the issue, and delegate the issue. The card's
     branch is that pull request's head branch, and no second pull request
@@ -1063,12 +1063,7 @@ each check. Report each result.
     pull request's head, and its own pull request links the original. Before
     it completes, the worker asks in Linear whether to close the original and
     blocks with `needs_input`. It closes the original only after a human
-    approves. Repeat with a pull request the App opened on a branch whose
-    first commit is a person's: triage treats it the same way, so the card's
-    branch is `<gitBranchName>-takeover` and the body carries `takeover_pr`.
-    Then repeat with the App's own takeover pull request on that branch: the
-    card keeps that branch and its body still carries the person's
-    `takeover_pr`.
+    approves.
 18. Once a card's pull request is open, send a Linear `stop`, then reply in
     the same agent session. In `hermes kanban show <task id> --json`, the
     events after `blocked` are `unblocked`, `review_requested`, and
