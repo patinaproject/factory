@@ -11,6 +11,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -22,6 +23,13 @@ DEFAULT_WORKER_ENTRY = (
     "First start the issue through this repository's own issue-start workflow, which moves it to In Progress. "
     "Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
+TAKEOVER_ENTRY = (
+    "The issue already has an open pull request, {url}, opened by someone else. This branch starts from "
+    "its head. Open your own ready pull request, and in its body credit the original author and link {url}. "
+    "Do not close {url}. The worker closes it after a human approves. If push-signed refuses one of its "
+    "commits, such as a merge commit, rebase them onto the default branch before you publish. Credit the "
+    "original author with a Co-authored-by trailer on the commits you publish."
+)
 RESUME_PROMPT = "Continue."
 PUBLISH_RULE = (
     "Publish commits only by running {push_signed} from the worktree, never `git push`. It creates "
@@ -31,6 +39,7 @@ PUBLISH_RULE = (
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
+PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 
 
 class Refusal(Exception):
@@ -42,6 +51,40 @@ def git(cwd: Path, *args: str) -> str:
     if proc.returncode != 0:
         raise Refusal(f"git {' '.join(args)} failed in {cwd}: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def remote_branch_exists(worktree: Path, branch: str) -> bool:
+    ref = f"refs/heads/{branch}"
+    proc = subprocess.run(["git", "ls-remote", "--exit-code", "origin", ref], cwd=worktree, capture_output=True, text=True)
+    if proc.returncode == 2:
+        return False
+    if proc.returncode != 0:
+        raise Refusal(f"git ls-remote origin {ref} failed in {worktree}: {proc.stderr.strip()}")
+    return any(line.split("\t")[1] == ref for line in proc.stdout.splitlines())
+
+
+def takeover_pull_ref(takeover_pr: str, repo: str) -> str:
+    match = PULL_URL.match(takeover_pr)
+    if not match or match.group(1).lower() != repo.lower():
+        raise Refusal(f"--takeover-pr {takeover_pr} is not a pull request URL in {repo}")
+    return f"refs/pull/{match.group(2)}/head"
+
+
+def adopt_existing_work(worktree: Path, branch: str, repo: str, takeover_pr: str | None) -> dict | None:
+    pull_ref = takeover_pull_ref(takeover_pr, repo) if takeover_pr else None
+    default = git(worktree, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if git(worktree, "rev-list", f"{default}..HEAD") or git(worktree, "status", "--porcelain"):
+        return None
+    if remote_branch_exists(worktree, branch):
+        source, ref, fetch_ref = "remote_branch", branch, f"refs/heads/{branch}"
+    elif pull_ref:
+        source, ref, fetch_ref = "takeover_pr", takeover_pr, pull_ref
+    else:
+        return None
+    git(worktree, "fetch", "--quiet", "origin", fetch_ref)
+    head = git(worktree, "rev-parse", "FETCH_HEAD")
+    git(worktree, "reset", "--quiet", "--hard", head)
+    return {"source": source, "ref": ref, "head": head}
 
 
 def load_settings(settings_file: str | None) -> dict:
@@ -179,6 +222,8 @@ def build_prompt(args: argparse.Namespace, repo: dict, branch: str, resumed: boo
         branch=branch,
         repo=args.repo,
     )
+    if args.takeover_pr:
+        entry = f"{entry}\n\n{TAKEOVER_ENTRY.format(url=args.takeover_pr)}"
     return f"{entry}\n\n{message}" if message else entry
 
 
@@ -201,6 +246,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             raise Refusal(f"a process for Claude session {session_id} is already running")
 
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
+        adopted = adopt_existing_work(worktree, branch, args.repo, args.takeover_pr)
         resumed = transcript_exists(session_id, worktree)
         transport = settings.get("claude_session") or {}
         command = [
@@ -233,7 +279,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         finally:
             settings_path.unlink(missing_ok=True)
 
-    report = {"session_id": session_id, "resumed": resumed, "worktree": str(worktree), "branch": branch}
+    report = {"session_id": session_id, "resumed": resumed, "worktree": str(worktree), "branch": branch, "adopted": adopted}
     try:
         output = json.loads(proc.stdout)
     except json.JSONDecodeError:
@@ -252,6 +298,7 @@ def main() -> int:
     parser.add_argument("--issue-url", required=True)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--message-file")
+    parser.add_argument("--takeover-pr")
     parser.add_argument("--settings-json")
     args = parser.parse_args()
     try:
