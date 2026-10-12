@@ -104,32 +104,27 @@ not the app. Replace it with a token that Linear issued with `actor=app`.
 
 ## Give Claude Code sessions Linear
 
-Claude Code sessions on the machine reach Linear through the app, so an agent
-never asks the operator to sign in. A user-scope MCP server named
-`linear-factory` connects to Linear's MCP server, and its `headersHelper` runs
-[`scripts/linear-mcp-headers`](../scripts/linear-mcp-headers) to send the app's
-token. The script takes the token from the plugin's client, which shares the
-gateway's token cache in `<home>`. Never get the token another way. Linear
-revokes all of an app's client credentials tokens when a request asks for a
-different scope set, and the gateway then loses its token.
+Claude Code sessions in a checkout of this repository reach Linear through
+the app, so an agent never asks the operator to sign in. The `linear` server
+in the repository's `.mcp.json` has a `headersHelper` that runs
+[`scripts/linear-mcp-headers`](../scripts/linear-mcp-headers). The script
+sends the app's token from the plugin's client, which shares the gateway's
+token cache in `~/.hermes`. Never get the token another way. Linear revokes
+all of an app's client credentials tokens when a request asks for a different
+scope set, and the gateway then loses its token.
 
-Everything this server writes shows the app as its author.
+On a machine without the plugin, the script prints no headers, and Claude Code
+asks for the usual OAuth sign-in.
 
-**Check.** `claude mcp get linear-factory`, run as the gateway's user, shows
-scope `User`, the URL `https://mcp.linear.app/mcp`, and `Connected`.
+Everything written through this server shows the app as its author.
 
-**Install.**
+**Check.** In a checkout of this repository, run `claude mcp list` as the
+gateway's user. Expect `linear: https://mcp.linear.app/mcp (HTTP) - ✔ Connected`.
 
-```sh
-claude mcp add-json -s user linear-factory \
-  '{"type": "http", "url": "https://mcp.linear.app/mcp", "headersHelper": "python3 -I <repo>/skills/setup-factory/scripts/linear-mcp-headers"}'
-```
-
-The script reads `~/.hermes`. For another `<home>`, put `HERMES_HOME=<home>`
-before `python3` in the `headersHelper` command.
-
-**Verify.** Run the check again. Then start a session and ask it to read an
-issue with a `linear-factory` tool.
+There is nothing to install. If the check reports `Needs authentication`,
+confirm that `<home>/plugins/linear-agent-session` exists and that
+`python3 -I skills/setup-factory/scripts/linear-mcp-headers` prints an
+`Authorization` key. Do not print its value.
 
 ## Live test
 

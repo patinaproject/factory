@@ -3,7 +3,8 @@
     "linear": {
       "type": "http",
       "url": "https://mcp.linear.app/mcp",
-      "oauth_resource": "https://mcp.linear.app/mcp"
+      "oauth_resource": "https://mcp.linear.app/mcp",
+      "headersHelper": "python3 -I skills/setup-factory/scripts/linear-mcp-headers"
     }
   }
 }

@@ -45,6 +45,13 @@ class LinearMcpHeadersTest(unittest.TestCase):
         helper.chmod(0o700)
         self.assertEqual(self.run_script(), {"Authorization": f"Bearer token-for-from-env-s2@{self.home}"})
 
+    def test_prints_no_headers_without_the_factory_plugin(self) -> None:
+        empty = Path(tempfile.mkdtemp())
+        env = {key: value for key, value in os.environ.items() if not key.startswith("LINEAR_")}
+        env["HERMES_HOME"] = str(empty)
+        result = subprocess.run([sys.executable, "-I", str(SCRIPT)], env=env, capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), {})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Print the Linear MCP server's request headers for Claude Code's headersHelper.
 
-Claude Code runs this when it connects to https://mcp.linear.app/mcp and sends
-the JSON object it prints as HTTP headers. The token is the factory's Linear
-agent app token from the linear-agent-session plugin's client, which shares the
-gateway's token cache. Never mint the token another way: Linear revokes all of
+The repository's .mcp.json runs this when Claude Code connects to
+https://mcp.linear.app/mcp, and sends the JSON object it prints as HTTP
+headers. On a machine without the factory's linear-agent-session plugin it
+prints {}, and Claude Code falls back to the usual OAuth sign-in. The token is
+the factory's Linear agent app token from the plugin's client, which shares
+the gateway's token cache. Never mint the token another way: Linear revokes all of
 an app's client credentials tokens when a request asks for a different scope
 set, and the gateway would lose its token.
 
@@ -51,7 +53,10 @@ def environment(home: Path) -> dict:
 
 
 def headers(home: Path) -> dict:
-    sys.path.insert(0, str(home / "plugins" / "linear-agent-session"))
+    plugin = home / "plugins" / "linear-agent-session"
+    if not plugin.is_dir():
+        return {}
+    sys.path.insert(0, str(plugin))
     import linear
 
     return {"Authorization": f"Bearer {linear.client_from_env(environment(home))._access_token()}"}
