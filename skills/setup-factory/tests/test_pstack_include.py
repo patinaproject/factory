@@ -100,12 +100,17 @@ class PstackIncludeTest(unittest.TestCase):
         self.claude_md.write_text(f"{BLOCK}\n{INCLUDE}\n")
         self.assertTrue(any("pstack-models.md is missing" in m for m in self.failures()))
 
-    def test_sheet_with_a_full_model_id_or_placeholder_fails(self) -> None:
-        for line in ("bug-fix: claude-opus-5", "bug-fix: <model>"):
+    def test_sheet_naming_an_unusable_model_fails(self) -> None:
+        for line in ("bug-fix: claude-opus-5", "bug-fix: <model>", "arena runners: opus, gpt-4o"):
             with self.subTest(line=line):
                 (self.config / "pstack-models.md").write_text(SHEET + line + "\n")
                 self.claude_md.write_text(f"{BLOCK}\n{INCLUDE}\n")
-                self.assertTrue(any("bug-fix" in m for m in self.failures()))
+                self.assertTrue(any(line.split(":")[0] in m for m in self.failures()))
+
+    def test_sheet_with_aliases_and_effort_passes(self) -> None:
+        (self.config / "pstack-models.md").write_text(SHEET + "bug-fix: opus @xhigh\narena runners: opus, auto, inherit-parent\n")
+        self.claude_md.write_text(f"{BLOCK}\n{INCLUDE}\n")
+        self.assertEqual(self.failures(), [])
 
     def test_config_outside_home_uses_the_absolute_form(self) -> None:
         other = self.home / "elsewhere"

@@ -20,6 +20,7 @@ from pathlib import Path
 BEGIN = "<!-- factory:begin -->"
 END = "<!-- factory:end -->"
 SHEET = "pstack-models.md"
+MODEL_ALIASES = {"opus", "sonnet", "haiku", "fable", "inherit-parent", "auto"}
 ROLE_LINE = re.compile(r"^([a-z][^:\n]*?):\s*(\S.*)$")
 FREE_TEXT_LINES = ("default effort", "session hook")
 
@@ -56,17 +57,17 @@ def add_include(text: str, form: str) -> str:
 
 
 def sheet_problems(text: str) -> list[str]:
-    """Role lines that name a full `claude-` model ID, which the `Agent` tool rejects, or keep a placeholder."""
+    """Role lines whose entries are not an alias the `Agent` tool accepts."""
     problems = []
     for line in text.splitlines():
         match = ROLE_LINE.match(line)
         if not match or match.group(1) in FREE_TEXT_LINES:
             continue
         role, value = match.groups()
-        if "<" in value:
-            problems.append(f"{role}: unfilled placeholder")
-        elif re.search(r"\bclaude-", value):
-            problems.append(f"{role}: use the family name, not a full model ID")
+        for entry in value.split(","):
+            model = entry.split("@")[0].strip()
+            if model not in MODEL_ALIASES:
+                problems.append(f"{role}: {model!r} is not one of {', '.join(sorted(MODEL_ALIASES))}")
     return problems
 
 

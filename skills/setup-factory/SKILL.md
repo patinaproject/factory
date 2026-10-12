@@ -1129,7 +1129,7 @@ worker sessions read the same `<config>/CLAUDE.md` as the operator, where
    ```
 
 3. Check. Every line must start with `PASS`: the sheet exists and names no
-   placeholder or full model ID, the marker pair is intact, and the include
+   model other than an `Agent` alias, the marker pair is intact, and the include
    appears exactly once outside the block. Part 17's block write keeps lines
    outside the markers, so a later re-run does not remove the include.
 
