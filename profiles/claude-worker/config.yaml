@@ -7,6 +7,13 @@ tools:
   tool_search:
     enabled: "off"
 
+# One process_manage wait is capped by this many seconds, and so is every
+# foreground terminal command that passes no timeout. Hermes ends any tool call
+# at 420 seconds, so keep this below that. The worker waits on claude-session
+# with it, so a long run costs a few model turns, not dozens.
+terminal:
+  timeout: 400
+
 skills:
   auto_load: [claude-code]
 

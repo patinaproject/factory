@@ -64,9 +64,12 @@ ROOT_CONFIG = {
     "streaming.enabled": True,
     "platforms.slack.extra.native_task_cards": True,
 }
-WORKER_CONFIG = {key: ROOT_CONFIG[key] for key in (
-    "model.provider", "model.default", "plugins.entries.linear-agent-session.settings",
-)}
+WORKER_CONFIG = {
+    **{key: ROOT_CONFIG[key] for key in (
+        "model.provider", "model.default", "plugins.entries.linear-agent-session.settings",
+    )},
+    "terminal.timeout": 400,
+}
 
 
 def cron_job(name: str, minutes: int, deliver: str = "local", **fields) -> dict:
@@ -322,6 +325,11 @@ class CheckInstallTest(unittest.TestCase):
         self.config(self.root, {**ROOT_CONFIG, "kanban.review_dispatch": True})
 
         self.assertEqual(self.check(), (1, f"config kanban.review_dispatch in {self.root}: is not false (part 10)\n"))
+
+    def test_worker_wait_limit_that_differs_from_the_runbook(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "terminal.timeout": 1200})
+
+        self.assertEqual(self.check(), (1, f"config terminal.timeout in {self.worker}: is not 400 (part 5)\n"))
 
     def test_proxy_provider_from_part_3_is_accepted(self) -> None:
         self.config(self.root, {**ROOT_CONFIG, "model.provider": "custom:proxy"})

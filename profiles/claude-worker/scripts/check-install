@@ -148,6 +148,7 @@ CONFIG = (
     ConfigKey(10, "kanban.max_in_progress", (ROOT,), declared("set to the operator's card limit")),
     ConfigKey(10, "kanban.review_dispatch", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.auto_decompose", (ROOT,), equal(False)),
+    ConfigKey(5, "terminal.timeout", (WORKER,), equal(400)),
     ConfigKey(13, "streaming.enabled", (ROOT,), equal(True)),
     ConfigKey(13, "platforms.slack.extra.native_task_cards", (ROOT,), equal(True)),
 )

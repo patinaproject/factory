@@ -462,6 +462,14 @@ hermes -p claude-worker skills opt-in --sync </dev/null
 
 The sync makes the bundled `claude-code` skill available to the worker. A
 distribution install sets no model, so now run part 4 for the worker profile.
+An update keeps the installed `config.yaml`, so set the worker's wait limit
+on a machine installed before the profile shipped it. `SOUL.md` waits on
+`claude-session` with a 400 second timeout, which Hermes clamps to this value.
+It stays under the 420 second limit Hermes puts on every tool call:
+
+```sh
+hermes -p claude-worker config set terminal.timeout 400 </dev/null
+```
 
 **Verify.**
 
