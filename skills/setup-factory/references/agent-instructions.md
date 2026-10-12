@@ -16,7 +16,7 @@ own instructions above or below it.
 | --- | --- |
 | Where the factory's private configuration record lives | A document in the operator's tracker or wiki |
 | The directory that holds `gh` and the other tools setup installed | `~/.local/bin` |
-| Credentials on the machine that Hermes agents must never receive | `<NAME>` of each operator-only token |
+| Credentials on the machine that Hermes agents must never receive | `<NAME>` of each operator-only token, such as `OP_SERVICE_ACCOUNT_TOKEN` |
 | The operator's SST app that owns the ingress, and what deploys it | A repository path, and "merging to the default branch" |
 | The SSH hostname and the account people SSH into, when SSH is used | `<ssh-hostname>`, `<account>` |
 | The path of this repository's checkout on the machine | `~/factory` |

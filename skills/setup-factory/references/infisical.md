@@ -50,7 +50,8 @@ All of these must hold:
 - `hermes config get secrets.command --json` and
   `hermes -p claude-worker config get secrets.command --json` each show
   `"enabled": true` and the command from
-  [Configure both homes](#configure-both-homes).
+  [Configure both homes](#configure-both-homes). When the factory uses
+  [1Password](1password.md), the command comes from that part instead.
 - Each of those commands prints `Command helper: applied <n> secrets` on its
   first line, where `<n>` is the number of values in the folder.
 - `<home>/bin/factory-secrets` exists, and `diff` against the script in

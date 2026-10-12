@@ -1,6 +1,6 @@
 ---
 name: setup-factory
-description: Set up or re-check a Hermes software factory on a machine from this repository. Installs and verifies Hermes, the Claude Code CLI and transport, the factory plugins and claude-worker profile, the Linear agent app, the factory's GitHub App and its webhook, the webhook routes, Slack, an optional Infisical secret source, Cloudflare Tunnel and Access ingress through the operator's SST app, and the machine-wide agent instructions. Use for "set up a factory", "install the factory on this machine", "re-run factory setup", or checking that an existing factory is configured correctly.
+description: Set up or re-check a Hermes software factory on a machine from this repository. Installs and verifies Hermes, the Claude Code CLI and transport, the factory plugins and claude-worker profile, the Linear agent app, the factory's GitHub App and its webhook, the webhook routes, Slack, an optional Infisical secret source, optional 1Password access for operator-only credentials, Cloudflare Tunnel and Access ingress through the operator's SST app, and the machine-wide agent instructions. Use for "set up a factory", "install the factory on this machine", "re-run factory setup", or checking that an existing factory is configured correctly.
 ---
 
 # Set up a factory
@@ -93,6 +93,7 @@ your task notes, not in the repository.
 | The GitHub organization or account that owns the repositories, and a name for the factory's GitHub App | GitHub App |
 | A path outside every repository for the GitHub App's private key, for example `~/.config/factory/github-app.pem` | GitHub App |
 | Whether secrets live in Infisical, and if so the project ID, environment, folder, and machine identity | Infisical |
+| Whether the operator keeps operator-only credentials in 1Password, and if so the vault and the service account name | 1Password |
 | Slack workspace and the channels the agent joins | Slack |
 | Where the factory's private configuration record lives, and the credentials on the machine that Hermes agents must never receive | Agent instructions |
 
@@ -747,6 +748,9 @@ Follow [`references/slack.md`](references/slack.md).
 
 Skip this part when the operator does not use Infisical. Otherwise follow
 [`references/infisical.md`](references/infisical.md).
+
+Then, when the operator uses 1Password for operator-only credentials, follow
+[`references/1password.md`](references/1password.md). It needs Infisical.
 
 ## 15. Restart and end-to-end checks
 
