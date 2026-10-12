@@ -94,6 +94,7 @@ your task notes, not in the repository.
 | Whether people SSH into the machine through Access, and if so the SSH hostname and each person's email | Ingress, host exposure |
 | The operator's SST app, its stage, and its review process | Ingress |
 | Whether Claude Code uses a local proxy, and if so its base URL, model alias, and token variable name | Claude Code transport |
+| Optional with a proxy: a model id for each of the Sonnet, Haiku, and Fable tiers, so subagents run on cheaper models than the worker's main agent. Offer only ids the proxy's `/v1/models` lists. Skip it when the proxy serves one model | Claude Code transport |
 | Linear workspace, and whether the operator already has an agent app | Linear app |
 | The GitHub organization or account that owns the repositories, and a name for the factory's GitHub App | GitHub App |
 | A path outside every repository for the GitHub App's private key, for example `~/.config/factory/github-app.pem` | GitHub App |
@@ -101,6 +102,7 @@ your task notes, not in the repository.
 | Whether the operator keeps operator-only credentials in 1Password, and if so the vault and the service account name | 1Password |
 | Slack workspace and the channels the agent joins | Slack |
 | Where the factory's private configuration record lives, and the credentials on the machine that Hermes agents must never receive | Agent instructions |
+| Optional: a pstack model sheet, as a path to a sheet the operator keeps or as answers to the `setup-pstack` questions (a model per role from the aliases the `Agent` tool accepts, default effort, session hook on or off). Never invent model choices. Skip the step when the operator declines | Agent instructions |
 
 ## Where each value lives
 
@@ -544,13 +546,15 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
-  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 0}
+  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "max_turns": 0}
 }
 ```
 
 Exactly one repository has `routing: default`. Leave
 `claude_session.base_url`, `model`, and `auth_token_env` empty unless part 3
-set up a proxy. `worker_entry` is a prefix, such as `/patina-mode`, that
+set up a proxy. With a proxy, set `tier_models` to the Sonnet, Haiku, and Fable
+ids from the operator's input, so subagents run on cheaper models while the
+worker's main agent stays on `model`. `worker_entry` is a prefix, such as `/patina-mode`, that
 `claude-session` puts before the built-in task prompt. The task prompt names
 the issue, its URL, the repository, and the branch, and is always sent. An
 empty `worker_entry` sends the task prompt alone. `claude-session` refuses a `worker_entry` that
@@ -1126,6 +1130,38 @@ printf '%s' <worker>/gh | env_set <home>/.env GH_CONFIG_DIR
 Hermes reads the memory file when a session starts. The gateway reads
 `<home>/.env` only when it starts, so after `env_set` changes that file, ask
 the operator to restart the gateway as in part 15.
+
+**pstack model sheet.** Skip this step when the operator gave no sheet and
+declined the `setup-pstack` questions. `claude-session` forwards `HOME` and
+`CLAUDE_CONFIG_DIR` to worker runs and does not set `CLAUDE_CONFIG_DIR`, so
+worker sessions read the same `<config>/CLAUDE.md` as the operator, where
+`<config>` is `$CLAUDE_CONFIG_DIR` or `~/.claude`.
+
+1. Write the sheet to `<config>/pstack-models.md`, replacing the whole file so
+   a re-run converges. Use the shape in
+   [`references/pstack-models-template.md`](references/pstack-models-template.md)
+   with the operator's values. Use model family names such as `opus`, never
+   full `claude-*` IDs, which the `Agent` tool rejects. Record the values in
+   the private configuration record, never in this repository.
+2. Add the include, outside the factory block, only when it is absent. The
+   command backs up `CLAUDE.md` first and refuses to edit a file whose
+   `<!-- factory:begin -->` and `<!-- factory:end -->` pair is not intact:
+
+   ```sh
+   python3 <repo>/skills/setup-factory/scripts/pstack-include --write
+   ```
+
+3. Check. Every line must start with `PASS`: the sheet exists and names no
+   model other than an `Agent` alias, the marker pair is intact, and the include
+   appears exactly once outside the block. Part 17's block write keeps lines
+   outside the markers, so a later re-run does not remove the include.
+
+   ```sh
+   python3 <repo>/skills/setup-factory/scripts/pstack-include
+   ```
+
+   Pass `--config-dir <config>` when `CLAUDE_CONFIG_DIR` is set in the worker
+   environment but not in your shell.
 
 ## Deploy a merged factory change
 

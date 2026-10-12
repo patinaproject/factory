@@ -290,14 +290,7 @@ def node_bin_for(worktree: Path) -> Path | None:
     return max(matches, key=lambda d: version_key(d.name)) / "bin"
 
 
-MODEL_TIER_VARIABLES = (
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL",
-    "CLAUDE_CODE_SUBAGENT_MODEL",
-)
+MODEL_TIERS = ("sonnet", "haiku", "fable")
 
 
 # What Claude Code and the tools it runs need: a shell, locale, temp dir, the worker's gh login, its
@@ -361,6 +354,32 @@ def linear_api_key() -> str:
         raise Refusal(f"Linear token: {error}") from None
 
 
+def tier_models(transport: dict) -> dict:
+    value = transport.get("tier_models")
+    if value is None:
+        return {}
+    ok = isinstance(value, dict) and set(value) <= set(MODEL_TIERS) and all(
+        isinstance(model, str) and model for model in value.values()
+    )
+    if not ok:
+        raise Refusal(
+            f"claude_session.tier_models {value!r} must map {', '.join(MODEL_TIERS)} to non-empty model ids"
+        )
+    return value
+
+
+def model_environment(transport: dict, tiers: dict) -> dict:
+    # The main loop and every tier without its own model stay on the transport model, because a proxy
+    # answers `unknown provider for model ...` for an id it does not serve.
+    model = transport["model"]
+    env = {"ANTHROPIC_MODEL": model, "ANTHROPIC_DEFAULT_OPUS_MODEL": model}
+    env.update({f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL": tiers.get(tier, model) for tier in MODEL_TIERS})
+    # A subagent that names no model takes this alias. CLAUDE_CODE_SUBAGENT_MODEL_FORCE stays unset so
+    # an explicit model on the Agent call still wins.
+    env["CLAUDE_CODE_SUBAGENT_MODEL"] = "sonnet" if "sonnet" in tiers else model
+    return env
+
+
 def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
@@ -372,8 +391,9 @@ def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
         if not os.environ.get(token_env):
             raise Refusal(f"auth_token_env names {token_env}, which is not set")
         env["ANTHROPIC_AUTH_TOKEN"] = os.environ[token_env]
+    tiers = tier_models(transport)
     if transport.get("model"):
-        env.update({name: transport["model"] for name in MODEL_TIER_VARIABLES})
+        env.update(model_environment(transport, tiers))
     # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
     return {"env": env, "hooks": {"SessionStart": [{"hooks": [remove]}]}}
