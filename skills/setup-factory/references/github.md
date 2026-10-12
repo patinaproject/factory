@@ -105,15 +105,23 @@ folder already exists, the secret lives there. In the lines below, replace
 >   and write, Issues read and write, Checks read-only, Commit statuses
 >   read-only, Actions read-only, and Metadata read-only.
 > - **Subscribe to events:** Issues, Issue comment, Pull request, Pull request
->   review, Pull request review comment, Workflow run, Check run, and Check
->   suite.
+>   review, Pull request review comment, Workflow run, and Check run. Not
+>   Check suite.
 > - **Where can this GitHub App be installed:** only on this account.
 >
 > Afterwards, ask for the **App ID** from the App's **General** page and for
 > `<app-slug>`. Neither is a secret.
 
-The events are the `GITHUB_EVENTS` list in `templates/render.py`. Compare the
-list with the form when that file changes.
+The events are the rows of `GITHUB_EVENT_TABLE` in `templates/render.py`.
+Compare the list with the form when that file changes.
+
+### Upgrade an existing App's events
+
+An App created with Check suite still sends every `check_suite` delivery, and
+the route drops each one.
+
+> **HUMAN CHECKPOINT.** Ask the operator to open the App's **Permissions &
+> events** page, clear **Check suite** under **Subscribe to events**, and save.
 
 ### Upgrade an existing App's permissions
 
@@ -271,10 +279,17 @@ Record these values for the `github` object in part 10:
 | `installation_id` | The installation ID |
 | `private_key_path` | The absolute path of the private key |
 
-The `github` route drops every event whose `sender.login` equals
-`github.login`, so the factory does not triage its own pushes and comments.
-Failed checks are the exception: a check on the App's own push names the App
-as sender, and the worker needs that failure.
+The `github` route keeps an event only when it belongs to the App's own work.
+A `pull_request`, `pull_request_review`, `pull_request_review_comment`, or
+`issue_comment` event passes when the App, as `github.login`, opened the pull
+request. A `workflow_run` event passes when the App triggered it and it
+failed. A `check_run` event passes when it failed on a branch listed in
+`<home>/owned-refs.json` and is not a GitHub Actions job, and an `issues` or
+`issue_comment` event passes when its issue URL is listed there. The route
+also drops events the App itself sends, so the factory does not triage its
+own pushes and comments. Failed checks and the App's own merges are the
+exceptions, because the worker needs the failure and the card has to
+complete.
 
 ## Set the worker's `gh` directory
 

@@ -760,9 +760,10 @@ belongs to the worker profile.
 `refresh-checkouts`. `cron create` does not remove duplicates. If more than one
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
-jobs: `refresh-checkouts`, `refresh-gh-app-login`, and `check-install`. A copy
-there runs without the worker's scripts and settings, so remove it the same
-way. A second setup session runs this check before it creates anything.
+jobs: `refresh-checkouts`, `refresh-owned-refs`, `refresh-gh-app-login`, and
+`check-install`. A copy there runs without the worker's scripts and settings,
+so remove it the same way. A second setup session runs this check before it
+creates anything.
 
 **Create** the job only when the list has none:
 
@@ -774,6 +775,20 @@ Hermes runs a script-only cron job's script with Python, whatever its
 shebang says, so every script a `--no-agent` job runs must be Python. A shell
 script fails on every tick with a `SyntaxError`.
 
+**Owned refs job.** The `github` route keeps a `check_run` event only when
+its branch, and an `issues` or `issue_comment` event only when its issue URL,
+is listed in `<home>/owned-refs.json`, which the route reads on every delivery
+through Hermes' `in_file` operator. `refresh-owned-refs` rewrites that file
+every minute from `hermes kanban list --json` with every card's `branch_name`
+and `github_issue_url`, in one atomic step. Without the file the route drops
+every `check_run` and `issues` event. `check-install` reports the file when it
+is missing or older than 5 minutes. Create the job when `cron list` has no
+`refresh-owned-refs` job:
+
+```sh
+hermes -p claude-worker cron create "every 1m" --name refresh-owned-refs --no-agent --script refresh-owned-refs </dev/null
+```
+
 **Install drift job.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
 `origin/HEAD` of the checkout the profile was installed from. It also checks
@@ -782,8 +797,9 @@ machine changes this runbook cannot reproduce: a `config.yaml` key from parts
 4, 6, 10, or 13 that differs from what the part sets, a cron job that is
 missing, duplicated, changed, or not created by the runbook, and, on macOS, a
 launchd service from part 7 or 15 that is not installed, does not run at load,
-or is not running. It never prints a config value. It prints one
-line per difference and nothing when the install is current. It fetches
+or is not running, and `<home>/owned-refs.json` that is missing or older
+than 5 minutes. It never prints a config value. It prints one line per
+difference and nothing when the install is current. It fetches
 first, so a merge shows up within the hour. Deliver it where the operator
 reads it: the home channel of the platform from part 13, such as `slack`.
 On a first install, create it after part 13. Create the job when `cron list`
@@ -804,7 +820,8 @@ hermes -p claude-worker cron list    # read each Last run line
 ```
 
 `refresh-checkouts` prints nothing when every checkout is current, and its
-last run shows no error. `check-install` shows an error until the install
+last run shows no error. After `refresh-owned-refs` runs, `<home>/owned-refs.json`
+exists and holds a JSON list. `check-install` shows an error until the install
 matches, which the Deploy section below fixes. `refresh-checkouts` prints one
 line for each checkout it left alone, such as a checkout on another branch or with
 uncommitted changes. Fix each problem it names.
@@ -1089,6 +1106,8 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      `platforms.webhook.extra.rate_limit` is installed. If it is, show the
      operator the count, and open an issue to raise `RATE_LIMIT` in
      `templates/render.py`.
+   - An `owned refs` line: create the part 12 `refresh-owned-refs` job, or
+     run it with `cron run` when it exists.
    - A `dashboard sign-in` line: follow step 6 of
      [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
      or allow the `refresh_tokens` grant on the `saas` Access application when
