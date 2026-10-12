@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from tests.support import SCRIPTS, GitFixture, git
+from tests.support import BOT_AUTHOR, BOT_LOGIN, SCRIPTS, GitFixture, git
 
 # A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
 ISSUE_ID = str(uuid.uuid4())
@@ -43,15 +43,23 @@ ALLOWED_NAMES = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TZ", "NVM_DIR",
     "GH_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
 }
-TAKEOVER_ENTRY = (
-    f"The issue already has an open pull request, {TAKEOVER_PR}, opened by someone else. This branch starts "
-    f"from its head. Open your own ready pull request, and in its body credit the original author and link "
+TAKEOVER_INTRO = f"The issue already has an open pull request, {TAKEOVER_PR}, opened by someone else."
+TAKEOVER_RULES = (
+    f"Open your own ready pull request, and in its body credit the original author and link "
     f"{TAKEOVER_PR}. Do not close {TAKEOVER_PR}. The worker closes it after a human approves. If push-signed "
     "refuses one of its commits, such as a merge commit, squash the pull request onto the default branch before "
     "you publish: check out the default branch under this branch's name, run `git merge --squash` with the pull "
     "request's head (fetch it again with `git fetch origin refs/pull/<number>/head` and use FETCH_HEAD), resolve "
     "conflicts once, and commit. Credit the original author with a Co-authored-by trailer "
     "on the commits you publish."
+)
+TAKEOVER_ENTRY = f"{TAKEOVER_INTRO} This branch starts from its head. {TAKEOVER_RULES}"
+FACTORY_BRANCH_TAKEOVER_ENTRY = (
+    f"{TAKEOVER_INTRO} This branch holds the factory's own earlier commits, not that pull request's. {TAKEOVER_RULES}"
+)
+PERSON_BRANCH_REFUSAL = (
+    f"origin/abc-123-fix was not created by {BOT_LOGIN}, so the factory cannot publish to it; a person must rename "
+    "that branch or open a pull request from it, which triage hands over as takeover_pr"
 )
 
 
@@ -453,8 +461,14 @@ class ClaudeSessionTest(GitFixture):
     def head(self) -> str:
         return git(self.worktree, "rev-parse", "HEAD")
 
-    def test_unstarted_branch_adopts_the_remote_branch(self) -> None:
-        remote = self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
+    def assert_refused_before_claude(self, status: int, report: dict, error: str, start: str) -> None:
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": error})
+        self.assertEqual(self.head(), start)
+        self.assertFalse(self.log.exists())
+
+    def test_unstarted_branch_adopts_the_factory_remote_branch(self) -> None:
+        remote = self.push_upstream_commit("remote", "refs/heads/abc-123-fix", author=BOT_AUTHOR)
 
         status, report = self.run_session()
 
@@ -462,6 +476,65 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": remote})
         self.assertEqual(self.head(), remote)
         self.assertEqual(self.claude_call()["argv"][1], DEFAULT_ENTRY)
+
+    def test_person_remote_branch_is_refused(self) -> None:
+        self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
+        start = self.head()
+
+        status, report = self.run_session()
+
+        self.assert_refused_before_claude(status, report, PERSON_BRANCH_REFUSAL, start)
+
+    def test_person_remote_branch_is_refused_even_with_a_takeover_pull_request(self) -> None:
+        self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
+        self.push_upstream_commit("pull", "refs/pull/7/head")
+        start = self.head()
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assert_refused_before_claude(status, report, PERSON_BRANCH_REFUSAL, start)
+
+    def test_remote_branch_at_the_default_branch_is_adopted(self) -> None:
+        start = self.head()
+        git(self.main, "push", "-q", "origin", "HEAD:refs/heads/abc-123-fix")
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": start})
+        self.assertEqual(self.head(), start)
+
+    def test_branch_the_factory_created_is_adopted_after_a_person_adds_to_it(self) -> None:
+        self.push_upstream_commit("factory", "refs/heads/abc-123-fix", author=BOT_AUTHOR)
+        remote = self.push_upstream_commit("person", "refs/heads/abc-123-fix", base="refs/heads/abc-123-fix")
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": remote})
+        self.assertEqual(self.head(), remote)
+
+    def test_remote_branch_without_a_github_login_is_refused(self) -> None:
+        self.push_upstream_commit("remote", "refs/heads/abc-123-fix", author=BOT_AUTHOR)
+        self.settings = self.write_settings([self.repository], login=None)
+        start = self.head()
+
+        status, report = self.run_session()
+
+        self.assert_refused_before_claude(status, report, (
+            "github.login is not set in the settings, so claude-session cannot tell the factory's branches "
+            "from a person's"
+        ), start)
+
+    def test_missing_origin_head_is_refused(self) -> None:
+        git(self.main, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+        start = self.head()
+
+        status, report = self.run_session()
+
+        self.assert_refused_before_claude(status, report, (
+            f"origin/HEAD is not set in {self.worktree}; run git remote set-head origin -a in the checkout"
+        ), start)
 
     def test_unstarted_branch_adopts_the_takeover_pull_request(self) -> None:
         pull = self.push_upstream_commit("pull", "refs/pull/7/head")
@@ -473,14 +546,15 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.head(), pull)
         self.assertEqual(self.claude_call()["argv"][1], f"{DEFAULT_ENTRY}\n\n{TAKEOVER_ENTRY}")
 
-    def test_remote_branch_wins_over_the_takeover_pull_request(self) -> None:
-        remote = self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
+    def test_factory_remote_branch_wins_over_the_takeover_pull_request(self) -> None:
+        remote = self.push_upstream_commit("remote", "refs/heads/abc-123-fix", author=BOT_AUTHOR)
         self.push_upstream_commit("pull", "refs/pull/7/head")
 
         _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
-        self.assertEqual(report["adopted"]["source"], "remote_branch")
+        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": remote})
         self.assertEqual(self.head(), remote)
+        self.assertEqual(self.claude_call()["argv"][1], f"{DEFAULT_ENTRY}\n\n{FACTORY_BRANCH_TAKEOVER_ENTRY}")
 
     def test_adoption_runs_once(self) -> None:
         pull = self.push_upstream_commit("pull", "refs/pull/7/head")

@@ -10,6 +10,8 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 REPO = SCRIPTS.parents[2]
+BOT_LOGIN = "factory-app[bot]"
+BOT_AUTHOR = (BOT_LOGIN, f"123+{BOT_LOGIN}@users.noreply.github.com")
 
 FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys
@@ -68,18 +70,33 @@ class GitFixture(unittest.TestCase):
         git(self.main, "worktree", "add", "-q", "-b", branch, str(path))
         return path
 
-    def push_upstream_commit(self, name: str, ref: str = "refs/heads/main") -> str:
+    def push_upstream_commit(
+        self, name: str, ref: str = "refs/heads/main", author: tuple[str, str] | None = None, base: str | None = None
+    ) -> str:
+        """Push one commit to ref, on top of base when given, else on the default branch."""
         other = self.tmp / f"other-{name}"
         git(self.tmp, "clone", "-q", str(self.origin), str(other))
+        if base:
+            git(other, "fetch", "-q", "origin", base)
+            git(other, "reset", "-q", "--hard", "FETCH_HEAD")
         (other / f"{name}.txt").write_text(name)
         git(other, "add", f"{name}.txt")
-        git(other, "commit", "-q", "-m", name)
+        if author:
+            git(other, "-c", "user.name=GitHub", "-c", "user.email=noreply@github.com",
+                "commit", "-q", "-m", name, f"--author={author[0]} <{author[1]}>")
+        else:
+            git(other, "commit", "-q", "-m", name)
         git(other, "push", "-q", "origin", f"+HEAD:{ref}")
         return git(other, "rev-parse", "HEAD")
 
-    def write_settings(self, repositories: list, claude_session: dict | None = None) -> Path:
+    def write_settings(
+        self, repositories: list, claude_session: dict | None = None, login: str | None = BOT_LOGIN
+    ) -> Path:
         path = self.tmp / "settings.json"
-        path.write_text(json.dumps({"repositories": repositories, "claude_session": claude_session or {}}))
+        settings = {"repositories": repositories, "claude_session": claude_session or {}}
+        if login:
+            settings["github"] = {"login": login}
+        path.write_text(json.dumps(settings))
         return path
 
     def make_fake_claude(self, log: Path) -> Path:
