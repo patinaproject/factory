@@ -16,7 +16,7 @@ own instructions above or below it.
 | --- | --- |
 | Where the factory's private configuration record lives | A document in the operator's tracker or wiki |
 | The directory that holds `gh` and the other tools setup installed | `~/.local/bin` |
-| Credentials on the machine that Hermes agents must never receive | `<NAME>` of each operator-only token |
+| Credentials on the machine that Hermes agents must never receive | `<NAME>` of each operator-only token, such as `OP_SERVICE_ACCOUNT_TOKEN` |
 | The operator's SST app that owns the ingress, and what deploys it | A repository path, and "merging to the default branch" |
 | The SSH hostname and the account people SSH into, when SSH is used | `<ssh-hostname>`, `<account>` |
 | The path of this repository's checkout on the machine | `~/factory` |
@@ -83,6 +83,8 @@ configuration, and update it in the same change.
   terminal.
 - These credentials are for the operator only, and Hermes agents never
   receive them: <operator-only credentials>.
+- Never run `op`, and never read the operator-only credentials, even when a
+  login shell puts an `op` wrapper on `PATH`.
 
 ### Remote access and ingress
 
@@ -121,8 +123,9 @@ configuration, and update it in the same change.
 ```
 
 Leave out the "Secrets" line about operator-only credentials when the input
-names none. When nobody SSHs into the machine, leave out the two SSH lines and
-drop `--ssh-users` from the check command.
+names none. Leave out the `op` line when the factory does not use
+[1Password](1password.md). When nobody SSHs into the machine, leave out the
+two SSH lines and drop `--ssh-users` from the check command.
 
 ## Write the block
 
