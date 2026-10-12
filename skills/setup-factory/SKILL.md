@@ -799,8 +799,10 @@ python3 skills/setup-factory/scripts/check-host-exposure --ssh-users <email>,<em
 ```
 
 It probes each of the machine's LAN and public addresses, including public
-IPv6 addresses that a router may not block. If every line starts with `PASS`,
-report the part as already configured.
+IPv6 addresses that a router may not block. Add
+`--principals-file /etc/ssh/authorized_principals/<account>` when people SSH
+in as a different account from the one running the check. If every line
+starts with `PASS`, report the part as already configured.
 
 Each `FAIL` line names its fix. Turn off a sharing service in System Settings.
 
