@@ -16,7 +16,9 @@ tables), that a cron job delivers only to a platform with a home channel in
 its profile, that the root home's check-install-alert wrapper matches the
 repository, that the worker home's secrets.command is the worker helper
 whenever the root home has a secret source, and that each configured
-repository checkout exists and has origin/HEAD set.
+repository checkout exists and has origin/HEAD set. When any difference is
+reported and the source checkout is not at origin/HEAD, the last line names
+that checkout and the command that fast-forwards it.
 
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd check at another file system
 root and launchctl, for tests.
@@ -528,6 +530,17 @@ def check_owned_refs(root: Path) -> list:
     return []
 
 
+def check_source_checkout(commit: Commit) -> list:
+    head = git(commit.repo, "rev-parse", "HEAD").strip()
+    if head == commit.sha:
+        return []
+    return [Drift(
+        "source checkout", str(commit.repo),
+        f"is behind {commit.label} at {commit.short}; fast-forward only this checkout with "
+        f"git -C {commit.repo} merge --ff-only {commit.sha}, and leave the worker-owned checkouts to refresh-checkouts",
+    )]
+
+
 def check_checkouts(settings) -> list:
     # Missing or malformed settings are check_config's to report.
     if not isinstance(settings, dict):
@@ -631,6 +644,8 @@ def main() -> int:
         if sys.platform == "darwin":
             launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))
             drifts.extend(check_services(launchd_root, os.environ.get("LAUNCHCTL_BIN", "launchctl")))
+        if drifts and args.ref is None:
+            drifts.extend(check_source_checkout(commit))
     except Refusal as exc:
         print(f"check-install: {exc}", file=sys.stderr)
         return 2

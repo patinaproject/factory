@@ -617,8 +617,32 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"plugin p1 in {self.root}: __init__.py differs from main at {merged}\n"
-                f"plugin p1 in {self.worker}: __init__.py differs from main at {merged}\n"),
+                f"plugin p1 in {self.worker}: __init__.py differs from main at {merged}\n"
+                + self.source_line(merged)),
         )
+
+    def source_line(self, short: str) -> str:
+        sha = git(self.repo, "rev-parse", "origin/main")
+        return (
+            f"source checkout {self.repo}: is behind main at {short}; fast-forward only this checkout with "
+            f"git -C {self.repo} merge --ff-only {sha}, and leave the worker-owned checkouts to refresh-checkouts\n"
+        )
+
+    def test_source_checkout_at_origin_head_gets_no_fast_forward_line(self) -> None:
+        self.install(self.worker, "SOUL.md", "stale\n")
+
+        code, out = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("source checkout", out)
+
+    def test_behind_source_checkout_without_drift_is_silent(self) -> None:
+        seed = self.tmp / "seed"
+        (seed / "README.md").write_text("docs only\n")
+        git(seed, "add", "README.md")
+        git(seed, "commit", "-qm", "docs")
+
+        self.assertEqual(self.check(), (0, ""))
 
     def test_checkout_state_does_not_matter(self) -> None:
         git(self.repo, "checkout", "-q", "-b", "side")
