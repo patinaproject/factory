@@ -8,12 +8,22 @@ dashboard's OIDC sign-in can keep a user signed in, and that the gateway
 rejected no webhook delivery with 429 in the last hour. Silent when the install
 matches. Prints one line per difference and exits 1, or exits 2 when it cannot
 run.
+
+It also checks that the config keys, cron jobs, and launchd services the setup
+runbook creates still match what it creates (the CONFIG, CRON, and SERVICES
+tables).
+
+LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd check at another file system
+root and launchctl, for tests.
 """
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import glob
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -23,7 +33,7 @@ import urllib.request
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
@@ -46,6 +56,96 @@ class Drift(NamedTuple):
 
 class Refusal(Exception):
     pass
+
+
+class Want(NamedTuple):
+    ok: Callable[[object], bool]
+    text: str
+
+
+def equal(value) -> Want:
+    return Want(lambda live: live == value, json.dumps(value))
+
+
+def prefixed(prefix: str, what: str) -> Want:
+    return Want(lambda live: isinstance(live, str) and live.startswith(prefix) and live != prefix, what)
+
+
+def one_of(*wants: Want) -> Want:
+    return Want(lambda live: any(want.ok(live) for want in wants), " or ".join(want.text for want in wants))
+
+
+def declared(what: str, *, besides: tuple = ()) -> Want:
+    """A per-factory value from the runbook's inputs: any value counts, except an empty one or `besides`."""
+    return Want(lambda live: live not in (None, "", *besides), what)
+
+
+ROOT, WORKER = "root", "worker"
+BOTH = (ROOT, WORKER)
+
+
+class ConfigKey(NamedTuple):
+    part: int
+    key: str
+    homes: tuple
+    want: Want
+    same_in_homes: bool = False
+
+
+class CronJob(NamedTuple):
+    part: int
+    name: str
+    minutes: int
+    deliver: Want
+
+
+class Service(NamedTuple):
+    part: int
+    name: str
+    kind: str
+    plist: str
+
+    def domains(self) -> tuple:
+        # A user agent loads in gui/<uid> from a login session and in user/<uid> otherwise, such as over SSH.
+        uid = os.getuid()
+        return ("system",) if self.kind == "daemon" else (f"gui/{uid}", f"user/{uid}")
+
+
+# What each part of skills/setup-factory/SKILL.md sets. check_routes and check_dashboard cover the
+# routes and dashboard keys. Optional parts (3, 14) and secret-bearing keys are not listed.
+CONFIG = (
+    ConfigKey(
+        4, "model.provider", BOTH,
+        one_of(equal("claude-subscription-directsdk-experimental"), prefixed("custom:", "custom:<proxy provider>")),
+        same_in_homes=True,
+    ),
+    ConfigKey(4, "model.default", BOTH, declared("set to the operator's model alias")),
+    ConfigKey(6, "platforms.webhook.enabled", (ROOT,), equal(True)),
+    ConfigKey(6, "platforms.webhook.extra.host", (ROOT,), equal("127.0.0.1")),
+    ConfigKey(6, "platforms.webhook.extra.port", (ROOT,), declared("set to the webhook port")),
+    ConfigKey(
+        10, "plugins.entries.linear-agent-session.settings", BOTH, declared("set to the factory settings"),
+        same_in_homes=True,
+    ),
+    ConfigKey(10, "kanban.max_in_progress", (ROOT,), declared("set to the operator's card limit")),
+    ConfigKey(10, "kanban.review_dispatch", (ROOT,), equal(False)),
+    ConfigKey(10, "kanban.auto_decompose", (ROOT,), equal(False)),
+    ConfigKey(13, "streaming.enabled", (ROOT,), equal(True)),
+    ConfigKey(13, "platforms.slack.extra.native_task_cards", (ROOT,), equal(True)),
+)
+
+# Script-only jobs in the worker profile. Each runs the worker script of the same name.
+CRON = (
+    CronJob(10, "refresh-gh-app-login", 30, equal("local")),
+    CronJob(12, "refresh-checkouts", 60, equal("local")),
+    CronJob(12, "check-install", 60, declared("the operator's chat platform", besides=("local",))),
+)
+
+# macOS only. `plist` is a glob; the runbook lets the operator name the cloudflared plist.
+SERVICES = (
+    Service(7, "cloudflared tunnel", "daemon", "/Library/LaunchDaemons/*cloudflared*.plist"),
+    Service(15, "Hermes gateway", "agent", "~/Library/LaunchAgents/ai.hermes.gateway.plist"),
+)
 
 
 class Commit(NamedTuple):
@@ -215,6 +315,116 @@ def check_dashboard(root: Path, hermes: str) -> list:
     return drifts
 
 
+def config_value(home: Path, hermes: str, key: str):
+    # Without --raw, Hermes masks secrets. Values are compared here and never printed.
+    proc = subprocess.run(
+        [hermes, "config", "get", key, "--json"], env={**os.environ, "HERMES_HOME": str(home)},
+        capture_output=True, text=True,
+    )
+    if proc.returncode == 0:
+        return json.loads(proc.stdout)
+    if "Config key not set" in proc.stderr:
+        return None
+    raise Refusal(f"hermes config get {key} failed in {home}: {proc.stderr.strip()}")
+
+
+def check_config(home_paths: dict, hermes: str) -> list:
+    reads = [(entry, home) for entry in CONFIG for home in entry.homes]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        values = list(pool.map(lambda read: config_value(home_paths[read[1]], hermes, read[0].key), reads))
+    drifts = []
+    by_key: dict = {}
+    for (entry, home), value in zip(reads, values):
+        if not entry.want.ok(value):
+            detail = f"is not {entry.want.text} (part {entry.part})"
+            drifts.append(Drift("config", f"{entry.key} in {home_paths[home]}", detail))
+        by_key.setdefault(entry.key, []).append(value)
+    for entry in CONFIG:
+        values = by_key[entry.key]
+        if entry.same_in_homes and any(value != values[0] for value in values):
+            between = " and ".join(str(home_paths[home]) for home in entry.homes)
+            drifts.append(Drift("config", entry.key, f"differs between {between} (part {entry.part})"))
+    return drifts
+
+
+def cron_jobs(home: Path) -> list:
+    store = home / "cron" / "jobs.json"
+    return json.loads(store.read_text())["jobs"] if store.is_file() else []
+
+
+def cron_differences(job: CronJob, live: dict) -> list:
+    details = []
+    if not live["enabled"]:
+        details.append("is disabled")
+    schedule = live["schedule"]
+    if schedule.get("kind") != "interval" or schedule.get("minutes") != job.minutes:
+        details.append(f"runs {live['schedule_display']}, not every {job.minutes}m")
+    if live["script"] != job.name or not live["no_agent"]:
+        details.append(f"is not a script-only job that runs {job.name}")
+    if not job.deliver.ok(live["deliver"]):
+        details.append(f"delivers to {json.dumps(live['deliver'])}, not {job.deliver.text}")
+    return details
+
+
+def check_cron(root: Path, worker: Path) -> list:
+    drifts = []
+    worker_jobs = cron_jobs(worker)
+    for job in CRON:
+        where = f"{job.name} in {worker}"
+        found = [live for live in worker_jobs if live["name"] == job.name]
+        if not found:
+            drifts.append(Drift("cron job", where, f"is missing (part {job.part})"))
+        elif len(found) > 1:
+            drifts.append(Drift("cron job", where, f"exists {len(found)} times (part {job.part})"))
+        for live in found:
+            drifts.extend(Drift("cron job", where, f"{d} (part {job.part})") for d in cron_differences(job, live))
+    parts = {job.name: job.part for job in CRON}
+    for home, jobs in ((root, cron_jobs(root)), (worker, worker_jobs)):
+        for live in jobs:
+            where = f"{live['name']} in {home}"
+            if live["name"] not in parts:
+                drifts.append(Drift("cron job", where, "is not a job the setup runbook creates"))
+            elif home == root:
+                drifts.append(Drift("cron job", where, f"belongs to the worker profile (part {parts[live['name']]})"))
+    return drifts
+
+
+def launchd_state(launchctl: str, domains: tuple, label: str) -> str | None:
+    for domain in domains:
+        # The full output lists the program arguments, which can hold a token; only the state is read.
+        proc = subprocess.run([launchctl, "print", f"{domain}/{label}"], capture_output=True, text=True)
+        state = re.search(r"^\s*state = (\S+)", proc.stdout, re.MULTILINE)
+        if proc.returncode == 0 and state:
+            return state.group(1)
+    return None
+
+
+def check_services(launchd_root: Path, launchctl: str) -> list:
+    drifts = []
+    for service in SERVICES:
+        pattern = str(launchd_root / os.path.expanduser(service.plist).lstrip("/"))
+        plists = sorted(glob.glob(pattern))
+        if len(plists) != 1:
+            found = "no plist matches" if not plists else f"{len(plists)} plists match"
+            drifts.append(Drift("service", service.name, f"{found} {service.plist} (part {service.part})"))
+            continue
+        try:
+            with open(plists[0], "rb") as handle:
+                plist = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException) as exc:
+            drifts.append(Drift("service", service.name, f"cannot read {plists[0]}: {exc.__class__.__name__}"))
+            continue
+        # The plist's ProgramArguments can hold a token, so only Label and RunAtLoad are used.
+        if plist.get("RunAtLoad") is not True:
+            drifts.append(Drift("service", service.name, f"does not run at load (part {service.part})"))
+        state = launchd_state(launchctl, service.domains(), plist["Label"])
+        if state is None:
+            drifts.append(Drift("service", service.name, f"is not loaded in launchd (part {service.part})"))
+        elif state != "running":
+            drifts.append(Drift("service", service.name, f"is {state}, not running (part {service.part})"))
+    return drifts
+
+
 def homes() -> tuple:
     if not os.environ.get("HERMES_HOME"):
         raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
@@ -271,10 +481,15 @@ def main() -> int:
         drifts = [
             *check_profile(commit, worker),
             *check_plugins(commit, [root, worker]),
+            *check_config({ROOT: root, WORKER: worker}, hermes),
+            *check_cron(root, worker),
             *check_routes(commit, root, hermes),
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
         ]
+        if sys.platform == "darwin":
+            launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))
+            drifts.extend(check_services(launchd_root, os.environ.get("LAUNCHCTL_BIN", "launchctl")))
     except Refusal as exc:
         print(f"check-install: {exc}", file=sys.stderr)
         return 2
