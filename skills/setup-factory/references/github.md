@@ -27,8 +27,9 @@ Run this reference in two passes. Part 9 runs [Create the App](#create-the-app)
 through [Set the worker's `gh` directory](#set-the-workers-gh-directory). Part
 10 writes the settings and clones the checkouts, then returns here for
 [Sign the worker's `gh` in](#sign-the-workers-gh-in),
-[Check the App's access](#check-the-apps-access), and
-[Configure git in each checkout](#configure-git-in-each-checkout).
+[Check the App's access](#check-the-apps-access),
+[Configure git in each checkout](#configure-git-in-each-checkout), and
+[Block plain pushes on the machine](#block-plain-pushes-on-the-machine).
 
 ## Check
 
@@ -56,6 +57,8 @@ All of these must hold:
   `<bot user id>+<app-slug>[bot]@users.noreply.github.com`.
 - For each main checkout, `git -C <path> config --local remote.origin.pushurl`
   prints `no_push_use_push-signed`.
+- `python3 <worker>/scripts/guard-git-push --check` prints nothing. See
+  [Block plain pushes on the machine](#block-plain-pushes-on-the-machine).
 - `env_has <home>/.env GITHUB_WEBHOOK_SECRET` prints `1`.
 - The App's webhook is active and delivers to the factory (see
   [Live test](#live-test)).
@@ -272,6 +275,30 @@ use the normal URL.
 Kanban worktrees share their main checkout's configuration, so each worktree
 uses these values.
 
+## Block plain pushes on the machine
+
+The push URL above guards only the configured checkouts. An agent session in
+another clone, such as an operator's interactive session, can still run
+`git push`, and its unsigned commits then block the pull request's merge.
+`guard-git-push` closes that gap for every repository of the user that runs
+the factory. It adds global `url.no_push_use_push-signed/.pushInsteadOf`
+entries for `https://github.com/`, `git@github.com:`, and
+`ssh://git@github.com/`, so git rewrites any push to GitHub to a path that
+does not exist:
+
+```sh
+python3 <worker>/scripts/guard-git-push           # adds the missing entries, prints nothing
+python3 <worker>/scripts/guard-git-push --check   # prints nothing when all entries exist
+```
+
+A plain `git push` then fails with
+`fatal: 'no_push_use_push-signed/<owner>/<repo>.git' does not appear to be a git repository`,
+also with `--no-verify` and in a repository with its own hooks. Fetches keep
+the normal URL, and `push-signed` publishes through GitHub's API, so neither
+changes. This changes the user's global git configuration, `~/.gitconfig`.
+Tell the operator before you run it. A remote with its own `pushurl` keeps
+that URL.
+
 ## Webhooks
 
 The App's own webhook replaces per-repository and organization webhooks. It
@@ -383,8 +410,10 @@ in the pull request. Signing with the operator's personal key would verify the
 commit as the operator, not the App.
 
 The configured checkouts set `remote.origin.pushurl` to
-`no_push_use_push-signed`, so a plain `git push` fails with that name. A
-session in another clone has no such guard, so follow the rule there too.
+`no_push_use_push-signed`, and
+[Block plain pushes on the machine](#block-plain-pushes-on-the-machine) does
+the same for every other clone, so a plain `git push` to GitHub fails with
+that name.
 
 When the remote branch does not exist, `push-signed` creates it at the merge
 base with the default branch and replays every commit after that point. For a
