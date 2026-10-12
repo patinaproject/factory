@@ -53,7 +53,7 @@ anything.
 
 ## Find the card
 
-The card's `completion_contract` equals the event's repository, ignoring case.
+Find the card by the refs the `github` route filters on, and by nothing else.
 
 - For a pull request, review, check, or workflow event, take the branch from
   the event fields above. For an `issue_comment` on a pull request, read it with
@@ -62,6 +62,10 @@ The card's `completion_contract` equals the event's repository, ignoring case.
 - For an `issues` event or an `issue_comment` on an issue that is not a pull
   request, the card is the task whose `body` contains the line
   `github_issue_url: <issue URL>`.
+
+Do not compare the card's `completion_contract` with the event. Hermes
+replaces the repository there with a pull request URL once a worker reports
+one.
 
 If no card matches, stop. The event belongs to work the factory does not own.
 
