@@ -28,7 +28,7 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
   exists, run `hermes kanban unblock <task id>`. When one exists, run three
   commands in this order: `hermes kanban unblock <task id>`, then
   `hermes kanban request-review <task id>`, then
-  `hermes kanban reopen-review <task id> --reason 'Linear reply; see the card comments'`.
+  `hermes kanban reopen-review <task id> --reason 'resumed from Linear; see the card comments'`.
   Hermes holds a `ready` card for 24 hours after a card comment that names a
   pull request, and a plain unblock does not lift the hold. The review reopen
   is the handoff that does, so the worker starts on the next dispatcher tick.
@@ -172,7 +172,7 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
 4. If the card is `blocked`, read the issue with `linear_issue`. If its
    `delegate` is `<<app_user_id>>`, unblock it as "Rules" says. If the card
    is `review`, run
-   `hermes kanban reopen-review <task id> --reason 'Linear reply; see the card comments'`,
+   `hermes kanban reopen-review <task id> --reason 'resumed from Linear; see the card comments'`.
    so its worker reads the reply.
 5. Post one `thought` on this agent session, so the human sees that the reply
    arrived. Name the card's task id, then add what happens next:
