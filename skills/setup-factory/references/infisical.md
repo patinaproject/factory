@@ -51,12 +51,15 @@ All of these must hold:
   `hermes -p claude-worker config get secrets.command --json` each show
   `"enabled": true` and the command from
   [Configure both homes](#configure-both-homes). When the factory uses
-  [1Password](1password.md), the command comes from that part instead.
+  [1Password](1password.md), the helper also carries that part's filter.
 - Each of those commands prints `Command helper: applied <n> secrets` on its
-  first line, where `<n>` is the number of values in the folder.
+  first line, where `<n>` is the number of values in the folder. When the
+  folder holds `OP_SERVICE_ACCOUNT_TOKEN` for [1Password](1password.md),
+  `<n>` is the number of values minus one.
 - `<home>/bin/factory-secrets` exists, and `diff` against the script in
   [Configure both homes](#configure-both-homes) shows no change, or only the
-  changes the operator approved there.
+  changes the operator approved there. When the factory uses
+  [1Password](1password.md), the only other change is that part's filter.
 - `hermes -p claude-worker config get terminal.env_passthrough --json` lists
   the token variable that `claude_session.auth_token_env` names.
 - No moved value remains in a `.env` file: `env_has` prints `0` for each value

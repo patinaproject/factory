@@ -46,8 +46,8 @@ Run these in a new operator login shell. All of them must hold:
 - `op user get --me | grep -c '^Type: *SERVICE_ACCOUNT'` prints `1`.
 - `op vault list --format json | python3 -c 'import json, sys; print(len(json.load(sys.stdin)))'`
   prints `1`, and `op vault list` names `<vault>`.
-- The Hermes helper output has no token line. The `helper_count` function in
-  [Verify](#verify) prints `0`.
+- The Hermes helper output has no token line. The `helper_count` lines in
+  [Verify](#verify) each print `0`, for both homes.
 - `env_has <home>/.env OP_SERVICE_ACCOUNT_TOKEN` and
   `env_has <worker>/.env OP_SERVICE_ACCOUNT_TOKEN` each print `0`.
 
@@ -99,20 +99,27 @@ infisical export --silent --projectId <project id> --env <environment> \
 
 ## Strip the token from the Hermes helper
 
-Replace the command from
-[Configure both homes](infisical.md#configure-both-homes). It keeps the export
-in a variable, so a failed export still fails the command. Then it removes the
-token line:
+Both homes run the helper script from the Infisical part,
+`<home>/bin/factory-secrets`, as described in
+[Configure both homes](infisical.md#configure-both-homes). Do not replace it
+with an inline command. Add one filter to the script instead.
+
+In `<home>/bin/factory-secrets`, find the line that prints the export after a
+successful attempt:
 
 ```sh
-cmd='t=$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$FACTORY_INFISICAL_CLIENT_ID" INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$FACTORY_INFISICAL_CLIENT_SECRET" infisical login --method=universal-auth --silent --plain) && [ -n "$t" ] && out=$(INFISICAL_TOKEN="$t" infisical export --silent --projectId=<project id> --env=<environment> --path=<folder> --format=dotenv) && printf "%s\n" "$out" | sed "/^OP_SERVICE_ACCOUNT_TOKEN=/d"'
-value="$(python3 -c 'import json, sys; print(json.dumps({"enabled": True, "helper_timeout_seconds": 20, "command": sys.argv[1]}))' "$cmd")"
-hermes config set secrets.command "$value" </dev/null
-hermes -p claude-worker config set secrets.command "$value" </dev/null
+    printf '%s\n' "$out"
 ```
 
-The filter is the last part:
-`printf "%s\n" "$out" | sed "/^OP_SERVICE_ACCOUNT_TOKEN=/d"`.
+Change it so the output passes through the filter:
+
+```sh
+    printf '%s\n' "$out" | sed '/^OP_SERVICE_ACCOUNT_TOKEN=/d'
+```
+
+The script still checks that the export is not empty before it prints, so a
+failed export still fails the helper. When the worker's `secrets.command`
+names a different script, make the same change there.
 
 Hermes now reports one fewer secret than the folder holds:
 `Command helper: applied <n> secrets`, where `<n>` is the folder's count minus
@@ -132,6 +139,7 @@ The wrapper does these things:
   helper does.
 - It reads only `OP_SERVICE_ACCOUNT_TOKEN`, exports it, and runs the real
   `op` with the same arguments.
+- It turns off the Infisical CLI's update check, which can hang.
 - Each Infisical call stops after 20 seconds.
 - It never prints the token. On failure it prints one line to standard error
   and exits `1`.
@@ -143,6 +151,7 @@ US Cloud.
 ```sh
 #!/bin/sh
 set -u
+export INFISICAL_DISABLE_UPDATE_CHECK=true
 real_op='<bin dir>/op'
 env_file='<home>/.env'
 
@@ -184,18 +193,23 @@ sets. Hermes agents then run the real `op`, with no token.
 Open a new login shell, so that it reads the new `PATH`. Then run the checks
 from [Check](#check).
 
-`helper_count` runs the Hermes helper command from
-[Strip the token](#strip-the-token-from-the-hermes-helper) with the machine
-identity from `<home>/.env`, and counts the token lines. It never prints a
-value:
+`helper_count` reads the helper command that a Hermes home is configured
+with, runs it with the machine identity from that home's `.env`, and counts
+the token lines. It reads the two `FACTORY_INFISICAL_` keys with `sed`, so it
+loads nothing else from the file, and it never prints a value:
 
 ```sh
 helper_count() {
-  FACTORY_INFISICAL_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' <home>/.env)" \
-  FACTORY_INFISICAL_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' <home>/.env)" \
+  env_file=$1; shift
+  cmd="$(hermes "$@" config get secrets.command --json 2>/dev/null </dev/null |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["command"])')"
+  [ -n "$cmd" ] || { echo "no secrets.command" >&2; return 1; }
+  FACTORY_INFISICAL_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' "$env_file")" \
+  FACTORY_INFISICAL_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' "$env_file")" \
     sh -c "$cmd" | grep -c '^OP_SERVICE_ACCOUNT_TOKEN='
 }
-helper_count   # 0
+helper_count <home>/.env                     # 0
+helper_count <worker>/.env -p claude-worker  # 0
 ```
 
 Also confirm that the gateway's `PATH` does not contain `<wrapper dir>`.
