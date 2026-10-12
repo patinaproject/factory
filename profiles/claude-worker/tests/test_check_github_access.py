@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import SCRIPTS
+from tests.support import SCRIPTS, with_interpreter
 
 REPO = "example-org/example-repo"
 SHA = "a" * 40
@@ -66,7 +66,7 @@ class CheckGithubAccessTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         self.gh = self.tmp / "fake-gh"
-        self.gh.write_text(FAKE_GH)
+        self.gh.write_text(with_interpreter(FAKE_GH))
         os.chmod(self.gh, 0o755)
         self.log = self.tmp / "gh-calls.jsonl"
         self.settings = self.tmp / "settings.json"

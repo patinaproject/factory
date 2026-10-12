@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,20 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 REPO = SCRIPTS.parents[2]
 BOT_LOGIN = "factory-app[bot]"
 BOT_AUTHOR = (BOT_LOGIN, f"123+{BOT_LOGIN}@users.noreply.github.com")
+
+SHEBANG = "#!/usr/bin/env python3\n"
+
+
+def with_interpreter(script: str) -> str:
+    """Pin a fake script to the interpreter running the tests.
+
+    `env python3` follows the PATH claude-session hands the script. On macOS
+    that can reach /usr/bin/python3, a shim that adds SDKROOT, CPATH,
+    LIBRARY_PATH, and MANPATH to the environment the fake then records.
+    """
+    assert script.startswith(SHEBANG)
+    return f"#!{sys.executable}\n" + script[len(SHEBANG):]
+
 
 FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys
@@ -112,7 +127,7 @@ class GitFixture(unittest.TestCase):
 
     def make_fake_claude(self, log: Path) -> Path:
         path = self.tmp / "fake-claude"
-        path.write_text(FAKE_CLAUDE)
+        path.write_text(with_interpreter(FAKE_CLAUDE))
         os.chmod(path, 0o755)
         self.fake_claude_options = {"log": str(log)}
         self.configure_fake_claude()

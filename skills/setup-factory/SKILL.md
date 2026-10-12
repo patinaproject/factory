@@ -732,10 +732,15 @@ Hermes moves a card that blocks twice for the same reason to its `triage`
 column, and by default its decomposer then splits the card into child cards.
 A factory card is one Linear issue, and its children would lack the key block
 the worker needs, so turn the decomposer off. A looping card then waits in
-`triage` for a person.
+`triage` for a person, and a reply on its Linear issue resumes it.
+
+Leave `kanban.default_assignee` unset. The resume steps in the triage prompt
+unassign a card so the dispatcher skips it while `kanban specify` rewrites it,
+and a default assignee would route the unassigned card to a worker first.
 
 **Check.** `hermes config get kanban.review_dispatch` and
-`hermes config get kanban.auto_decompose` each print `false`.
+`hermes config get kanban.auto_decompose` each print `false`, and
+`hermes config get kanban.default_assignee` prints nothing or an empty string.
 
 `default_workdir` is board metadata, so `hermes config get` does not show it.
 Read the board metadata with `hermes kanban boards --help` to find the listing
@@ -1070,14 +1075,23 @@ each check. Report each result.
     `review_reopened`. The next dispatcher tick starts a worker, no
     `respawn_guarded` event with reason `active_pr` follows, and the card
     completes without operator action.
+19. Move a card to `triage`, for example by letting it block twice for the same
+    reason, then reply in its Linear agent session. In
+    `hermes kanban show <task id> --json`, the events after the reply are
+    `assigned` with no assignee, `specified`, `edited`, and `assigned` to
+    `claude-worker`. The card's title and body are unchanged, the next
+    dispatcher tick starts a worker, and no `respawn_guarded` event follows
+    the last `assigned` event. Run it once with a pull request open and once
+    without.
 
-**Known limitation.** Only the Kanban dashboard reopens a `done` or `triage`
-card. The operator drags the card to Ready, which Hermes documents as a
-deliberate re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a
-GitHub event arrives for a done card, triage comments on the card and asks the
-operator to reopen the card from the Kanban dashboard. A card reaches `done`
-only when its pull request merges, so this applies to follow-up work after the
-merge.
+**Known limitation.** Only the Kanban dashboard reopens a `done` card. The
+operator drags the card to Ready, which Hermes documents as a deliberate
+re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a GitHub event
+arrives for a done card, triage comments on the card and asks the operator to
+reopen the card from the Kanban dashboard. A card reaches `done` only when its
+pull request merges, so this applies to follow-up work after the merge. A
+`triage` card needs no dashboard: its Linear reply unassigns the card, runs
+`specify`, restores the title and body, and assigns the card again.
 
 ## 16. Host exposure
 
@@ -1196,10 +1210,17 @@ A merged change to `plugins/`, `profiles/`, or `templates/` is not live until
 it is installed. Hermes loads plugins and webhook routes only when the gateway
 starts. The worker reads `SOUL.md` and its scripts on each run.
 
-1. Bring the checkout the profile was installed from up to date. Its path is
-   the `source` line of `<worker>/distribution.yaml`, two levels up. It must be
-   on the default branch with no uncommitted changes. Fast-forward it to
-   `origin/HEAD`.
+1. Find the source checkout. It is the checkout `<worker>/distribution.yaml`
+   points at, and this command prints it:
+
+   ```sh
+   HERMES_HOME=<worker> python3 <worker>/scripts/check-install --print-source
+   ```
+
+   Fast-forward only that checkout to `origin/HEAD`. It must be on the default
+   branch with no uncommitted changes. Never touch the worker-owned
+   checkouts, which are the configured repository checkouts the worker profile
+   uses. They change only through a Kanban card or `refresh-checkouts`.
 2. List what is out of date:
 
    ```sh
@@ -1218,6 +1239,10 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      `templates/render.py`.
    - An `owned refs` line: create the part 12 `refresh-owned-refs` job, or
      run it with `cron run` when it exists.
+   - A `source checkout` line: the source checkout is not at `origin/HEAD`.
+     When the line gives a `git merge --ff-only` command, run it as written,
+     then run `check-install` again. Otherwise the checkout is ahead, diverged,
+     on another branch, or dirty. Fix that by hand before you deploy.
    - A `checkout` line: the checkout is missing or has no `origin/HEAD`. Clone
      it as in part 10, or run `git -C <path> remote set-head origin -a`.
    - A `dashboard sign-in` line: follow step 6 of
