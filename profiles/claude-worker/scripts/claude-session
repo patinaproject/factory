@@ -4,6 +4,11 @@
 Prints exactly one JSON line on stdout. The Hermes worker that calls this
 script relays the line to the board; this process is fenced from board
 mutations, so it never touches Kanban itself.
+
+Claude Code starts with the allowlisted environment in CHILD_ENV_NAMES and
+CHILD_ENV_PREFIXES. Every credential it needs, the Linear token and the proxy
+token, reaches it only through the per-run settings file, mode 0600, which is
+removed when the run ends.
 """
 from __future__ import annotations
 
@@ -43,13 +48,18 @@ PUBLISH_RULE = (
     "commits that the GitHub App signs, which repositories requiring verified signatures need. To bring "
     "in the base branch, run `gh pr update-branch`, never a local merge."
 )
+LINEAR_RULE = (
+    "Reach Linear only with the token in LINEAR_API_KEY, which the factory's Linear agent app issued for this "
+    "run. Never mint a Linear token yourself and never run a secrets helper: a token request with another scope "
+    "set revokes the factory's tokens."
+)
 FINISH_RULE = (
     "Stop every background command, monitor, and watcher you started before you write your final result. "
     "The run ends when you finish, and anything still running is killed. To wait for CI, run a foreground "
     "command that ends on its own, such as `gh pr checks <number> --watch --fail-fast` with the tool's "
     "timeout set, and run it again when it times out."
 )
-SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{FINISH_RULE}"
+SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{FINISH_RULE}"
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 QUIET_SECONDS = 1.0
 GRACE_SECONDS = 10.0
@@ -203,18 +213,47 @@ MODEL_TIER_VARIABLES = (
 )
 
 
+# What Claude Code and the tools it runs need: a shell, locale, temp dir, the worker's gh login, and its
+# own config dir. Nothing else from the worker's environment crosses, so no secret can.
+CHILD_ENV_NAMES = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TZ", "NVM_DIR",
+    "GH_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+})
+CHILD_ENV_PREFIXES = ("LC_",)
+
+
 def child_env(worktree: Path) -> dict:
-    env = {name: value for name, value in os.environ.items() if not name.startswith("ANTHROPIC_")}
+    env = {
+        name: value for name, value in os.environ.items()
+        if name in CHILD_ENV_NAMES or name.startswith(CHILD_ENV_PREFIXES)
+    }
     node_bin = node_bin_for(worktree)
     if node_bin:
         env["PATH"] = f"{node_bin}{os.pathsep}{env.get('PATH', '')}"
     return env
 
 
-def transport_settings(transport: dict) -> dict | None:
+def linear_api_key() -> str:
+    """A Linear token from the worker home's linear-agent-session plugin, which shares its token cache."""
+    home = os.environ.get("HERMES_HOME")
+    if not home:
+        raise Refusal("HERMES_HOME is not set; claude-session reads the Linear token through the worker home's plugin")
+    plugin = Path(home) / "plugins" / "linear-agent-session"
+    if not (plugin / "linear.py").is_file():
+        raise Refusal(f"the linear-agent-session plugin is not installed in {home}")
+    sys.path.insert(0, str(plugin))
+    import linear
+
+    try:
+        return linear.client_from_env()._access_token()
+    except linear.LinearError as error:
+        raise Refusal(f"Linear token: {error}") from None
+
+
+def claude_settings(transport: dict, api_key: str) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
-    env = {}
+    env = {"LINEAR_API_KEY": api_key}
     if transport.get("base_url"):
         env["ANTHROPIC_BASE_URL"] = transport["base_url"]
     token_env = transport.get("auth_token_env")
@@ -224,7 +263,13 @@ def transport_settings(transport: dict) -> dict | None:
         env["ANTHROPIC_AUTH_TOKEN"] = os.environ[token_env]
     if transport.get("model"):
         env.update({name: transport["model"] for name in MODEL_TIER_VARIABLES})
-    return {"env": env} if env else None
+    return {"env": env}
+
+
+def write_private(path: Path, settings: dict) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        json.dump(settings, handle)
 
 
 def max_turns_args(transport: dict) -> list[str]:
@@ -395,13 +440,9 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         ]
         if transport.get("model"):
             command += ["--model", transport["model"]]
-        overrides = transport_settings(transport)
         settings_path = lock_path.with_name(SETTINGS_FILE_NAME)
-        if overrides:
-            fd = os.open(settings_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as handle:
-                json.dump(overrides, handle)
-            command += ["--settings", str(settings_path)]
+        write_private(settings_path, claude_settings(transport, linear_api_key()))
+        command += ["--settings", str(settings_path)]
         try:
             output, exit_code, detail = run_claude(command, worktree)
         finally:

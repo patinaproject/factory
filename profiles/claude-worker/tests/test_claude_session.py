@@ -18,6 +18,9 @@ SYSTEM_PROMPT = (
     f"Publish commits only by running {(SCRIPTS / 'push-signed').resolve()} from the worktree, never `git push`. "
     "It creates commits that the GitHub App signs, which repositories requiring verified signatures need. "
     "To bring in the base branch, run `gh pr update-branch`, never a local merge.\n\n"
+    "Reach Linear only with the token in LINEAR_API_KEY, which the factory's Linear agent app issued for this "
+    "run. Never mint a Linear token yourself and never run a secrets helper: a token request with another scope "
+    "set revokes the factory's tokens.\n\n"
     "Stop every background command, monitor, and watcher you started before you write your final result. "
     "The run ends when you finish, and anything still running is killed. To wait for CI, run a foreground "
     "command that ends on its own, such as `gh pr checks <number> --watch --fail-fast` with the tool's "
@@ -30,6 +33,16 @@ DEFAULT_ENTRY = (
     "which moves it to In Progress. Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
 TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
+# Everything else a worker process holds. None of it may reach Claude.
+WORKER_SECRETS = {
+    "LINEAR_WEBHOOK_SECRET": "x", "GITHUB_WEBHOOK_SECRET": "x", "FACTORY_INFISICAL_CLIENT_ID": "x",
+    "FACTORY_INFISICAL_CLIENT_SECRET": "x", "SLACK_BOT_TOKEN": "x", "OP_SERVICE_ACCOUNT_TOKEN": "x",
+    "EXAMPLE_PROXY_TOKEN": "token-value", "HERMES_KANBAN_TASK": "t_1", "GH_TOKEN": "x",
+}
+ALLOWED_NAMES = {
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TZ", "NVM_DIR",
+    "GH_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+}
 TAKEOVER_ENTRY = (
     f"The issue already has an open pull request, {TAKEOVER_PR}, opened by someone else. This branch starts "
     f"from its head. Open your own ready pull request, and in its body credit the original author and link "
@@ -46,10 +59,12 @@ class ClaudeSessionTest(GitFixture):
     def setUp(self) -> None:
         super().setUp()
         self.worktree = self.add_worktree("abc-123-fix")
-        self.claude = self.make_fake_claude()
         self.log = self.tmp / "claude-call.json"
+        self.claude = self.make_fake_claude(self.log)
         self.claude_config = self.tmp / "claude-config"
         self.nvm_dir = self.tmp / "nvm"
+        self.hermes_home = self.tmp / "hermes" / "profiles" / "claude-worker"
+        self.install_linear_plugin(self.hermes_home)
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
 
@@ -57,10 +72,14 @@ class ClaudeSessionTest(GitFixture):
         base = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
         base.update(
             HERMES_KANBAN_WORKSPACE=str(workspace or self.worktree),
+            HERMES_HOME=str(self.hermes_home),
             CLAUDE_BIN=str(self.claude),
             CLAUDE_CONFIG_DIR=str(self.claude_config),
             NVM_DIR=str(self.nvm_dir),
-            FAKE_CLAUDE_LOG=str(self.log),
+            GH_CONFIG_DIR=str(self.tmp / "gh"),
+            LINEAR_CLIENT_ID="id1",
+            LINEAR_CLIENT_SECRET="secret1",
+            **WORKER_SECRETS,
         )
         base.update(env or {})
         proc = subprocess.run(
@@ -81,6 +100,9 @@ class ClaudeSessionTest(GitFixture):
 
     def claude_call(self) -> dict:
         return json.loads(self.log.read_text())
+
+    def worktree_git_dir(self) -> Path:
+        return Path(git(self.worktree, "rev-parse", "--absolute-git-dir"))
 
     def write_transcript(self, worktree: Path | None = None) -> None:
         project = self.claude_config / "projects" / f"project-{uuid.uuid4()}"
@@ -111,6 +133,7 @@ class ClaudeSessionTest(GitFixture):
             "--permission-mode", "bypassPermissions",
             "--session-id", SESSION_ID,
             "--append-system-prompt", SYSTEM_PROMPT,
+            "--settings", str(self.worktree_git_dir() / "claude-session.settings.json"),
         ])
         self.assertEqual(Path(call["cwd"]).resolve(), self.worktree)
 
@@ -130,6 +153,7 @@ class ClaudeSessionTest(GitFixture):
             "--permission-mode", "bypassPermissions",
             "--resume", SESSION_ID,
             "--append-system-prompt", SYSTEM_PROMPT,
+            "--settings", str(self.worktree_git_dir() / "claude-session.settings.json"),
         ])
 
     def test_transcript_of_another_worktree_starts_a_fresh_session(self) -> None:
@@ -266,7 +290,7 @@ class ClaudeSessionTest(GitFixture):
             "max_turns": 12,
         })
 
-        self.run_session(env={"EXAMPLE_PROXY_TOKEN": "token-value"})
+        self.run_session()
 
         call = self.claude_call()
         settings_path = call["argv"][-1]
@@ -282,6 +306,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(call["settings"], {
             "mode": "0o600",
             "content": {"env": {
+                "LINEAR_API_KEY": "cached-token",
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:9999",
                 "ANTHROPIC_AUTH_TOKEN": "token-value",
                 "ANTHROPIC_MODEL": "example-model",
@@ -293,7 +318,50 @@ class ClaudeSessionTest(GitFixture):
             }},
         })
         self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
+        self.assertNotIn("EXAMPLE_PROXY_TOKEN", call["env"])
         self.assertFalse(Path(settings_path).exists())
+
+    def test_claude_gets_only_the_allowlisted_environment(self) -> None:
+        self.run_session(env={"LC_ALL": "C", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1", "SOME_API_KEY": "x"})
+
+        env = self.claude_call()["env"]
+        self.assertEqual(set(env) & set(WORKER_SECRETS), set())
+        # macOS adds __CF_USER_TEXT_ENCODING to every process it starts.
+        extra = {name for name in env if name not in ALLOWED_NAMES and not name.startswith(("LC_", "__CF_"))}
+        self.assertEqual(extra, set())
+        self.assertNotIn("LINEAR_CLIENT_ID", env)
+        self.assertNotIn("LINEAR_CLIENT_SECRET", env)
+        self.assertNotIn("HERMES_HOME", env)
+        self.assertEqual(env["GH_CONFIG_DIR"], str(self.tmp / "gh"))
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(self.claude_config))
+        self.assertEqual(env["LC_ALL"], "C")
+        self.assertEqual(env["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"], "1")
+        self.assertEqual(env["HOME"], os.environ["HOME"])
+        self.assertIn("PATH", env)
+
+    def test_linear_token_comes_from_the_plugin_cache_in_the_settings_file(self) -> None:
+        self.run_session()
+
+        call = self.claude_call()
+        self.assertEqual(call["settings"], {"mode": "0o600", "content": {"env": {"LINEAR_API_KEY": "cached-token"}}})
+        self.assertNotIn("LINEAR_API_KEY", call["env"])
+        self.assertFalse(Path(call["argv"][-1]).exists())
+
+    def test_missing_linear_credentials_refuse_before_claude_starts(self) -> None:
+        status, report = self.run_session(env={"LINEAR_CLIENT_SECRET": ""})
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": "Linear token: set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"})
+        self.assertFalse(self.log.exists())
+
+    def test_missing_plugin_refuses_before_claude_starts(self) -> None:
+        empty = self.tmp / "empty-home"
+        empty.mkdir()
+        status, report = self.run_session(env={"HERMES_HOME": str(empty)})
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": f"the linear-agent-session plugin is not installed in {empty}"})
+        self.assertFalse(self.log.exists())
 
     def test_inherited_anthropic_variables_never_reach_claude(self) -> None:
         self.run_session(env={"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ANTHROPIC_AUTH_TOKEN": "inherited"})
@@ -305,8 +373,7 @@ class ClaudeSessionTest(GitFixture):
 
         call = self.claude_call()
         self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
-        self.assertNotIn("--settings", call["argv"])
-        self.assertIsNone(call["settings"])
+        self.assertEqual(call["settings"]["content"], {"env": {"LINEAR_API_KEY": "cached-token"}})
 
     def test_without_max_turns_the_run_has_no_turn_limit(self) -> None:
         for claude_session in ({}, {"max_turns": None}, {"max_turns": 0}):
@@ -331,13 +398,15 @@ class ClaudeSessionTest(GitFixture):
                 })
 
     def test_max_turns_run_is_reported_as_completed(self) -> None:
-        status, report = self.run_session(env={"FAKE_CLAUDE_SUBTYPE": "error_max_turns"})
+        self.configure_fake_claude(subtype="error_max_turns")
+        status, report = self.run_session()
 
         self.assertEqual(status, 0)
         self.assertEqual(report["subtype"], "error_max_turns")
 
     def test_failed_claude_run_is_reported_as_an_error(self) -> None:
-        status, report = self.run_session(env={"FAKE_CLAUDE_SUBTYPE": "error_during_execution"})
+        self.configure_fake_claude(subtype="error_during_execution")
+        status, report = self.run_session()
 
         self.assertEqual(status, 1)
         self.assertEqual(report["error"], "claude run ended with error_during_execution (exit 0)")
@@ -359,7 +428,8 @@ class ClaudeSessionTest(GitFixture):
 
     def test_run_ends_when_claude_exits_but_a_child_holds_its_output(self) -> None:
         started = time.monotonic()
-        status, report = self.run_session(env={"FAKE_CLAUDE_LEFTOVER_PID_FILE": str(self.tmp / "leftover.pid")})
+        self.configure_fake_claude(leftover_pid_file=str(self.tmp / "leftover.pid"))
+        status, report = self.run_session()
 
         self.assertEqual(status, 0)
         self.assertEqual(report["result"], "Opened the pull request.")
@@ -368,11 +438,10 @@ class ClaudeSessionTest(GitFixture):
 
     def test_run_ends_when_claude_waits_for_a_detached_background_command(self) -> None:
         started = time.monotonic()
-        status, report = self.run_session(env={
-            "FAKE_CLAUDE_LEFTOVER_PID_FILE": str(self.tmp / "leftover.pid"),
-            "FAKE_CLAUDE_LEFTOVER_DETACHED": "1",
-            "FAKE_CLAUDE_WAITS_FOR_LEFTOVER": "1",
-        })
+        self.configure_fake_claude(
+            leftover_pid_file=str(self.tmp / "leftover.pid"), leftover_detached=True, waits_for_leftover=True
+        )
+        status, report = self.run_session()
 
         self.assertEqual(status, 0)
         self.assertEqual(report["result"], "Opened the pull request.")
