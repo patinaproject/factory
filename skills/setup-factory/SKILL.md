@@ -396,7 +396,7 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
-  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 40}
+  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 0}
 }
 ```
 
@@ -405,7 +405,11 @@ Exactly one repository has `routing: default`. Leave
 set up a proxy. `worker_entry` is a prefix, such as `/patina-mode`, that
 `claude-session` puts before the built-in task prompt. The task prompt names
 the issue, its URL, the repository, and the branch, and is always sent. An
-empty `worker_entry` sends the task prompt alone. `kanban_url` is the dashboard's
+empty `worker_entry` sends the task prompt alone. `claude_session.max_turns`
+caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
+one run can finish a whole task. A positive limit pauses a long task, such as
+a dependency upgrade, and the worker resumes it in a second run.
+`kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
 empty to post no link. Set `github.login` so triage can tell the factory's own
 open pull requests from a person's. When it is empty, triage treats every open

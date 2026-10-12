@@ -31,7 +31,7 @@ plugins:
           base_url: ""
           model: ""
           auth_token_env: ""
-          max_turns: 40
+          max_turns: 0
     pr-ready-gate:
       settings:
         gated_profiles: [claude-worker]

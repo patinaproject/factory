@@ -299,6 +299,28 @@ class ClaudeSessionTest(GitFixture):
         self.assertNotIn("--settings", call["argv"])
         self.assertIsNone(call["settings"])
 
+    def test_without_max_turns_the_run_has_no_turn_limit(self) -> None:
+        for claude_session in ({}, {"max_turns": None}, {"max_turns": 0}):
+            with self.subTest(claude_session=claude_session):
+                self.settings = self.write_settings([self.repository], claude_session)
+
+                status, _ = self.run_session()
+
+                self.assertEqual(status, 0)
+                self.assertNotIn("--max-turns", self.claude_call()["argv"])
+
+    def test_invalid_max_turns_is_refused(self) -> None:
+        for value in (-1, "40", True):
+            with self.subTest(max_turns=value):
+                self.settings = self.write_settings([self.repository], {"max_turns": value})
+
+                status, report = self.run_session()
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {
+                    "error": f"claude_session.max_turns {value!r} must be a positive integer, or 0 for no limit",
+                })
+
     def test_max_turns_run_is_reported_as_completed(self) -> None:
         status, report = self.run_session(env={"FAKE_CLAUDE_SUBTYPE": "error_max_turns"})
 

@@ -214,6 +214,15 @@ def transport_settings(transport: dict) -> dict | None:
     return {"env": env} if env else None
 
 
+def max_turns_args(transport: dict) -> list[str]:
+    value = transport.get("max_turns")
+    if value is None or value == 0:
+        return []
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise Refusal(f"claude_session.max_turns {value!r} must be a positive integer, or 0 for no limit")
+    return ["--max-turns", str(value)]
+
+
 def build_prompt(args: argparse.Namespace, repo: dict, branch: str, resumed: bool) -> str:
     message = Path(args.message_file).read_text() if args.message_file else ""
     if resumed:
@@ -237,6 +246,8 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         raise Refusal("HERMES_KANBAN_WORKSPACE is not set; claude-session runs only inside a Kanban worker")
     settings = load_settings(args.settings_json)
     repo = find_repository(settings, args.repo)
+    transport = settings.get("claude_session") or {}
+    turn_limit = max_turns_args(transport)
     worktree = resolve_worktree(workspace, repo["path"])
     session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{args.issue_id}"))
 
@@ -252,12 +263,11 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         adopted = adopt_existing_work(worktree, branch, args.repo, args.takeover_pr)
         resumed = transcript_exists(session_id, worktree)
-        transport = settings.get("claude_session") or {}
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),
             "-p", build_prompt(args, repo, branch, resumed),
             "--output-format", "json",
-            "--max-turns", str(transport.get("max_turns") or 40),
+            *turn_limit,
             "--permission-mode", "bypassPermissions",
             "--resume" if resumed else "--session-id", session_id,
             "--append-system-prompt", PUBLISH_RULE.format(push_signed=Path(__file__).resolve().with_name("push-signed")),
