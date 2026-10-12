@@ -44,6 +44,7 @@ GITHUB_EVENTS = [
 ]
 FAILED = ["failure", "timed_out", "action_required", "startup_failure"]
 APP_PR = {"field": "pull_request.user.login", "equals": "example-app[bot]"}
+OWNED_BRANCH_PR = {"field": "pull_request.head.ref", "in_file": "owned-refs.json"}
 OWNED_ISSUE = {"field": "issue.html_url", "in_file": "owned-refs.json"}
 REPO_FILTER = {"field": "repository.full_name", "in": ["example-org/app", "example-org/site"]}
 EVENT_FILTER = {
@@ -53,6 +54,7 @@ EVENT_FILTER = {
                 {"field": "event", "equals": "pull_request"},
                 {"field": "action", "in": ["closed", "reopened", "converted_to_draft"]},
                 APP_PR,
+                OWNED_BRANCH_PR,
             ]
         },
         {
@@ -60,6 +62,7 @@ EVENT_FILTER = {
                 {"field": "event", "equals": "pull_request_review"},
                 {"field": "action", "in": ["submitted"]},
                 APP_PR,
+                OWNED_BRANCH_PR,
             ]
         },
         {
@@ -67,13 +70,26 @@ EVENT_FILTER = {
                 {"field": "event", "equals": "pull_request_review_comment"},
                 {"field": "action", "in": ["created"]},
                 APP_PR,
+                OWNED_BRANCH_PR,
             ]
         },
         {
             "all": [
                 {"field": "event", "equals": "issue_comment"},
                 {"field": "action", "in": ["created"]},
-                {"any": [{"field": "issue.user.login", "equals": "example-app[bot]"}, OWNED_ISSUE]},
+                {"not": {"field": "comment.body", "regex": r"\A<!-- linear-linkback -->"}},
+                {"not": {"field": "comment.user.login", "in": ["cloudflare-workers-and-pages[bot]"]}},
+                {
+                    "any": [
+                        {
+                            "all": [
+                                {"field": "issue.pull_request", "exists": True},
+                                {"field": "issue.user.login", "equals": "example-app[bot]"},
+                            ]
+                        },
+                        OWNED_ISSUE,
+                    ]
+                },
             ]
         },
         {
@@ -81,6 +97,7 @@ EVENT_FILTER = {
                 {"field": "event", "equals": "workflow_run"},
                 {"field": "action", "in": ["completed"]},
                 {"field": "workflow_run.triggering_actor.login", "equals": "example-app[bot]"},
+                {"field": "workflow_run.head_branch", "in_file": "owned-refs.json"},
                 {"field": "workflow_run.conclusion", "in": FAILED},
             ]
         },
@@ -490,28 +507,45 @@ def payload(action: str, sender: str = HUMAN, repo: str = "example-org/app", **f
     return {"action": action, "repository": {"full_name": repo}, "sender": {"login": sender}, **fields}
 
 
-def pull_request(author: str, merged: bool = False) -> dict:
+def pull_request(author: str, merged: bool = False, branch: str = OWNED_BRANCH) -> dict:
     return {
         "number": 12,
-        "user": {"login": author},
+        "state": "closed" if merged else "open",
+        "user": {"login": author, "type": "Bot" if author.endswith("[bot]") else "User"},
         "merged": merged,
         "html_url": "https://github.com/example-org/app/pull/12",
-        "head": {"ref": "goodyear/pat-1-fix"},
+        "head": {"ref": branch, "sha": "0" * 40},
+        "base": {"ref": "main"},
     }
 
 
 def issue(author: str, html_url: str = "https://github.com/example-org/app/pull/12", is_pull: bool = True) -> dict:
-    fields = {"number": 12, "user": {"login": author}, "html_url": html_url}
+    fields = {"number": 12, "state": "open", "user": {"login": author}, "html_url": html_url}
     if is_pull:
-        fields["pull_request"] = {"html_url": html_url}
+        fields["pull_request"] = {"html_url": html_url, "merged_at": None}
     return fields
 
 
-def workflow_run(actor: str, conclusion: str) -> dict:
+def comment(author: str, body: str) -> dict:
+    return {
+        "id": 1,
+        "user": {"login": author, "type": "Bot" if author.endswith("[bot]") else "User"},
+        "body": body,
+        "html_url": "https://github.com/example-org/app/pull/12#issuecomment-1",
+    }
+
+
+LINEAR_BOT = "linear-code[bot]"
+LINKBACK = '<!-- linear-linkback -->\n<p><a href="https://linear.app/example/issue/EX-1">EX-1</a></p>'
+UNOWNED_BRANCH = "86-work-outside-the-board"
+UNOWNED_ISSUE_URL = "https://github.com/example-org/app/issues/86"
+
+
+def workflow_run(actor: str, conclusion: str, branch: str = OWNED_BRANCH) -> dict:
     return {
         "name": "CI",
         "conclusion": conclusion,
-        "head_branch": OWNED_BRANCH,
+        "head_branch": branch,
         "triggering_actor": {"login": actor},
         "html_url": "https://github.com/example-org/app/actions/runs/1",
     }
@@ -533,7 +567,78 @@ FILTER_CASES = [
     ("review edited on an App PR", "pull_request_review", payload("edited", pull_request=pull_request(APP)), False),
     ("review comment on an App PR", "pull_request_review_comment", payload("created", pull_request=pull_request(APP)), True),
     ("review comment on a human PR", "pull_request_review_comment", payload("created", pull_request=pull_request(HUMAN)), False),
-    ("issue comment on an App PR", "issue_comment", payload("created", issue=issue(APP)), True),
+    ("issue comment on an App PR", "issue_comment", payload("created", issue=issue(APP), comment=comment(HUMAN, "Please rename this.")), True),
+    (
+        "review bot comment on an App PR",
+        "issue_comment",
+        payload("created", sender="github-actions[bot]", issue=issue(APP), comment=comment("github-actions[bot]", "### Diff")),
+        True,
+    ),
+    (
+        "Vercel deploy notice on an App PR",
+        "issue_comment",
+        payload("created", sender="vercel[bot]", issue=issue(APP), comment=comment("vercel[bot]", "[vc]: #abc")),
+        True,
+    ),
+    (
+        "Cloudflare deploy notice on an App PR",
+        "issue_comment",
+        payload(
+            "created",
+            sender="cloudflare-workers-and-pages[bot]",
+            issue=issue(APP),
+            comment=comment("cloudflare-workers-and-pages[bot]", "## Deploying with Cloudflare Workers"),
+        ),
+        False,
+    ),
+    (
+        "comment that quotes the linkback marker",
+        "issue_comment",
+        payload("created", issue=issue(APP), comment=comment(HUMAN, "Why is `<!-- linear-linkback -->` here?")),
+        True,
+    ),
+    (
+        "Linear linkback on an App PR",
+        "issue_comment",
+        payload("created", sender=LINEAR_BOT, issue=issue(APP), comment=comment(LINEAR_BOT, LINKBACK)),
+        False,
+    ),
+    (
+        "Linear linkback on a card's GitHub issue",
+        "issue_comment",
+        payload(
+            "created",
+            sender=LINEAR_BOT,
+            repo="example-org/site",
+            issue=issue(HUMAN, OWNED_ISSUE_URL, is_pull=False),
+            comment=comment(LINEAR_BOT, LINKBACK),
+        ),
+        False,
+    ),
+    (
+        "comment on an issue the App opened that no card has",
+        "issue_comment",
+        payload("created", issue=issue(APP, UNOWNED_ISSUE_URL, is_pull=False), comment=comment(HUMAN, "Done?")),
+        False,
+    ),
+    (
+        "review submitted on an App PR from a branch no card has",
+        "pull_request_review",
+        payload("submitted", pull_request=pull_request(APP, branch=UNOWNED_BRANCH), review={"state": "approved"}),
+        False,
+    ),
+    (
+        "review comment on an App PR from a branch no card has",
+        "pull_request_review_comment",
+        payload("created", pull_request=pull_request(APP, branch=UNOWNED_BRANCH), comment=comment(HUMAN, "Nit.")),
+        False,
+    ),
+    (
+        "the App merges its PR from a branch no card has",
+        "pull_request",
+        payload("closed", sender=APP, pull_request=pull_request(APP, merged=True, branch=UNOWNED_BRANCH)),
+        False,
+    ),
     ("issue comment on a human PR", "issue_comment", payload("created", issue=issue(HUMAN)), False),
     (
         "issue comment on a card's GitHub issue",
@@ -545,6 +650,12 @@ FILTER_CASES = [
     ("the App's own comment on its PR", "issue_comment", payload("created", sender=APP, issue=issue(APP)), False),
     ("failed workflow run triggered by the App", "workflow_run", payload("completed", sender=APP, workflow_run=workflow_run(APP, "failure")), True),
     ("failed workflow run triggered by a human", "workflow_run", payload("completed", workflow_run=workflow_run(HUMAN, "failure")), False),
+    (
+        "failed workflow run triggered by the App on a branch no card has",
+        "workflow_run",
+        payload("completed", sender=APP, workflow_run=workflow_run(APP, "failure", "main")),
+        False,
+    ),
     ("successful workflow run triggered by the App", "workflow_run", payload("completed", sender=APP, workflow_run=workflow_run(APP, "success")), False),
     ("failed check run on an owned branch", "check_run", payload("completed", sender=APP, check_run=check_run(OWNED_BRANCH, "failure")), True),
     ("failed check run on another branch", "check_run", payload("completed", sender=APP, check_run=check_run("main", "failure")), False),
@@ -594,8 +705,10 @@ class HermesFilterTest(unittest.TestCase):
     def test_a_missing_owned_refs_file_drops_only_ref_keyed_events(self):
         with self.assertLogs(self.filters.logger, "WARNING"):
             dropped = self.matches("check_run", payload("completed", sender=APP, check_run=check_run(OWNED_BRANCH, "failure")))
+            review = self.matches("pull_request_review", payload("submitted", pull_request=pull_request(APP)))
         self.assertIs(dropped, False)
-        self.assertIs(self.matches("pull_request_review", payload("submitted", pull_request=pull_request(APP))), True)
+        self.assertIs(review, False)
+        self.assertIs(self.matches("issue_comment", payload("created", issue=issue(APP), comment=comment(HUMAN, "Hi."))), True)
 
 
 if __name__ == "__main__":

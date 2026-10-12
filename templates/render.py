@@ -26,6 +26,9 @@ LINEAR_EVENTS = ["AgentSessionEvent", "Issue"]
 # Hermes resolves a relative in_file path against the gateway's home.
 OWNED_REFS_FILE = "owned-refs.json"
 FAILED_CONCLUSIONS = ["failure", "timed_out", "action_required", "startup_failure"]
+# A bot whose pull request comments repeat a result the route already keeps as a failed check_run.
+CHECK_RUN_ECHO_BOTS = ["cloudflare-workers-and-pages[bot]"]
+LINEAR_LINKBACK = r"\A<!-- linear-linkback -->"
 LINEAR_SECRET = "${LINEAR_WEBHOOK_SECRET}"
 GITHUB_SECRET = "${GITHUB_WEBHOOK_SECRET}"
 
@@ -44,10 +47,6 @@ class GithubEvent(NamedTuple):
     keep: Callable[[str], list]
 
 
-def by_app(field: str) -> Callable[[str], list]:
-    return lambda login: [{"field": field, "equals": login}]
-
-
 def owned(field: str) -> dict:
     return {"field": field, "in_file": OWNED_REFS_FILE}
 
@@ -56,12 +55,32 @@ def failed(event: str) -> dict:
     return {"field": f"{event}.conclusion", "in": FAILED_CONCLUSIONS}
 
 
+def keeps_pull_request(login: str) -> list:
+    # Triage finds a pull request's card by its branch, so a branch on no card always ends in "no card matches".
+    return [{"field": "pull_request.user.login", "equals": login}, owned("pull_request.head.ref")]
+
+
 def keeps_issue_comment(login: str) -> list:
-    return [{"any": [{"field": "issue.user.login", "equals": login}, owned("issue.html_url")]}]
+    # An issue_comment payload carries no branch, so a comment on the App's pull request is kept by author.
+    # An issue that is not a pull request is found by its URL only. Linear's linkback comment asks for nothing.
+    return [
+        {"not": {"field": "comment.body", "regex": LINEAR_LINKBACK}},
+        {"not": {"field": "comment.user.login", "in": CHECK_RUN_ECHO_BOTS}},
+        {
+            "any": [
+                {"all": [{"field": "issue.pull_request", "exists": True}, {"field": "issue.user.login", "equals": login}]},
+                owned("issue.html_url"),
+            ]
+        },
+    ]
 
 
 def keeps_workflow_run(login: str) -> list:
-    return [{"field": "workflow_run.triggering_actor.login", "equals": login}, failed("workflow_run")]
+    return [
+        {"field": "workflow_run.triggering_actor.login", "equals": login},
+        owned("workflow_run.head_branch"),
+        failed("workflow_run"),
+    ]
 
 
 def keeps_check_run(login: str) -> list:
@@ -77,25 +96,34 @@ GITHUB_EVENT_TABLE = (
     GithubEvent(
         "pull_request",
         ("closed", "reopened", "converted_to_draft"),
-        "the App opened the pull request",
-        by_app("pull_request.user.login"),
+        "the App opened the pull request from a card's branch",
+        keeps_pull_request,
     ),
     GithubEvent(
-        "pull_request_review", ("submitted",), "the App opened the pull request", by_app("pull_request.user.login")
+        "pull_request_review",
+        ("submitted",),
+        "the App opened the pull request from a card's branch",
+        keeps_pull_request,
     ),
     GithubEvent(
         "pull_request_review_comment",
         ("created",),
-        "the App opened the pull request",
-        by_app("pull_request.user.login"),
+        "the App opened the pull request from a card's branch",
+        keeps_pull_request,
     ),
     GithubEvent(
         "issue_comment",
         ("created",),
-        "the App opened the issue or pull request, or the issue is a card's GitHub issue",
+        "the App opened the pull request or the issue is a card's GitHub issue, "
+        "and the comment is neither Linear's linkback nor a Cloudflare deploy notice",
         keeps_issue_comment,
     ),
-    GithubEvent("workflow_run", ("completed",), "the App triggered the run and it failed", keeps_workflow_run),
+    GithubEvent(
+        "workflow_run",
+        ("completed",),
+        "the App triggered the run on a card's branch and it failed",
+        keeps_workflow_run,
+    ),
     GithubEvent(
         "check_run",
         ("completed",),
