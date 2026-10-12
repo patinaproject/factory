@@ -841,9 +841,11 @@ So this job belongs to the root profile, unlike the other jobs in this part.
 Hermes runs a cron script from the owning profile's own `scripts/` directory,
 so install the wrapper there. It runs the worker's current `check-install` with
 the worker home, so the job never runs a stale copy. On a first install, do
-this after part 13. Run it from the factory checkout:
+this after part 13. A root home that has never run a script job has no
+`scripts/` directory, so create it first. Run it from the factory checkout:
 
 ```sh
+install -d <root>/scripts
 install -m 0644 skills/setup-factory/scripts/check-install-alert <root>/scripts/check-install-alert
 ```
 
@@ -1198,7 +1200,7 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      or allow the `refresh_tokens` grant on the `saas` Access application when
      the line names the issuer. Then restart the dashboard service.
    - A `script <root>/scripts/check-install-alert` line: install the wrapper
-     again with the part 12 `install` command.
+     again with the part 12 `install` commands, which create `<root>/scripts` first.
    - A `cron job check-install` line: the job is missing, in the wrong
      profile, or delivers to a platform with no home channel. Create it in the
      root profile as in part 12, and remove a leftover copy in the worker
