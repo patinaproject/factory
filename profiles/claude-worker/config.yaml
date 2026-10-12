@@ -11,7 +11,7 @@ skills:
   auto_load: [claude-code]
 
 plugins:
-  enabled: [linear-agent-session, pr-comment-links, pr-ready-gate]
+  enabled: [linear-agent-session, pr-ready-gate]
   entries:
     linear-agent-session:
       settings:

@@ -19,7 +19,6 @@
 │   └── wiki-index.md          # Planned wiki pages
 ├── plugins/
 │   ├── linear-agent-session/  # Linear acknowledgement hook, activity, issue, and session tools, cli.py
-│   ├── pr-comment-links/      # pre_tool_call hook that writes pull requests as owner/name#number in kanban_comment bodies
 │   └── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
 ├── profiles/
 │   └── claude-worker/         # Kanban worker profile distribution

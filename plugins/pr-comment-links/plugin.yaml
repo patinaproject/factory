@@ -1,9 +1,0 @@
-manifest_version: 2
-name: pr-comment-links
-version: "0.1.0"
-description: >-
-  Rewrites every GitHub pull request URL in a kanban_comment body to
-  owner/name#number before the comment is stored, so Hermes' dispatcher never
-  holds a ready card for 24 hours with respawn_guarded reason active_pr.
-provides_hooks:
-  - pre_tool_call
