@@ -37,8 +37,34 @@ is done, then run the check.
 
 ## Collect the inputs
 
-Ask the operator for these values before you start. Record them in your task
-notes, not in the repository.
+**Discover before you ask.** Ask the operator only for a decision, such as
+which repositories the factory works, and for a secret that they type into
+their own terminal. Never ask the operator for a value that a command on the
+machine can read, and never ask them to sign in anywhere, for example with
+`gh auth login`. On a re-run, most values already exist in the installed
+settings, the Hermes configuration, or the factory's private configuration
+record that `~/.claude/CLAUDE.md` names. Run the command for each value
+below first, and ask only when it prints nothing:
+
+| Value | Discover with |
+| --- | --- |
+| Hermes install checkout and its tag | `git -C <home>/hermes-agent describe --tags` |
+| Existing factory settings: repositories, `app_user_id`, `kanban_url`, `claude_session`, and the `github` object | `hermes config get plugins.entries.linear-agent-session.settings --json` |
+| `<app-slug>` | `github.login` in the settings, without `[bot]` |
+| GitHub App ID | `gh api /apps/<app-slug> --jq .id`. Any `gh` login can read it |
+| GitHub App's permissions | `gh api /apps/<app-slug> --jq .permissions` |
+| Installation ID and private key path | `github.installation_id` and `github.private_key_path` in the settings |
+| Bot user ID | `gh api '/users/<app-slug>[bot]' --jq .id` |
+| Repositories the installation covers | `GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --jq '.repositories[].full_name'` |
+| Infisical project ID, environment, and folder | `grep -oE -e '--projectId[= ][^ ]+' -e '--env[= ][^ ]+' -e '--path[= ][^ ]+' <file>`, where `<file>` holds the `command` that `hermes config get secrets.command --json` prints: the script it names, or a file with that command line |
+| `kanban.max_in_progress` and the webhook port | `hermes config get kanban.max_in_progress` and `hermes config get platforms.webhook.extra.port` |
+
+When `gh` or `hermes` is not on the session's `PATH`, call it by its full
+path, such as `~/.local/bin/gh`. Never run any of these with `--raw`, which
+prints secrets.
+
+Ask the operator for the values that remain before you start. Record them in
+your task notes, not in the repository.
 
 | Input | Used by |
 | --- | --- |
