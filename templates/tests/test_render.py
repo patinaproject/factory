@@ -138,6 +138,39 @@ class RouteStructureTest(unittest.TestCase):
         self.assertEqual(sorted(routes), ["github", "linear-agent"])
 
 
+PROMPTED_EVENT = {
+    "type": "AgentSessionEvent",
+    "action": "prompted",
+    "agentSession": {
+        "id": "00000000-0000-4000-8000-0000000000a1",
+        "issue": {"id": "00000000-0000-4000-8000-0000000000b1", "identifier": "ABC-1"},
+    },
+    "agentActivity": {"signal": None, "content": {"type": "prompt", "body": "close"}},
+}
+
+
+def render_like_hermes(template: str, payload: dict) -> str:
+    """Fill {dot.path} placeholders the way the Hermes webhook adapter does: a missing key stays as written."""
+
+    def resolve(match: re.Match) -> str:
+        value = payload
+        for part in match.group(1).split("."):
+            if not isinstance(value, dict) or part not in value:
+                return match.group(0)
+            value = value[part]
+        return str(value)
+
+    return re.sub(r"\{([A-Za-z_][A-Za-z0-9_.]*)\}", resolve, template)
+
+
+class LinearPayloadTest(unittest.TestCase):
+    def test_a_prompted_reply_reaches_the_prompt(self):
+        prompt = render_like_hermes(render.build_routes(SETTINGS)["linear"]["prompt"], PROMPTED_EVENT)
+
+        self.assertIn("- Activity body: close\n", prompt)
+        self.assertIn("- Activity signal: None\n", prompt)
+
+
 class PromptSubstitutionTest(unittest.TestCase):
     def setUp(self):
         routes = render.build_routes(SETTINGS)

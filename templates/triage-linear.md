@@ -39,7 +39,7 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 - Agent session issue: {agentSession.issue.id} ({agentSession.issue.identifier})
 - Data change issue: {data.id} ({data.identifier})
 - Activity signal: {agentActivity.signal}
-- Activity body: {agentActivity.body}
+- Activity body: {agentActivity.content.body}
 
 A field still shown as a dotted name in braces is absent from this payload. The
 session's prompt context is:
@@ -149,9 +149,15 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
 
 1. Read the issue with `linear_issue` and find its card. If there is none,
    handle the event as "Session created" and stop.
-2. Comment on the card with the reply: the activity body, attributed to Linear.
-   Replace each `https://github.com/<owner>/<name>/pull/<number>` URL in it
-   with `<owner>/<name>#<number>`, so the comment names no pull request URL.
+2. If the activity body above is still a dotted name in braces, the reply
+   arrived without its text. Comment on the card that a Linear reply arrived
+   without text, post a `thought` on this agent session asking the human to
+   send the reply again, and stop. Do not unblock the card, because the
+   worker would block again on the same question.
+   Otherwise comment on the card with the reply: the activity body,
+   attributed to Linear. Replace each
+   `https://github.com/<owner>/<name>/pull/<number>` URL in it with
+   `<owner>/<name>#<number>`, so the comment names no pull request URL.
 3. If the card's body names a different `linear_agent_session_id`, update it as
    in "Session created" step 6.
 4. If the card is `blocked`, read the issue with `linear_issue`. If its

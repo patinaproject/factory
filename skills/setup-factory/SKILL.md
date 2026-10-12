@@ -542,6 +542,7 @@ the settings and the clones from this part. Continue only when
 ```sh
 hermes config set kanban.max_in_progress <n>
 hermes config set kanban.review_dispatch false
+hermes config set kanban.auto_decompose false
 hermes kanban boards set-default-workdir default <path of the default repository>
 ```
 
@@ -552,7 +553,14 @@ pull request merges, and back to the worker when a review requests changes.
 Cards in `review` run no worker, so they do not count against
 `kanban.max_in_progress`.
 
-**Check.** `hermes config get kanban.review_dispatch` prints `false`.
+Hermes moves a card that blocks twice for the same reason to its `triage`
+column, and by default its decomposer then splits the card into child cards.
+A factory card is one Linear issue, and its children would lack the key block
+the worker needs, so turn the decomposer off. A looping card then waits in
+`triage` for a person.
+
+**Check.** `hermes config get kanban.review_dispatch` and
+`hermes config get kanban.auto_decompose` each print `false`.
 
 `default_workdir` is board metadata, so `hermes config get` does not show it.
 Read the board metadata with `hermes kanban boards --help` to find the listing
