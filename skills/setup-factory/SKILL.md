@@ -945,8 +945,8 @@ shell outside Hermes, and run the forged lines again.
 each check. Report each result.
 
 1. Delegate an issue that routes to the `default` repository. Linear shows the
-   acknowledgement within 10 seconds, then the "queued" activity. The card has
-   that repository as its `completion_contract`.
+   acknowledgement within 10 seconds, then the "queued" activity. The new card
+   has that repository as its `completion_contract`.
 2. Delegate an issue synced from a `synced_github` repository. Its card has that
    repository's contract, and its worktree starts from that repository's
    default branch.

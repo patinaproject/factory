@@ -48,7 +48,8 @@ passes through `triage`. When the block is missing, rebuild the keys from the
 fields Hermes keeps:
 
 - `repo` is the card's `completion_contract`, and `branch` is its
-  `branch_name`.
+  `branch_name`. When Hermes has bound the card to a pull request, the
+  contract is that pull request's URL, and `repo` is its `<owner>/<name>`.
 - The issue identifier is the `<team>-<number>` part of the branch name, for
   example `abc-123` in `team/abc-123-fix-checkout` and in
   `team/abc-123-fix-checkout-takeover`. A card that continues the factory's

@@ -53,12 +53,15 @@ anything.
 
 ## Find the card
 
-The card's `completion_contract` equals the event's repository, ignoring case.
+A card's repository is its `completion_contract`. Hermes replaces that
+`<owner>/<name>` with the pull request URL once a worker reports one. Then the
+card's repository is the `<owner>/<name>` in that URL.
 
 - For a pull request, review, check, or workflow event, take the branch from
   the event fields above. For an `issue_comment` on a pull request, read it with
   `gh pr view <pull request URL> --json headRefName`. The card is the task whose
-  `branch_name` equals that branch.
+  `branch_name` equals that branch and whose repository equals the event's
+  repository, ignoring case.
 - For an `issues` event or an `issue_comment` on an issue that is not a pull
   request, the card is the task whose `body` contains the line
   `github_issue_url: <issue URL>`.

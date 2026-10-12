@@ -67,6 +67,22 @@ class RefreshOwnedRefsTest(unittest.TestCase):
         self.assertEqual(self.output.read_text(), json.dumps(EXPECTED, indent=2) + "\n")
         self.assertEqual(json.loads(self.output.read_text()), EXPECTED)
 
+    def test_keeps_the_branch_of_a_card_hermes_bound_to_a_pull_request(self) -> None:
+        bound = {
+            "id": "t5",
+            "title": "ABC-5: bound",
+            "body": "",
+            "branch_name": "goodyear/abc-5-bound",
+            "status": "blocked",
+            "completion_contract": "https://github.com/example-org/app/pull/12",
+        }
+        self.tasks.write_text(json.dumps([bound]))
+
+        proc = self.run_script("--tasks-json", str(self.tasks), "--output", str(self.output))
+
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(json.loads(self.output.read_text()), ["goodyear/abc-5-bound"])
+
     def test_rewrites_unchanged_content_with_a_newer_mtime_and_no_leftover(self) -> None:
         self.run_script("--tasks-json", str(self.tasks), "--output", str(self.output))
         first = self.output.read_bytes()
