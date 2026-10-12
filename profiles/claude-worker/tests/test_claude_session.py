@@ -141,25 +141,35 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(self.claude_call()["argv"][:2], ["-p", "Continue."])
 
-    def test_worker_entry_template_is_rendered(self) -> None:
-        self.repository["worker_entry"] = "Run /work-issue {issue_identifier} {issue_id} {issue_url} {branch} {repo}"
+    def test_worker_entry_prefixes_the_default_entry(self) -> None:
+        self.repository["worker_entry"] = "/patina-mode"
         self.settings = self.write_settings([self.repository])
 
         self.run_session()
 
-        self.assertEqual(
-            self.claude_call()["argv"][1],
-            f"Run /work-issue ABC-123 {ISSUE_ID} https://linear.app/example/issue/ABC-123 abc-123-fix {REPO}",
-        )
+        self.assertEqual(self.claude_call()["argv"][1], f"/patina-mode {DEFAULT_ENTRY}")
 
-    def test_unexpected_error_is_reported_as_one_json_line(self) -> None:
-        self.repository["worker_entry"] = "Run {unknown_field}"
+    def test_worker_entry_with_fields_is_refused_before_claude_starts(self) -> None:
+        entry = "/patina-mode Work Linear issue {issue_identifier} on branch {branch}."
+        self.repository["worker_entry"] = entry
         self.settings = self.write_settings([self.repository])
 
         status, report = self.run_session()
 
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {
+            "error": f"worker_entry {entry!r} must be a plain prefix such as /patina-mode; "
+            "claude-session adds the issue, URL, repository, and branch itself",
+        })
+        self.assertFalse(self.log.exists())
+
+    def test_unexpected_error_is_reported_as_one_json_line(self) -> None:
+        missing = self.main / "no-such-message.txt"
+
+        status, report = self.run_session("--message-file", str(missing))
+
         self.assertEqual(status, 1)
-        self.assertEqual(report, {"error": "KeyError: 'unknown_field'"})
+        self.assertEqual(report, {"error": f"FileNotFoundError: [Errno 2] No such file or directory: '{missing}'"})
 
     def test_refuses_while_the_worktree_lock_is_held(self) -> None:
         lock_path = Path(git(self.worktree, "rev-parse", "--absolute-git-dir")) / "claude-session.lock"
@@ -290,6 +300,28 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
         self.assertNotIn("--settings", call["argv"])
         self.assertIsNone(call["settings"])
+
+    def test_without_max_turns_the_run_has_no_turn_limit(self) -> None:
+        for claude_session in ({}, {"max_turns": None}, {"max_turns": 0}):
+            with self.subTest(claude_session=claude_session):
+                self.settings = self.write_settings([self.repository], claude_session)
+
+                status, _ = self.run_session()
+
+                self.assertEqual(status, 0)
+                self.assertNotIn("--max-turns", self.claude_call()["argv"])
+
+    def test_invalid_max_turns_is_refused(self) -> None:
+        for value in (-1, "40", True):
+            with self.subTest(max_turns=value):
+                self.settings = self.write_settings([self.repository], {"max_turns": value})
+
+                status, report = self.run_session()
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {
+                    "error": f"claude_session.max_turns {value!r} must be a positive integer, or 0 for no limit",
+                })
 
     def test_max_turns_run_is_reported_as_completed(self) -> None:
         status, report = self.run_session(env={"FAKE_CLAUDE_SUBTYPE": "error_max_turns"})

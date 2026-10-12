@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
+ROUTES_KEY = "platforms.webhook.extra.routes"
 TEMPLATE_DIR = Path(__file__).resolve().parent
 GITHUB_ROUTE = "github"
 ROUTINGS = ("default", "synced_github")
@@ -35,6 +36,7 @@ GITHUB_SECRET = "${GITHUB_WEBHOOK_SECRET}"
 FULL_NAME = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 ROUTE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 MARKER = re.compile(r"<<([a-z_]+)>>")
+REFERENCE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
 
 class SettingsError(Exception):
@@ -230,17 +232,66 @@ def build_routes(settings: Any) -> dict:
     }
 
 
+def installed_route(name: str) -> Optional[dict]:
+    # --raw expands ${VAR} references into the live secret. The output stays in this process
+    # and only key names and fixed text reach the report, so the secret is never printed.
+    proc = subprocess.run(
+        ["hermes", "config", "get", f"{ROUTES_KEY}.{name}", "--json", "--raw"], capture_output=True, text=True
+    )
+    return json.loads(proc.stdout) if proc.returncode == 0 else None
+
+
+def secret_status(rendered: str, installed: Any, config_text: str) -> tuple:
+    """Describe where the installed secret comes from without printing its value."""
+    if not isinstance(installed, str) or not installed:
+        return False, "secret is missing"
+    if REFERENCE.match(installed):
+        return False, f"secret is the reference {installed}, but Hermes has no value for it"
+    if installed in config_text:
+        return False, f"secret is a literal value in config.yaml, not the {rendered} reference"
+    if rendered in config_text:
+        return True, f"secret is the {rendered} reference"
+    return False, f"secret does not come from config.yaml; set it to the {rendered} reference"
+
+
+def check_routes(routes: dict, config_path: Path) -> list:
+    config_text = config_path.read_text(encoding="utf-8")
+    report = []
+    for name, rendered in routes.items():
+        installed = installed_route(name)
+        if not isinstance(installed, dict):
+            report.append((False, f"route {name}: not installed"))
+            continue
+        keys = sorted((rendered.keys() | installed.keys()) - {"secret"})
+        differing = [key for key in keys if rendered.get(key) != installed.get(key)]
+        secret_ok, secret = secret_status(rendered["secret"], installed.get("secret"), config_text)
+        shape = f"differs in {', '.join(differing)}" if differing else "matches"
+        report.append((secret_ok and not differing, f"route {name}: {shape}; {secret}"))
+    return report
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--settings-json", help="read settings from this JSON file instead of `hermes config get`")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="compare the rendered routes with the installed ones; prints no secret value",
+    )
     args = parser.parse_args(argv)
     try:
         routes = build_routes(load_settings(args.settings_json))
     except SettingsError as exc:
         print(f"render.py: invalid settings: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps(routes, indent=2))
-    return 0
+    if not args.check:
+        print(json.dumps(routes, indent=2))
+        return 0
+    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    report = check_routes(routes, home / "config.yaml")
+    for _, line in report:
+        print(line)
+    return 0 if all(ok for ok, _ in report) else 1
 
 
 if __name__ == "__main__":

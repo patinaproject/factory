@@ -37,15 +37,41 @@ is done, then run the check.
 
 ## Collect the inputs
 
-Ask the operator for these values before you start. Record them in your task
-notes, not in the repository.
+**Discover before you ask.** Ask the operator only for a decision, such as
+which repositories the factory works, and for a secret that they type into
+their own terminal. Never ask the operator for a value that a command on the
+machine can read, and never ask them to sign in anywhere, for example with
+`gh auth login`. On a re-run, most values already exist in the installed
+settings, the Hermes configuration, or the factory's private configuration
+record that `~/.claude/CLAUDE.md` names. Run the command for each value
+below first, and ask only when it prints nothing:
+
+| Value | Discover with |
+| --- | --- |
+| Hermes install checkout and its tag | `git -C <home>/hermes-agent describe --tags` |
+| Existing factory settings: repositories, `app_user_id`, `kanban_url`, `claude_session`, and the `github` object | `hermes config get plugins.entries.linear-agent-session.settings --json` |
+| `<app-slug>` | `github.login` in the settings, without `[bot]` |
+| GitHub App ID | `gh api /apps/<app-slug> --jq .id`. Any `gh` login can read it |
+| GitHub App's permissions | `gh api /apps/<app-slug> --jq .permissions` |
+| Installation ID and private key path | `github.installation_id` and `github.private_key_path` in the settings |
+| Bot user ID | `gh api '/users/<app-slug>[bot]' --jq .id` |
+| Repositories the installation covers | `GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --jq '.repositories[].full_name'` |
+| Infisical project ID, environment, and folder | `grep -oE -e '--projectId[= ][^ ]+' -e '--env[= ][^ ]+' -e '--path[= ][^ ]+' <file>`, where `<file>` holds the `command` that `hermes config get secrets.command --json` prints: the script it names, or a file with that command line |
+| `kanban.max_in_progress` and the webhook port | `hermes config get kanban.max_in_progress` and `hermes config get platforms.webhook.extra.port` |
+
+When `gh` or `hermes` is not on the session's `PATH`, call it by its full
+path, such as `~/.local/bin/gh`. Never run any of these with `--raw`, which
+prints secrets.
+
+Ask the operator for the values that remain before you start. Record them in
+your task notes, not in the repository.
 
 | Input | Used by |
 | --- | --- |
 | Hermes home directory (default `~/.hermes`) and install checkout | Every part |
 | Hermes release tag to pin, `v0.21.4` or later | Hermes |
 | Model alias for Hermes' own agent loop, for example `sonnet` | DirectSDK provider |
-| Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` | Settings, clones, routes |
+| Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
 | `kanban.max_in_progress` | Kanban |
 | Factory hostname, Cloudflare account, and zone | Ingress |
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
@@ -69,7 +95,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` and `<worker>/.env` |
 | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
-| `GH_CONFIG_DIR` | `<worker>/.env`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews |
+| `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
 | The token variable that `claude_session.auth_token_env` names | `<worker>/.env`. Never name it `ANTHROPIC_*` |
 | Cloudflare tunnel token | The `cloudflared` system service only |
@@ -321,6 +347,8 @@ distribution install sets no model, so now run part 4 for the worker profile.
 
 - `<worker>/scripts/claude-session`, `<worker>/scripts/refresh-checkouts`,
   and `<worker>/scripts/refresh-gh-app-login` exist and are executable.
+- `<worker>/scripts/check-github-access` and `<worker>/scripts/guard-git-push`
+  exist. Run them with `python3`.
 - `<worker>/SOUL.md` matches `<repo>/profiles/claude-worker/SOUL.md`.
 - `hermes -p claude-worker config get platform_toolsets.cli` lists `terminal`,
   `kanban`, and `linear_agent_session`.
@@ -396,14 +424,22 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
-  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 40}
+  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 0}
 }
 ```
 
 Exactly one repository has `routing: default`. Leave
 `claude_session.base_url`, `model`, and `auth_token_env` empty unless part 3
-set up a proxy. An empty
-`worker_entry` uses the built-in prompt. `kanban_url` is the dashboard's
+set up a proxy. `worker_entry` is a prefix, such as `/patina-mode`, that
+`claude-session` puts before the built-in task prompt. The task prompt names
+the issue, its URL, the repository, and the branch, and is always sent. An
+empty `worker_entry` sends the task prompt alone. `claude-session` refuses a `worker_entry` that
+contains `{...}` fields, such as a full prompt from an older factory. Shorten
+it to the prefix. `claude_session.max_turns`
+caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
+one run can finish a whole task. A positive limit pauses a long task, such as
+a dependency upgrade, and the worker resumes it in a second run.
+`kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
 empty to post no link. Set `github.login` so triage can tell the factory's own
 open pull requests from a person's. When it is empty, triage treats every open
@@ -496,8 +532,10 @@ The installer also adds lines to the user's shell startup file. Leave them.
 
 **GitHub login and checkouts.** Return to
 [`references/github.md`](references/github.md) and run its
-"Sign the worker's `gh` in" and "Configure git in each checkout" sections.
-They need the settings and the clones from this part.
+"Sign the worker's `gh` in", "Check the App's access", "Configure git in
+each checkout", and "Block plain pushes on the machine" sections. They need
+the settings and the clones from this part. Continue only when
+`check-github-access` and `guard-git-push --check` print nothing.
 
 **Kanban.**
 
@@ -526,17 +564,31 @@ command, and confirm the path.
 in part 10. [`templates/README.md`](../../templates/README.md) describes the
 output.
 
-**Check.** Render the routes, then compare each with the installed one:
+**Check.** Compare each rendered route with the installed one:
+
+```sh
+python3 <repo>/templates/render.py --check
+```
+
+It prints one line per route, such as
+`route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference`, and
+exits `0` only when every route matches and every secret is its reference. A
+`differs in <keys>` line names the keys that differ. A secret line other than
+`is the ... reference` means the route holds a literal secret, or Hermes has no
+value for the reference.
+
+Never compare or print an installed route with
+`hermes config get ... --raw`. That command expands each `${...}` reference,
+so its output holds the live signing secret. `--check` reads it inside the
+process and prints only route names, key names, and the reference names.
+
+Render the routes for the install step:
 
 ```sh
 python3 <repo>/templates/render.py > <scratch>/routes.json
-for name in $(python3 -c 'import json, sys; print(*json.load(sys.stdin))' < <scratch>/routes.json); do
-  diff <(hermes config get "platforms.webhook.extra.routes.$name" --json --raw | python3 -m json.tool --sort-keys) \
-       <(python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)[sys.argv[1]], sort_keys=True, indent=4))' "$name" < <scratch>/routes.json)
-done
 ```
 
-**Install** each route whose diff is not empty:
+**Install** each route that `--check` reports as not installed, as differing, or with the wrong secret:
 
 ```sh
 hermes config set "platforms.webhook.extra.routes.$name" \
@@ -725,6 +777,38 @@ It writes the factory's operating rules into `~/.claude/CLAUDE.md`, so every
 Claude Code session on the machine acts on GitHub as the App, publishes
 commits with `push-signed`, and knows where the private configuration record
 lives.
+
+**Hermes' own agent.** Hermes' default-profile agent, which answers in Slack,
+does not read `~/.claude/CLAUDE.md`. Without its own notes, it looks for
+credentials in its tool shell, finds none, and reports that GitHub or Linear
+is not set up. `templates/memory.py` installs the factory's entries in its
+memory file. They say that credentials live in the gateway, that `gh` acts as
+the App through `GH_CONFIG_DIR`, that Linear is reached through the
+`linear-agent-session` tools, and that a Slack message proves Slack works.
+
+**Check.**
+
+```sh
+python3 <repo>/templates/memory.py --check --gh-config-dir <worker>/gh <home>/memories/MEMORY.md
+grep '^GH_CONFIG_DIR=' <home>/.env    # GH_CONFIG_DIR=<worker>/gh
+```
+
+The first command prints nothing when every factory entry is present and
+current. Otherwise it prints one line per entry that is missing or differs.
+
+**Install.** The command replaces each factory entry with the same label,
+such as `GitHub:`, and keeps every other entry, so the agent's own memories
+stay. It refuses to write a file over Hermes' limit of 2,200 characters. Then
+set the `gh` directory for the default home:
+
+```sh
+python3 <repo>/templates/memory.py --gh-config-dir <worker>/gh <home>/memories/MEMORY.md
+printf '%s' <worker>/gh | env_set <home>/.env GH_CONFIG_DIR
+```
+
+Hermes reads the memory file when a session starts. The gateway reads
+`<home>/.env` only when it starts, so after `env_set` changes that file, ask
+the operator to restart the gateway as in part 15.
 
 ## Deploy a merged factory change
 

@@ -1,0 +1,7 @@
+Factory credentials: they live in the gateway's environment, not in the tool shell. An empty LINEAR_*, SLACK_*, GH_TOKEN or GITHUB_TOKEN in the shell is expected and is not a failure. Never ask the operator to sign in anywhere.
+§
+GitHub: gh acts as <<github_login>> through GH_CONFIG_DIR=<<gh_config_dir>>, an App installation token that a cron job renews every 30 minutes. Check it with `gh api /installation/repositories --jq .total_count`. `gh api user` failing with 403 is normal for an App token. Use HTTPS through gh; there is no GitHub SSH key, so never test or use SSH. Publish commits with push-signed, never git push.
+§
+Linear: the linear-agent-session tools sign in with the agent app's client credentials, which only the gateway holds. Check Linear with those tools on a real issue. Never curl api.linear.app or test a Linear token from the shell.
+§
+Slack: a message that reached you through Slack proves Slack works. The Slack tokens stay in the gateway on purpose.

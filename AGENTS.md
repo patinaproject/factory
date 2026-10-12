@@ -86,6 +86,13 @@ rule that only docs enforce is a candidate for a script, check, or test.
 | --- | --- |
 | A factory machine's live install matches this repository's default branch after a merge | `profiles/claude-worker/scripts/check-install`, run hourly as a cron job and in setup part 5 and "Deploy a merged factory change" |
 | Agents on a factory machine act on GitHub only as the App and publish only with `push-signed` | The machine-wide block from `skills/setup-factory/references/agent-instructions.md`; branch rules that require signed commits |
+| A plain `git push` to GitHub fails on a factory machine, in any clone | `profiles/claude-worker/scripts/guard-git-push`, a global `pushInsteadOf` rewrite that setup installs and checks with `--check`; the per-checkout `pushurl` |
+| `worker_entry` is a prefix, and the task prompt with the issue, URL, repository, and branch is always sent | `build_prompt` in `profiles/claude-worker/scripts/claude-session`; its `worker_entry` tests |
+| A worker run has no turn limit unless `claude_session.max_turns` sets a positive one | `max_turns_args` in `claude-session`, which refuses any other value before the run starts |
+| The GitHub App has every permission that completion reads, such as Checks and Commit statuses, before the first card runs | `profiles/claude-worker/scripts/check-github-access`, run in setup's GitHub part |
+| No setup check prints a secret; compare webhook routes only with `render.py --check` | `templates/render.py --check`, whose tests fail when a secret value reaches its output; docs only for other `hermes config get --raw` reads |
+| Setup discovers each input it can read on the machine and never asks the operator to sign in | Docs only: "Collect the inputs" in `skills/setup-factory/SKILL.md`; the machine-wide block |
+| Hermes' own agent knows that credentials live in the gateway and how to check GitHub, Linear, and Slack | `templates/memory.py --check` in setup part 16 |
 | A worker completes a card only when its pull request is ready to merge | `plugins/pr-ready-gate` |
 | A takeover never publishes to another person's branch | The `-takeover` branch rule in `templates/triage-linear.md`; adoption tests in `profiles/claude-worker/tests/test_claude_session.py` |
 | When `gh issue develop` fails with `createLinkedBranch`, derive the branch name from the adapter's rule | Docs only: `docs/agents/issue-tracker.md` and the machine-wide block |

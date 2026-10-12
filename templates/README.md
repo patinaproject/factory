@@ -26,3 +26,23 @@ done
 
 Run it again after changing the settings, then restart the gateway. Pass
 `--settings-json <file>` to render from a file instead of `hermes config get`.
+
+## Check the installed routes
+
+```sh
+python3 templates/render.py --check
+```
+
+It prints one line per route that says whether the installed route matches
+the rendered one, and whether its secret is the `${...}` reference. It never
+prints a secret value. It exits `1` when a route differs, is missing, or holds
+a literal secret.
+
+## Hermes agent memory
+
+`hermes-memory.txt` holds the entries that `memory.py` installs in the memory
+file of Hermes' own agent, `<home>/memories/MEMORY.md`. Entries are separated
+by a line that holds only `§`, and each starts with a label, such as
+`GitHub:`. `<<github_login>>` and `<<gh_config_dir>>` are filled from the
+settings and from `--gh-config-dir`. Keep the entries short: Hermes limits the
+whole file to 2,200 characters, and the agent adds its own entries.
