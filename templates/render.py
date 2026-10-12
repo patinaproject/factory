@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -229,11 +230,13 @@ def queued_link_sentence(kanban_url) -> str:
     return f"Set `external_urls` to one link labeled `Kanban card <task id>` whose URL is `{kanban_url}`."
 
 
-def own_pull_request_sentence(github_login: str) -> str:
-    logins = [github_login]
-    if github_login.endswith("[bot]"):
-        logins.append(f"app/{github_login.removesuffix('[bot]')}")
-    return f"A pull request is the factory's own when its `author.login` is {' or '.join(f'`{login}`' for login in logins)}."
+def hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+
+
+def card_branch_command(home: Path, github_login: str) -> str:
+    script = home / "profiles" / "claude-worker" / "scripts" / "card_branch.py"
+    return f"python3 {shlex.quote(str(script))} --app {shlex.quote(github_login)}"
 
 
 def _or_list(items: list) -> str:
@@ -337,7 +340,7 @@ def build_routes(settings: Any) -> dict:
                     "app_user_id": config["app_user_id"],
                     "repositories": repos,
                     "queued_link": queued_link_sentence(config["kanban_url"]),
-                    "own_pull_request": own_pull_request_sentence(config["github_login"]),
+                    "card_branch": card_branch_command(hermes_home(), config["github_login"]),
                 },
             ),
         },
@@ -424,8 +427,7 @@ def main(argv: Optional[list] = None) -> int:
     if not args.check:
         print(json.dumps(build_config(routes), indent=2))
         return 0
-    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-    report = [*check_routes(routes, home / "config.yaml"), check_rate_limit()]
+    report = [*check_routes(routes, hermes_home() / "config.yaml"), check_rate_limit()]
     for _, line in report:
         print(line)
     return 0 if all(ok for ok, _ in report) else 1

@@ -11,7 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
-from tests.support import BOT_AUTHOR, BOT_LOGIN, SCRIPTS, GitFixture, git
+from tests.support import BOT_LOGIN, SCRIPTS, FakeGithub, GitFixture, git
 
 # A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
 ISSUE_ID = str(uuid.uuid4())
@@ -61,7 +61,7 @@ TOOLCHAIN = {
     "JAVA_HOME": "/opt/jdk", "ANDROID_HOME": "/opt/android-sdk", "ANDROID_SDK_ROOT": "/opt/android-sdk",
     "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
 }
-TAKEOVER_INTRO = f"The issue already has an open pull request, {TAKEOVER_PR}, opened by someone else."
+TAKEOVER_INTRO = f"The issue already has an open pull request, {TAKEOVER_PR}, on a branch the factory did not create."
 TAKEOVER_RULES = (
     f"Open your own ready pull request, and in its body credit the original author and link "
     f"{TAKEOVER_PR}. Do not close {TAKEOVER_PR}. The worker closes it after a human approves. If push-signed "
@@ -76,8 +76,9 @@ FACTORY_BRANCH_TAKEOVER_ENTRY = (
     f"{TAKEOVER_INTRO} This branch holds the factory's own earlier commits, not that pull request's. {TAKEOVER_RULES}"
 )
 PERSON_BRANCH_REFUSAL = (
-    f"origin/abc-123-fix was not created by {BOT_LOGIN}, so the factory cannot publish to it; a person must rename "
-    "that branch or open a pull request from it, which triage hands over as takeover_pr"
+    f"origin/abc-123-fix was not created by {BOT_LOGIN} according to GitHub's branch_creation record "
+    "(another account created it, or GitHub has no record yet), so the factory cannot publish to it. "
+    "Triage picks abc-123-fix-takeover for this state; give the card that branch."
 )
 
 
@@ -91,6 +92,7 @@ class ClaudeSessionTest(GitFixture):
         self.nvm_dir = self.tmp / "nvm"
         self.hermes_home = self.tmp / "hermes" / "profiles" / "claude-worker"
         self.install_linear_plugin(self.hermes_home)
+        self.github = FakeGithub(self.tmp, REPO)
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
 
@@ -106,6 +108,7 @@ class ClaudeSessionTest(GitFixture):
             LINEAR_CLIENT_ID="id1",
             LINEAR_CLIENT_SECRET="secret1",
             **WORKER_SECRETS,
+            **self.github.env(),
         )
         base.update(env or {})
         return [
@@ -819,8 +822,14 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.head(), start)
         self.assertFalse(self.log.exists())
 
+    def publish_branch(self, *actors: str, base: str | None = None) -> str:
+        """Put origin/abc-123-fix on the remote and record who created it, oldest first."""
+        head = self.push_upstream_commit("remote", "refs/heads/abc-123-fix", base=base)
+        self.github.create_branch("abc-123-fix", *actors)
+        return head
+
     def test_unstarted_branch_adopts_the_factory_remote_branch(self) -> None:
-        remote = self.push_upstream_commit("remote", "refs/heads/abc-123-fix", author=BOT_AUTHOR)
+        remote = self.publish_branch(BOT_LOGIN)
 
         status, report = self.run_session()
 
@@ -829,35 +838,19 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.head(), remote)
         self.assertEqual(self.claude_call()["argv"][1], DEFAULT_ENTRY)
 
-    def test_person_remote_branch_is_refused(self) -> None:
-        self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
-        start = self.head()
-
-        status, report = self.run_session()
-
-        self.assert_refused_before_claude(status, report, PERSON_BRANCH_REFUSAL, start)
-
-    def test_person_remote_branch_is_refused_even_with_a_takeover_pull_request(self) -> None:
-        self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
-        self.push_upstream_commit("pull", "refs/pull/7/head")
-        start = self.head()
-
-        status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
-
-        self.assert_refused_before_claude(status, report, PERSON_BRANCH_REFUSAL, start)
-
-    def test_remote_branch_at_the_default_branch_is_adopted(self) -> None:
-        start = self.head()
-        git(self.main, "push", "-q", "origin", "HEAD:refs/heads/abc-123-fix")
+    def test_branch_the_app_created_is_adopted_although_a_person_wrote_its_first_commit(self) -> None:
+        self.push_upstream_commit("person", "refs/heads/abc-123-fix")
+        self.github.create_branch("abc-123-fix", BOT_LOGIN)
+        remote = self.push_upstream_commit("later", "refs/heads/abc-123-fix", base="refs/heads/abc-123-fix")
 
         status, report = self.run_session()
 
         self.assertEqual(status, 0)
-        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": start})
-        self.assertEqual(self.head(), start)
+        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": remote})
+        self.assertEqual(self.head(), remote)
 
-    def test_branch_the_factory_created_is_adopted_after_a_person_adds_to_it(self) -> None:
-        self.push_upstream_commit("factory", "refs/heads/abc-123-fix", author=BOT_AUTHOR)
+    def test_branch_the_app_created_is_adopted_after_a_person_adds_to_it(self) -> None:
+        self.publish_branch(BOT_LOGIN)
         remote = self.push_upstream_commit("person", "refs/heads/abc-123-fix", base="refs/heads/abc-123-fix")
 
         status, report = self.run_session()
@@ -866,8 +859,63 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": remote})
         self.assertEqual(self.head(), remote)
 
-    def test_remote_branch_without_a_github_login_is_refused(self) -> None:
-        self.push_upstream_commit("remote", "refs/heads/abc-123-fix", author=BOT_AUTHOR)
+    def test_person_remote_branch_is_refused(self) -> None:
+        self.publish_branch("tlmader")
+        start = self.head()
+
+        status, report = self.run_session()
+
+        self.assert_refused_before_claude(status, report, PERSON_BRANCH_REFUSAL, start)
+
+    def test_person_remote_branch_is_refused_even_with_a_takeover_pull_request(self) -> None:
+        self.publish_branch("tlmader")
+        self.push_upstream_commit("pull", "refs/pull/7/head")
+        start = self.head()
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assert_refused_before_claude(status, report, PERSON_BRANCH_REFUSAL, start)
+
+    def test_branch_a_person_recreated_after_the_app_is_refused(self) -> None:
+        self.publish_branch(BOT_LOGIN, "tlmader")
+        start = self.head()
+
+        status, report = self.run_session()
+
+        self.assert_refused_before_claude(status, report, PERSON_BRANCH_REFUSAL, start)
+
+    def test_remote_branch_without_a_creation_record_is_refused(self) -> None:
+        self.publish_branch()
+        start = self.head()
+
+        status, report = self.run_session()
+
+        self.assert_refused_before_claude(status, report, PERSON_BRANCH_REFUSAL, start)
+
+    def test_a_failed_github_read_is_refused_and_never_adopts(self) -> None:
+        self.publish_branch(BOT_LOGIN)
+        self.github.state["repo"] = "someone-else/example-repo"
+        self.github.save()
+        start = self.head()
+
+        status, report = self.run_session()
+
+        self.assert_refused_before_claude(
+            status, report, f"gh api repos/{REPO}/branches/abc-123-fix failed: gh: Not Found (HTTP 404)", start
+        )
+
+    def test_remote_branch_at_the_default_branch_is_adopted(self) -> None:
+        start = self.head()
+        git(self.main, "push", "-q", "origin", "HEAD:refs/heads/abc-123-fix")
+        self.github.create_branch("abc-123-fix", BOT_LOGIN)
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": start})
+        self.assertEqual(self.head(), start)
+
+    def test_an_unstarted_branch_without_a_github_login_is_refused(self) -> None:
         self.settings = self.write_settings([self.repository], login=None)
         start = self.head()
 
@@ -899,7 +947,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.claude_call()["argv"][1], f"{DEFAULT_ENTRY}\n\n{TAKEOVER_ENTRY}")
 
     def test_factory_remote_branch_wins_over_the_takeover_pull_request(self) -> None:
-        remote = self.push_upstream_commit("remote", "refs/heads/abc-123-fix", author=BOT_AUTHOR)
+        remote = self.publish_branch(BOT_LOGIN)
         self.push_upstream_commit("pull", "refs/pull/7/head")
 
         _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
@@ -907,6 +955,22 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": remote})
         self.assertEqual(self.head(), remote)
         self.assertEqual(self.claude_call()["argv"][1], f"{DEFAULT_ENTRY}\n\n{FACTORY_BRANCH_TAKEOVER_ENTRY}")
+
+    def test_takeover_branch_the_app_published_is_adopted_after_the_pull_request_is_force_pushed_and_deleted(self) -> None:
+        pull = self.push_upstream_commit("pull", "refs/pull/7/head")
+        first = self.run_session("--takeover-pr", TAKEOVER_PR)[1]
+        self.assertEqual(first["adopted"], {"source": "takeover_pr", "ref": TAKEOVER_PR, "head": pull})
+        published = self.push_upstream_commit("published", "refs/heads/abc-123-fix", base="refs/pull/7/head")
+        self.github.create_branch("abc-123-fix", BOT_LOGIN)
+        self.push_upstream_commit("forced", "refs/pull/7/head")
+        git(self.origin, "update-ref", "-d", "refs/pull/7/head")
+        git(self.worktree, "reset", "-q", "--hard", "origin/main")
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": published})
+        self.assertEqual(self.head(), published)
 
     def test_adoption_runs_once(self) -> None:
         pull = self.push_upstream_commit("pull", "refs/pull/7/head")
@@ -919,7 +983,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.head(), pull)
 
     def test_started_branch_is_left_alone(self) -> None:
-        self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
+        self.publish_branch("tlmader")
         (self.worktree / "local.txt").write_text("local")
         git(self.worktree, "add", "local.txt")
         git(self.worktree, "commit", "-q", "-m", "local")
@@ -931,7 +995,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.head(), local)
 
     def test_dirty_worktree_is_left_alone(self) -> None:
-        self.push_upstream_commit("remote", "refs/heads/abc-123-fix")
+        self.publish_branch("tlmader")
         start = self.head()
         (self.worktree / "draft.txt").write_text("draft")
 

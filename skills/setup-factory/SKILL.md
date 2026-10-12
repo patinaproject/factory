@@ -1051,9 +1051,9 @@ each check. Report each result.
     issue. The first `claude-session` line reports `adopted` with `source`
     `remote_branch`, the branch starts at that commit, and the first
     `push-signed` publishes. Then repeat with a branch a person pushed under
-    another issue's `gitBranchName` and no pull request. `claude-session`
-    refuses with a line that names the branch and the App, the card blocks,
-    and the person's branch is unchanged.
+    the issue's `gitBranchName` and no pull request. Triage creates no card
+    and posts a `thought` that tells the person to open a pull request from
+    the branch or to rename or delete it. The person's branch is unchanged.
 16. Open a pull request as the GitHub App on a branch other than the issue's
     `gitBranchName`, link it to the issue, and delegate the issue. The card's
     branch is that pull request's head branch, and no second pull request

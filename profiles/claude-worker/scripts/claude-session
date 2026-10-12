@@ -30,13 +30,15 @@ import uuid
 from pathlib import Path
 from typing import NamedTuple
 
+import card_branch
+
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_WORKER_ENTRY = (
     "Work Linear issue {issue_identifier} ({issue_url}) in {repo} on branch {branch}. "
     "First start the issue through this repository's own issue-start workflow, which moves it to In Progress. "
     "Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
-TAKEOVER_INTRO = "The issue already has an open pull request, {url}, opened by someone else."
+TAKEOVER_INTRO = "The issue already has an open pull request, {url}, on a branch the factory did not create."
 TAKEOVER_START = {
     "takeover_pr": "This branch starts from its head.",
     "remote_branch": "This branch holds the factory's own earlier commits, not that pull request's.",
@@ -102,26 +104,8 @@ STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 
 
-FACTORY, OTHER = "factory", "other"
-REFUSE = "refuse"
-# Keyed on (takeover pull request given, owner of origin/<branch> or None when it is missing).
-ADOPTION = {
-    (False, None): None,
-    (False, FACTORY): "remote_branch",
-    (False, OTHER): REFUSE,
-    (True, None): "takeover_pr",
-    (True, FACTORY): "remote_branch",
-    (True, OTHER): REFUSE,
-}
-
-
 class Refusal(Exception):
     pass
-
-
-class RemoteBranch(NamedTuple):
-    head: str
-    owner: str
 
 
 class Adoption(NamedTuple):
@@ -152,16 +136,6 @@ def git(cwd: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
-def remote_branch_exists(worktree: Path, branch: str) -> bool:
-    ref = f"refs/heads/{branch}"
-    proc = subprocess.run(["git", "ls-remote", "--exit-code", "origin", ref], cwd=worktree, capture_output=True, text=True)
-    if proc.returncode == 2:
-        return False
-    if proc.returncode != 0:
-        raise Refusal(f"git ls-remote origin {ref} failed in {worktree}: {proc.stderr.strip()}")
-    return any(line.split("\t")[1] == ref for line in proc.stdout.splitlines())
-
-
 def takeover_pull_ref(takeover_pr: str, repo: str) -> str:
     match = PULL_URL.match(takeover_pr)
     if not match or match.group(1).lower() != repo.lower():
@@ -178,23 +152,6 @@ def origin_default(worktree: Path) -> str:
     return proc.stdout.strip()
 
 
-def remote_branch(worktree: Path, branch: str, default: str, login: str | None) -> RemoteBranch | None:
-    """origin/<branch> and who created it, judged by the author of the branch's own first commit."""
-    if not remote_branch_exists(worktree, branch):
-        return None
-    if not login:
-        raise Refusal(
-            "github.login is not set in the settings, so claude-session cannot tell the factory's branches from a person's"
-        )
-    # Refresh the default branch first, or merges from `gh pr update-branch` look like the branch's own commits.
-    git(worktree, "fetch", "--quiet", "origin")
-    git(worktree, "fetch", "--quiet", "origin", f"refs/heads/{branch}")
-    head = git(worktree, "rev-parse", "FETCH_HEAD")
-    own = git(worktree, "rev-list", "--first-parent", "--reverse", f"{default}..{head}").splitlines()
-    factory = not own or git(worktree, "log", "-1", "--format=%an", own[0]) == login
-    return RemoteBranch(head, FACTORY if factory else OTHER)
-
-
 def adopt_existing_work(
     worktree: Path, branch: str, repo: str, takeover_pr: str | None, login: str | None
 ) -> Adoption | None:
@@ -202,20 +159,25 @@ def adopt_existing_work(
     default = origin_default(worktree)
     if git(worktree, "rev-list", f"{default}..HEAD") or git(worktree, "status", "--porcelain"):
         return None
-    remote = remote_branch(worktree, branch, default, login)
-    source = ADOPTION[(pull_ref is not None, remote.owner if remote else None)]
-    if source is None:
-        return None
-    if source == REFUSE:
+    if not login:
         raise Refusal(
-            f"origin/{branch} was not created by {login}, so the factory cannot publish to it; a person must rename "
-            "that branch or open a pull request from it, which triage hands over as takeover_pr"
+            "github.login is not set in the settings, so claude-session cannot tell the factory's branches from a person's"
         )
-    if source == "remote_branch":
-        adoption = Adoption(source, branch, remote.head)
+    try:
+        branch_owner = card_branch.owner(card_branch.run_gh, repo, branch, login)
+    except card_branch.GhFailed as failure:
+        raise Refusal(str(failure)) from failure
+    source = card_branch.adoption(pull_ref is not None, branch_owner)
+    if source is card_branch.Source.FRESH:
+        return None
+    if source is card_branch.Source.REFUSE:
+        raise Refusal(card_branch.refusal(branch, login))
+    if source is card_branch.Source.REMOTE_BRANCH:
+        git(worktree, "fetch", "--quiet", "origin", f"refs/heads/{branch}")
+        adoption = Adoption(source.value, branch, git(worktree, "rev-parse", "FETCH_HEAD"))
     else:
         git(worktree, "fetch", "--quiet", "origin", pull_ref)
-        adoption = Adoption(source, takeover_pr, git(worktree, "rev-parse", "FETCH_HEAD"))
+        adoption = Adoption(source.value, takeover_pr, git(worktree, "rev-parse", "FETCH_HEAD"))
     git(worktree, "reset", "--quiet", "--hard", adoption.head)
     return adoption
 

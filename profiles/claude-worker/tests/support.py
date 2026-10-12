@@ -12,7 +12,6 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 REPO = SCRIPTS.parents[2]
 BOT_LOGIN = "factory-app[bot]"
-BOT_AUTHOR = (BOT_LOGIN, f"123+{BOT_LOGIN}@users.noreply.github.com")
 
 SHEBANG = "#!/usr/bin/env python3\n"
 
@@ -69,6 +68,75 @@ if leftover and options.get("waits_for_leftover"):
 """
 
 
+FAKE_GH = """#!/usr/bin/env python3
+import json, os, sys
+from urllib.parse import parse_qs, unquote
+
+state_path = os.environ["FAKE_GH_STATE"]
+state = json.load(open(state_path))
+args = sys.argv[1:]
+with open(state_path + ".log", "a") as log:
+    log.write(json.dumps(args) + "\\n")
+path, _, query = args[1].partition("?")
+parts = [unquote(part) for part in path.split("/")]
+prefix = "/".join(parts[:3])
+if prefix != "repos/" + state["repo"]:
+    sys.exit("gh: Not Found (HTTP 404)")
+if parts[3] == "branches":
+    if "/".join(parts[4:]) not in state["branches"]:
+        sys.exit("gh: Branch not found (HTTP 404)")
+    print(json.dumps({"name": "/".join(parts[4:])}))
+elif parts[3] == "activity":
+    ref = parse_qs(query)["ref"][0].removeprefix("refs/heads/")
+    creators = state["branches"].get(ref, [])
+    print(json.dumps([
+        {"activity_type": "branch_creation", "ref": "refs/heads/" + ref, "actor": {"login": login}}
+        for login in reversed(creators)
+    ][:1]))
+elif parts[3] == "pulls":
+    print(json.dumps(state["pulls"][parts[4]]))
+else:
+    sys.exit("gh: Not Found (HTTP 404)")
+"""
+
+
+class FakeGithub:
+    """A gh that answers the branch, activity, and pull request reads that card_branch makes.
+
+    A branch maps to the actors of its `branch_creation` records, oldest first. An empty list is a branch with no record.
+    """
+
+    def __init__(self, directory: Path, repo: str) -> None:
+        self.path = directory / "fake-gh"
+        self.path.write_text(with_interpreter(FAKE_GH))
+        os.chmod(self.path, 0o755)
+        self.state_path = directory / "fake-gh-state.json"
+        self.state = {"repo": repo, "branches": {}, "pulls": {}}
+        self.save()
+
+    def save(self) -> None:
+        self.state_path.write_text(json.dumps(self.state))
+
+    def create_branch(self, name: str, *actors: str) -> None:
+        self.state["branches"][name] = list(actors)
+        self.save()
+
+    def add_pull(self, number: int, head: str, *, state: str = "open", merged: bool = False,
+                 head_repo: str | None = None, updated_at: str = "2026-10-01T00:00:00Z") -> None:
+        self.state["pulls"][str(number)] = {
+            "state": state, "merged": merged, "updated_at": updated_at,
+            "head": {"ref": head, "repo": {"full_name": head_repo or self.state["repo"]}},
+        }
+        self.save()
+
+    def env(self) -> dict:
+        return {"GH_BIN": str(self.path), "FAKE_GH_STATE": str(self.state_path)}
+
+    def calls(self) -> list:
+        log = Path(str(self.state_path) + ".log")
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
 def git(cwd: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", *args],
@@ -96,9 +164,7 @@ class GitFixture(unittest.TestCase):
         git(self.main, "worktree", "add", "-q", "-b", branch, str(path))
         return path
 
-    def push_upstream_commit(
-        self, name: str, ref: str = "refs/heads/main", author: tuple[str, str] | None = None, base: str | None = None
-    ) -> str:
+    def push_upstream_commit(self, name: str, ref: str = "refs/heads/main", base: str | None = None) -> str:
         """Push one commit to ref, on top of base when given, else on the default branch."""
         other = self.tmp / f"other-{name}"
         git(self.tmp, "clone", "-q", str(self.origin), str(other))
@@ -107,11 +173,7 @@ class GitFixture(unittest.TestCase):
             git(other, "reset", "-q", "--hard", "FETCH_HEAD")
         (other / f"{name}.txt").write_text(name)
         git(other, "add", f"{name}.txt")
-        if author:
-            git(other, "-c", "user.name=GitHub", "-c", "user.email=noreply@github.com",
-                "commit", "-q", "-m", name, f"--author={author[0]} <{author[1]}>")
-        else:
-            git(other, "commit", "-q", "-m", name)
+        git(other, "commit", "-q", "-m", name)
         git(other, "push", "-q", "origin", f"+HEAD:{ref}")
         return git(other, "rev-parse", "HEAD")
 

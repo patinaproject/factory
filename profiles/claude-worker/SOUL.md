@@ -61,15 +61,12 @@ fields Hermes keeps:
   the issue keys.
 - `linear_agent_session_id` is the newest entry in the issue's
   `agentSessions`.
-- `takeover_pr` follows the rule triage used. Read each pull request URL in
-  the issue's `attachments` that is in `repo` with
-  `gh pr view <url> --json state,author,headRefName,isCrossRepository,updatedAt`
-  and keep the open ones. A pull request is the factory's own when its
-  `author.login` is the login `gh auth status` prints, `<slug>[bot]`, or
-  `app/<slug>`, and its `isCrossRepository` is false. When an own pull request
-  exists, the card has no `takeover_pr`. Otherwise `takeover_pr` is the
-  remaining pull request with the newest `updatedAt`, and the card has none
-  when none remains.
+- `takeover_pr` is the one triage chose. Run
+  `python3 "$HERMES_HOME/scripts/card_branch.py" --app <login> --repo <repo> --git-branch <gitBranchName>`
+  with `--pull <url>` for each pull request URL in the issue's `attachments`
+  that is in `repo`. `<login>` is the login `gh auth status` prints. Use the
+  `takeover_pr` it prints, which can be null. When it prints `blocked` or
+  `error`, call `kanban_block` with kind `capability` and its reason.
 
 If a key still cannot be found, call `kanban_block` with kind `capability` and
 a reason that names the missing key. When `linear_agent_session_id` is known,
