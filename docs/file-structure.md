@@ -34,7 +34,7 @@
 │       ├── SKILL.md
 │       └── references/        # Cloudflare and SST, Linear, GitHub, Slack, Claude transport, Infisical, 1Password, agent instructions
 ├── templates/
-│   ├── render.py              # Builds the linear and github webhook routes from settings
+│   ├── render.py              # Builds the webhook routes and rate limit from settings
 │   ├── triage-linear.md       # Linear triage prompt template
 │   └── triage-github.md       # GitHub triage prompt template
 ├── AGENTS.md                  # Shared agent and contributor workflow contract

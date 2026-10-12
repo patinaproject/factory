@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the Hermes `linear` and `github` webhook routes from the factory settings."""
+"""Render the factory's Hermes webhook config, the `linear` and `github` routes and the rate limit, from the settings."""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,11 @@ from typing import Any, Optional
 
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 ROUTES_KEY = "platforms.webhook.extra.routes"
+RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
+# Deliveries per route per minute. Hermes counts every signed delivery before its event and filter
+# checks, so GitHub's check events use the budget, and it answers 429 to the rest, which GitHub never
+# redelivers. The github route peaks near 110 a minute; Hermes' default of 30 dropped review events.
+RATE_LIMIT = 600
 TEMPLATE_DIR = Path(__file__).resolve().parent
 GITHUB_ROUTE = "github"
 ROUTINGS = ("default", "synced_github")
@@ -232,6 +237,21 @@ def build_routes(settings: Any) -> dict:
     }
 
 
+def build_config(routes: dict) -> dict:
+    """Map each webhook config key the factory owns to the value `hermes config set` installs."""
+    return {RATE_LIMIT_KEY: RATE_LIMIT, **{f"{ROUTES_KEY}.{name}": route for name, route in routes.items()}}
+
+
+def check_rate_limit() -> tuple:
+    proc = subprocess.run(["hermes", "config", "get", RATE_LIMIT_KEY, "--json"], capture_output=True, text=True)
+    installed = json.loads(proc.stdout) if proc.returncode == 0 else None
+    if installed == RATE_LIMIT:
+        return True, f"rate_limit: matches {RATE_LIMIT}"
+    if installed is None:
+        return False, f"rate_limit: not installed, so Hermes allows 30 a minute; install {RATE_LIMIT}"
+    return False, f"rate_limit: {json.dumps(installed)} differs from {RATE_LIMIT}"
+
+
 def installed_route(name: str) -> Optional[dict]:
     # --raw expands ${VAR} references into the live secret. The output stays in this process
     # and only key names and fixed text reach the report, so the secret is never printed.
@@ -276,7 +296,7 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="compare the rendered routes with the installed ones; prints no secret value",
+        help="compare the rendered config with the installed one; prints no secret value",
     )
     args = parser.parse_args(argv)
     try:
@@ -285,10 +305,10 @@ def main(argv: Optional[list] = None) -> int:
         print(f"render.py: invalid settings: {exc}", file=sys.stderr)
         return 1
     if not args.check:
-        print(json.dumps(routes, indent=2))
+        print(json.dumps(build_config(routes), indent=2))
         return 0
     home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-    report = check_routes(routes, home / "config.yaml")
+    report = [*check_routes(routes, home / "config.yaml"), check_rate_limit()]
     for _, line in report:
         print(line)
     return 0 if all(ok for ok, _ in report) else 1

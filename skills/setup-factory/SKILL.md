@@ -639,19 +639,20 @@ command, and confirm the path.
 
 ## 11. Webhook routes
 
-`templates/render.py` builds the `linear` and `github` routes from the settings
-in part 10. [`templates/README.md`](../../templates/README.md) describes the
+`templates/render.py` builds the `linear` and `github` routes and the webhook
+rate limit from the settings in part 10. [`templates/README.md`](../../templates/README.md) describes the
 output.
 
-**Check.** Compare each rendered route with the installed one:
+**Check.** Compare each rendered route and the rate limit with the installed ones:
 
 ```sh
 python3 <repo>/templates/render.py --check
 ```
 
 It prints one line per route, such as
-`route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference`, and
-exits `0` only when every route matches and every secret is its reference. A
+`route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference`, then
+`rate_limit: matches 600`. It exits `0` only when every route and the rate
+limit match and every secret is its reference. A
 `differs in <keys>` line names the keys that differ. A secret line other than
 `is the ... reference` means the route holds a literal secret, or Hermes has no
 value for the reference.
@@ -661,17 +662,20 @@ Never compare or print an installed route with
 so its output holds the live signing secret. `--check` reads it inside the
 process and prints only route names, key names, and the reference names.
 
-Render the routes for the install step:
+Render the webhook config for the install step. Its keys are full Hermes
+config keys, such as `platforms.webhook.extra.routes.linear` and
+`platforms.webhook.extra.rate_limit`:
 
 ```sh
-python3 <repo>/templates/render.py > <scratch>/routes.json
+python3 <repo>/templates/render.py > <scratch>/webhook-config.json
 ```
 
-**Install** each route that `--check` reports as not installed, as differing, or with the wrong secret:
+**Install** each key that `--check` reports as not installed, as differing, or
+with the wrong secret:
 
 ```sh
-hermes config set "platforms.webhook.extra.routes.$name" \
-  "$(python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)[sys.argv[1]]))' "$name" < <scratch>/routes.json)"
+hermes config set "$key" \
+  "$(python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)[sys.argv[1]]))' "$key" < <scratch>/webhook-config.json)"
 ```
 
 The route secrets are `${LINEAR_WEBHOOK_SECRET}` and `${GITHUB_WEBHOOK_SECRET}`
@@ -1001,13 +1005,18 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.
-   - A `webhook route <name>` line: run the part 11 install for that route.
+   - A `webhook config <key>` line: run the part 11 install for that key.
+   - A `webhook route <name>: <n> rejected with HTTP 429` line: the gateway
+     dropped deliveries in the last hour. Check that
+     `platforms.webhook.extra.rate_limit` is installed. If it is, show the
+     operator the count, and open an issue to raise `RATE_LIMIT` in
+     `templates/render.py`.
    - A `dashboard sign-in` line: follow step 6 of
      [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
      or allow the `refresh_tokens` grant on the `saas` Access application when
      the line names the issuer. Then restart the dashboard service.
 4. Run `check-install` again. It prints nothing.
-5. If step 3 changed a plugin or a webhook route:
+5. If step 3 changed a plugin or a webhook config key:
 
    > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
    > from a shell outside Hermes. Then confirm that

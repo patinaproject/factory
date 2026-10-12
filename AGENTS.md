@@ -94,6 +94,7 @@ rule that only docs enforce is a candidate for a script, check, or test.
 | Setup discovers each input it can read on the machine and never asks the operator to sign in | Docs only: "Collect the inputs" in `skills/setup-factory/SKILL.md`; the machine-wide block |
 | Hermes' own agent knows that credentials live in the gateway and how to check GitHub, Linear, and Slack | `templates/memory.py --check` in setup part 17 |
 | A factory's dashboard is reachable through its public hostname and keeps a signed-in user signed in past the first access token | `check_dashboard` in `profiles/claude-worker/scripts/check-install`: `dashboard.public_url` set, scopes include `offline_access`, and the issuer offers `refresh_tokens` |
+| No webhook delivery is lost to the gateway's rate limit | `templates/render.py --check`, which reports a missing or different `platforms.webhook.extra.rate_limit`; the HTTP 429 line in `profiles/claude-worker/scripts/check-install` |
 | A worker completes a card only when its pull request is ready to merge | `plugins/pr-ready-gate` |
 | A takeover never publishes to another person's branch | The `-takeover` branch rule in `templates/triage-linear.md`; adoption tests in `profiles/claude-worker/tests/test_claude_session.py` |
 | When `gh issue develop` fails with `createLinkedBranch`, derive the branch name from the adapter's rule | Docs only: `docs/agents/issue-tracker.md` and the machine-wide block |

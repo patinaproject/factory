@@ -270,10 +270,15 @@ class CommandLineTest(unittest.TestCase):
         Path(f.name).unlink()
         return code, out.getvalue(), err.getvalue()
 
-    def test_prints_the_routes_as_json(self):
+    def test_prints_each_config_key_with_its_value(self):
         code, out, err = self.run_main(SETTINGS)
         self.assertEqual((code, err), (0, ""))
-        self.assertEqual(json.loads(out), render.build_routes(SETTINGS))
+        routes = render.build_routes(SETTINGS)
+        self.assertEqual(json.loads(out), {
+            "platforms.webhook.extra.rate_limit": 600,
+            "platforms.webhook.extra.routes.linear": routes["linear"],
+            "platforms.webhook.extra.routes.github": routes["github"],
+        })
 
     def test_invalid_settings_exit_nonzero_with_the_reason(self):
         code, out, err = self.run_main(settings(repositories=[]))
@@ -283,11 +288,12 @@ class CommandLineTest(unittest.TestCase):
 
 SECRETS = {"LINEAR_WEBHOOK_SECRET": "linear-signing-secret-0123456789", "GITHUB_WEBHOOK_SECRET": "github-signing-secret-9876543210"}
 
-# Stands in for `hermes config get <route> --json --raw`, which expands ${VAR} into the live secret.
+# Stands in for `hermes config get <key> --json --raw`, which expands ${VAR} into the live secret.
 FAKE_HERMES = """#!PYTHON
 import json, os, re, sys
 name = sys.argv[3].rsplit(".", 1)[1]
-path = os.path.join(os.environ["HERMES_HOME"], "routes", name + ".json")
+folder = "." if name == "rate_limit" else "routes"
+path = os.path.join(os.environ["HERMES_HOME"], folder, name + ".json")
 if not os.path.exists(path):
     sys.exit("Config key not set: " + sys.argv[3])
 secrets = json.loads(os.environ["FAKE_SECRETS"])
@@ -335,6 +341,10 @@ class RouteCheckTest(unittest.TestCase):
         for name, route in self.routes.items():
             self.install(name, route)
         self.write_config("secret: ${LINEAR_WEBHOOK_SECRET}\nsecret: ${GITHUB_WEBHOOK_SECRET}\n")
+        self.install_rate_limit(600)
+
+    def install_rate_limit(self, value):
+        (self.tmp / "rate_limit.json").write_text(json.dumps(value))
 
     def test_installed_routes_with_references_match(self):
         self.install_rendered()
@@ -342,7 +352,26 @@ class RouteCheckTest(unittest.TestCase):
         self.assertEqual(self.check(), (0, [
             "route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference",
             "route github: matches; secret is the ${GITHUB_WEBHOOK_SECRET} reference",
+            "rate_limit: matches 600",
         ]))
+
+    def test_a_missing_rate_limit_is_reported(self):
+        self.install_rendered()
+        (self.tmp / "rate_limit.json").unlink()
+
+        code, lines = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(lines[2], "rate_limit: not installed, so Hermes allows 30 a minute; install 600")
+
+    def test_a_lower_rate_limit_is_reported(self):
+        self.install_rendered()
+        self.install_rate_limit(30)
+
+        code, lines = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(lines[2], "rate_limit: 30 differs from 600")
 
     def test_a_changed_route_names_the_differing_keys(self):
         self.install_rendered()
@@ -379,6 +408,7 @@ class RouteCheckTest(unittest.TestCase):
         self.assertEqual(self.check(), (1, [
             "route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference",
             "route github: not installed",
+            "rate_limit: matches 600",
         ]))
 
 
