@@ -348,7 +348,7 @@ profile also stops the provider, and the live test in part 15 then fails.
 ## 5. Factory plugins and the worker profile
 
 `<repo>` is the absolute path of this repository's checkout. Each profile has
-its own plugins directory, so install both plugins into both homes.
+its own plugins directory, so install every plugin into both homes.
 
 **Check**, for each home:
 
@@ -357,8 +357,8 @@ hermes plugins list
 hermes -p claude-worker plugins list
 ```
 
-Both list `linear-agent-session` and `pr-ready-gate`, enabled. On a fresh
-machine, install both now and skip the content check.
+Both list `linear-agent-session`, `pr-comment-links`, and `pr-ready-gate`,
+enabled. On a fresh machine, install all three now and skip the content check.
 
 On a re-run, `<worker>` already exists, and a listed plugin can still be
 older than the repository. First bring `<repo>` to an up-to-date default
@@ -379,8 +379,10 @@ plus `--force`.
 
 ```sh
 hermes plugins install "file://<repo>#plugins/linear-agent-session" --enable --yes-deps </dev/null
+hermes plugins install "file://<repo>#plugins/pr-comment-links" --enable --yes-deps </dev/null
 hermes plugins install "file://<repo>#plugins/pr-ready-gate" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/linear-agent-session" --enable --yes-deps </dev/null
+hermes -p claude-worker plugins install "file://<repo>#plugins/pr-comment-links" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/pr-ready-gate" --enable --yes-deps </dev/null
 ```
 
@@ -893,6 +895,13 @@ each check. Report each result.
     it completes, the worker asks in Linear whether to close the original and
     blocks with `needs_input`. It closes the original only after a human
     approves.
+18. Once a card's pull request is open, send a Linear `stop`, then reply in
+    the same agent session. The next dispatcher tick starts a worker, and the
+    card completes without a reassign from the operator. In
+    `hermes kanban show <task id> --json`, no comment contains
+    `github.com/<owner>/<name>/pull/`, two `assigned` events and one
+    `unblocked` event follow the `blocked` event, and no `respawn_guarded`
+    event with reason `active_pr` follows the unblock.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` or `triage`
 card. The operator drags the card to Ready, which Hermes documents as a
