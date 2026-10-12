@@ -213,9 +213,26 @@ Run `sst deploy --stage <stage>` a second time. It must report no changes.
 > token from the secret storage of step 4, in their own terminal.
 
 Check that the tunnel shows a healthy connector in the SST app's tunnel status
-output or the Cloudflare API, and that the service is enabled at boot
-(`launchctl print system/com.cloudflare.cloudflared` on macOS,
-`systemctl is-enabled cloudflared` on Linux).
+output or the Cloudflare API, and that the service is enabled at boot. On
+Linux, run `systemctl is-enabled cloudflared`. On macOS, do not run
+`launchctl print` on the service and read its whole output, because it prints
+the program arguments, and those can hold the tunnel token. Read only the
+label, the program path, and the boot flag from the plist, and only the
+`state =` line from `launchctl`:
+
+```sh
+plist=/Library/LaunchDaemons/com.cloudflare.cloudflared.plist
+label="$(plutil -extract Label raw -o - "$plist")"
+echo "label: $label"
+echo "program: $(plutil -extract Program raw -o - "$plist" 2>/dev/null ||
+  plutil -extract ProgramArguments.0 raw -o - "$plist")"
+echo "run at load: $(plutil -extract RunAtLoad raw -o - "$plist")"
+launchctl print "system/$label" | grep -m 1 'state ='
+```
+
+The program is the `cloudflared` binary, run at load is `true`, and the state
+is `running`. When the operator installed the service under another plist
+name, set `plist` to that file.
 
 ## 6. Configure the dashboard sign-in
 
