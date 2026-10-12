@@ -320,7 +320,8 @@ distribution install sets no model, so now run part 4 for the worker profile.
 **Verify.**
 
 - `<worker>/scripts/claude-session`, `<worker>/scripts/refresh-checkouts`,
-  and `<worker>/scripts/refresh-gh-app-login` exist and are executable.
+  `<worker>/scripts/refresh-gh-app-login`, and
+  `<worker>/scripts/check-github-access` exist and are executable.
 - `<worker>/SOUL.md` matches `<repo>/profiles/claude-worker/SOUL.md`.
 - `hermes -p claude-worker config get platform_toolsets.cli` lists `terminal`,
   `kanban`, and `linear_agent_session`.
@@ -502,8 +503,9 @@ The installer also adds lines to the user's shell startup file. Leave them.
 
 **GitHub login and checkouts.** Return to
 [`references/github.md`](references/github.md) and run its
-"Sign the worker's `gh` in" and "Configure git in each checkout" sections.
-They need the settings and the clones from this part.
+"Sign the worker's `gh` in", "Check the App's access", and "Configure git in
+each checkout" sections. They need the settings and the clones from this
+part. Continue only when `check-github-access` prints nothing.
 
 **Kanban.**
 

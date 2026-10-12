@@ -26,7 +26,8 @@ minutes.
 Run this reference in two passes. Part 9 runs [Create the App](#create-the-app)
 through [Set the worker's `gh` directory](#set-the-workers-gh-directory). Part
 10 writes the settings and clones the checkouts, then returns here for
-[Sign the worker's `gh` in](#sign-the-workers-gh-in) and
+[Sign the worker's `gh` in](#sign-the-workers-gh-in),
+[Check the App's access](#check-the-apps-access), and
 [Configure git in each checkout](#configure-git-in-each-checkout).
 
 ## Check
@@ -45,6 +46,8 @@ All of these must hold:
   `refresh-gh-app-login`, and its last run shows no error.
 - `GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --paginate --jq '.repositories[].full_name'`
   lists every configured repository.
+- `GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/check-github-access`
+  prints nothing. See [Check the App's access](#check-the-apps-access).
 - For each repository's main checkout,
   `git -C <path> config --local --get-all credential.https://github.com.helper`
   prints an empty line and then `!gh auth git-credential`.
@@ -87,8 +90,8 @@ A new secret breaks every webhook that uses the old one.
 >   ```
 >
 > - **Repository permissions:** Contents read and write, Pull requests read
->   and write, Issues read and write, Checks read-only, Actions read-only, and
->   Metadata read-only.
+>   and write, Issues read and write, Checks read-only, Commit statuses
+>   read-only, Actions read-only, and Metadata read-only.
 > - **Subscribe to events:** Issues, Issue comment, Pull request, Pull request
 >   review, Pull request review comment, Workflow run, Check run, and Check
 >   suite.
@@ -102,11 +105,17 @@ list with the form when that file changes.
 
 ### Upgrade an existing App's permissions
 
-An App created before Issues became read and write cannot label, comment on,
-or edit issues. The [live test](#live-test) fails for it.
+An App created before a permission joined the list above lacks it. Without
+Issues read and write, it cannot label, comment on, or edit issues, and the
+[live test](#live-test) fails. Without Checks or Commit statuses, the
+completion gate cannot read the pull request's checks, and refuses the first
+ready pull request only after the worker has finished.
+[Check the App's access](#check-the-apps-access) names each missing
+permission.
 
 > **HUMAN CHECKPOINT.** Ask the operator to open the App's
-> **Permissions & events** page, set **Issues** to **Read and write**, and save.
+> **Permissions & events** page, set each permission that the check names to
+> the access it names, and save.
 > GitHub then asks the installation's owner to accept the new permissions.
 > Ask the operator to accept them on the installation's settings page,
 > `.../settings/installations/<installation id>`.
@@ -201,6 +210,27 @@ The script prints nothing on success. On failure it prints one line that names
 the failed step, such as `check private key` or `mint installation token`, and
 Hermes delivers the line. `gh api user` fails for an installation token, so do
 not use it as the check.
+
+### Check the App's access
+
+`pr-ready-gate` and Hermes' Kanban completion contract read each pull
+request, its base branch rules, its check runs, and its commit statuses as the
+worker's `gh` login. A missing permission shows up only when the worker tries
+to complete a card. `check-github-access` makes the same reads now, for every
+configured repository, and compares the App's permissions with the
+[permission table](#use-gh-on-a-factory-machine):
+
+```sh
+GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/check-github-access
+```
+
+It prints nothing when every read succeeds. Otherwise it prints one line for
+each problem and exits `1`. A line such as
+`grant the App "Commit statuses: Read-only"` names the permission to add with
+[Upgrade an existing App's permissions](#upgrade-an-existing-apps-permissions).
+A `not found (HTTP 404)` line means the installation does not cover the
+repository. After the operator accepts a new permission, run the
+`refresh-gh-app-login` job, then run the check again.
 
 ## Configure git in each checkout
 
@@ -319,7 +349,9 @@ The App can do what its repository permissions allow:
 | Contents | Read and write | Fetch, create branches, publish commits with `push-signed` |
 | Pull requests | Read and write | Open, edit, label, and comment on pull requests, and resolve review threads |
 | Issues | Read and write | Open, edit, label, and comment on issues |
-| Checks, Actions | Read-only | Read check runs and workflow logs |
+| Checks | Read-only | Read check runs, which the completion gate needs |
+| Commit statuses | Read-only | Read commit statuses, which the completion gate needs |
+| Actions | Read-only | Read workflow runs and logs |
 | Metadata | Read-only | Read repository names, settings, and collaborators |
 
 When a command fails:

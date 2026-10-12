@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Check that the worker's GitHub App login can make the reads that completion needs.
+
+Runs as the gh login that GH_CONFIG_DIR selects. Compares the App's permissions
+with the ones the factory needs, then, for each configured repository, makes
+the reads that pr-ready-gate and Hermes' Kanban completion contract make: a
+pull request, its base branch rules, its check runs, and its commit statuses.
+
+Silent when every read succeeds. Prints one line per missing permission or
+refused read, naming the permission to grant, and exits 1. Exits 2 when it
+cannot run. It never prints the token.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import quote
+
+SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
+GH_TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN")
+LEVELS = {"read": 1, "write": 2}
+LEVEL_LABELS = {"read": "Read-only", "write": "Read and write"}
+
+
+class Permission(NamedTuple):
+    key: str
+    label: str
+    level: str
+
+    def grant(self) -> str:
+        return f'"{self.label}: {LEVEL_LABELS[self.level]}"'
+
+
+CONTENTS = Permission("contents", "Contents", "write")
+PULL_REQUESTS = Permission("pull_requests", "Pull requests", "write")
+ISSUES = Permission("issues", "Issues", "write")
+CHECKS = Permission("checks", "Checks", "read")
+STATUSES = Permission("statuses", "Commit statuses", "read")
+ACTIONS = Permission("actions", "Actions", "read")
+METADATA = Permission("metadata", "Metadata", "read")
+REQUIRED = (CONTENTS, PULL_REQUESTS, ISSUES, CHECKS, STATUSES, ACTIONS, METADATA)
+
+PULL_REQUEST_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid baseRefName state isDraft mergeStateStatus
+      baseRef { branchProtectionRule { requiredStatusChecks { context app { databaseId } } } }
+    }
+  }
+}"""
+
+
+class Refusal(Exception):
+    pass
+
+
+class Refused(Exception):
+    pass
+
+
+def load_settings(settings_file: str | None) -> dict:
+    if settings_file:
+        text = Path(settings_file).read_text()
+    else:
+        proc = subprocess.run(["hermes", "config", "get", SETTINGS_KEY, "--json", "--raw"], capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise Refusal(f"hermes config get {SETTINGS_KEY} failed: {proc.stderr.strip()}")
+        text = proc.stdout
+    settings = json.loads(text)
+    if not isinstance(settings, dict):
+        raise Refusal("settings must be an object")
+    return settings
+
+
+def explain(stderr: str, permission: Permission, repo: str) -> str:
+    if "HTTP 403" in stderr or "Resource not accessible by integration" in stderr:
+        return f"refused (HTTP 403): grant the App {permission.grant()} and accept it on the installation"
+    if "HTTP 404" in stderr or "Could not resolve to a Repository" in stderr:
+        return f"not found (HTTP 404): install the App on {repo}, or grant it {permission.grant()}"
+    if "HTTP 401" in stderr:
+        return "unauthorized (HTTP 401): the installation token expired; run the refresh-gh-app-login job"
+    detail = stderr.strip().splitlines()[0] if stderr.strip() else "no error output"
+    return f"failed: {detail}"
+
+
+def gh(permission: Permission, repo: str, what: str, *args: str):
+    proc = subprocess.run([os.environ.get("GH_BIN", "gh"), "api", *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refused(f"{repo}: reading {what} {explain(proc.stderr, permission, repo)}")
+    return json.loads(proc.stdout)
+
+
+def check_app(login: str) -> list[str]:
+    slug = login.removesuffix("[bot]")
+    granted = gh(METADATA, slug, "the App", f"apps/{slug}").get("permissions") or {}
+    return [
+        f"App {slug}: grant {permission.grant()}, it has {granted.get(permission.key) or 'no access'}"
+        for permission in REQUIRED
+        if LEVELS.get(granted.get(permission.key), 0) < LEVELS[permission.level]
+    ]
+
+
+def head_to_check(repo: str, problems: list) -> tuple[str, str]:
+    """Return the head commit and base branch of the latest pull request, or of the default branch without one."""
+    try:
+        pulls = gh(PULL_REQUESTS, repo, "pull requests", f"repos/{repo}/pulls?state=all&per_page=1")
+    except Refused as refused:
+        problems.append(str(refused))
+        pulls = []
+    if pulls:
+        pull = pulls[0]
+        owner, name = repo.split("/")
+        try:
+            gh(PULL_REQUESTS, repo, f"pull request #{pull['number']} through GraphQL", "graphql",
+               "-f", f"query={PULL_REQUEST_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}",
+               "-F", f"number={pull['number']}")
+        except Refused as refused:
+            problems.append(str(refused))
+        return pull["head"]["sha"], pull["base"]["ref"]
+    branch = gh(METADATA, repo, "the repository", f"repos/{repo}")["default_branch"]
+    commit = gh(CONTENTS, repo, f"the head of {branch}", f"repos/{repo}/commits/{quote(branch, safe='')}")
+    return commit["sha"], branch
+
+
+def check_repository(repo: str) -> list[str]:
+    problems: list = []
+    try:
+        sha, branch = head_to_check(repo, problems)
+    except Refused as refused:
+        return [*problems, str(refused)]
+    reads = [
+        (METADATA, f"the rules of {branch}", f"repos/{repo}/rules/branches/{quote(branch, safe='')}"),
+        (CHECKS, f"check runs of {sha[:7]}", f"repos/{repo}/commits/{sha}/check-runs?per_page=1"),
+        (STATUSES, f"commit statuses of {sha[:7]}", f"repos/{repo}/commits/{sha}/statuses?per_page=1"),
+    ]
+    for permission, what, endpoint in reads:
+        try:
+            gh(permission, repo, what, endpoint)
+        except Refused as refused:
+            problems.append(str(refused))
+    return problems
+
+
+def run(settings_file: str | None) -> list[str]:
+    if not os.environ.get("GH_CONFIG_DIR"):
+        raise Refusal("GH_CONFIG_DIR is not set; point it at the worker's gh directory")
+    overriding = [name for name in GH_TOKEN_VARIABLES if os.environ.get(name)]
+    if overriding:
+        raise Refusal(f"{', '.join(overriding)} is set and overrides the App login in GH_CONFIG_DIR; unset it")
+    settings = load_settings(settings_file)
+    login = (settings.get("github") or {}).get("login")
+    if not isinstance(login, str) or not login.endswith("[bot]"):
+        raise Refusal(f"github.login {login!r} must be the App's <app-slug>[bot] login")
+    repositories = [repo.get("full_name") for repo in settings.get("repositories") or []]
+    if not repositories:
+        raise Refusal("no repositories are configured")
+    try:
+        problems = check_app(login)
+    except Refused as refused:
+        problems = [str(refused)]
+    for repo in repositories:
+        problems.extend(check_repository(repo))
+    return problems
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--settings-json", help="read the settings from this JSON file instead of hermes config")
+    args = parser.parse_args()
+    try:
+        problems = run(args.settings_json)
+    except (Refusal, OSError, ValueError) as exc:
+        print(f"check-github-access: {exc}", file=sys.stderr)
+        return 2
+    for problem in problems:
+        print(problem)
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
