@@ -95,7 +95,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` and `<worker>/.env` |
 | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
-| `GH_CONFIG_DIR` | `<worker>/.env`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews |
+| `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
 | The token variable that `claude_session.auth_token_env` names | `<worker>/.env`. Never name it `ANTHROPIC_*` |
 | Cloudflare tunnel token | The `cloudflared` system service only |
@@ -775,6 +775,38 @@ It writes the factory's operating rules into `~/.claude/CLAUDE.md`, so every
 Claude Code session on the machine acts on GitHub as the App, publishes
 commits with `push-signed`, and knows where the private configuration record
 lives.
+
+**Hermes' own agent.** Hermes' default-profile agent, which answers in Slack,
+does not read `~/.claude/CLAUDE.md`. Without its own notes, it looks for
+credentials in its tool shell, finds none, and reports that GitHub or Linear
+is not set up. `templates/memory.py` installs the factory's entries in its
+memory file. They say that credentials live in the gateway, that `gh` acts as
+the App through `GH_CONFIG_DIR`, that Linear is reached through the
+`linear-agent-session` tools, and that a Slack message proves Slack works.
+
+**Check.**
+
+```sh
+python3 <repo>/templates/memory.py --check --gh-config-dir <worker>/gh <home>/memories/MEMORY.md
+grep '^GH_CONFIG_DIR=' <home>/.env    # GH_CONFIG_DIR=<worker>/gh
+```
+
+The first command prints nothing when every factory entry is present and
+current. Otherwise it prints one line per entry that is missing or differs.
+
+**Install.** The command replaces each factory entry with the same label,
+such as `GitHub:`, and keeps every other entry, so the agent's own memories
+stay. It refuses to write a file over Hermes' limit of 2,200 characters. Then
+set the `gh` directory for the default home:
+
+```sh
+python3 <repo>/templates/memory.py --gh-config-dir <worker>/gh <home>/memories/MEMORY.md
+printf '%s' <worker>/gh | env_set <home>/.env GH_CONFIG_DIR
+```
+
+Hermes reads the memory file when a session starts. The gateway reads
+`<home>/.env` only when it starts, so after `env_set` changes that file, ask
+the operator to restart the gateway as in part 15.
 
 ## Deploy a merged factory change
 

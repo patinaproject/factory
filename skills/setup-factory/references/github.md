@@ -42,7 +42,8 @@ All of these must hold:
 - The file at `github.private_key_path` exists and prints `0o600` for
   `python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' <key path>`.
   The path is outside every configured checkout and outside this repository.
-- `grep '^GH_CONFIG_DIR=' <worker>/.env` prints `GH_CONFIG_DIR=<worker>/gh`.
+- `grep '^GH_CONFIG_DIR=' <worker>/.env <home>/.env` prints
+  `GH_CONFIG_DIR=<worker>/gh` for each file.
 - `hermes -p claude-worker cron list` shows exactly one job named
   `refresh-gh-app-login`, and its last run shows no error.
 - `GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --paginate --jq '.repositories[].full_name'`
@@ -180,7 +181,11 @@ as sender, and the worker needs that failure.
 mkdir -p <worker>/gh
 chmod 700 <worker>/gh
 printf '%s' <worker>/gh | env_set <worker>/.env GH_CONFIG_DIR
+printf '%s' <worker>/gh | env_set <home>/.env GH_CONFIG_DIR
 ```
+
+The default home uses the same login, so Hermes' own agent acts on GitHub as
+the App, for example when it answers a question in Slack.
 
 Part 9 ends here. Continue with part 10.
 
