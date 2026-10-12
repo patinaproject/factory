@@ -278,9 +278,14 @@ class PromptSubstitutionTest(unittest.TestCase):
 
     def test_own_pull_requests_match_both_forms_of_the_app_login(self):
         self.assertIn(
-            "A pull request is the factory's own when its `author.login` is `example-app[bot]` or `app/example-app`.",
+            "A pull request is the factory's own when its `author.login` is `example-app[bot]` or `app/example-app` "
+            "and the App started its branch",
             self.prompts["linear"],
         )
+
+    def test_own_pull_request_needs_a_branch_the_app_started(self):
+        prompt = self.prompts["linear"]
+        self.assertIn("`commits[0].authors[0].name` is `example-app[bot]`", prompt)
 
     def test_linear_prompt_names_the_app_user(self):
         self.assertIn("00000000-0000-4000-8000-000000000001", self.prompts["linear"])

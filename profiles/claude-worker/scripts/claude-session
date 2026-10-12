@@ -188,8 +188,9 @@ def adopt_existing_work(
         return None
     if source == REFUSE:
         raise Refusal(
-            f"origin/{branch} was not created by {login}, so the factory cannot publish to it; a person must rename "
-            "that branch or open a pull request from it, which triage hands over as takeover_pr"
+            f"origin/{branch} was not created by {login}, so the factory cannot publish to it; start the card on "
+            f"{branch}-takeover with takeover_pr set to the pull request, or have a person delete or rename "
+            f"origin/{branch}"
         )
     if source == "remote_branch":
         adoption = Adoption(source, branch, remote.head)

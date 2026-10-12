@@ -90,7 +90,7 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    Take each URL in the issue's `attachments` of the form
    `https://github.com/<owner>/<name>/pull/<number>` whose `<owner>/<name>`
    matches the chosen repository, ignoring case. Read each one with
-   `gh pr view '<url>' --json state,author,headRefName,isCrossRepository,updatedAt`
+   `gh pr view '<url>' --json state,author,headRefName,isCrossRepository,updatedAt,commits`
    and keep those whose `state` is `OPEN`. <<own_pull_request>> An own pull
    request counts only when its `isCrossRepository` is false. When several
    pull requests of one kind remain, the newest `updatedAt` wins. Then read
@@ -99,8 +99,8 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    | Open pull requests | `branch` | `takeover_pr` |
    | --- | --- | --- |
    | An own pull request | its `headRefName` | none |
-   | A person's pull request whose `headRefName` is `gitBranchName` | `<gitBranchName>-takeover` | its URL |
-   | A person's pull request on another branch | `gitBranchName` | its URL |
+   | A pull request that is not own, whose `headRefName` is `gitBranchName` | `<gitBranchName>-takeover` | its URL |
+   | A pull request that is not own, on another branch | `gitBranchName` | its URL |
    | None | `gitBranchName` | none |
 
    The worker continues an own pull request. With `takeover_pr`, it starts

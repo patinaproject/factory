@@ -72,8 +72,9 @@ FACTORY_BRANCH_TAKEOVER_ENTRY = (
     f"{TAKEOVER_INTRO} This branch holds the factory's own earlier commits, not that pull request's. {TAKEOVER_RULES}"
 )
 PERSON_BRANCH_REFUSAL = (
-    f"origin/abc-123-fix was not created by {BOT_LOGIN}, so the factory cannot publish to it; a person must rename "
-    "that branch or open a pull request from it, which triage hands over as takeover_pr"
+    f"origin/abc-123-fix was not created by {BOT_LOGIN}, so the factory cannot publish to it; start the card on "
+    "abc-123-fix-takeover with takeover_pr set to the pull request, or have a person delete or rename "
+    "origin/abc-123-fix"
 )
 
 

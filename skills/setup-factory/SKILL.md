@@ -1012,7 +1012,9 @@ each check. Report each result.
     pull request's head, and its own pull request links the original. Before
     it completes, the worker asks in Linear whether to close the original and
     blocks with `needs_input`. It closes the original only after a human
-    approves.
+    approves. Repeat with a pull request the App opened on a branch whose
+    first commit is a person's: triage treats it the same way, so the card's
+    branch is `<gitBranchName>-takeover` and the body carries `takeover_pr`.
 18. Once a card's pull request is open, send a Linear `stop`, then reply in
     the same agent session. In `hermes kanban show <task id> --json`, the
     events after `blocked` are `unblocked`, `review_requested`, and
