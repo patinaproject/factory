@@ -188,11 +188,14 @@ Type `Issue`. The issue is the data change issue.
 
 1. Read the issue with `linear_issue`.
 2. Find the issue's card.
-3. If the issue's `stateType` is `completed` and the card is `review` or
-   `blocked`, comment on the card that the Linear issue is done, and stop. Do
-   not archive it. Merging the pull request usually marks the issue done, and
-   GitHub triage moves the card to `done` on the merge, from either status. Hermes cannot complete an
-   archived card, so archiving first would leave it unfinished.
+3. If the issue's `stateType` is `completed` and the card is not `done`, read
+   the pull request for the card's `branch:` line with
+   `gh pr view '<branch>' -R '<repo>' --json state,url`. If it is open or
+   merged, comment on the card that the Linear issue is done, and stop. Do not
+   archive it. Merging the pull request usually marks the issue done, and
+   GitHub triage or the worker moves the card to `done` on the merge. Hermes
+   cannot complete an archived card, so archiving first would leave it
+   unfinished.
 4. Otherwise, if the issue's `stateType` is `completed` or `canceled`, run
    `hermes kanban archive <task id>` when a card exists, and stop.
 5. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`, the
