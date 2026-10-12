@@ -19,8 +19,9 @@ whenever the root home has a secret source, and that each configured
 repository checkout exists and has origin/HEAD set. When any difference is
 reported and the source checkout is not at origin/HEAD, the last line names
 that checkout. It gives the fast-forward command only when the checkout is
-behind, on the default branch, and clean. --print-source prints the checkout
-path and exits.
+behind, on the default branch, and clean. --ref turns the line off, because
+the target is then not origin/HEAD. --print-source prints the checkout path
+and exits.
 
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd check at another file system
 root and launchctl, for tests.

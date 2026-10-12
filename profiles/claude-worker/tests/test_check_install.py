@@ -688,6 +688,15 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertNotIn("source checkout", out)
 
+    def test_an_explicit_ref_gets_no_source_checkout_line(self) -> None:
+        merged = self.advance_origin()[:7]
+
+        self.assertEqual(
+            self.check("--ref", "origin/main"),
+            (1, f"plugin p1 in {self.root}: __init__.py differs from origin/main at {merged}\n"
+                f"plugin p1 in {self.worker}: __init__.py differs from origin/main at {merged}\n"),
+        )
+
     def test_behind_source_checkout_without_drift_is_silent(self) -> None:
         seed = self.tmp / "seed"
         (seed / "README.md").write_text("docs only\n")

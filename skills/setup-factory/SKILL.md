@@ -1208,7 +1208,7 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      `templates/render.py`.
    - An `owned refs` line: create the part 12 `refresh-owned-refs` job, or
      run it with `cron run` when it exists.
-   - A `source checkout` line: the source checkout is behind `origin/HEAD`.
+   - A `source checkout` line: the source checkout is not at `origin/HEAD`.
      When the line gives a `git merge --ff-only` command, run it as written,
      then run `check-install` again. Otherwise the checkout is ahead, diverged,
      on another branch, or dirty. Fix that by hand before you deploy.
