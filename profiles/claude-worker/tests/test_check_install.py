@@ -477,6 +477,38 @@ class CheckInstallTest(unittest.TestCase):
             (1, f"owned refs {self.owned_refs}: is 10 minutes old; the refresh-owned-refs cron job is not running (part 12)\n"),
         )
 
+    def repositories(self, *paths: Path) -> None:
+        settings = {**SETTINGS, "repositories": [{"full_name": f"org/{p.name}", "path": str(p)} for p in paths]}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+
+    def checkout(self) -> Path:
+        path = self.tmp / "checkout"
+        git(self.tmp, "clone", "-q", str(self.tmp / "seed"), str(path))
+        return path
+
+    def test_checkout_with_origin_head_is_silent(self) -> None:
+        self.repositories(self.checkout())
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_checkout_without_origin_head(self) -> None:
+        checkout = self.checkout()
+        git(checkout, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+        self.repositories(checkout)
+
+        self.assertEqual(
+            self.check(),
+            (1, f"checkout {checkout}: origin/HEAD is not set; run git -C {checkout} remote set-head origin -a "
+                "(part 10)\n"),
+        )
+
+    def test_checkout_that_does_not_exist(self) -> None:
+        missing = self.tmp / "missing"
+        self.repositories(self.checkout(), missing)
+
+        self.assertEqual(self.check(), (1, f"checkout {missing}: does not exist (part 10)\n"))
+
     def test_a_merge_after_the_last_fetch_is_seen(self) -> None:
         seed = self.tmp / "seed"
         (seed / "plugins" / "p1" / "__init__.py").write_text("merged\n")
