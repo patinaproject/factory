@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Write the refs of every card on the board to the file the `github` route reads.
+
+The route's `in_file` clauses keep a `check_run` event only when its branch,
+and an `issues` or `issue_comment` event only when its issue URL, is listed in
+`<root>/owned-refs.json`. A Hermes cron job runs this script every minute. It
+rewrites the file in one atomic step on every run, so the file's mtime proves
+the job ran. Silent on success. Exits 1 and leaves the file untouched when
+`hermes kanban list` fails, or 2 when HERMES_HOME is not a profile home.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+OWNED_REFS = "owned-refs.json"
+GITHUB_ISSUE_URL = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
+
+
+class Refusal(Exception):
+    def __init__(self, message: str, code: int = 2) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def root_home() -> Path:
+    if not os.environ.get("HERMES_HOME"):
+        raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
+    worker = Path(os.environ["HERMES_HOME"]).resolve()
+    if worker.parent.name != "profiles":
+        raise Refusal(f"HERMES_HOME {worker} is not a profile home under <root>/profiles/")
+    return worker.parent.parent
+
+
+def find_hermes() -> str:
+    # A cron job's PATH can lack the installer's bin directory, so fall back to where it puts hermes.
+    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
+    for candidate in filter(None, candidates):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
+
+
+def list_tasks(tasks_json: str | None) -> list:
+    if tasks_json:
+        return json.loads(Path(tasks_json).read_text(encoding="utf-8"))
+    proc = subprocess.run([find_hermes(), "kanban", "list", "--json"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refusal(f"hermes kanban list failed: {proc.stderr.strip()}", 1)
+    return json.loads(proc.stdout)
+
+
+def owned_refs(tasks: list) -> list:
+    refs = set()
+    for task in tasks:
+        if task.get("branch_name"):
+            refs.add(task["branch_name"])
+        refs.update(GITHUB_ISSUE_URL.findall(task.get("body") or ""))
+    return sorted(refs)
+
+
+def write_atomically(target: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--tasks-json", help="read the task list from this file instead of `hermes kanban list --json`")
+    parser.add_argument("--output", type=Path, help=f"write here instead of <root>/{OWNED_REFS}")
+    args = parser.parse_args()
+    try:
+        target = args.output or root_home() / OWNED_REFS
+        refs = owned_refs(list_tasks(args.tasks_json))
+    except Refusal as exc:
+        print(f"refresh-owned-refs: {exc}", file=sys.stderr)
+        return exc.code
+    write_atomically(target, json.dumps(refs, indent=2) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
