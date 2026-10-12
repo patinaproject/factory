@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Check what a factory machine exposes outside Cloudflare Access.
+
+Probes every non-loopback address of the machine for SSH password login and
+sharing services, reads the macOS application firewall state, and compares the
+SSH principals file with the allowlist that the Access SSH application uses.
+Prints one PASS or FAIL line per check, each FAIL with its fix, and exits 1
+when any check fails.
+"""
+from __future__ import annotations
+
+import argparse
+import getpass
+import ipaddress
+import re
+import socket
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+FIREWALL = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+SHARING_OFF = "turn it off in System Settings > General > Sharing"
+SHARING_PORTS = {
+    445: ("File Sharing (SMB)", SHARING_OFF),
+    548: ("File Sharing (AFP)", SHARING_OFF),
+    3283: ("Remote Management", SHARING_OFF),
+    5900: ("Screen Sharing", SHARING_OFF),
+    7000: (
+        "AirPlay Receiver",
+        "turn it off in System Settings > General > AirDrop & Handoff > AirPlay Receiver",
+    ),
+}
+SSH_FIX = (
+    "add 'PasswordAuthentication no' and 'KbdInteractiveAuthentication no' "
+    "to a file in /etc/ssh/sshd_config.d/"
+)
+DENIED = re.compile(r"Permission denied \(([^)]*)\)")
+ADDRESS = re.compile(r"^\s*inet6?\s+([0-9a-fA-F:.]+)(?:%\S+)?\s")
+
+
+@dataclass
+class Facts:
+    open_ports: dict[str, list[int]] = field(default_factory=dict)
+    ssh_methods: dict[str, list[str]] = field(default_factory=dict)
+    firewall_enabled: bool | None = None
+    principals: set[str] | None = None
+    expected_principals: set[str] | None = None
+    addresses: list[str] | None = None
+
+
+def exposed_addresses(ifconfig_text: str) -> list[str]:
+    """Addresses another host can reach: not loopback, not link-local."""
+    found = []
+    for line in ifconfig_text.splitlines():
+        match = ADDRESS.match(line)
+        if not match:
+            continue
+        address = ipaddress.ip_address(match.group(1))
+        if address.is_loopback or address.is_link_local:
+            continue
+        if str(address) not in found:
+            found.append(str(address))
+    return found
+
+
+def ssh_auth_methods(ssh_output: str) -> list[str]:
+    match = DENIED.search(ssh_output)
+    if not match:
+        return []
+    return [method.strip() for method in match.group(1).split(",") if method.strip()]
+
+
+def principals_for(emails: list[str]) -> set[str]:
+    """sshd principals for Access short-lived certificates: each email's local part."""
+    principals = set()
+    for email in emails:
+        local, at, domain = email.strip().partition("@")
+        if not (local and at and domain):
+            raise ValueError(f"{email!r} is not an email address; the SSH allowlist names people, never a domain")
+        principals.add(local)
+    return principals
+
+
+def evaluate(facts: Facts) -> list[tuple[bool, str]]:
+    results = []
+    if facts.addresses == []:
+        results.append((False, "found no address another host can reach, so nothing was probed: pass --address"))
+    for address, methods in facts.ssh_methods.items():
+        if not methods:
+            results.append((False, f"SSH on {address} did not report its login methods: check that sshd answers on this port"))
+            continue
+        weak = [method for method in methods if method != "publickey"]
+        if weak:
+            results.append((False, f"SSH on {address} offers password login ({', '.join(weak)}): {SSH_FIX}"))
+        else:
+            results.append((True, f"SSH on {address} accepts only keys and certificates"))
+    for address, ports in facts.open_ports.items():
+        for port in ports:
+            name, fix = SHARING_PORTS[port]
+            results.append((False, f"{name} is reachable on {address}:{port}: {fix}"))
+    if not any(facts.open_ports.values()):
+        results.append((True, "no sharing service is reachable"))
+    if facts.firewall_enabled is False:
+        results.append((False, "the macOS application firewall is off: turn it on in System Settings > Network > Firewall"))
+    elif facts.firewall_enabled:
+        results.append((True, "the macOS application firewall is on"))
+    if facts.expected_principals is not None and facts.principals is None:
+        results.append((False, "the SSH principals file cannot be read: run the check as the account people SSH into"))
+    elif facts.expected_principals is not None:
+        actual = facts.principals or set()
+        missing = sorted(facts.expected_principals - actual)
+        extra = sorted(actual - facts.expected_principals)
+        if missing or extra:
+            results.append((
+                False,
+                f"SSH principals differ from the Access SSH allowlist (missing: {', '.join(missing) or 'none'}; "
+                f"extra: {', '.join(extra) or 'none'}): write one email local part per line",
+            ))
+        else:
+            results.append((True, "SSH principals match the Access SSH allowlist"))
+    return results
+
+
+def port_open(address: str, port: int) -> bool:
+    try:
+        with socket.create_connection((address, port), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def probe_ssh(address: str, port: int) -> list[str]:
+    result = subprocess.run(
+        [
+            "ssh", "-p", str(port),
+            "-o", "BatchMode=yes", "-o", "PreferredAuthentications=none",
+            "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=5", f"nobody@{address}", "true",
+        ],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    return ssh_auth_methods(result.stderr)
+
+
+def read_principals(path: Path) -> set[str] | None:
+    if not path.exists():
+        return set()
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    return {line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")}
+
+
+def gather(args: argparse.Namespace) -> Facts:
+    addresses = args.address or exposed_addresses(
+        subprocess.run(["ifconfig"], capture_output=True, text=True, check=True).stdout
+    )
+    facts = Facts(addresses=list(addresses))
+    for address in addresses:
+        if port_open(address, args.ssh_port):
+            facts.ssh_methods[address] = probe_ssh(address, args.ssh_port)
+        facts.open_ports[address] = [port for port in SHARING_PORTS if port_open(address, port)]
+    if Path(FIREWALL).exists():
+        state = subprocess.run([FIREWALL, "--getglobalstate"], capture_output=True, text=True).stdout
+        facts.firewall_enabled = "enabled" in state
+    if args.ssh_users:
+        facts.expected_principals = principals_for(args.ssh_users.split(","))
+        facts.principals = read_principals(Path(args.principals_file))
+    return facts
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--address", action="append", help="probe this address instead of the machine's own; repeatable")
+    parser.add_argument("--ssh-port", type=int, default=22)
+    parser.add_argument("--ssh-users", help="comma-separated emails that the Access SSH application allows")
+    parser.add_argument(
+        "--principals-file", default=f"/etc/ssh/authorized_principals/{getpass.getuser()}",
+        help="sshd AuthorizedPrincipalsFile for the account people SSH into",
+    )
+    results = evaluate(gather(parser.parse_args()))
+    for ok, message in results:
+        print(f"{'PASS' if ok else 'FAIL'} {message}")
+    return 0 if all(ok for ok, _ in results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

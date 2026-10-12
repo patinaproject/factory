@@ -17,6 +17,9 @@ own instructions above or below it.
 | Where the factory's private configuration record lives | A document in the operator's tracker or wiki |
 | The directory that holds `gh` and the other tools setup installed | `~/.local/bin` |
 | Credentials on the machine that Hermes agents must never receive | `<NAME>` of each operator-only token |
+| The operator's SST app that owns the ingress, and what deploys it | A repository path, and "merging to the default branch" |
+| The SSH hostname and the account people SSH into, when SSH is used | `<ssh-hostname>`, `<account>` |
+| The path of this repository's checkout on the machine | `~/factory` |
 
 The private configuration record holds the factory's real values: hostnames,
 App identifiers, secret-source paths, service names, and the answers given to
@@ -81,6 +84,29 @@ configuration, and update it in the same change.
 - These credentials are for the operator only, and Hermes agents never
   receive them: <operator-only credentials>.
 
+### Remote access and ingress
+
+- The factory's tunnel routes and Cloudflare Access applications are code in
+  <sst app>. <deploy step> deploys them. Never change Cloudflare in the
+  dashboard or with the `cloudflared` CLI. The running tunnel's routes are in
+  the `cloudflared` service log, under "Updated to new configuration".
+- People SSH in as `<account>` at `<ssh-hostname>` through Cloudflare Access
+  short-lived certificates, or with a key. sshd never accepts a password. Do
+  not turn password login back on.
+- One list says who may SSH in: the SSH allowlist in <sst app>. The machine
+  mirrors it in `/etc/ssh/authorized_principals/<account>`, one email local
+  part per line. Change both in the same change.
+- After any change to SSH, sharing, or the firewall, run
+  `python3 <factory checkout>/skills/setup-factory/scripts/check-host-exposure --ssh-users <emails>`.
+  Every line must start with `PASS`.
+
+### Privileged steps
+
+- You cannot answer a `sudo` password prompt. Put the privileged commands
+  in one script in your scratch directory, make it refuse a change that
+  could lock someone out, and ask the operator to run it with `sudo` in
+  their own terminal. Name the terminal and the exact command, then wait.
+
 ### Factory processes
 
 - The worker profile `<worker>` owns the checkouts at
@@ -95,7 +121,8 @@ configuration, and update it in the same change.
 ```
 
 Leave out the "Secrets" line about operator-only credentials when the input
-names none.
+names none. When nobody SSHs into the machine, leave out the two SSH lines and
+drop `--ssh-users` from the check command.
 
 ## Write the block
 
@@ -132,3 +159,13 @@ cd "$(mktemp -d)" && claude -p 'On this machine, how do you run gh, and how do y
 
 The answer names `GH_CONFIG_DIR=<worker>/gh` and `push-signed`, and it does
 not suggest `gh auth login` or `git push`.
+
+Ask a second question in a new session:
+
+```sh
+cd "$(mktemp -d)" && claude -p 'On this machine, how do I give a teammate SSH access, and how do you run a command that needs sudo?' </dev/null
+```
+
+The answer changes both the SST allowlist and the principals file, runs
+`check-host-exposure`, and asks the operator to run the privileged script.
+It does not offer to run `sudo` itself.

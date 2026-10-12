@@ -10,6 +10,11 @@ CLI.
 Ask the operator for the hostname, the Cloudflare account and zone, the
 identities that Access allows, and the session length. Never assume them.
 
+Also ask whether people should reach the machine over SSH through Access, and
+if so, for the SSH hostname and the email of each person. That email list is
+the machine's one SSH allowlist. The Access SSH policy and the machine's sshd
+principals both come from it.
+
 ## Security model
 
 Reproduce this model exactly.
@@ -24,6 +29,8 @@ Reproduce this model exactly.
 | Dashboard sign-in | A `saas` Access application with OIDC is the Hermes dashboard's identity provider. It is a public client: the authorization code grant with PKCE, without a client secret. It also allows the `refresh_tokens` grant, so the dashboard renews its session when the short-lived access token expires instead of signing the user out. Its issuer and client ID go in `dashboard.oauth.self_hosted`, and Hermes requests the `offline_access` scope, without which Cloudflare returns no refresh token. The machine never receives the client secret. The dashboard checks identity even behind the edge. |
 | Dashboard host | `dashboard.public_url` is `https://<hostname>`. The tunnel keeps the public `Host` header, and a loopback-bound dashboard rejects every host except loopback and this one with `400 Invalid Host header`. Setting it also turns on the dashboard's sign-in gate, so it needs the dashboard sign-in above. |
 | Local binding | The webhook listener, the dashboard, and any proxy listen on `127.0.0.1` only. Nothing is reachable except through the tunnel and Access. |
+| SSH, optional | An Access application of type `ssh` on its own SSH hostname, with a short-lived certificate authority. Its `allow` policy includes each person on the SSH allowlist by email, never an email domain: SSH lands in an account whose password grants root. A tunnel ingress rule sends the SSH hostname to `ssh://127.0.0.1:22` and requires the application's Access token at the origin. |
+| sshd | `TrustedUserCAKeys` holds the certificate authority's public key, and `AuthorizedPrincipalsFile` lists the local part of each allowlist email, one per line. sshd accepts only keys and certificates, never a password, on every address. The runbook's host exposure part checks this with `scripts/check-host-exposure`. |
 
 ## Check
 
@@ -97,6 +104,7 @@ between provider versions.
    | --- | --- | --- |
    | `<hostname>` | `^/webhooks/(linear\|github)$` | `http://127.0.0.1:<webhookPort>` |
    | `<hostname>` | The proxy's management UI paths, only when a proxy is used | `http://127.0.0.1:<proxyPort>` |
+   | `<ssh-hostname>`, only when SSH is used | None | `ssh://127.0.0.1:22`, with the SSH application's Access token required at the origin |
    | `<hostname>` | None | `http://127.0.0.1:<dashboardPort>` |
    | None | None | `http_status:404` |
 
@@ -117,6 +125,16 @@ between provider versions.
    refresh. Its only redirect URI is the dashboard's OAuth callback,
    `https://<hostname>/auth/callback`. Confirm the callback path in the Hermes
    dashboard documentation for the pinned release.
+
+7. Only when SSH is used: a proxied `CNAME` from `<ssh-hostname>` to the
+   tunnel, a `cloudflare.ZeroTrustAccessApplication` with type `ssh` for
+   `<ssh-hostname>` whose `allow` policy includes each allowlist email, and a
+   `cloudflare.ZeroTrustAccessShortLivedCertificate` for that application.
+   Keep the allowlist as one non-empty list of emails in the app's stage data,
+   and build the policy from it. Adding a person then changes the policy in
+   place, and the application and certificate authority stay the same.
+   Output the certificate authority's public key. It is not a secret, and
+   the machine's `TrustedUserCAKeys` file needs it.
 
 The proxy's management UI paths come from the proxy's documentation. Ask the
 operator to confirm them.
