@@ -200,6 +200,38 @@ class SessionCreateTest(unittest.TestCase):
         self.assertEqual(output, {"error": "agentSessionCreateOnIssue reported success: false"})
 
 
+class IssueArgumentTest(unittest.TestCase):
+    """Hermes defers these tools, so models call them without the schema and guess the argument name."""
+
+    RUNNERS = {
+        "linear_issue": lambda fake, args: tools.run_issue(lambda: make_client(fake), args),
+        "linear_agent_session_create": lambda fake, args: tools.run_session_create(lambda: make_client(fake), args),
+        "linear_issue_undelegate": lambda fake, args: tools.run_undelegate(lambda: make_client(fake), args),
+    }
+
+    def test_issue_tools_take_the_names_models_guess(self):
+        for tool, run in self.RUNNERS.items():
+            for name in ("issue", "id", "issue_id"):
+                with self.subTest(tool=tool, name=name):
+                    fake = FakeLinear([(200, {"errors": [{"message": "stop after the request"}]})])
+                    run(fake, {name: "ABC-9"})
+                    self.assertIn("ABC-9", json.dumps(fake.graphql_requests[0]["variables"]))
+
+    def test_issue_tools_without_an_issue_name_the_argument(self):
+        for tool, run in self.RUNNERS.items():
+            with self.subTest(tool=tool):
+                fake = FakeLinear([])
+                output = json.loads(run(fake, {}))
+                self.assertEqual(output, {"error": "pass issue: the issue UUID or identifier such as ABC-123"})
+                self.assertEqual(fake.graphql_requests, [])
+
+    def test_issue_schemas_require_nothing_hermes_would_refuse_first(self):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA):
+            with self.subTest(tool=schema["name"]):
+                self.assertNotIn("required", schema["parameters"])
+                self.assertEqual(list(schema["parameters"]["properties"]), ["issue"])
+
+
 class IssueTest(unittest.TestCase):
     RESPONSE = {
         "data": {
