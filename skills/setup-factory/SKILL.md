@@ -37,15 +37,41 @@ is done, then run the check.
 
 ## Collect the inputs
 
-Ask the operator for these values before you start. Record them in your task
-notes, not in the repository.
+**Discover before you ask.** Ask the operator only for a decision, such as
+which repositories the factory works, and for a secret that they type into
+their own terminal. Never ask the operator for a value that a command on the
+machine can read, and never ask them to sign in anywhere, for example with
+`gh auth login`. On a re-run, most values already exist in the installed
+settings, the Hermes configuration, or the factory's private configuration
+record that `~/.claude/CLAUDE.md` names. Run the command for each value
+below first, and ask only when it prints nothing:
+
+| Value | Discover with |
+| --- | --- |
+| Hermes install checkout and its tag | `git -C <home>/hermes-agent describe --tags` |
+| Existing factory settings: repositories, `app_user_id`, `kanban_url`, `claude_session`, and the `github` object | `hermes config get plugins.entries.linear-agent-session.settings --json` |
+| `<app-slug>` | `github.login` in the settings, without `[bot]` |
+| GitHub App ID | `gh api /apps/<app-slug> --jq .id`. Any `gh` login can read it |
+| GitHub App's permissions | `gh api /apps/<app-slug> --jq .permissions` |
+| Installation ID and private key path | `github.installation_id` and `github.private_key_path` in the settings |
+| Bot user ID | `gh api '/users/<app-slug>[bot]' --jq .id` |
+| Repositories the installation covers | `GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --jq '.repositories[].full_name'` |
+| Infisical project ID, environment, and folder | `grep -oE -e '--projectId[= ][^ ]+' -e '--env[= ][^ ]+' -e '--path[= ][^ ]+' <file>`, where `<file>` holds the `command` that `hermes config get secrets.command --json` prints: the script it names, or a file with that command line |
+| `kanban.max_in_progress` and the webhook port | `hermes config get kanban.max_in_progress` and `hermes config get platforms.webhook.extra.port` |
+
+When `gh` or `hermes` is not on the session's `PATH`, call it by its full
+path, such as `~/.local/bin/gh`. Never run any of these with `--raw`, which
+prints secrets.
+
+Ask the operator for the values that remain before you start. Record them in
+your task notes, not in the repository.
 
 | Input | Used by |
 | --- | --- |
 | Hermes home directory (default `~/.hermes`) and install checkout | Every part |
 | Hermes release tag to pin, `v0.21.4` or later | Hermes |
 | Model alias for Hermes' own agent loop, for example `sonnet` | DirectSDK provider |
-| Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` | Settings, clones, routes |
+| Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
 | `kanban.max_in_progress` | Kanban |
 | Factory hostname, Cloudflare account, and zone | Ingress |
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
@@ -69,15 +95,15 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` and `<worker>/.env` |
 | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
-| `GH_CONFIG_DIR` | `<worker>/.env`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews |
+| `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
 | The token variable that `claude_session.auth_token_env` names | `<worker>/.env`. Never name it `ANTHROPIC_*` |
-| Dashboard OIDC client secret | `<home>/.env` |
 | Cloudflare tunnel token | The `cloudflared` system service only |
 | `CLOUDFLARE_API_TOKEN` | The SST app's own secret storage or environment |
 | `plugins.entries.linear-agent-session.settings` | `config.yaml` of both homes, same JSON |
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
-| `kanban.max_in_progress`, `platforms.webhook.*`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
+| `kanban.max_in_progress`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
+| `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
 | The `default` board's `default_workdir` | Kanban board metadata, not `config.yaml` |
 
 When the factory uses Infisical, part 14 moves the Linear credentials, both
@@ -139,7 +165,7 @@ Run the parts in this order. Later parts depend on values from earlier ones.
 9. [GitHub App](#9-github-app)
 10. [Factory settings, repositories, and Kanban](#10-factory-settings-repositories-and-kanban)
 11. [Webhook routes](#11-webhook-routes)
-12. [Checkout refresh cron job](#12-checkout-refresh-cron-job)
+12. [Checkout refresh and drift cron jobs](#12-checkout-refresh-and-drift-cron-jobs)
 13. [Slack](#13-slack)
 14. [Infisical secret source](#14-infisical-secret-source), optional
 15. [Restart and end-to-end checks](#15-restart-and-end-to-end-checks)
@@ -273,8 +299,23 @@ hermes plugins list
 hermes -p claude-worker plugins list
 ```
 
-Both list `linear-agent-session` and `pr-ready-gate`, enabled. If a plugin is
-listed and enabled, skip its install.
+Both list `linear-agent-session` and `pr-ready-gate`, enabled. On a fresh
+machine, install both now and skip the content check.
+
+On a re-run, `<worker>` already exists, and a listed plugin can still be
+older than the repository. First bring `<repo>` to an up-to-date default
+branch, as in step 1 of
+[Deploy a merged factory change](#deploy-a-merged-factory-change). Then
+compare content:
+
+```sh
+HERMES_HOME=<worker> python3 <worker>/scripts/check-install
+```
+
+Read only its `plugin <name> in <home>` lines here. Parts 10 and 11 handle
+routes. Skip a plugin's install only when it is listed, enabled, and absent
+from those lines. Reinstall a plugin it names with the install command below
+plus `--force`.
 
 **Install** each missing plugin into each home:
 
@@ -306,6 +347,8 @@ distribution install sets no model, so now run part 4 for the worker profile.
 
 - `<worker>/scripts/claude-session`, `<worker>/scripts/refresh-checkouts`,
   and `<worker>/scripts/refresh-gh-app-login` exist and are executable.
+- `<worker>/scripts/check-github-access` and `<worker>/scripts/guard-git-push`
+  exist. Run them with `python3`.
 - `<worker>/SOUL.md` matches `<repo>/profiles/claude-worker/SOUL.md`.
 - `hermes -p claude-worker config get platform_toolsets.cli` lists `terminal`,
   `kanban`, and `linear_agent_session`.
@@ -381,16 +424,26 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
-  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 40}
+  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 0}
 }
 ```
 
 Exactly one repository has `routing: default`. Leave
 `claude_session.base_url`, `model`, and `auth_token_env` empty unless part 3
-set up a proxy. An empty
-`worker_entry` uses the built-in prompt. `kanban_url` is the dashboard's
+set up a proxy. `worker_entry` is a prefix, such as `/patina-mode`, that
+`claude-session` puts before the built-in task prompt. The task prompt names
+the issue, its URL, the repository, and the branch, and is always sent. An
+empty `worker_entry` sends the task prompt alone. `claude-session` refuses a `worker_entry` that
+contains `{...}` fields, such as a full prompt from an older factory. Shorten
+it to the prefix. `claude_session.max_turns`
+caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
+one run can finish a whole task. A positive limit pauses a long task, such as
+a dependency upgrade, and the worker resumes it in a second run.
+`kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
-empty to post no link.
+empty to post no link. Set `github.login` so triage can tell the factory's own
+open pull requests from a person's. When it is empty, triage treats every open
+pull request as someone else's.
 
 **Check**, for each home:
 
@@ -425,17 +478,89 @@ git -C <path> status --porcelain --untracked-files=no # prints nothing
 The main checkout stays on its default branch. Kanban creates worktrees under
 `<path>/.worktrees/`.
 
+**Node version.** The gateway's service puts Hermes' own Node first on
+`PATH`, and Hermes refuses a `PATH` override in config. That Node can be newer
+than a repository allows. `claude-session` corrects this for each run:
+
+- It reads `.nvmrc` at the root of the card's worktree. The file must hold a
+  numeric version or prefix, such as `24` or `24.21.0`, with or without a
+  leading `v`.
+- It picks the highest version under `$NVM_DIR/versions/node` that matches
+  the prefix, and puts its `bin` first on `PATH` for Claude Code. When the
+  worker's environment has no `NVM_DIR`, it uses `~/.nvm`.
+- When no installed version matches, it refuses to start Claude Code, exits
+  `2`, and names the version in its error:
+  `Node <version> from .nvmrc is not installed under <dir>; run nvm install <version>`.
+- It refuses an alias such as `lts/*` or `node` as not a numeric version
+  prefix.
+- Without an `.nvmrc`, it leaves `PATH` alone, so the run uses Hermes' Node.
+
+It does not read `engines.node` in `package.json`, and it does not find Node
+installed by Homebrew, fnm, asdf, or Volta. A repository that pins Node only
+through `engines.node` runs with Hermes' Node. Ask the operator to add an
+`.nvmrc` to that repository.
+
+For each repository, check the pin and the install. The installed list must
+include a version that matches the `.nvmrc`:
+
+```sh
+cat <path>/.nvmrc                                    # a numeric version, such as 24
+ls "${NVM_DIR:-$HOME/.nvm}/versions/node"            # includes a matching v<version>
+python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("engines", {}).get("node", "-"))' <path>/package.json
+```
+
+The last line runs only when the repository has a `package.json`. It prints
+the repository's `engines.node` range, and the `.nvmrc` version must satisfy
+it. When no installed version matches, install it as the operator's user, in
+a shell where nvm is loaded: `nvm install <version>`. Install any other tool
+a repository needs, such as `pnpm`, before the first card runs.
+
+A repository that enables the Engineering plugin runs its issue-handoff gate
+with Bun. `<bin dir>` is the directory that holds `gh` and the other tools
+setup installs, such as `~/.local/bin`. Check with `command -v bun` and with
+`ls <bin dir>/bun`, because a non-login shell can lack `<bin dir>` on `PATH`.
+When both fail, install Bun as the gateway's user. The installer puts the
+binary in `$BUN_INSTALL/bin`, so set `BUN_INSTALL` to the parent of
+`<bin dir>`:
+
+```sh
+curl -fsSL https://bun.sh/install | BUN_INSTALL="$(dirname <bin dir>)" bash
+<bin dir>/bun --version
+```
+
+The installer also adds lines to the user's shell startup file. Leave them.
+
 **GitHub login and checkouts.** Return to
 [`references/github.md`](references/github.md) and run its
-"Sign the worker's `gh` in" and "Configure git in each checkout" sections.
-They need the settings and the clones from this part.
+"Sign the worker's `gh` in", "Check the App's access", "Configure git in
+each checkout", and "Block plain pushes on the machine" sections. They need
+the settings and the clones from this part. Continue only when
+`check-github-access` and `guard-git-push --check` print nothing.
 
 **Kanban.**
 
 ```sh
 hermes config set kanban.max_in_progress <n>
+hermes config set kanban.review_dispatch false
+hermes config set kanban.auto_decompose false
 hermes kanban boards set-default-workdir default <path of the default repository>
 ```
+
+A worker hands a card with a merge-ready pull request to the `review` lane.
+With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,
+so the card waits there for a person. GitHub triage moves it to `done` when the
+pull request merges, and back to the worker when a review requests changes.
+Cards in `review` run no worker, so they do not count against
+`kanban.max_in_progress`.
+
+Hermes moves a card that blocks twice for the same reason to its `triage`
+column, and by default its decomposer then splits the card into child cards.
+A factory card is one Linear issue, and its children would lack the key block
+the worker needs, so turn the decomposer off. A looping card then waits in
+`triage` for a person.
+
+**Check.** `hermes config get kanban.review_dispatch` and
+`hermes config get kanban.auto_decompose` each print `false`.
 
 `default_workdir` is board metadata, so `hermes config get` does not show it.
 Read the board metadata with `hermes kanban boards --help` to find the listing
@@ -447,17 +572,31 @@ command, and confirm the path.
 in part 10. [`templates/README.md`](../../templates/README.md) describes the
 output.
 
-**Check.** Render the routes, then compare each with the installed one:
+**Check.** Compare each rendered route with the installed one:
+
+```sh
+python3 <repo>/templates/render.py --check
+```
+
+It prints one line per route, such as
+`route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference`, and
+exits `0` only when every route matches and every secret is its reference. A
+`differs in <keys>` line names the keys that differ. A secret line other than
+`is the ... reference` means the route holds a literal secret, or Hermes has no
+value for the reference.
+
+Never compare or print an installed route with
+`hermes config get ... --raw`. That command expands each `${...}` reference,
+so its output holds the live signing secret. `--check` reads it inside the
+process and prints only route names, key names, and the reference names.
+
+Render the routes for the install step:
 
 ```sh
 python3 <repo>/templates/render.py > <scratch>/routes.json
-for name in $(python3 -c 'import json, sys; print(*json.load(sys.stdin))' < <scratch>/routes.json); do
-  diff <(hermes config get "platforms.webhook.extra.routes.$name" --json --raw | python3 -m json.tool --sort-keys) \
-       <(python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)[sys.argv[1]], sort_keys=True, indent=4))' "$name" < <scratch>/routes.json)
-done
 ```
 
-**Install** each route whose diff is not empty:
+**Install** each route that `--check` reports as not installed, as differing, or with the wrong secret:
 
 ```sh
 hermes config set "platforms.webhook.extra.routes.$name" \
@@ -478,7 +617,7 @@ configuration remains.
 Render and install again whenever the settings change, then restart the
 gateway.
 
-## 12. Checkout refresh cron job
+## 12. Checkout refresh and drift cron jobs
 
 The script lives in the worker profile's `scripts/` directory, so the job
 belongs to the worker profile.
@@ -498,15 +637,34 @@ Hermes runs a script-only cron job's script with Python, whatever its
 shebang says, so every script a `--no-agent` job runs must be Python. A shell
 script fails on every tick with a `SyntaxError`.
 
-**Verify.** Run the job through Hermes once, then read its status:
+**Install drift job.** `check-install` compares the live worker profile, the
+factory plugins in both homes, and the installed webhook routes with
+`origin/HEAD` of the checkout the profile was installed from. It also checks
+that the dashboard's OIDC sign-in can keep a user signed in. It prints one
+line per difference and nothing when the install is current. It fetches
+first, so a merge shows up within the hour. Deliver it where the operator
+reads it: the home channel of the platform from part 13, such as `slack`.
+On a first install, create it after part 13. Create the job when `cron list`
+has no `check-install` job:
+
+```sh
+hermes -p claude-worker cron create "every 1h" --name check-install --no-agent --script check-install --deliver <platform> </dev/null
+```
+
+The job exits non-zero while drift exists, so its failure notice goes to the
+same platform.
+
+**Verify.** Run each job through Hermes once, then read its status:
 
 ```sh
 hermes -p claude-worker cron run <job id>
-hermes -p claude-worker cron list    # Last run shows no error
+hermes -p claude-worker cron list    # read each Last run line
 ```
 
-It prints nothing when every checkout is current. It prints one line for each
-checkout it left alone, such as a checkout on another branch or with
+`refresh-checkouts` prints nothing when every checkout is current, and its
+last run shows no error. `check-install` shows an error until the install
+matches, which the Deploy section below fixes. `refresh-checkouts` prints one
+line for each checkout it left alone, such as a checkout on another branch or with
 uncommitted changes. Fix each problem it names.
 
 ## 13. Slack
@@ -609,30 +767,125 @@ each check. Report each result.
 3. The worker moves the issue to In Progress through the repository's own
    issue-start workflow. Hermes makes no status change.
 4. While the pull request is a draft, has a pending or failing non-required
-   check, has a conflict, or is `BLOCKED` or `BEHIND`, `kanban_complete` is
-   refused. `hermes kanban complete` from the worker's shell is also refused.
-5. A `CLEAN`, non-draft pull request completes the card. The final `response`
+   check, has a conflict, or is `BLOCKED` or `BEHIND`, `kanban_request_review`
+   and `kanban_complete` are refused. `hermes kanban complete` from the
+   worker's shell is also refused.
+5. A `CLEAN`, non-draft pull request moves the card to `review`, not `done`.
+   An `action` activity with the pull request link appears in the same Linear
+   session, and no reviewer worker starts for the card.
+6. A "changes requested" review on GitHub returns the card to `ready`. A worker
+   run starts, and the card returns to `review` after the fix.
+7. Merging the pull request moves the card to `done`. The final `response`
    with the pull request link appears in the same Linear session.
-6. A reply in Linear during a run is picked up when the run ends, and the next
+8. A reply in Linear during a run is picked up when the run ends, and the next
    run resumes the same Claude session ID.
-7. A Linear `stop` stops the worker and blocks the card.
-8. Un-delegating stops the worker and blocks the card with reason
-   `undelegated`. Delegating again unblocks the same card, which resumes the
-   same branch, worktree, and session.
-9. A mention without delegation gets an answer and creates no card.
-10. No more than `kanban.max_in_progress` workers run at once, and no `claude`
+9. A Linear `stop` stops the worker and blocks the card.
+10. Un-delegating stops the worker and blocks the card with reason
+    `undelegated`. Delegating again unblocks the same card, which resumes the
+    same branch, worktree, and session.
+11. A mention without delegation gets an answer and creates no card.
+12. No more than `kanban.max_in_progress` workers run at once, and no `claude`
     process runs outside a Kanban worker.
-11. `git -C <install> status --porcelain` still prints nothing, and `HEAD` is
+13. `git -C <install> status --porcelain` still prints nothing, and `HEAD` is
     still the pinned tag.
-12. `git -C <repo> status --porcelain` prints nothing. This repository holds no
+14. `git -C <repo> status --porcelain` prints nothing. This repository holds no
     factory value.
+15. Push an issue's `gitBranchName` to GitHub with one commit, without a local
+    copy in the checkout, then delegate the issue. The first `claude-session`
+    line reports `adopted` with `source` `remote_branch`, the branch starts at
+    that commit, and the first `push-signed` publishes.
+16. Open a pull request as the GitHub App on a branch other than the issue's
+    `gitBranchName`, link it to the issue, and delegate the issue. The card's
+    branch is that pull request's head branch, and no second pull request
+    opens.
+17. Open a pull request as a person, link it to the issue, and delegate the
+    issue. The card body carries `takeover_pr`, the worker starts from that
+    pull request's head, and its own pull request links the original. Before
+    it completes, the worker asks in Linear whether to close the original and
+    blocks with `needs_input`. It closes the original only after a human
+    approves.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` or `triage`
 card. The operator drags the card to Ready, which Hermes documents as a
-deliberate re-queue. Hermes v0.21.5 has no CLI command or tool for it. When a
+deliberate re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a
 GitHub event arrives for a done card, triage comments on the card and asks the
-operator to reopen the card from the Kanban dashboard. A failed check after
-completion therefore waits for the operator before the worker resumes.
+operator to reopen the card from the Kanban dashboard. A card reaches `done`
+only when its pull request merges, so this applies to follow-up work after the
+merge.
+
+## 16. Agent instructions
+
+Follow [`references/agent-instructions.md`](references/agent-instructions.md).
+It writes the factory's operating rules into `~/.claude/CLAUDE.md`, so every
+Claude Code session on the machine acts on GitHub as the App, publishes
+commits with `push-signed`, and knows where the private configuration record
+lives.
+
+**Hermes' own agent.** Hermes' default-profile agent, which answers in Slack,
+does not read `~/.claude/CLAUDE.md`. Without its own notes, it looks for
+credentials in its tool shell, finds none, and reports that GitHub or Linear
+is not set up. `templates/memory.py` installs the factory's entries in its
+memory file. They say that credentials live in the gateway, that `gh` acts as
+the App through `GH_CONFIG_DIR`, that Linear is reached through the
+`linear-agent-session` tools, and that a Slack message proves Slack works.
+
+**Check.**
+
+```sh
+python3 <repo>/templates/memory.py --check --gh-config-dir <worker>/gh <home>/memories/MEMORY.md
+grep '^GH_CONFIG_DIR=' <home>/.env    # GH_CONFIG_DIR=<worker>/gh
+```
+
+The first command prints nothing when every factory entry is present and
+current. Otherwise it prints one line per entry that is missing or differs.
+
+**Install.** The command replaces each factory entry with the same label,
+such as `GitHub:`, and keeps every other entry, so the agent's own memories
+stay. It refuses to write a file over Hermes' limit of 2,200 characters. Then
+set the `gh` directory for the default home:
+
+```sh
+python3 <repo>/templates/memory.py --gh-config-dir <worker>/gh <home>/memories/MEMORY.md
+printf '%s' <worker>/gh | env_set <home>/.env GH_CONFIG_DIR
+```
+
+Hermes reads the memory file when a session starts. The gateway reads
+`<home>/.env` only when it starts, so after `env_set` changes that file, ask
+the operator to restart the gateway as in part 15.
+
+## Deploy a merged factory change
+
+A merged change to `plugins/`, `profiles/`, or `templates/` is not live until
+it is installed. Hermes loads plugins and webhook routes only when the gateway
+starts. The worker reads `SOUL.md` and its scripts on each run.
+
+1. Bring the checkout the profile was installed from up to date. Its path is
+   the `source` line of `<worker>/distribution.yaml`, two levels up. It must be
+   on the default branch with no uncommitted changes. Fast-forward it to
+   `origin/HEAD`.
+2. List what is out of date:
+
+   ```sh
+   HERMES_HOME=<worker> python3 <worker>/scripts/check-install
+   ```
+
+3. Install each item it names:
+   - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
+   - A `plugin <name> in <home>` line: run the part 5 install command for that
+     home with `--force`.
+   - A `webhook route <name>` line: run the part 11 install for that route.
+   - A `dashboard sign-in` line: follow step 6 of
+     [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
+     or allow the `refresh_tokens` grant on the `saas` Access application when
+     the line names the issuer. Then restart the dashboard service.
+4. Run `check-install` again. It prints nothing.
+5. If step 3 changed a plugin or a webhook route:
+
+   > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
+   > from a shell outside Hermes. Then confirm that
+   > `~/.hermes/logs/gateway.log` shows a startup after the install.
+
+6. Record the deployed commit in the private configuration record.
 
 ## 16. Agent instructions
 

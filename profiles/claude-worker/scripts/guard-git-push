@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Make a plain `git push` to GitHub fail for every repository on this machine.
+
+Adds one global `url.<guard>.pushInsteadOf` entry for each form of a github.com
+URL. git rewrites the push URL of any matching remote to a path that does not
+exist, so `git push` fails with an error that names push-signed, even with
+--no-verify or a repository's own hooks path. Fetches are unchanged, and
+push-signed publishes through GitHub's API, not `git push`. A remote with its
+own pushurl keeps it.
+
+Silent when the entries exist. With --check, prints one line per missing entry
+and exits 1 without changing anything.
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+
+GUARD = "no_push_use_push-signed/"
+KEY = f"url.{GUARD}.pushInsteadOf"
+GITHUB_PREFIXES = ("https://github.com/", "git@github.com:", "ssh://git@github.com/")
+
+
+def git_config(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "config", "--global", *args], capture_output=True, text=True)
+
+
+def missing_prefixes() -> list[str]:
+    proc = git_config("--get-all", KEY)
+    if proc.returncode not in (0, 1):
+        raise SystemExit(f"guard-git-push: git config --global --get-all {KEY} failed: {proc.stderr.strip()}")
+    present = set(proc.stdout.splitlines())
+    return [prefix for prefix in GITHUB_PREFIXES if prefix not in present]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--check", action="store_true", help="report missing entries without adding them")
+    args = parser.parse_args()
+    missing = missing_prefixes()
+    if args.check:
+        for prefix in missing:
+            print(f"global git config: {KEY} lacks {prefix}, so a plain git push to it is not blocked")
+        return 1 if missing else 0
+    for prefix in missing:
+        proc = git_config("--add", KEY, prefix)
+        if proc.returncode != 0:
+            print(f"guard-git-push: git config --global --add {KEY} {prefix} failed: {proc.stderr.strip()}")
+            return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -12,7 +12,8 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
   `linear_agent_activity`.
 - Read Linear issues only with the `linear_issue` tool. It reads as the agent
   app, which is the reader the worker uses, so `gitBranchName` matches.
-- Stay read-only on GitHub. Do not run git, edit files, or write code.
+- Stay read-only on GitHub. Read pull requests only with `gh pr view`. Do not
+  run git, edit files, or write code.
 - An issue has one card for its whole life. Find it with
   `hermes kanban list --json` after reading the issue with `linear_issue`: it
   is the task whose `branch_name` equals the issue's `gitBranchName`, or, when
@@ -38,7 +39,7 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 - Agent session issue: {agentSession.issue.id} ({agentSession.issue.identifier})
 - Data change issue: {data.id} ({data.identifier})
 - Activity signal: {agentActivity.signal}
-- Activity body: {agentActivity.body}
+- Activity body: {agentActivity.content.body}
 
 A field still shown as a dotted name in braces is absent from this payload. The
 session's prompt context is:
@@ -69,18 +70,40 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    has no `linear_issue_id:` line, and whose `title` or `body` contains the
    issue identifier. If any exist, the issue is still being worked outside
    this factory. Post one `thought` on this agent session naming those task
-   IDs and saying no new card was created, then stop. Otherwise create the
-   card. Use the chosen
-   repository's card flags, the issue's `gitBranchName` as the branch, and a
-   title made of the identifier, a colon, and the issue title with every
-   character except letters, digits, spaces, `.` and `-` removed:
+   IDs and saying no new card was created, then stop. Otherwise check the
+   issue for an open pull request, then create the card.
+
+   Take each URL in the issue's `attachments` of the form
+   `https://github.com/<owner>/<name>/pull/<number>` whose `<owner>/<name>`
+   matches the chosen repository, ignoring case. Read each one with
+   `gh pr view '<url>' --json state,author,headRefName,isCrossRepository,updatedAt`
+   and keep those whose `state` is `OPEN`. <<own_pull_request>>
+
+   - If one is the factory's own pull request and its `isCrossRepository` is
+     false, use its `headRefName` as the branch. The worker continues that
+     pull request.
+   - Otherwise use the issue's `gitBranchName` as the branch. If any open
+     pull request remains, the issue has someone else's pull request. Pick
+     the one with the latest `updatedAt` and add the line
+     `takeover_pr: <url>` after the `branch:` line inside the fenced block
+     below. The worker starts from it and opens its own pull request. If that
+     pull request's `headRefName` equals the issue's `gitBranchName`, use
+     `<gitBranchName>-takeover` as the branch instead, so the worker never
+     publishes to the other person's branch.
+
+   Never write a pull request URL in a card comment. Hermes treats a card
+   whose comments name a pull request as already having one.
+
+   Create the card with the chosen repository's card flags, the branch you
+   chose, and a title made of the identifier, a colon, and the issue title
+   with every character except letters, digits, spaces, `.` and `-` removed:
 
    ````sh
    hermes kanban create '<title>' \
      --assignee claude-worker \
      --priority <card priority> \
      <card flags> \
-     --branch '<gitBranchName>' \
+     --branch '<branch>' \
      --idempotency-key 'linear:<issue id>' \
      --body-file - \
      --json <<'CARD'
@@ -90,7 +113,7 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    linear_issue_url: <issue url>
    linear_agent_session_id: <agent session id>
    repo: <repository full_name>
-   branch: <gitBranchName>
+   branch: <branch>
    ```
    CARD
    ````
@@ -126,7 +149,15 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
 
 1. Read the issue with `linear_issue` and find its card. If there is none,
    handle the event as "Session created" and stop.
-2. Comment on the card with the reply: the activity body, attributed to Linear.
+2. If the activity body above is still a dotted name in braces, the reply
+   arrived without its text. Comment on the card that a Linear reply arrived
+   without text, post a `thought` on this agent session asking the human to
+   send the reply again, and stop. Do not unblock the card, because the
+   worker would block again on the same question.
+   Otherwise comment on the card with the reply: the activity body,
+   attributed to Linear. Replace each
+   `https://github.com/<owner>/<name>/pull/<number>` URL in it with
+   `<owner>/<name>#<number>`, so the comment names no pull request URL.
 3. If the card's body names a different `linear_agent_session_id`, update it as
    in "Session created" step 6.
 4. If the card is `blocked`, read the issue with `linear_issue`. If its
@@ -141,10 +172,14 @@ Type `AgentSessionEvent`, action `prompted`, activity signal `stop`.
 
 1. Read the issue with `linear_issue` and find its card. If there is none,
    post a `response` saying there was no work to stop, and stop.
-2. If the card is `ready`, `running`, `todo`, or `review`, run
+2. If the card is `review`, first run
+   `hermes kanban reopen-review <task id> --reason stopped`. Hermes blocks only
+   a `ready` or `running` card, and this returns the card to `ready`.
+3. If the card is now `ready`, `running`, or `todo`, run
    `hermes kanban block <task id> stopped`. Blocking ends the worker's run, and
-   the Kanban dispatcher terminates a worker that outlives its run.
-3. Post a `response` on this agent session saying the work is stopped and the
+   the Kanban dispatcher terminates a worker that outlives its run. A blocked
+   card whose pull request merges still moves to `done` through GitHub triage.
+4. Post a `response` on this agent session saying the work is stopped and the
    card is blocked, and that a reply or a new delegation resumes it.
 
 ## Issue change
@@ -153,13 +188,18 @@ Type `Issue`. The issue is the data change issue.
 
 1. Read the issue with `linear_issue`.
 2. Find the issue's card.
-3. If the issue's `stateType` is `completed` or `canceled`, run
+3. If the issue's `stateType` is `completed` and the card is `review`,
+   comment on the card that the Linear issue is done, and stop. Do not archive
+   it. Merging the pull request usually marks the issue done, and GitHub
+   triage moves the card to `done` on the merge. Hermes cannot complete an
+   archived card, so archiving first would leave it unfinished.
+4. Otherwise, if the issue's `stateType` is `completed` or `canceled`, run
    `hermes kanban archive <task id>` when a card exists, and stop.
-4. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`, the
+5. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`, the
    issue was un-delegated. If a card exists and is not `blocked` and not
-   `done`, run `hermes kanban block <task id> undelegated`. Do not archive it.
-   Stop.
-5. Otherwise the issue was just delegated to the agent. Linear opens a new
+   `done`, stop it as in "Stop" steps 2 and 3, with reason `undelegated` in
+   place of `stopped`. Do not archive it. Stop.
+6. Otherwise the issue was just delegated to the agent. Linear opens a new
    agent session on an issue's first delegation, but a re-delegation can
    arrive with no "Session created" event.
    - Compare the issue's newest `agentSessions` entry whose `appUserId` is

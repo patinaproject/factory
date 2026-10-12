@@ -5,10 +5,14 @@ import copy
 import importlib.util
 import io
 import json
+import os
 import re
+import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _spec = importlib.util.spec_from_file_location("render", Path(__file__).resolve().parent.parent / "render.py")
 render = importlib.util.module_from_spec(_spec)
@@ -52,6 +56,13 @@ CHECK_FILTER = {
 SELF_FILTER = {
     "any": [
         {"field": "event", "in": ["check_run", "check_suite", "workflow_run"]},
+        {
+            "all": [
+                {"field": "event", "equals": "pull_request"},
+                {"field": "action", "equals": "closed"},
+                {"field": "pull_request.merged", "equals": True},
+            ]
+        },
         {"not": {"field": "sender.login", "equals": "example-app[bot]"}},
     ]
 }
@@ -127,6 +138,39 @@ class RouteStructureTest(unittest.TestCase):
         self.assertEqual(sorted(routes), ["github", "linear-agent"])
 
 
+PROMPTED_EVENT = {
+    "type": "AgentSessionEvent",
+    "action": "prompted",
+    "agentSession": {
+        "id": "00000000-0000-4000-8000-0000000000a1",
+        "issue": {"id": "00000000-0000-4000-8000-0000000000b1", "identifier": "ABC-1"},
+    },
+    "agentActivity": {"signal": None, "content": {"type": "prompt", "body": "close"}},
+}
+
+
+def render_like_hermes(template: str, payload: dict) -> str:
+    """Fill {dot.path} placeholders the way the Hermes webhook adapter does: a missing key stays as written."""
+
+    def resolve(match: re.Match) -> str:
+        value = payload
+        for part in match.group(1).split("."):
+            if not isinstance(value, dict) or part not in value:
+                return match.group(0)
+            value = value[part]
+        return str(value)
+
+    return re.sub(r"\{([A-Za-z_][A-Za-z0-9_.]*)\}", resolve, template)
+
+
+class LinearPayloadTest(unittest.TestCase):
+    def test_a_prompted_reply_reaches_the_prompt(self):
+        prompt = render_like_hermes(render.build_routes(SETTINGS)["linear"]["prompt"], PROMPTED_EVENT)
+
+        self.assertIn("- Activity body: close\n", prompt)
+        self.assertIn("- Activity signal: None\n", prompt)
+
+
 class PromptSubstitutionTest(unittest.TestCase):
     def setUp(self):
         routes = render.build_routes(SETTINGS)
@@ -153,6 +197,20 @@ class PromptSubstitutionTest(unittest.TestCase):
             routes["linear"]["prompt"],
         )
         self.assertIn("Leave `external_urls` unset.", self.prompts["linear"])
+
+    def test_own_pull_requests_match_both_forms_of_the_app_login(self):
+        self.assertIn(
+            "A pull request is the factory's own when its `author.login` is `example-app[bot]` or `app/example-app`.",
+            self.prompts["linear"],
+        )
+
+    def test_without_an_app_login_no_pull_request_is_the_factorys_own(self):
+        routes = render.build_routes(settings(github={"login": ""}))
+        self.assertIn(
+            "No GitHub App login is configured, so every open pull request counts as someone else's.",
+            routes["linear"]["prompt"],
+        )
+        self.assertNotIn("`author.login` is", routes["linear"]["prompt"])
 
     def test_linear_prompt_names_the_app_user(self):
         self.assertIn("00000000-0000-4000-8000-000000000001", self.prompts["linear"])
@@ -221,6 +279,107 @@ class CommandLineTest(unittest.TestCase):
         code, out, err = self.run_main(settings(repositories=[]))
         self.assertEqual((code, out), (1, ""))
         self.assertEqual(err, "render.py: invalid settings: repositories must be a non-empty list\n")
+
+
+SECRETS = {"LINEAR_WEBHOOK_SECRET": "linear-signing-secret-0123456789", "GITHUB_WEBHOOK_SECRET": "github-signing-secret-9876543210"}
+
+# Stands in for `hermes config get <route> --json --raw`, which expands ${VAR} into the live secret.
+FAKE_HERMES = """#!PYTHON
+import json, os, re, sys
+name = sys.argv[3].rsplit(".", 1)[1]
+path = os.path.join(os.environ["HERMES_HOME"], "routes", name + ".json")
+if not os.path.exists(path):
+    sys.exit("Config key not set: " + sys.argv[3])
+secrets = json.loads(os.environ["FAKE_SECRETS"])
+text = open(path).read()
+print(re.sub(r"\\$\\{([A-Za-z_]+)\\}", lambda m: secrets.get(m.group(1), m.group(0)), text))
+"""
+
+
+class RouteCheckTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        hermes = bin_dir / "hermes"
+        hermes.write_text(FAKE_HERMES.replace("PYTHON", sys.executable))
+        hermes.chmod(0o755)
+        (self.tmp / "routes").mkdir()
+        self.routes = render.build_routes(SETTINGS)
+        self.env = {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            "HERMES_HOME": str(self.tmp),
+            "FAKE_SECRETS": json.dumps(SECRETS),
+        }
+
+    def install(self, name, route):
+        (self.tmp / "routes" / f"{name}.json").write_text(json.dumps(route))
+
+    def write_config(self, text):
+        (self.tmp / "config.yaml").write_text(text)
+
+    def check(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(SETTINGS, f)
+        self.addCleanup(Path(f.name).unlink)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, self.env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = render.main(["--check", "--settings-json", f.name])
+        printed = out.getvalue() + err.getvalue()
+        for secret in SECRETS.values():
+            self.assertNotIn(secret, printed)
+        return code, out.getvalue().splitlines()
+
+    def install_rendered(self):
+        for name, route in self.routes.items():
+            self.install(name, route)
+        self.write_config("secret: ${LINEAR_WEBHOOK_SECRET}\nsecret: ${GITHUB_WEBHOOK_SECRET}\n")
+
+    def test_installed_routes_with_references_match(self):
+        self.install_rendered()
+
+        self.assertEqual(self.check(), (0, [
+            "route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference",
+            "route github: matches; secret is the ${GITHUB_WEBHOOK_SECRET} reference",
+        ]))
+
+    def test_a_changed_route_names_the_differing_keys(self):
+        self.install_rendered()
+        self.install("github", {**self.routes["github"], "prompt": "old prompt", "events": ["issues"]})
+
+        code, lines = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(lines[1], "route github: differs in events, prompt; secret is the ${GITHUB_WEBHOOK_SECRET} reference")
+
+    def test_a_literal_secret_in_config_is_reported_without_its_value(self):
+        self.install_rendered()
+        self.install("linear", {**self.routes["linear"], "secret": SECRETS["LINEAR_WEBHOOK_SECRET"]})
+        self.write_config(f"secret: {SECRETS['LINEAR_WEBHOOK_SECRET']}\nsecret: ${{GITHUB_WEBHOOK_SECRET}}\n")
+
+        code, lines = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(lines[0], "route linear: matches; secret is a literal value in config.yaml, not the ${LINEAR_WEBHOOK_SECRET} reference")
+
+    def test_a_reference_without_a_value_is_reported(self):
+        self.install_rendered()
+        self.env["FAKE_SECRETS"] = json.dumps({"GITHUB_WEBHOOK_SECRET": SECRETS["GITHUB_WEBHOOK_SECRET"]})
+
+        code, lines = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(lines[0], "route linear: matches; secret is the reference ${LINEAR_WEBHOOK_SECRET}, but Hermes has no value for it")
+
+    def test_a_missing_route_is_reported(self):
+        self.install_rendered()
+        (self.tmp / "routes" / "github.json").unlink()
+
+        self.assertEqual(self.check(), (1, [
+            "route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference",
+            "route github: not installed",
+        ]))
 
 
 if __name__ == "__main__":
