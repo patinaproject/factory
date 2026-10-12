@@ -77,6 +77,20 @@ instead of editing the tree, creating that issue if none exists. The branch
 implementing such an issue applies the captured text verbatim in its pull
 request.
 
+## Factory machine rules and their enforcement
+
+Each rule came from an operator correction. When an operator corrects a setup
+mistake, fix it, add the rule here, and name what enforces it. Prefer a check
+that fails over prose.
+
+| Rule | Enforced by |
+| --- | --- |
+| Outside Access, a factory machine exposes only SSH, and SSH never accepts a password | `skills/setup-factory/scripts/check-host-exposure` in the runbook's host exposure part, with tests in `skills/setup-factory/tests/` |
+| No sharing service is reachable, and the macOS firewall is on | `check-host-exposure` |
+| The SSH allowlist is one list of emails, never a domain; the sshd principals file mirrors it | `check-host-exposure --ssh-users`, which fails on drift and refuses a domain |
+| A privileged step runs as one script in the operator's terminal and refuses to lock anyone out | Judgment: the runbook's rule for privileged steps and the agent instructions block |
+| Agents on a factory machine know who owns ingress, how people reach the machine, and how to handle `sudo` | The agent instructions block, which the runbook's Check compares with the template |
+
 ## Build, Test, and Development Commands
 
 - `pnpm install` (or `pnpm env:setup`): install dev tooling and register Husky.

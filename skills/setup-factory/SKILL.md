@@ -25,6 +25,12 @@ pass.
   count, not by reading it.
 - **Never edit Hermes source.** If the Hermes install has local commits or a
   dirty tree, stop and report it. Do not repair it.
+- **Privileged steps run in the operator's terminal.** You cannot answer a
+  `sudo` password prompt. Put every privileged command for a part into one
+  script in your scratch directory. Make the script refuse any change that
+  could lock the operator out, then ask the operator to run it with `sudo`
+  in their own terminal, and wait. The prompt times out after about five
+  minutes. Then run the part's check again.
 - **Run Hermes commands without a prompt.** Pass `-y` or `--yes-deps` where the
   command takes one, and redirect standard input from `/dev/null`.
 
@@ -49,6 +55,7 @@ notes, not in the repository.
 | `kanban.max_in_progress` | Kanban |
 | Factory hostname, Cloudflare account, and zone | Ingress |
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
+| Whether people SSH into the machine through Access, and if so the SSH hostname and each person's email | Ingress, host exposure |
 | The operator's SST app, its stage, and its review process | Ingress |
 | Whether Claude Code uses a local proxy, and if so its base URL, model alias, and token variable name | Claude Code transport |
 | Linear workspace, and whether the operator already has an agent app | Linear app |
@@ -143,7 +150,8 @@ Run the parts in this order. Later parts depend on values from earlier ones.
 13. [Slack](#13-slack)
 14. [Infisical secret source](#14-infisical-secret-source), optional
 15. [Restart and end-to-end checks](#15-restart-and-end-to-end-checks)
-16. [Agent instructions](#16-agent-instructions)
+16. [Host exposure](#16-host-exposure)
+17. [Agent instructions](#17-agent-instructions)
 
 ## 1. Hermes
 
@@ -670,7 +678,44 @@ operator to reopen the card from the Kanban dashboard. A card reaches `done`
 only when its pull request merges, so this applies to follow-up work after the
 merge.
 
-## 16. Agent instructions
+## 16. Host exposure
+
+Outside Cloudflare Access, the machine exposes only SSH, and SSH accepts only
+keys and certificates. Run the check from this repository's checkout on the
+machine. Pass the SSH allowlist when people SSH in through Access, and leave
+`--ssh-users` out when nobody does:
+
+```sh
+python3 skills/setup-factory/scripts/check-host-exposure --ssh-users <email>,<email>
+```
+
+It probes each of the machine's LAN and public addresses, including public
+IPv6 addresses that a router may not block. If every line starts with `PASS`,
+report the part as already configured.
+
+Each `FAIL` line names its fix. Turn off a sharing service in System Settings.
+
+> **HUMAN CHECKPOINT.** Ask the operator to turn off each reported sharing
+> service, and to turn on the firewall when it is off. Run the check again.
+
+The SSH fixes need `sudo`. Write one script that does all of them, and follow
+the rule for privileged steps:
+
+- Back up each file it edits.
+- Write `/etc/ssh/authorized_principals/<account>` with one line for each
+  allowlist email's local part. Never add a name that is not on the list.
+- Before it turns off password login, read the last day's accepted SSH logins
+  with `log show --last 24h --info --predicate 'eventMessage CONTAINS "Accepted "'`.
+  If any login used `password` or `keyboard-interactive`, skip that change
+  and report who would be locked out.
+- Add `PasswordAuthentication no` and `KbdInteractiveAuthentication no` to a
+  file in `/etc/ssh/sshd_config.d/`, then run `sshd -t`. If it fails, restore
+  the backups.
+
+macOS starts sshd for each connection, so new connections use the change
+without a restart. Run the check again. It must print only `PASS` lines.
+
+## 17. Agent instructions
 
 Follow [`references/agent-instructions.md`](references/agent-instructions.md).
 It writes the factory's operating rules into `~/.claude/CLAUDE.md`, so every
