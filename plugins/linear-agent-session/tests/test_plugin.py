@@ -6,7 +6,9 @@ import enum
 import io
 import json
 import os
+import sys
 import tempfile
+import types
 import time
 import unittest
 from types import SimpleNamespace
@@ -53,9 +55,33 @@ class RecordingClient:
         return "activity-1"
 
 
-def run_hook(evt, client, route="linear"):
-    hook = plugin.make_dispatch_hook(lambda: client, lambda: route)
+RESOLVED_SECRET = "s3cret-resolved-value"
+SKIP_LINEAR = {"action": "skip", "reason": "route linear secret is the unresolved reference ${LINEAR_WEBHOOK_SECRET}"}
+
+
+def webhook_config(routes, global_secret=None):
+    extra = {"routes": routes}
+    if global_secret is not None:
+        extra["secret"] = global_secret
+    return {"platforms": {"webhook": {"extra": extra}}}
+
+
+RESOLVED_CONFIG = webhook_config({"linear": {"secret": RESOLVED_SECRET}, "github": {"secret": RESOLVED_SECRET}})
+
+
+def run_hook(evt, client, route="linear", config=RESOLVED_CONFIG):
+    hook = plugin.make_dispatch_hook(lambda: client, lambda: route, lambda: config)
     return asyncio.run(hook(event=evt, gateway=object(), session_store=None))
+
+
+@contextlib.contextmanager
+def hermes_config(config):
+    hermes_cli = types.ModuleType("hermes_cli")
+    module = types.ModuleType("hermes_cli.config")
+    module.load_config_readonly = lambda: config
+    hermes_cli.config = module
+    with mock.patch.dict(sys.modules, {"hermes_cli": hermes_cli, "hermes_cli.config": module}):
+        yield
 
 
 ACK = ("session-1", {"type": "thought", "body": "Received. Triaging now."}, True)
@@ -99,7 +125,7 @@ class DispatchHookTest(unittest.TestCase):
 
     def test_slow_linear_is_abandoned_at_the_deadline(self):
         client = RecordingClient(delay=1.0)
-        hook = plugin.make_dispatch_hook(lambda: client, lambda: "linear")
+        hook = plugin.make_dispatch_hook(lambda: client, lambda: "linear", lambda: RESOLVED_CONFIG)
 
         async def timed():
             started = time.monotonic()
@@ -110,6 +136,69 @@ class DispatchHookTest(unittest.TestCase):
             result, elapsed = asyncio.run(timed())
         self.assertIsNone(result)
         self.assertLess(elapsed, 0.5)
+
+
+class SecretGuardTest(unittest.TestCase):
+    def test_unresolved_secret_skips_without_acknowledging(self):
+        config = webhook_config(
+            {"linear": {"secret": "${LINEAR_WEBHOOK_SECRET}"}, "github": {"secret": RESOLVED_SECRET}}
+        )
+        client = RecordingClient()
+        with self.assertLogs("linear_agent_session", "ERROR") as logs:
+            result = run_hook(event(session_event("created")), client, config=config)
+        self.assertEqual(result, SKIP_LINEAR)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("route linear", logs.output[0])
+        self.assertIn("${LINEAR_WEBHOOK_SECRET}", logs.output[0])
+        self.assertNotIn(RESOLVED_SECRET, logs.output[0])
+
+    def test_unresolved_secret_on_another_route_is_skipped(self):
+        config = webhook_config({"github": {"secret": "${env:GITHUB_WEBHOOK_SECRET}"}})
+        with self.assertLogs("linear_agent_session", "ERROR"):
+            result = run_hook(event({"zen": "hi"}, route="github"), RecordingClient(), config=config)
+        reason = "route github secret is the unresolved reference ${GITHUB_WEBHOOK_SECRET}"
+        self.assertEqual(result, {"action": "skip", "reason": reason})
+
+    def test_route_without_secret_uses_global_fallback(self):
+        client = RecordingClient()
+        unresolved = webhook_config({"linear": {}}, global_secret="${LINEAR_WEBHOOK_SECRET}")
+        with self.assertLogs("linear_agent_session", "ERROR"):
+            self.assertEqual(run_hook(event(session_event("created")), client, config=unresolved), SKIP_LINEAR)
+        self.assertEqual(client.calls, [])
+        resolved = webhook_config({"linear": {}}, global_secret=RESOLVED_SECRET)
+        self.assertIsNone(run_hook(event(session_event("created")), client, config=resolved))
+        self.assertEqual(client.calls, [ACK])
+
+    def test_route_secret_overrides_unresolved_global(self):
+        config = webhook_config({"linear": {"secret": RESOLVED_SECRET}}, global_secret="${WEBHOOK_SECRET}")
+        client = RecordingClient()
+        self.assertIsNone(run_hook(event(session_event("created")), client, config=config))
+        self.assertEqual(client.calls, [ACK])
+
+    def test_accepted_without_skip(self):
+        unresolved = webhook_config({"linear": {"secret": "${LINEAR_WEBHOOK_SECRET}"}})
+        cases = {
+            "secret only contains a reference": (
+                webhook_config({"linear": {"secret": "x-${LINEAR_WEBHOOK_SECRET}"}}),
+                event({"type": "Issue"}),
+            ),
+            "non-webhook event": (unresolved, event({"type": "Issue"}, platform=Platform.SLACK)),
+            "route absent from config": (unresolved, event({"type": "Issue"}, route="dynamic")),
+            "no webhook platform": ({}, event({"type": "Issue"})),
+        }
+        for name, (config, evt) in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(run_hook(evt, RecordingClient(), config=config))
+
+    def test_config_is_read_per_delivery(self):
+        configs = [webhook_config({"linear": {"secret": "${LINEAR_WEBHOOK_SECRET}"}}), RESOLVED_CONFIG]
+        client = RecordingClient()
+        hook = plugin.make_dispatch_hook(lambda: client, lambda: "linear", lambda: configs.pop(0))
+        with self.assertLogs("linear_agent_session", "ERROR"):
+            self.assertEqual(asyncio.run(hook(event=event(session_event("created")))), SKIP_LINEAR)
+        self.assertIsNone(asyncio.run(hook(event=event(session_event("created")))))
+        self.assertEqual(client.calls, [ACK])
 
 
 class FakeContext:
@@ -143,6 +232,28 @@ class RegisterTest(unittest.TestCase):
         network = mock.patch("urllib.request.urlopen", side_effect=AssertionError("unexpected network call"))
         network.start()
         self.addCleanup(network.stop)
+        config = hermes_config(RESOLVED_CONFIG)
+        config.__enter__()
+        self.addCleanup(config.__exit__, None, None, None)
+
+    def test_register_logs_each_unresolved_route(self):
+        config = webhook_config(
+            {
+                "linear": {"secret": "${LINEAR_WEBHOOK_SECRET}"},
+                "github": {"secret": "${GITHUB_WEBHOOK_SECRET}"},
+                "ok": {"secret": RESOLVED_SECRET},
+            }
+        )
+        ctx = FakeContext()
+        with hermes_config(config), self.assertLogs("linear_agent_session", "ERROR") as logs:
+            plugin.register(ctx)
+            hook = ctx.hooks[0][1]
+            self.assertEqual(asyncio.run(hook(event=event(session_event("created")))), SKIP_LINEAR)
+        startup = [line for line in logs.output if "will be dropped" in line]
+        self.assertEqual(len(startup), 2)
+        self.assertTrue(any("route linear" in line and "LINEAR_WEBHOOK_SECRET" in line for line in startup))
+        self.assertTrue(any("route github" in line and "GITHUB_WEBHOOK_SECRET" in line for line in startup))
+        self.assertNotIn(RESOLVED_SECRET, "\n".join(logs.output))
 
     def test_registers_tools_and_hook(self):
         ctx = FakeContext()

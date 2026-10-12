@@ -2,8 +2,9 @@ manifest_version: 2
 name: linear-agent-session
 version: "0.1.0"
 description: >-
-  Acknowledges Linear agent session webhooks within Linear's 10-second deadline
-  and gives agents the linear_agent_activity, linear_issue,
+  Drops a webhook delivery on any route whose secret is still an unresolved
+  ${NAME} reference, acknowledges Linear agent session webhooks within Linear's
+  10-second deadline, and gives agents the linear_agent_activity, linear_issue,
   linear_agent_session_create, linear_delegated_issues, and
   linear_issue_undelegate tools, acting as the Linear agent app.
 provides_hooks: [pre_gateway_dispatch]

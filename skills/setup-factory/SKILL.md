@@ -825,8 +825,16 @@ forged_post github '${GITHUB_WEBHOOK_SECRET}' X-Hub-Signature-256 ping # github 
 A `401` proves something only when the same request signed with the real
 secret is accepted. The signed checks in
 [`references/cloudflare-sst.md`](references/cloudflare-sst.md) show that. Run
-these lines after every gateway restart. A startup guard that refuses such a
-route is not yet enforced in code.
+these lines after every gateway restart.
+
+The `linear-agent-session` plugin is the last line of defense, for every
+webhook route. The gateway answers a forged delivery on such a route with
+`202` because it sends the status before plugins run. The plugin then drops
+the delivery before any agent run and before its Linear acknowledgement, and
+logs
+`linear-agent-session: dropped a delivery on route <route>: secret is the unresolved reference ${<NAME>}`.
+At startup it logs one line per such route. A `202` from a forged line
+still means the secret source failed, so follow the steps below.
 
 If a forged line prints anything but `401`, the gateway is serving a route
 that anyone can sign for. Stop it before you fix the secret source.
