@@ -89,7 +89,7 @@ configuration, and update it in the same change.
   from a shell outside Hermes.
 - A merged factory change is not live until it is deployed. Follow the
   setup-factory runbook's "Deploy a merged factory change" section.
-  `HERMES_HOME=<worker> <worker>/scripts/check-install` lists what is out of
+  `HERMES_HOME=<worker> python3 <worker>/scripts/check-install` lists what is out of
   date.
 <!-- factory:end -->
 ```

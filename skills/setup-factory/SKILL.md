@@ -278,7 +278,7 @@ plugin can still be older than the repository, so also compare content once
 the worker profile exists:
 
 ```sh
-HERMES_HOME=<worker> <worker>/scripts/check-install
+HERMES_HOME=<worker> python3 <worker>/scripts/check-install
 ```
 
 Skip a plugin's install only when it is listed, enabled, and absent from the
@@ -716,7 +716,7 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
 2. List what is out of date:
 
    ```sh
-   HERMES_HOME=<worker> <worker>/scripts/check-install --fetch
+   HERMES_HOME=<worker> python3 <worker>/scripts/check-install --fetch
    ```
 
 3. Install each item it names:

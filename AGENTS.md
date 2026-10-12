@@ -90,6 +90,7 @@ rule that only docs enforce is a candidate for a script, check, or test.
 | A takeover never publishes to another person's branch | The `-takeover` branch rule in `templates/triage-linear.md`; adoption tests in `profiles/claude-worker/tests/test_claude_session.py` |
 | When `gh issue develop` fails with `createLinkedBranch`, derive the branch name from the adapter's rule | Docs only: `docs/agents/issue-tracker.md` and the machine-wide block |
 | A repository with the Engineering plugin has Bun for its issue-handoff gate | Setup part 10 check |
+| A new script is committed without the executable bit and run with `python3` | `push-signed` refuses a commit that adds an executable file, because GitHub's commit API cannot set file modes |
 | Commit type follows the changed paths | Docs only: "Commit type selection" below; commitlint checks only the format |
 | Tests never assert on documentation prose | Docs only: "Testing Guidelines" below |
 
