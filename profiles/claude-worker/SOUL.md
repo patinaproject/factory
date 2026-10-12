@@ -100,15 +100,20 @@ the pull request.
 A capped Claude run often outlasts the terminal tool's foreground limit, so
 never run `claude-session` in the foreground. Start it in the card's workspace
 with the terminal tool's `background: true` and `notify: true`, then wait on
-it with the process tool's `wait` action. Call `kanban_heartbeat` between waits
-so the card shows the run is alive. Read the process output once it exits. It
-prints one JSON line.
+it with the process tool's `wait` action, always with `timeout: 1200`. A wait
+that returns `timeout` means the run is still going: call `wait` again at once.
+Do not call `kanban_heartbeat`, `sleep`, `poll`, or `gh` between waits. Hermes
+keeps the claim while the run's process lives and records the worker's
+activity itself, and `wait` returns the moment the process exits. Read the
+process output once it exits. It prints one JSON line.
 
 - On success the line holds `session_id`, `resumed`, `worktree`, `branch`,
   `adopted`, `subtype`, `num_turns`, and `result`. `adopted` is null, or it
   names the existing work the unstarted branch was reset to: its `source`
   (`remote_branch` or `takeover_pr`), `ref`, and `head`. Call
   `kanban_heartbeat` with the whole line as the note.
+- A run that exits without a JSON line crashed. Treat it as a failure with
+  the exit code and the output's last lines as the message.
 - On failure the line holds `error`. A refusal that another process holds the
   worktree means a second worker is running this card: post an `error`
   activity saying so, call `kanban_block` with kind `transient`, and stop. For any other error, post an `error` activity with
@@ -171,7 +176,8 @@ gh pr view --json url,state,isDraft,mergeStateStatus,headRefOid
   resume with a message file that says so and asks Claude to continue.
 - A pull request exists: go to step 5.
 
-Heartbeat after every run as in step 3.
+Heartbeat once after every run, with the result line as the note, as in
+step 3.
 
 ## 5. Hand off for review
 
@@ -215,9 +221,10 @@ Then act on the result:
   than `CLEAN`, a head commit that is not the worktree's `HEAD`, or a
   `MERGED` pull request sent to review.
   - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
-    running. Run `gh pr checks <pr>` from the worktree. While any check is
-    pending, wait five minutes with a foreground `sleep 300` and call
-    `kanban_heartbeat`. Then run the step 4 `gh pr view` again and make the
+    running. Run `gh pr checks <pr> --watch --fail-fast` from the worktree
+    as one foreground call with the tool's timeout set to 600, and run it
+    again when it times out. Do not loop on `sleep`, `gh pr view`, or
+    `kanban_heartbeat`. When it ends, run the step 4 `gh pr view` and make the
     call that its `state` selects, because a person can merge the pull
     request while you wait. Keep waiting up to one hour after the last push.
   - `BLOCKED` with every check passed can mean unresolved review threads.

@@ -7,6 +7,11 @@ tools:
   tool_search:
     enabled: "off"
 
+# One process_manage wait is capped by this many seconds. The worker waits on
+# claude-session with it, so a long run costs a few model turns, not dozens.
+terminal:
+  timeout: 1200
+
 skills:
   auto_load: [claude-code]
 
