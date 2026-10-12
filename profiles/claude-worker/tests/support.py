@@ -19,6 +19,12 @@ if "--settings" in argv:
     settings = {"content": json.load(open(path)), "mode": oct(os.stat(path).st_mode & 0o777)}
 with open(os.environ["FAKE_CLAUDE_LOG"], "w") as log:
     json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings}, log)
+leftover = None
+if os.environ.get("FAKE_CLAUDE_LEFTOVER_PID_FILE"):
+    import subprocess
+    leftover = subprocess.Popen(["sleep", "600"], start_new_session=os.environ.get("FAKE_CLAUDE_LEFTOVER_DETACHED") == "1")
+    with open(os.environ["FAKE_CLAUDE_LEFTOVER_PID_FILE"], "w") as pid_file:
+        pid_file.write(str(leftover.pid))
 print(json.dumps({
     "type": "result",
     "subtype": os.environ.get("FAKE_CLAUDE_SUBTYPE", "success"),
@@ -26,7 +32,9 @@ print(json.dumps({
     "result": "Opened the pull request.",
     "session_id": "ignored",
     "num_turns": 7,
-}))
+}), flush=True)
+if leftover and os.environ.get("FAKE_CLAUDE_WAITS_FOR_LEFTOVER") == "1":
+    leftover.wait()
 """
 
 
