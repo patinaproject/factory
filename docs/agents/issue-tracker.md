@@ -99,6 +99,12 @@ the title, transliterate to ASCII, replace each run of non-alphanumeric
 characters with one hyphen, trim hyphens, and keep the complete issue number.
 Use the resulting adapter-provided name verbatim.
 
+Prefer `gh issue develop`, which creates the same name and links it to the
+issue. On a factory machine, `gh` acts as a GitHub App that cannot create
+linked branches, so `gh issue develop` fails with a `createLinkedBranch`
+permission error. Then derive the name with the rule above, create the branch
+from the fetched default branch, and continue.
+
 ### Public planning and shipping
 
 GitHub milestones describe planned delivery. GitHub Releases describe what
