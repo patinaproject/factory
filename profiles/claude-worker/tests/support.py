@@ -22,8 +22,19 @@ settings = None
 if "--settings" in argv:
     path = argv[argv.index("--settings") + 1]
     settings = {"content": json.load(open(path)), "mode": oct(os.stat(path).st_mode & 0o777)}
-with open(options["log"], "w") as log:
-    json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings}, log)
+    # Like Claude Code, run the SessionStart hooks once the settings are read.
+    import subprocess
+    hooks = {} if options.get("skip_start_hooks") else settings["content"].get("hooks", {})
+    for group in hooks.get("SessionStart", []):
+        for hook in group["hooks"]:
+            subprocess.run(hook["command"], shell=True, check=True)
+    settings["exists_after_start"] = os.path.exists(path)
+with open(options["log"] + ".tmp", "w") as log:
+    json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings, "pid": os.getpid()}, log)
+os.rename(options["log"] + ".tmp", options["log"])
+if options.get("hold_seconds"):
+    import time
+    time.sleep(options["hold_seconds"])
 leftover = None
 if options.get("leftover_pid_file"):
     import subprocess
