@@ -32,7 +32,7 @@ SESSION_CREATE_MUTATION = """mutation AgentSessionCreateOnIssue($input: AgentSes
   agentSessionCreateOnIssue(input: $input) { success agentSession { id } }
 }"""
 
-# Linear priority -> (name, Kanban card priority). Linear ranks Urgent 1 and Low 4; a card ranks higher numbers first.
+# Linear ranks Urgent 1 and Low 4; a card ranks higher numbers first.
 PRIORITIES = {0: ("No priority", 0), 1: ("Urgent", 4), 2: ("High", 3), 3: ("Medium", 2), 4: ("Low", 1)}
 
 ISSUE_QUERY = """query Issue($id: String!) {
