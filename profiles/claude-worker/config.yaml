@@ -35,6 +35,7 @@ plugins:
         claude_session:
           base_url: ""
           model: ""
+          tier_models: {}
           auth_token_env: ""
           max_turns: 0
     pr-ready-gate:
