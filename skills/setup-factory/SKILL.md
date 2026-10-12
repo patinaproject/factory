@@ -94,6 +94,7 @@ your task notes, not in the repository.
 | Whether people SSH into the machine through Access, and if so the SSH hostname and each person's email | Ingress, host exposure |
 | The operator's SST app, its stage, and its review process | Ingress |
 | Whether Claude Code uses a local proxy, and if so its base URL, model alias, and token variable name | Claude Code transport |
+| Optional with a proxy: a model id for each of the Sonnet, Haiku, and Fable tiers, so subagents run on cheaper models than the worker's main agent. Offer only ids the proxy's `/v1/models` lists. Skip it when the proxy serves one model | Claude Code transport |
 | Linear workspace, and whether the operator already has an agent app | Linear app |
 | The GitHub organization or account that owns the repositories, and a name for the factory's GitHub App | GitHub App |
 | A path outside every repository for the GitHub App's private key, for example `~/.config/factory/github-app.pem` | GitHub App |
@@ -101,6 +102,7 @@ your task notes, not in the repository.
 | Whether the operator keeps operator-only credentials in 1Password, and if so the vault and the service account name | 1Password |
 | Slack workspace and the channels the agent joins | Slack |
 | Where the factory's private configuration record lives, and the credentials on the machine that Hermes agents must never receive | Agent instructions |
+| Optional: a pstack model sheet, as a path to a sheet the operator keeps or as answers to the `setup-pstack` questions (a model per role from the aliases the `Agent` tool accepts, default effort, session hook on or off). Never invent model choices. Skip the step when the operator declines | Agent instructions |
 
 ## Where each value lives
 
@@ -460,6 +462,14 @@ hermes -p claude-worker skills opt-in --sync </dev/null
 
 The sync makes the bundled `claude-code` skill available to the worker. A
 distribution install sets no model, so now run part 4 for the worker profile.
+An update keeps the installed `config.yaml`, so set the worker's wait limit
+on a machine installed before the profile shipped it. `SOUL.md` waits on
+`claude-session` with a 400 second timeout, which Hermes clamps to this value.
+It stays under the 420 second limit Hermes puts on every tool call:
+
+```sh
+hermes -p claude-worker config set terminal.timeout 400 </dev/null
+```
 
 **Verify.**
 
@@ -544,13 +554,15 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
-  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 0}
+  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "max_turns": 0}
 }
 ```
 
 Exactly one repository has `routing: default`. Leave
 `claude_session.base_url`, `model`, and `auth_token_env` empty unless part 3
-set up a proxy. `worker_entry` is a prefix, such as `/patina-mode`, that
+set up a proxy. With a proxy, set `tier_models` to the Sonnet, Haiku, and Fable
+ids from the operator's input, so subagents run on cheaper models while the
+worker's main agent stays on `model`. `worker_entry` is a prefix, such as `/patina-mode`, that
 `claude-session` puts before the built-in task prompt. The task prompt names
 the issue, its URL, the repository, and the branch, and is always sent. An
 empty `worker_entry` sends the task prompt alone. `claude-session` refuses a `worker_entry` that
@@ -559,6 +571,18 @@ it to the prefix. `claude_session.max_turns`
 caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
 one run can finish a whole task. A positive limit pauses a long task, such as
 a dependency upgrade, and the worker resumes it in a second run.
+
+A card that waits in review leaves its Claude session idle past the 5-minute
+prompt cache, and a resumed large session re-writes its whole context at the
+cache-write price. `claude_session.fresh_after_tokens` sets the context size,
+in tokens, at which `claude-session` starts a new session instead. It is a
+positive integer and defaults to 100000. A run within 5 minutes of the
+session's last write always resumes. A later run resumes when the last
+context is under the setting, and otherwise starts a fresh session whose
+prompt names the branch, its commit, the previous transcript, and the previous
+run's last message. The run's JSON line reports `reason`: `new`, `warm`,
+`small`, `fresh-large-idle`, or `fresh-unreadable`. Leave the key out unless the
+default needs tuning.
 
 A repository whose workers verify on a simulator or emulator sets
 `toolchain_checks`, a list of shell commands, on its entry. Before each run,
@@ -781,9 +805,10 @@ belongs to the worker profile.
 `refresh-checkouts`. `cron create` does not remove duplicates. If more than one
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
-jobs: `refresh-checkouts`, `refresh-owned-refs`, `refresh-gh-app-login`, and
-`check-install`. A copy there runs without the worker's scripts and settings,
-so remove it the same way. A second setup session runs this check before it
+jobs: `refresh-checkouts`, `refresh-owned-refs`, and `refresh-gh-app-login`.
+A copy there runs without the worker's scripts and settings, so remove it the
+same way. The default home holds exactly one job, `check-install`, described
+below. A second setup session runs this check before it
 creates anything.
 
 **Create** the job only when the list has none:
@@ -818,22 +843,43 @@ factory plugins in both homes, and the installed webhook routes with
 that the dashboard's OIDC sign-in can keep a user signed in. It also reports
 machine changes this runbook cannot reproduce: a `config.yaml` key from parts
 4, 6, 10, or 13 that differs from what the part sets, a cron job that is
-missing, duplicated, changed, or not created by the runbook, and, on macOS, a
-launchd service from part 7 or 15 that is not installed, does not run at load,
-or is not running, and `<home>/owned-refs.json` that is missing or older
-than 5 minutes. It never prints a config value. It prints one line per
-difference and nothing when the install is current. It fetches
-first, so a merge shows up within the hour. Deliver it where the operator
-reads it: the home channel of the platform from part 13, such as `slack`.
-On a first install, create it after part 13. Create the job when `cron list`
-has no `check-install` job:
+missing, duplicated, changed, not created by the runbook, or in the wrong
+profile, a cron job that delivers to a platform with no home channel in its
+profile, the root home's `scripts/check-install-alert` when it is missing or
+differs from the repository, and, on macOS, a launchd service from part 7 or 15
+that is not installed, does not run at load, or is not running, and
+`<home>/owned-refs.json` that is missing or older than 5 minutes. It never
+prints a config value. It prints one line per difference and nothing when the
+install is current. It fetches first, so a merge shows up within the hour.
+
+Deliver it where the operator reads it: the home channel of the platform from
+part 13, such as `slack`. Only the default (root) profile runs that platform
+and has its home channel. The gateway refuses the platform's credential in a
+second profile, and Hermes drops the output of a job whose profile has no home
+channel for its `--deliver` platform, logging `no delivery target resolved`.
+So this job belongs to the root profile, unlike the other jobs in this part.
+Hermes runs a cron script from the owning profile's own `scripts/` directory,
+so install the wrapper there. It runs the worker's current `check-install` with
+the worker home, so the job never runs a stale copy. On a first install, do
+this after part 13. A root home that has never run a script job has no
+`scripts/` directory, so create it first. Run it from the factory checkout:
 
 ```sh
-hermes -p claude-worker cron create "every 1h" --name check-install --no-agent --script check-install --deliver <platform> </dev/null
+install -d <root>/scripts
+install -m 0644 skills/setup-factory/scripts/check-install-alert <root>/scripts/check-install-alert
+```
+
+Then create the job when `hermes cron list` for the root profile has no
+`check-install` job:
+
+```sh
+hermes cron create "every 1h" --name check-install --no-agent --script check-install-alert --deliver <platform> </dev/null
 ```
 
 The job exits non-zero while drift exists, so its failure notice goes to the
-same platform.
+same platform. A factory that created this job in the worker profile earlier
+removes that copy with `hermes -p claude-worker cron remove <job id>`, with the
+operator's approval, after the root job exists.
 
 **Verify.** Run each job through Hermes once, then read its status:
 
@@ -1114,6 +1160,38 @@ Hermes reads the memory file when a session starts. The gateway reads
 `<home>/.env` only when it starts, so after `env_set` changes that file, ask
 the operator to restart the gateway as in part 15.
 
+**pstack model sheet.** Skip this step when the operator gave no sheet and
+declined the `setup-pstack` questions. `claude-session` forwards `HOME` and
+`CLAUDE_CONFIG_DIR` to worker runs and does not set `CLAUDE_CONFIG_DIR`, so
+worker sessions read the same `<config>/CLAUDE.md` as the operator, where
+`<config>` is `$CLAUDE_CONFIG_DIR` or `~/.claude`.
+
+1. Write the sheet to `<config>/pstack-models.md`, replacing the whole file so
+   a re-run converges. Use the shape in
+   [`references/pstack-models-template.md`](references/pstack-models-template.md)
+   with the operator's values. Use model family names such as `opus`, never
+   full `claude-*` IDs, which the `Agent` tool rejects. Record the values in
+   the private configuration record, never in this repository.
+2. Add the include, outside the factory block, only when it is absent. The
+   command backs up `CLAUDE.md` first and refuses to edit a file whose
+   `<!-- factory:begin -->` and `<!-- factory:end -->` pair is not intact:
+
+   ```sh
+   python3 <repo>/skills/setup-factory/scripts/pstack-include --write
+   ```
+
+3. Check. Every line must start with `PASS`: the sheet exists and names no
+   model other than an `Agent` alias, the marker pair is intact, and the include
+   appears exactly once outside the block. Part 17's block write keeps lines
+   outside the markers, so a later re-run does not remove the include.
+
+   ```sh
+   python3 <repo>/skills/setup-factory/scripts/pstack-include
+   ```
+
+   Pass `--config-dir <config>` when `CLAUDE_CONFIG_DIR` is set in the worker
+   environment but not in your shell.
+
 ## Deploy a merged factory change
 
 A merged change to `plugins/`, `profiles/`, or `templates/` is not live until
@@ -1148,6 +1226,12 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
      or allow the `refresh_tokens` grant on the `saas` Access application when
      the line names the issuer. Then restart the dashboard service.
+   - A `script <root>/scripts/check-install-alert` line: install the wrapper
+     again with the part 12 `install` commands, which create `<root>/scripts` first.
+   - A `cron job check-install` line: the job is missing, in the wrong
+     profile, or delivers to a platform with no home channel. Create it in the
+     root profile as in part 12, and remove a leftover copy in the worker
+     profile. Set the platform's home channel in the root home as in part 13.
    - A `config`, `cron job`, or `service` line: the machine differs from what
      the named part produces. If the runbook is right, run that part again.
      If the machine is right, change the part and its row in `check-install`
