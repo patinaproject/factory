@@ -94,6 +94,7 @@ your task notes, not in the repository.
 | Whether people SSH into the machine through Access, and if so the SSH hostname and each person's email | Ingress, host exposure |
 | The operator's SST app, its stage, and its review process | Ingress |
 | Whether Claude Code uses a local proxy, and if so its base URL, model alias, and token variable name | Claude Code transport |
+| Optional with a proxy: a model id for each of the Sonnet, Haiku, and Fable tiers, so subagents run on cheaper models than the worker's main agent. Offer only ids the proxy's `/v1/models` lists. Skip it when the proxy serves one model | Claude Code transport |
 | Linear workspace, and whether the operator already has an agent app | Linear app |
 | The GitHub organization or account that owns the repositories, and a name for the factory's GitHub App | GitHub App |
 | A path outside every repository for the GitHub App's private key, for example `~/.config/factory/github-app.pem` | GitHub App |
@@ -545,13 +546,15 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
-  "claude_session": {"base_url": "", "model": "", "auth_token_env": "", "max_turns": 0}
+  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "max_turns": 0}
 }
 ```
 
 Exactly one repository has `routing: default`. Leave
 `claude_session.base_url`, `model`, and `auth_token_env` empty unless part 3
-set up a proxy. `worker_entry` is a prefix, such as `/patina-mode`, that
+set up a proxy. With a proxy, set `tier_models` to the Sonnet, Haiku, and Fable
+ids from the operator's input, so subagents run on cheaper models while the
+worker's main agent stays on `model`. `worker_entry` is a prefix, such as `/patina-mode`, that
 `claude-session` puts before the built-in task prompt. The task prompt names
 the issue, its URL, the repository, and the branch, and is always sent. An
 empty `worker_entry` sends the task prompt alone. `claude-session` refuses a `worker_entry` that
