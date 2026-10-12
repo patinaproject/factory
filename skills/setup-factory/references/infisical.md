@@ -56,9 +56,9 @@ All of these must hold:
   first line, where `<n>` is the number of values in the folder. When the
   folder holds `OP_SERVICE_ACCOUNT_TOKEN` for [1Password](1password.md),
   `<n>` is the number of values minus one.
-- `<home>/bin/factory-secrets` exists, and `diff` against the script in
-  [Configure both homes](#configure-both-homes) shows no change, or only the
-  changes the operator approved there. When the factory uses
+- `<home>/bin/factory-secrets` exists, and the `cmp -s` check in
+  [Configure both homes](#configure-both-homes) prints `same`, or the operator
+  approved the differences there. When the factory uses
   [1Password](1password.md), the only other change is that part's filter.
 - `hermes -p claude-worker config get terminal.env_passthrough --json` lists
   the token variable that `claude_session.auth_token_env` names.
@@ -220,25 +220,28 @@ echo "factory-secrets: Infisical export failed after 3 attempts" >&2
 exit 1
 SH
 chmod 700 <home>/bin/factory-secrets.new
-if [ -e <home>/bin/factory-secrets ]; then
-  diff -u <home>/bin/factory-secrets <home>/bin/factory-secrets.new && rm <home>/bin/factory-secrets.new
-else
+if [ ! -e <home>/bin/factory-secrets ]; then
   mv <home>/bin/factory-secrets.new <home>/bin/factory-secrets
+elif cmp -s <home>/bin/factory-secrets <home>/bin/factory-secrets.new; then
+  echo same
+  rm <home>/bin/factory-secrets.new
+else
+  echo differs
 fi
 ```
 
-When the `diff` prints changes, keep both files and stop.
+Never print the contents of either file or a `diff` between them. A helper
+tuned on this machine can hold a secret inline. When the command prints
+`differs`, keep both files and stop.
 
-> **HUMAN CHECKPOINT.** Show the operator the `diff` output and ask whether
-> to replace the existing helper. On approval, run
+> **HUMAN CHECKPOINT.** Ask the operator to run
+> `diff -u <home>/bin/factory-secrets <home>/bin/factory-secrets.new` in
+> their own terminal, review it there, and say whether to replace the
+> existing helper. On approval, run
 > `mv <home>/bin/factory-secrets.new <home>/bin/factory-secrets`. Otherwise
 > run `rm <home>/bin/factory-secrets.new` and keep the existing helper. Then
 > confirm that `<home>/bin/factory-secrets.new` is gone and that
 > `<home>/bin/factory-secrets` exists with mode `700`.
-
-The documented script holds no secret. If the existing script holds a secret
-inline, do not print the `diff`. Ask the operator to compare the two files
-themselves.
 
 Then point both homes at the helper:
 
