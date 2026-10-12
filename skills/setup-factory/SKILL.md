@@ -273,17 +273,23 @@ hermes plugins list
 hermes -p claude-worker plugins list
 ```
 
-Both list `linear-agent-session` and `pr-ready-gate`, enabled. A listed
-plugin can still be older than the repository, so also compare content once
-the worker profile exists:
+Both list `linear-agent-session` and `pr-ready-gate`, enabled. On a fresh
+machine, install both now and skip the content check.
+
+On a re-run, `<worker>` already exists, and a listed plugin can still be
+older than the repository. First bring `<repo>` to an up-to-date default
+branch, as in step 1 of
+[Deploy a merged factory change](#deploy-a-merged-factory-change). Then
+compare content:
 
 ```sh
 HERMES_HOME=<worker> python3 <worker>/scripts/check-install
 ```
 
-Skip a plugin's install only when it is listed, enabled, and absent from the
-`plugin <name> in <home>` lines that `check-install` prints. Reinstall a
-plugin it names with the install command below plus `--force`.
+Read only its `plugin <name> in <home>` lines here. Parts 10 and 11 handle
+routes. Skip a plugin's install only when it is listed, enabled, and absent
+from those lines. Reinstall a plugin it names with the install command below
+plus `--force`.
 
 **Install** each missing plugin into each home:
 
@@ -474,10 +480,19 @@ a shell where nvm is loaded: `nvm install <version>`. Install any other tool
 a repository needs, such as `pnpm`, before the first card runs.
 
 A repository that enables the Engineering plugin runs its issue-handoff gate
-with Bun. Check with `command -v bun` and with `ls <bin dir>/bun`, because a
-non-login shell can lack `<bin dir>` on `PATH`. When both fail, install Bun
-for the gateway's user with the installer from bun.sh, with `BUN_INSTALL` set
-so its binary lands in `<bin dir>`. Then `bun --version` prints a version.
+with Bun. `<bin dir>` is the directory that holds `gh` and the other tools
+setup installs, such as `~/.local/bin`. Check with `command -v bun` and with
+`ls <bin dir>/bun`, because a non-login shell can lack `<bin dir>` on `PATH`.
+When both fail, install Bun as the gateway's user. The installer puts the
+binary in `$BUN_INSTALL/bin`, so set `BUN_INSTALL` to the parent of
+`<bin dir>`:
+
+```sh
+curl -fsSL https://bun.sh/install | BUN_INSTALL="$(dirname <bin dir>)" bash
+<bin dir>/bun --version
+```
+
+The installer also adds lines to the user's shell startup file. Leave them.
 
 **GitHub login and checkouts.** Return to
 [`references/github.md`](references/github.md) and run its
@@ -565,22 +580,30 @@ script fails on every tick with a `SyntaxError`.
 **Install drift job.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
 `origin/HEAD` of the checkout the profile was installed from. It prints one
-line per difference and nothing when the install is current. Create one job
-the same way, when `cron list` has no `check-install` job:
+line per difference and nothing when the install is current. It fetches
+first, so a merge shows up within the hour. Deliver it where the operator
+reads it: the home channel of the platform from part 13, such as `slack`.
+On a first install, create it after part 13. Create the job when `cron list`
+has no `check-install` job:
 
 ```sh
-hermes -p claude-worker cron create "every 1h" --name check-install --no-agent --script check-install </dev/null
+hermes -p claude-worker cron create "every 1h" --name check-install --no-agent --script check-install --deliver <platform> </dev/null
 ```
+
+The job exits non-zero while drift exists, so its failure notice goes to the
+same platform.
 
 **Verify.** Run each job through Hermes once, then read its status:
 
 ```sh
 hermes -p claude-worker cron run <job id>
-hermes -p claude-worker cron list    # Last run shows no error
+hermes -p claude-worker cron list    # read each Last run line
 ```
 
-It prints nothing when every checkout is current. It prints one line for each
-checkout it left alone, such as a checkout on another branch or with
+`refresh-checkouts` prints nothing when every checkout is current, and its
+last run shows no error. `check-install` shows an error until the install
+matches, which the Deploy section below fixes. `refresh-checkouts` prints one
+line for each checkout it left alone, such as a checkout on another branch or with
 uncommitted changes. Fix each problem it names.
 
 ## 13. Slack
@@ -716,7 +739,7 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
 2. List what is out of date:
 
    ```sh
-   HERMES_HOME=<worker> python3 <worker>/scripts/check-install --fetch
+   HERMES_HOME=<worker> python3 <worker>/scripts/check-install
    ```
 
 3. Install each item it names:
