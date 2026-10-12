@@ -179,6 +179,21 @@ class HookDecisionTest(unittest.TestCase):
         self.assertIn(f"headRefOid is '{OTHER}'", message)
         self.assertNotIn("state is 'OPEN'", message)
 
+    def test_review_handoff_with_not_ready_pr_is_blocked(self):
+        shell = FakeShell(pr={**CLEAN, "mergeStateStatus": "BLOCKED"})
+        result = call_hook(shell, tool_name="kanban_request_review")
+        self.assertEqual(result["action"], "block")
+        self.assertIn("pr-ready-gate blocked kanban_request_review", result["message"])
+        self.assertIn("mergeStateStatus is 'BLOCKED'", result["message"])
+
+    def test_review_handoff_with_ready_pr_is_allowed(self):
+        self.assertIsNone(call_hook(FakeShell(), tool_name="kanban_request_review"))
+
+    def test_review_handoff_without_a_pr_is_blocked(self):
+        result = call_hook(FakeShell(gh_returncode=1), tool_name="kanban_request_review")
+        self.assertEqual(result["action"], "block")
+        self.assertIn("call kanban_request_review again", result["message"])
+
     def test_local_head_comes_from_the_workspace(self):
         shell = FakeShell(head=OTHER)
         result = call_hook(shell)

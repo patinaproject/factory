@@ -7,6 +7,8 @@ import subprocess
 from typing import Any, Optional
 
 DEFAULT_GATED_PROFILES = ["claude-worker"]
+# Hermes runs its completion contract inside complete_task only, so a review handoff needs this gate too.
+GATED_TOOLS = ("kanban_complete", "kanban_request_review")
 PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state"
 PR_URL = re.compile(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/\d+/?$")
 # Hermes kills a pre_tool_call hook after 30s; up to three calls must fit inside that.
@@ -105,7 +107,7 @@ def check(args: Any, env: dict) -> tuple[str, list[str]]:
 
 def make_hook(ctx: Any):
     def on_pre_tool_call(tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict]:
-        if tool_name != "kanban_complete":
+        if tool_name not in GATED_TOOLS:
             return None
         profile = ctx.profile_name or os.environ.get("HERMES_PROFILE", "")
         if profile not in ctx.get_config("gated_profiles", default=DEFAULT_GATED_PROFILES):
@@ -116,9 +118,9 @@ def make_hook(ctx: Any):
             return {
                 "action": "block",
                 "message": (
-                    f"pr-ready-gate blocked kanban_complete because the pull request could not be verified: {exc}. "
+                    f"pr-ready-gate blocked {tool_name} because the pull request could not be verified: {exc}. "
                     "If no pull request exists for this branch, push and open a ready (non-draft) one; "
-                    "otherwise fix the cause and call kanban_complete again."
+                    f"otherwise fix the cause and call {tool_name} again."
                 ),
             }
         if not failures:
@@ -127,8 +129,8 @@ def make_hook(ctx: Any):
         return {
             "action": "block",
             "message": (
-                f"pr-ready-gate blocked kanban_complete: {pr} is not ready to merge.\n{lines}\n"
-                "Call kanban_complete again once every condition holds."
+                f"pr-ready-gate blocked {tool_name}: {pr} is not ready to merge.\n{lines}\n"
+                f"Call {tool_name} again once every condition holds."
             ),
         }
 
