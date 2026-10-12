@@ -64,9 +64,12 @@ ROOT_CONFIG = {
     "streaming.enabled": True,
     "platforms.slack.extra.native_task_cards": True,
 }
-WORKER_CONFIG = {key: ROOT_CONFIG[key] for key in (
-    "model.provider", "model.default", "plugins.entries.linear-agent-session.settings",
-)}
+WORKER_CONFIG = {
+    **{key: ROOT_CONFIG[key] for key in (
+        "model.provider", "model.default", "plugins.entries.linear-agent-session.settings",
+    )},
+    "terminal.timeout": 400,
+}
 
 
 def cron_job(name: str, minutes: int, deliver: str = "local", **fields) -> dict:
@@ -81,8 +84,10 @@ WORKER_JOBS = [
     cron_job("refresh-gh-app-login", 30),
     cron_job("refresh-checkouts", 60),
     cron_job("refresh-owned-refs", 1),
-    cron_job("check-install", 60, "slack"),
 ]
+ALERT_SCRIPT = "check-install-alert"
+ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}]
+ALERT_SOURCE = f"skills/setup-factory/scripts/{ALERT_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
 loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
@@ -96,6 +101,7 @@ REPO_FILES = {
     "plugins/p1/__init__.py": "plugin\n",
     "plugins/p1/tests/test_a.py": "test\n",
     "templates/render.py": RENDER,
+    ALERT_SOURCE: "#!/usr/bin/env python3\nalert\n",
 }
 
 
@@ -127,6 +133,8 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps({**ROUTE, "secret": "abc...1234"}))
         self.install(self.root, f"installed-config/{RATE_LIMIT_KEY}.json", "600")
         self.install(self.root, "logs/agent.log", "")
+        self.install(self.root, f"scripts/{ALERT_SCRIPT}", REPO_FILES[ALERT_SOURCE])
+        self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C0123\n")
         self.owned_refs = self.root / "owned-refs.json"
         self.install(self.root, "owned-refs.json", '["goodyear/abc-1-fix"]\n')
 
@@ -141,6 +149,7 @@ class CheckInstallTest(unittest.TestCase):
         self.config(self.root, ROOT_CONFIG)
         self.config(self.worker, WORKER_CONFIG)
         self.cron(self.worker, WORKER_JOBS)
+        self.cron(self.root, ROOT_JOBS)
         self.launchd = Launchd(self.tmp)
 
     def install(self, home: Path, path: str, text: str) -> None:
@@ -317,6 +326,11 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (1, f"config kanban.review_dispatch in {self.root}: is not false (part 10)\n"))
 
+    def test_worker_wait_limit_that_differs_from_the_runbook(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "terminal.timeout": 1200})
+
+        self.assertEqual(self.check(), (1, f"config terminal.timeout in {self.worker}: is not 400 (part 5)\n"))
+
     def test_proxy_provider_from_part_3_is_accepted(self) -> None:
         self.config(self.root, {**ROOT_CONFIG, "model.provider": "custom:proxy"})
         self.config(self.worker, {**WORKER_CONFIG, "model.provider": "custom:proxy"})
@@ -424,12 +438,13 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (0, ""))
 
     def test_missing_and_duplicated_cron_jobs(self) -> None:
-        self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2], WORKER_JOBS[3], WORKER_JOBS[3]])
+        self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2]])
+        self.cron(self.root, [*ROOT_JOBS, *ROOT_JOBS])
 
         self.assertEqual(
             self.check(),
             (1, f"cron job refresh-checkouts in {self.worker}: is missing (part 12)\n"
-                f"cron job check-install in {self.worker}: exists 2 times (part 12)\n"),
+                f"cron job check-install in {self.root}: exists 2 times (part 12)\n"),
         )
 
     def test_cron_job_changed_by_hand(self) -> None:
@@ -437,8 +452,8 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("refresh-gh-app-login", 30, enabled=False),
             cron_job("refresh-checkouts", 15, no_agent=False),
             cron_job("refresh-owned-refs", 1),
-            cron_job("check-install", 60, "local"),
         ])
+        self.cron(self.root, [{**cron_job("check-install", 60, "local"), "script": ALERT_SCRIPT}])
 
         self.assertEqual(
             self.check(),
@@ -446,18 +461,69 @@ class CheckInstallTest(unittest.TestCase):
                 f"cron job refresh-checkouts in {self.worker}: runs every 15m, not every 60m (part 12)\n"
                 f"cron job refresh-checkouts in {self.worker}: is not a script-only job that runs refresh-checkouts "
                 "(part 12)\n"
-                f'cron job check-install in {self.worker}: delivers to "local", not the operator\'s chat platform '
+                f'cron job check-install in {self.root}: delivers to "local", not the operator\'s chat platform '
                 "(part 12)\n"),
         )
 
     def test_cron_jobs_the_runbook_does_not_create(self) -> None:
         self.cron(self.worker, [*WORKER_JOBS, cron_job("nightly-cleanup", 1440)])
-        self.cron(self.root, [cron_job("refresh-checkouts", 60)])
+        self.cron(self.root, [*ROOT_JOBS, cron_job("refresh-checkouts", 60)])
 
         self.assertEqual(
             self.check(),
             (1, f"cron job refresh-checkouts in {self.root}: belongs to the worker profile (part 12)\n"
                 f"cron job nightly-cleanup in {self.worker}: is not a job the setup runbook creates\n"),
+        )
+
+    def test_check_install_job_left_in_the_worker_profile(self) -> None:
+        self.cron(self.worker, [*WORKER_JOBS, cron_job("check-install", 60, "slack")])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job check-install in {self.worker}: belongs to the root profile (part 12)\n"),
+        )
+
+    def test_delivery_without_a_home_channel_is_reported(self) -> None:
+        (self.root / ".env").unlink()
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job check-install in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"),
+        )
+
+    def test_empty_home_channel_is_not_a_target(self) -> None:
+        self.install(self.root, ".env", "SLACK_HOME_CHANNEL=\nSLACK_BOT_TOKEN=x\n")
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job check-install in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"),
+        )
+
+    def test_home_channel_from_config_resolves_delivery(self) -> None:
+        (self.root / ".env").unlink()
+        self.config(self.root, {**ROOT_CONFIG, "platforms.slack.home_channel": {"chat_id": "C0123"}})
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_explicit_and_local_delivery_targets_need_no_home_channel(self) -> None:
+        (self.root / ".env").unlink()
+        self.cron(self.root, [{**cron_job("check-install", 60, "slack:C0123"), "script": ALERT_SCRIPT}])
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_root_alert_script_missing_or_changed(self) -> None:
+        script = self.root / "scripts" / ALERT_SCRIPT
+        script.write_text("old\n")
+        changed = self.check()
+        script.unlink()
+        missing = self.check()
+
+        self.assertEqual(
+            (changed, missing),
+            ((1, f"script {script}: differs from main at {self.sha} (part 12)\n"),
+             (1, f"script {script}: is missing; install it from {ALERT_SOURCE} (part 12)\n")),
         )
 
     def test_missing_owned_refs_file(self) -> None:
