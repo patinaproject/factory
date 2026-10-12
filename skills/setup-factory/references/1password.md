@@ -20,10 +20,12 @@ and the worker, never receive them. The design has four pieces:
   runs the real `op`.
 
 The strip keeps the token out of the environment that Hermes gives its agents.
-It is not a hard boundary. The worker's processes can read the
-`FACTORY_INFISICAL_` credentials, as [`infisical.md`](infisical.md) explains, and
-that identity can read the whole folder. Keep the vault small, read-only, and
-limited to what the operator needs.
+The worker's own helper, `<worker>/scripts/worker-secrets`, keeps only the
+three keys the worker loads, and the worker's machine identity can read only
+those, as [`infisical.md`](infisical.md) explains. The default home's identity
+can read the whole folder, and both homes run as one user, so the strip is not
+a hard boundary there. Keep the vault small, read-only, and limited to what
+the operator needs.
 
 ## Inputs
 
@@ -137,8 +139,9 @@ Change it so the output passes through the filter:
 ```
 
 The script still checks that the export is not empty before it prints, so a
-failed export still fails the helper. When the worker's `secrets.command`
-names a different script, make the same change there.
+failed export still fails the helper. The worker's helper,
+`<worker>/scripts/worker-secrets`, needs no change: it passes through only
+`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, and the proxy token variable.
 
 Hermes now reports one fewer secret than the folder holds:
 `Command helper: applied <n> secrets`, where `<n>` is the folder's count minus
@@ -260,13 +263,14 @@ helper_count() {
   echo "keys=$keys token=$(printf '%s\n' "$out" | grep -c '^OP_SERVICE_ACCOUNT_TOKEN=')"
 }
 helper_count <home>/.env                     # keys=<n> token=0
-helper_count <worker>/.env -p claude-worker  # keys=<n> token=0
+helper_count <worker>/.env -p claude-worker  # keys=3 token=0
 ```
 
 The check passes only when each line prints `token=0` and `keys=` is greater
 than `0`. When the helper exits nonzero or prints no `KEY=` line, the function
 prints one error line and returns `1`, so a broken helper cannot pass as
-`token=0`. `<n>` is the folder's count minus one.
+`token=0`. `<n>` is the folder's count minus one. The worker's line prints
+`keys=3`, or `keys=2` when the proxy needs no token.
 
 Also confirm that the gateway's `PATH` does not contain `<wrapper dir>`.
 

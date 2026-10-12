@@ -9,31 +9,34 @@ import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+REPO = SCRIPTS.parents[2]
 
 FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys
+# The real claude gets no test variables, so the fake reads its options from the file beside it.
+options = json.load(open(__file__ + ".json"))
 argv = sys.argv[1:]
 settings = None
 if "--settings" in argv:
     path = argv[argv.index("--settings") + 1]
     settings = {"content": json.load(open(path)), "mode": oct(os.stat(path).st_mode & 0o777)}
-with open(os.environ["FAKE_CLAUDE_LOG"], "w") as log:
+with open(options["log"], "w") as log:
     json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings}, log)
 leftover = None
-if os.environ.get("FAKE_CLAUDE_LEFTOVER_PID_FILE"):
+if options.get("leftover_pid_file"):
     import subprocess
-    leftover = subprocess.Popen(["sleep", "600"], start_new_session=os.environ.get("FAKE_CLAUDE_LEFTOVER_DETACHED") == "1")
-    with open(os.environ["FAKE_CLAUDE_LEFTOVER_PID_FILE"], "w") as pid_file:
+    leftover = subprocess.Popen(["sleep", "600"], start_new_session=bool(options.get("leftover_detached")))
+    with open(options["leftover_pid_file"], "w") as pid_file:
         pid_file.write(str(leftover.pid))
 print(json.dumps({
     "type": "result",
-    "subtype": os.environ.get("FAKE_CLAUDE_SUBTYPE", "success"),
+    "subtype": options.get("subtype", "success"),
     "is_error": False,
     "result": "Opened the pull request.",
     "session_id": "ignored",
     "num_turns": 7,
 }), flush=True)
-if leftover and os.environ.get("FAKE_CLAUDE_WAITS_FOR_LEFTOVER") == "1":
+if leftover and options.get("waits_for_leftover"):
     leftover.wait()
 """
 
@@ -79,8 +82,24 @@ class GitFixture(unittest.TestCase):
         path.write_text(json.dumps({"repositories": repositories, "claude_session": claude_session or {}}))
         return path
 
-    def make_fake_claude(self) -> Path:
+    def make_fake_claude(self, log: Path) -> Path:
         path = self.tmp / "fake-claude"
         path.write_text(FAKE_CLAUDE)
         os.chmod(path, 0o755)
+        self.fake_claude_options = {"log": str(log)}
+        self.configure_fake_claude()
         return path
+
+    def configure_fake_claude(self, **options) -> None:
+        self.fake_claude_options.update(options)
+        (self.tmp / "fake-claude.json").write_text(json.dumps(self.fake_claude_options))
+
+    def install_linear_plugin(self, home: Path, cached_token: str | None = "cached-token") -> None:
+        """The real plugin client under a worker home, with a token in its cache so no request reaches Linear."""
+        plugin = home / "plugins" / "linear-agent-session"
+        plugin.mkdir(parents=True)
+        (plugin / "linear.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "linear.py")
+        if cached_token:
+            cache = home / "plugin-data" / "linear-agent-session" / "token.json"
+            cache.parent.mkdir(parents=True)
+            cache.write_text(json.dumps({"client_id": "id1", "access_token": cached_token, "expires_at": 4102444800}))

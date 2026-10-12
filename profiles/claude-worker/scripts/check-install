@@ -12,7 +12,8 @@ run.
 
 It also checks that the config keys, cron jobs, and launchd services the setup
 runbook creates still match what it creates (the CONFIG, CRON, and SERVICES
-tables).
+tables), and that the worker home's secrets.command is the worker helper
+whenever the root home has a secret source.
 
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd check at another file system
 root and launchctl, for tests.
@@ -352,6 +353,23 @@ def check_config(home_paths: dict, hermes: str) -> list:
     return drifts
 
 
+def check_worker_secrets(root: Path, worker: Path, hermes: str) -> list:
+    def enabled(value) -> bool:
+        return isinstance(value, dict) and value.get("enabled") is True
+
+    live = config_value(worker, hermes, "secrets.command")
+    where = f"secrets.command in {worker}"
+    # The live command is never printed, since a tuned command could embed a secret.
+    if not enabled(config_value(root, hermes, "secrets.command")):
+        if enabled(live):
+            return [Drift("config", where, "is set while the root home has no secret source (part 14)")]
+        return []
+    helper = f"python3 {worker}/scripts/worker-secrets"
+    if enabled(live) and live.get("command") == helper:
+        return []
+    return [Drift("config", where, f"is not the worker helper {helper} (part 14)")]
+
+
 def cron_jobs(home: Path) -> list:
     store = home / "cron" / "jobs.json"
     return json.loads(store.read_text())["jobs"] if store.is_file() else []
@@ -500,6 +518,7 @@ def main() -> int:
             *check_profile(commit, worker),
             *check_plugins(commit, [root, worker]),
             *check_config({ROOT: root, WORKER: worker}, hermes),
+            *check_worker_secrets(root, worker, hermes),
             *check_cron(root, worker),
             *check_routes(commit, root, hermes),
             *check_dashboard(root, hermes),

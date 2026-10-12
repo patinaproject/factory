@@ -372,6 +372,57 @@ class CheckInstallTest(unittest.TestCase):
                 "(part 10)\n"),
         )
 
+    def secrets(self, root: dict | None, worker: dict | None) -> None:
+        self.config(self.root, {**ROOT_CONFIG, **({"secrets.command": root} if root else {})})
+        self.config(self.worker, {**WORKER_CONFIG, **({"secrets.command": worker} if worker else {})})
+
+    def test_worker_secrets_helper_behind_a_root_secret_source_is_silent(self) -> None:
+        self.secrets(
+            {"enabled": True, "command": f"{self.root}/bin/factory-secrets"},
+            {"enabled": True, "command": f"python3 {self.worker}/scripts/worker-secrets"},
+        )
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_worker_secrets_command_that_is_not_the_worker_helper(self) -> None:
+        drift = (
+            f"config secrets.command in {self.worker}: "
+            f"is not the worker helper python3 {self.worker}/scripts/worker-secrets (part 14)\n"
+        )
+        root = {"enabled": True, "command": f"{self.root}/bin/factory-secrets"}
+        for worker in (
+            root,
+            {"enabled": True, "command": "env TOKEN=s3cr3t-value sh -c helper"},
+            {"enabled": False, "command": f"python3 {self.worker}/scripts/worker-secrets"},
+            None,
+        ):
+            with self.subTest(worker=worker):
+                self.secrets(root, worker)
+
+                code, out = self.check()
+
+                self.assertEqual((code, out), (1, drift))
+                self.assertNotIn("s3cr3t-value", out)
+
+    def test_worker_secret_source_without_a_root_secret_source(self) -> None:
+        worker = {"enabled": True, "command": "env TOKEN=s3cr3t-value sh -c helper"}
+        for root in (None, {"enabled": False, "command": f"{self.root}/bin/factory-secrets"}):
+            with self.subTest(root=root):
+                self.secrets(root, worker)
+
+                code, out = self.check()
+
+                self.assertEqual(
+                    (code, out),
+                    (1, f"config secrets.command in {self.worker}: is set while the root home has no secret source (part 14)\n"),
+                )
+                self.assertNotIn("s3cr3t-value", out)
+
+    def test_worker_secret_source_disabled_with_the_root_one_is_silent(self) -> None:
+        self.secrets({"enabled": False, "command": "x"}, {"enabled": False, "command": "y"})
+
+        self.assertEqual(self.check(), (0, ""))
+
     def test_missing_and_duplicated_cron_jobs(self) -> None:
         self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2], WORKER_JOBS[3], WORKER_JOBS[3]])
 
