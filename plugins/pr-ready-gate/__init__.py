@@ -29,6 +29,9 @@ MERGE_STATE_REMEDIES = {
 }
 
 
+MERGED_REVIEW = "state is 'MERGED', so there is nothing left to review: call kanban_complete instead"
+
+
 class GateError(Exception):
     pass
 
@@ -37,7 +40,7 @@ def evaluate(pr: dict, local_head: str, tool_name: str) -> list[str]:
     failures = []
     state = pr.get("state")
     if state == "MERGED" and tool_name == "kanban_request_review":
-        return ["state is 'MERGED', so there is nothing left to review: call kanban_complete instead"]
+        return [MERGED_REVIEW]
     if state == "MERGED":
         # A merged pull request is past ready-to-merge; only its head still has to be the worker's commit.
         return _head_failures(pr, local_head)
@@ -127,6 +130,11 @@ def make_hook(ctx: Any):
             }
         if not failures:
             return None
+        if failures == [MERGED_REVIEW]:
+            return {
+                "action": "block",
+                "message": f"pr-ready-gate blocked {tool_name}: {pr} is already merged. Call kanban_complete instead.",
+            }
         lines = "\n".join(f"- {failure}" for failure in failures)
         return {
             "action": "block",

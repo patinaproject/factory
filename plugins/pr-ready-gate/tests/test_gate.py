@@ -193,8 +193,8 @@ class HookDecisionTest(unittest.TestCase):
         merged = {**CLEAN, "state": "MERGED", "mergeStateStatus": "UNKNOWN"}
         result = call_hook(FakeShell(pr=merged), tool_name="kanban_request_review")
         self.assertEqual(result["action"], "block")
-        self.assertIn("state is 'MERGED'", result["message"])
-        self.assertIn("call kanban_complete instead", result["message"])
+        self.assertIn("is already merged. Call kanban_complete instead.", result["message"])
+        self.assertNotIn("kanban_request_review again", result["message"])
 
     def test_completion_with_merged_pr_is_allowed(self):
         merged = {**CLEAN, "state": "MERGED", "mergeStateStatus": "UNKNOWN"}
