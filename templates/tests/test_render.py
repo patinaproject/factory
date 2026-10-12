@@ -563,8 +563,6 @@ FILTER_CASES = [
 
 @unittest.skipUnless(WEBHOOK_FILTERS.is_file(), f"needs the Hermes checkout at {HERMES_AGENT_DIR}; CI skips this class")
 class HermesFilterTest(unittest.TestCase):
-    """Run the rendered github route through Hermes' own filter evaluator."""
-
     @classmethod
     def setUpClass(cls):
         # webhook_filters imports hermes_constants lazily from the checkout root.

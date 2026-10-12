@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Write the refs of every card on the board to the file the `github` route reads.
 
-The route's `in_file` clauses keep a `check_run` event only when its branch,
+The board is every card `hermes kanban list --json` returns, which is every card
+not archived. A `done` card stays listed, so a late event on its branch still
+reaches triage. The route's `in_file` clauses keep a `check_run` event only when its branch,
 and an `issues` or `issue_comment` event only when its issue URL, is listed in
 `<root>/owned-refs.json`. A Hermes cron job runs this script every minute. It
 rewrites the file in one atomic step on every run, so the file's mtime proves

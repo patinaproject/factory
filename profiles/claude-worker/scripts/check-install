@@ -40,8 +40,6 @@ from typing import Callable, NamedTuple
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
 OWNED_REFS = "owned-refs.json"
-# The refresh-owned-refs cron job rewrites the file every minute.
-OWNED_REFS_MAX_AGE = 300
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -146,6 +144,7 @@ CRON = (
     CronJob(12, "refresh-owned-refs", 1, equal("local")),
     CronJob(12, "check-install", 60, declared("the operator's chat platform", besides=("local",))),
 )
+OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
 
 # macOS only. `plist` is a glob; the runbook lets the operator name the cloudflared plist.
 SERVICES = (

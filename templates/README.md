@@ -21,10 +21,11 @@ acts on, and when the event belongs to the App's own work. The `github` route's
 filter and the prompt's "events that matter" list are both rendered from it,
 so they cannot drift apart. The filter keeps an event only when it belongs to
 the App's own work: a pull request the App opened (`github.login` in the
-settings), a workflow run the App triggered and that failed, or a failed
-`check_run` or an `issues` event on a ref in `<home>/owned-refs.json`. The
-worker's `refresh-owned-refs` cron job rewrites that file every minute with
-every card's branch and GitHub issue URL, and the route reads it on every
+settings), a workflow run the App triggered and that failed, a failed
+`check_run` on a branch in `<home>/owned-refs.json`, or an `issues` or
+`issue_comment` event on an issue URL listed there. The worker's
+`refresh-owned-refs` cron job rewrites that file every minute with the branch
+and GitHub issue URL of every card not archived, and the route reads it on every
 delivery through Hermes' `in_file` operator. The route also drops events the
 App itself sends, except failed checks and its own merges.
 

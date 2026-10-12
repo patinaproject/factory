@@ -23,7 +23,7 @@ GITHUB_ROUTE = "github"
 ROUTINGS = ("default", "synced_github")
 TOOLSETS = ["terminal", "kanban", "linear_agent_session"]
 LINEAR_EVENTS = ["AgentSessionEvent", "Issue"]
-# Relative to the gateway's Hermes home. The worker's refresh-owned-refs cron job writes it.
+# Hermes resolves a relative in_file path against the gateway's home.
 OWNED_REFS_FILE = "owned-refs.json"
 FAILED_CONCLUSIONS = ["failure", "timed_out", "action_required", "startup_failure"]
 LINEAR_SECRET = "${LINEAR_WEBHOOK_SECRET}"
@@ -36,16 +36,11 @@ REFERENCE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
 
 class GithubEvent(NamedTuple):
-    """One event the `github` route delivers and triage acts on.
-
-    `actions` are the actions triage acts on. `owned_when` completes "only when ..."
-    in the triage prompt. `keep` maps the App login to the filter clauses that must
-    all hold for the route to keep the event.
-    """
+    """One event the `github` route delivers and triage acts on."""
 
     name: str
     actions: tuple
-    owned_when: str
+    only_when: str
     keep: Callable[[str], list]
 
 
@@ -97,7 +92,7 @@ GITHUB_EVENT_TABLE = (
     GithubEvent(
         "issue_comment",
         ("created",),
-        "the App opened the pull request, or the issue is a card's GitHub issue",
+        "the App opened the issue or pull request, or the issue is a card's GitHub issue",
         keeps_issue_comment,
     ),
     GithubEvent("workflow_run", ("completed",), "the App triggered the run and it failed", keeps_workflow_run),
@@ -222,7 +217,7 @@ def _or_list(items: list) -> str:
 def events_that_matter(table) -> str:
     return "\n".join(
         f"- `{event.name}` with action {_or_list([f'`{action}`' for action in event.actions])}, "
-        f"only when {event.owned_when}."
+        f"only when {event.only_when}."
         for event in table
     )
 
