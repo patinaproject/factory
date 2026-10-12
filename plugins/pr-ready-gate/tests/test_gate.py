@@ -63,6 +63,18 @@ class FakeShell:
         return next(call for call in self.calls if call[0][0] == "gh")
 
 
+PASSING_CHECKS = [
+    {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+    {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SKIPPED"},
+    {"__typename": "StatusContext", "state": "SUCCESS"},
+]
+AWAITING_RE_REVIEW = {
+    "mergeStateStatus": "BLOCKED",
+    "reviewDecision": "CHANGES_REQUESTED",
+    "statusCheckRollup": PASSING_CHECKS,
+}
+
+
 def call_hook(shell, env=WORKER_ENV, ctx=None, tool_name="kanban_complete", args=None):
     hook = gate.make_hook(ctx or FakeCtx())
     with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(gate.subprocess, "run", shell):
@@ -145,7 +157,7 @@ class HookDecisionTest(unittest.TestCase):
         gh_calls = [call for call in shell.calls if call[0][0] == "gh"]
         self.assertEqual(
             gh_calls,
-            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state"], WORKSPACE, 20)],
+            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup"], WORKSPACE, 20)],
         )
 
     def test_published_pr_url_is_viewed_with_its_repo(self):
@@ -153,7 +165,7 @@ class HookDecisionTest(unittest.TestCase):
         self.assertIsNone(call_hook(shell, args={"metadata": {"published_pr": PR_URL}}))
         self.assertEqual(
             shell.gh_call()[0],
-            ["gh", "pr", "view", PR_URL, "--json", "url,isDraft,mergeStateStatus,headRefOid,state",
+            ["gh", "pr", "view", PR_URL, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup",
              "--repo", "example-org/example-repo"],
         )
 
@@ -184,6 +196,31 @@ class HookDecisionTest(unittest.TestCase):
         result = call_hook(shell, tool_name="kanban_request_review")
         self.assertEqual(result["action"], "block")
         self.assertIn("pr-ready-gate blocked kanban_request_review", result["message"])
+        self.assertIn("mergeStateStatus is 'BLOCKED'", result["message"])
+
+    def test_review_handoff_after_changes_requested_is_allowed_once_checks_pass(self):
+        shell = FakeShell(pr={**CLEAN, **AWAITING_RE_REVIEW})
+        self.assertIsNone(call_hook(shell, tool_name="kanban_request_review"))
+
+    def test_review_handoff_after_changes_requested_waits_for_pending_checks(self):
+        pending = {**AWAITING_RE_REVIEW, "statusCheckRollup": [*PASSING_CHECKS, {"status": "IN_PROGRESS", "conclusion": ""}]}
+        result = call_hook(FakeShell(pr={**CLEAN, **pending}), tool_name="kanban_request_review")
+        self.assertEqual(result["action"], "block")
+        self.assertIn("mergeStateStatus is 'BLOCKED'", result["message"])
+
+    def test_review_handoff_after_changes_requested_refuses_a_failed_status(self):
+        failed = {**AWAITING_RE_REVIEW, "statusCheckRollup": [*PASSING_CHECKS, {"state": "FAILURE"}]}
+        result = call_hook(FakeShell(pr={**CLEAN, **failed}), tool_name="kanban_request_review")
+        self.assertEqual(result["action"], "block")
+
+    def test_review_handoff_after_changes_requested_waits_for_checks_to_register(self):
+        unregistered = {**AWAITING_RE_REVIEW, "statusCheckRollup": []}
+        result = call_hook(FakeShell(pr={**CLEAN, **unregistered}), tool_name="kanban_request_review")
+        self.assertEqual(result["action"], "block")
+
+    def test_completion_after_changes_requested_is_still_blocked(self):
+        result = call_hook(FakeShell(pr={**CLEAN, **AWAITING_RE_REVIEW}), tool_name="kanban_complete")
+        self.assertEqual(result["action"], "block")
         self.assertIn("mergeStateStatus is 'BLOCKED'", result["message"])
 
     def test_review_handoff_with_ready_pr_is_allowed(self):

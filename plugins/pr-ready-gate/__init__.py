@@ -9,7 +9,8 @@ from typing import Any, Optional
 DEFAULT_GATED_PROFILES = ["claude-worker"]
 # Hermes runs its completion contract inside complete_task only, so a review handoff needs this gate too.
 GATED_TOOLS = ("kanban_complete", "kanban_request_review")
-PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state"
+PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup"
+PASSING_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
 PR_URL = re.compile(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/\d+/?$")
 # Hermes kills a pre_tool_call hook after 30s; up to three calls must fit inside that.
 GIT_TIMEOUT_SECONDS = 3
@@ -49,10 +50,32 @@ def evaluate(pr: dict, local_head: str, tool_name: str) -> list[str]:
     if pr.get("isDraft") is not False:
         failures.append(f"isDraft is {pr.get('isDraft')!r}, expected False: {MERGE_STATE_REMEDIES['DRAFT']}")
     merge_state = pr.get("mergeStateStatus")
+    if tool_name == "kanban_request_review" and _awaiting_re_review(pr):
+        # A changes-requested review keeps GitHub at BLOCKED until the reviewer reviews again, which needs this handoff.
+        merge_state = "CLEAN"
     if merge_state != "CLEAN":
         remedy = MERGE_STATE_REMEDIES.get(merge_state, "wait until GitHub reports CLEAN")
         failures.append(f"mergeStateStatus is {merge_state!r}, expected 'CLEAN': {remedy}")
     return failures + _head_failures(pr, local_head)
+
+
+def _awaiting_re_review(pr: dict) -> bool:
+    checks = pr.get("statusCheckRollup")
+    return (
+        pr.get("mergeStateStatus") == "BLOCKED"
+        and pr.get("reviewDecision") == "CHANGES_REQUESTED"
+        and isinstance(checks, list)
+        and bool(checks)
+        and all(_check_passed(check) for check in checks)
+    )
+
+
+def _check_passed(check) -> bool:
+    if not isinstance(check, dict):
+        return False
+    if "state" in check:
+        return check["state"] == "SUCCESS"
+    return check.get("status") == "COMPLETED" and check.get("conclusion") in PASSING_CONCLUSIONS
 
 
 def _head_failures(pr: dict, local_head: str) -> list[str]:
