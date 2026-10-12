@@ -21,7 +21,7 @@ Reproduce this model exactly.
 | DNS | A proxied `CNAME` from the factory hostname to `<tunnel-id>.cfargotunnel.com`. |
 | Access | One `self_hosted` Access application covers the whole hostname. It has an `allow` policy for the operator's identities, such as an email domain, and a bounded session, such as `24h`. Every path requires an allowed identity by default, including the dashboard and the proxy's management UI. |
 | Webhook bypass | One path-scoped `self_hosted` Access application for each webhook path, each with a single `bypass` policy for `everyone`. Nothing broader than the exact webhook paths is exempt. These paths rely on Hermes' signature check: `GET` returns `405` and an unsigned `POST` returns `401`. |
-| Dashboard sign-in | A `saas` Access application with OIDC is the Hermes dashboard's identity provider. It is a public client: the authorization code grant with PKCE, without a client secret. Its issuer and client ID go in `dashboard.oauth.self_hosted`. The machine never receives the client secret. The dashboard checks identity even behind the edge. |
+| Dashboard sign-in | A `saas` Access application with OIDC is the Hermes dashboard's identity provider. It is a public client: the authorization code grant with PKCE, without a client secret. It also allows the `refresh_tokens` grant, so the dashboard renews its session when the short-lived access token expires instead of signing the user out. Its issuer and client ID go in `dashboard.oauth.self_hosted`, and Hermes requests the `offline_access` scope, without which Cloudflare returns no refresh token. The machine never receives the client secret. The dashboard checks identity even behind the edge. |
 | Dashboard host | `dashboard.public_url` is `https://<hostname>`. The tunnel keeps the public `Host` header, and a loopback-bound dashboard rejects every host except loopback and this one with `400 Invalid Host header`. Setting it also turns on the dashboard's sign-in gate, so it needs the dashboard sign-in above. |
 | Local binding | The webhook listener, the dashboard, and any proxy listen on `127.0.0.1` only. Nothing is reachable except through the tunnel and Access. |
 
@@ -35,9 +35,11 @@ and run [Verify](#verify) only.
 - `sst diff --stage <stage>` reports no changes.
 - `cloudflared` runs as a system service, and the tunnel shows a healthy
   connector.
-- `hermes config get dashboard --json --raw` shows `public_url` equal to
-  `https://<hostname>`, and an `issuer` and `client_id` under
-  `oauth.self_hosted`.
+- `check-install` (setup part 5) prints no `dashboard sign-in` line. It checks
+  that `dashboard.public_url` is set, that the scopes request
+  `offline_access`, and that the issuer offers the `refresh_tokens` grant.
+  Confirm that `public_url` is `https://<hostname>` with
+  `hermes config get dashboard.public_url`.
 - The external checks in [Verify](#verify) pass.
 
 ## 1. Find or create the SST app
@@ -107,9 +109,12 @@ between provider versions.
    `domain: <hostname><path>` for each entry in `webhookPaths`. Each has a
    single `bypass` policy whose include rule is `everyone`.
 6. `cloudflare.ZeroTrustAccessApplication` with type `saas` and OIDC for the
-   dashboard. Allow only the `authorization_code_with_pkce` grant, allow PKCE
-   without a client secret, and request the `openid`, `email`, and `profile`
-   scopes. Its only redirect URI is the dashboard's OAuth callback,
+   dashboard. Allow the `authorization_code_with_pkce` and `refresh_tokens`
+   grants, allow PKCE without a client secret, and request the `openid`,
+   `email`, and `profile` scopes. Keep the access token lifetime short, such as
+   `5m`, and set the refresh token lifetime shorter than the Access session,
+   such as `23h` for a `24h` session. Access checks its policies again at each
+   refresh. Its only redirect URI is the dashboard's OAuth callback,
    `https://<hostname>/auth/callback`. Confirm the callback path in the Hermes
    dashboard documentation for the pinned release.
 
@@ -161,15 +166,20 @@ store:
 hermes config set dashboard.public_url "https://<hostname>"
 hermes config set dashboard.oauth.self_hosted.issuer "<issuer>"
 hermes config set dashboard.oauth.self_hosted.client_id "<client ID>"
+hermes config set dashboard.oauth.self_hosted.scopes "openid profile email offline_access"
 ```
 
 `hermes config set` can warn that the `self_hosted` keys are not recognized.
 The bundled self-hosted provider reads them, so the warning is harmless. Check
 the key names against the Hermes dashboard documentation for the pinned release.
 
-Set all three together. With `public_url` alone, the dashboard refuses to
-start because no sign-in provider is configured. Restart the dashboard service,
-then read the values back with `hermes config get dashboard --json --raw`.
+Set them together. With `public_url` alone, the dashboard refuses to start
+because no sign-in provider is configured. Without `offline_access`, the
+dashboard signs the user out when the first access token expires, even though
+the application allows refresh tokens. Restart the dashboard service, then run
+`check-install` and confirm that it prints no `dashboard sign-in` line. Do not
+read the block back with `hermes config get dashboard --json --raw`, which also
+prints the `basic_auth` fields.
 
 ## Verify
 
@@ -226,7 +236,9 @@ Then check these:
   and confirm that the `http_status:404` rule is last.
 - Opening `https://<hostname>/kanban` in a browser asks for the Access sign-in,
   then the dashboard's own OIDC sign-in through the `saas` application, then
-  shows the Kanban board.
+  shows the Kanban board. Leave it open past the access token lifetime. It
+  stays signed in, and `<home>/logs/dashboard-auth.log` records a
+  `refresh_success` event instead of a new `login_success`.
 - On the factory machine, `lsof -nP -iTCP -sTCP:LISTEN` shows the webhook
   listener, the dashboard, and any proxy on `127.0.0.1` only.
 - After a reboot, the tunnel reconnects without anyone signing in.

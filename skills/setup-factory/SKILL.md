@@ -631,7 +631,8 @@ script fails on every tick with a `SyntaxError`.
 
 **Install drift job.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
-`origin/HEAD` of the checkout the profile was installed from. It prints one
+`origin/HEAD` of the checkout the profile was installed from. It also checks
+that the dashboard's OIDC sign-in can keep a user signed in. It prints one
 line per difference and nothing when the install is current. It fetches
 first, so a merge shows up within the hour. Deliver it where the operator
 reads it: the home channel of the platform from part 13, such as `slack`.
