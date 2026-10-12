@@ -1061,6 +1061,9 @@ each check. Report each result.
     approves. Repeat with a pull request the App opened on a branch whose
     first commit is a person's: triage treats it the same way, so the card's
     branch is `<gitBranchName>-takeover` and the body carries `takeover_pr`.
+    Then repeat with the App's own takeover pull request on that branch: the
+    card keeps that branch and its body still carries the person's
+    `takeover_pr`.
 18. Once a card's pull request is open, send a Linear `stop`, then reply in
     the same agent session. In `hermes kanban show <task id> --json`, the
     events after `blocked` are `unblocked`, `review_requested`, and

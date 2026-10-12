@@ -287,6 +287,11 @@ class PromptSubstitutionTest(unittest.TestCase):
         prompt = self.prompts["linear"]
         self.assertIn("`commits[0].authors[0].name` is `example-app[bot]`", prompt)
 
+    def test_own_pull_request_on_a_takeover_branch_is_read_with_its_commits(self):
+        prompt = self.prompts["linear"]
+        self.assertIn("--json state,author,headRefName,isCrossRepository,updatedAt,commits", prompt)
+        self.assertIn("`headRefName` is `<gitBranchName>-takeover`", prompt)
+
     def test_linear_prompt_names_the_app_user(self):
         self.assertIn("00000000-0000-4000-8000-000000000001", self.prompts["linear"])
 

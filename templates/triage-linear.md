@@ -91,21 +91,26 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    `https://github.com/<owner>/<name>/pull/<number>` whose `<owner>/<name>`
    matches the chosen repository, ignoring case. Read each one with
    `gh pr view '<url>' --json state,author,headRefName,isCrossRepository,updatedAt,commits`
-   and keep those whose `state` is `OPEN`. <<own_pull_request>> An own pull
-   request counts only when its `isCrossRepository` is false. When several
-   pull requests of one kind remain, the newest `updatedAt` wins. Then read
-   the first matching row:
+   and keep those whose `state` is `OPEN`, except for the person's pull
+   request that the first row names, which may be in any state. <<own_pull_request>>
+   An own pull request counts only when its `isCrossRepository` is false.
+   When several pull requests of one kind remain, the newest `updatedAt`
+   wins. Then read the first matching row:
 
    | Open pull requests | `branch` | `takeover_pr` |
    | --- | --- | --- |
+   | An own pull request whose `headRefName` is `<gitBranchName>-takeover` | its `headRefName` | the URL of the pull request that is not own and whose `headRefName` is `gitBranchName`, or none when there is none |
    | An own pull request | its `headRefName` | none |
    | A pull request that is not own, whose `headRefName` is `gitBranchName` | `<gitBranchName>-takeover` | its URL |
    | A pull request that is not own, on another branch | `gitBranchName` | its URL |
    | None | `gitBranchName` | none |
 
-   The worker continues an own pull request. With `takeover_pr`, it starts
-   from that pull request's head and opens its own pull request, and the
-   branch rule keeps it off the other person's branch. The worker also refuses
+   The worker continues an own pull request. An own pull request on a
+   `-takeover` branch keeps the person's pull request as `takeover_pr`,
+   because the branch starts from that pull request's head and the worker
+   judges who started the branch from the commits after it. With
+   `takeover_pr`, it starts from that pull request's head and opens its own
+   pull request, and the branch rule keeps it off the other person's branch. The worker also refuses
    a branch on GitHub that the factory did not create, so a person's branch
    reaches the factory only through a pull request on this table. Write
    `takeover_pr: <url>` after the `branch:` line inside the fenced block

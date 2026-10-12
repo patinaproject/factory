@@ -178,8 +178,25 @@ def origin_default(worktree: Path) -> str:
     return proc.stdout.strip()
 
 
-def remote_branch(worktree: Path, branch: str, default: str, login: str | None) -> RemoteBranch | None:
-    """origin/<branch> and who created it, judged by the author of the branch's own first commit."""
+def branch_owner(worktree: Path, default: str, head: str, pull_head: str | None, login: str) -> str:
+    """Who started a card branch, from the inputs of the rule: the branch head, the default branch, the takeover
+    pull request's head when the card has one, and the App's login.
+
+    The branch is the factory's own when it holds no commits beyond the default branch, or when the first of
+    its commits, counted from the takeover point, is the App's. A takeover branch starts from the pull request's
+    head, so its first commit is the person's and the count starts after that head."""
+    if not git(worktree, "rev-list", "-1", f"{default}..{head}"):
+        return FACTORY
+    after = [f"^{pull_head}"] if pull_head else []
+    commits = git(worktree, "rev-list", "--first-parent", "--reverse", f"{default}..{head}", *after).splitlines()
+    owned = bool(commits) and git(worktree, "log", "-1", "--format=%an", commits[0]) == login
+    return FACTORY if owned else OTHER
+
+
+def remote_branch(
+    worktree: Path, branch: str, default: str, pull_ref: str | None, login: str | None
+) -> RemoteBranch | None:
+    """origin/<branch> and who created it."""
     if not remote_branch_exists(worktree, branch):
         return None
     if not login:
@@ -188,11 +205,28 @@ def remote_branch(worktree: Path, branch: str, default: str, login: str | None) 
         )
     # Refresh the default branch first, or merges from `gh pr update-branch` look like the branch's own commits.
     git(worktree, "fetch", "--quiet", "origin")
+    pull_head = None
+    if pull_ref:
+        git(worktree, "fetch", "--quiet", "origin", pull_ref)
+        pull_head = git(worktree, "rev-parse", "FETCH_HEAD")
     git(worktree, "fetch", "--quiet", "origin", f"refs/heads/{branch}")
     head = git(worktree, "rev-parse", "FETCH_HEAD")
-    own = git(worktree, "rev-list", "--first-parent", "--reverse", f"{default}..{head}").splitlines()
-    factory = not own or git(worktree, "log", "-1", "--format=%an", own[0]) == login
-    return RemoteBranch(head, FACTORY if factory else OTHER)
+    return RemoteBranch(head, branch_owner(worktree, default, head, pull_head, login))
+
+
+def refusal_text(branch: str, login: str | None, takeover_pr: str | None) -> str:
+    if branch.endswith("-takeover"):
+        return (
+            f"origin/{branch} has no commit by {login} after the takeover point, so the factory cannot publish to "
+            f"it; have a person delete or rename origin/{branch}, or set takeover_pr to the person's pull request "
+            f"whose head {branch} was started from"
+            + ("" if takeover_pr is None else f" (this card has {takeover_pr})")
+        )
+    return (
+        f"origin/{branch} was not created by {login}, so the factory cannot publish to it; start the card on "
+        f"{branch}-takeover with takeover_pr set to the person's pull request that is on {branch}, or have a "
+        f"person delete or rename origin/{branch}"
+    )
 
 
 def adopt_existing_work(
@@ -202,16 +236,12 @@ def adopt_existing_work(
     default = origin_default(worktree)
     if git(worktree, "rev-list", f"{default}..HEAD") or git(worktree, "status", "--porcelain"):
         return None
-    remote = remote_branch(worktree, branch, default, login)
+    remote = remote_branch(worktree, branch, default, pull_ref, login)
     source = ADOPTION[(pull_ref is not None, remote.owner if remote else None)]
     if source is None:
         return None
     if source == REFUSE:
-        raise Refusal(
-            f"origin/{branch} was not created by {login}, so the factory cannot publish to it; start the card on "
-            f"{branch}-takeover with takeover_pr set to the pull request, or have a person delete or rename "
-            f"origin/{branch}"
-        )
+        raise Refusal(refusal_text(branch, login, takeover_pr))
     if source == "remote_branch":
         adoption = Adoption(source, branch, remote.head)
     else:

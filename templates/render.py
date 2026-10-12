@@ -235,9 +235,9 @@ def own_pull_request_sentence(github_login: str) -> str:
         logins.append(f"app/{github_login.removesuffix('[bot]')}")
     return (
         f"A pull request is the factory's own when its `author.login` is {' or '.join(f'`{login}`' for login in logins)} "
-        f"and the App started its branch, meaning `commits[0].authors[0].name` is `{github_login}`. A pull request "
-        "the App opened on a branch a person started is not own, because the worker refuses that branch; it takes "
-        "the takeover rows below."
+        f"and the App started its branch, meaning `commits[0].authors[0].name` is `{github_login}` or its "
+        "`headRefName` is `<gitBranchName>-takeover`. A pull request the App opened on any other branch a person "
+        "started is not own, because the worker refuses that branch; it takes the takeover rows below."
     )
 
 

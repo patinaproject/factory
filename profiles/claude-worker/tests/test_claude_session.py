@@ -77,9 +77,15 @@ FACTORY_BRANCH_TAKEOVER_ENTRY = (
 )
 PERSON_BRANCH_REFUSAL = (
     f"origin/abc-123-fix was not created by {BOT_LOGIN}, so the factory cannot publish to it; start the card on "
-    "abc-123-fix-takeover with takeover_pr set to the pull request, or have a person delete or rename "
-    "origin/abc-123-fix"
+    "abc-123-fix-takeover with takeover_pr set to the person's pull request that is on abc-123-fix, or have a "
+    "person delete or rename origin/abc-123-fix"
 )
+TAKEOVER_BRANCH = "abc-123-fix-takeover"
+TAKEOVER_BRANCH_REFUSAL = (
+    f"origin/{TAKEOVER_BRANCH} has no commit by {BOT_LOGIN} after the takeover point, so the factory cannot "
+    f"publish to it; have a person delete or rename origin/{TAKEOVER_BRANCH}, or set takeover_pr to the person's "
+    "pull request whose head {branch} was started from"
+).replace("{branch}", TAKEOVER_BRANCH)
 
 
 class ClaudeSessionTest(GitFixture):
@@ -846,6 +852,55 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
         self.assert_refused_before_claude(status, report, PERSON_BRANCH_REFUSAL, start)
+
+    def start_takeover_branch(self) -> tuple[Path, str]:
+        """The verifier's probe: a person's commit at the pull head, the App's commit on top, pushed as the branch."""
+        worktree = self.add_worktree(TAKEOVER_BRANCH)
+        pull = self.push_upstream_commit("pull", "refs/pull/7/head")
+        return worktree, pull
+
+    def test_app_takeover_branch_is_adopted_with_its_takeover_pull_request(self) -> None:
+        worktree, pull = self.start_takeover_branch()
+        remote = self.push_upstream_commit(
+            "app", f"refs/heads/{TAKEOVER_BRANCH}", author=BOT_AUTHOR, base="refs/pull/7/head"
+        )
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR, workspace=worktree)
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": TAKEOVER_BRANCH, "head": remote})
+        self.assertEqual(git(worktree, "rev-parse", "HEAD"), remote)
+        self.assertNotEqual(pull, remote)
+
+    def test_app_takeover_branch_without_its_takeover_pull_request_is_refused(self) -> None:
+        worktree, _ = self.start_takeover_branch()
+        self.push_upstream_commit("app", f"refs/heads/{TAKEOVER_BRANCH}", author=BOT_AUTHOR, base="refs/pull/7/head")
+
+        status, report = self.run_session(workspace=worktree)
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": TAKEOVER_BRANCH_REFUSAL})
+        self.assertFalse(self.log.exists())
+
+    def test_takeover_branch_without_an_app_commit_after_the_pull_head_is_refused(self) -> None:
+        worktree, _ = self.start_takeover_branch()
+        self.push_upstream_commit("person", f"refs/heads/{TAKEOVER_BRANCH}", base="refs/pull/7/head")
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR, workspace=worktree)
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": TAKEOVER_BRANCH_REFUSAL + f" (this card has {TAKEOVER_PR})"})
+        self.assertFalse(self.log.exists())
+
+    def test_branch_at_the_pull_head_is_refused(self) -> None:
+        worktree, pull = self.start_takeover_branch()
+        git(self.main, "fetch", "-q", "origin", "refs/pull/7/head")
+        git(self.main, "push", "-q", "origin", f"{pull}:refs/heads/{TAKEOVER_BRANCH}")
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR, workspace=worktree)
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": TAKEOVER_BRANCH_REFUSAL + f" (this card has {TAKEOVER_PR})"})
 
     def test_remote_branch_at_the_default_branch_is_adopted(self) -> None:
         start = self.head()
