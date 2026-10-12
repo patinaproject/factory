@@ -50,17 +50,25 @@ fields Hermes keeps:
 - `repo` is the card's `completion_contract`, and `branch` is its
   `branch_name`.
 - The issue identifier is the `<team>-<number>` part of the branch name, for
-  example `abc-123` in `team/abc-123-fix-checkout`. A card that continues an
-  existing pull request can have a branch without one. Then take the
-  identifier from the card title, which starts with `<identifier>:`. Read that
-  issue with `linear_issue`: its `id`, `identifier`, and `url` are the issue
-  keys.
+  example `abc-123` in `team/abc-123-fix-checkout` and in
+  `team/abc-123-fix-checkout-takeover`. A card that continues the factory's
+  own pull request has a branch without one. Then take the identifier from the
+  card title, which starts with `<identifier>:`. When the title was rewritten
+  too, read that pull request with `gh pr view <branch> --json body` and take
+  the identifier from its `linear.app/<workspace>/issue/<identifier>` link.
+  Read the issue with `linear_issue`: its `id`, `identifier`, and `url` are
+  the issue keys.
 - `linear_agent_session_id` is the newest entry in the issue's
   `agentSessions`.
-- `takeover_pr` is the open pull request in the issue's `attachments` that is
-  in `repo` and whose head branch is not the card's branch. Check each with
-  `gh pr view <url> --json state,headRefName`. When none exists, the card has
-  no `takeover_pr`.
+- `takeover_pr` follows the rule triage used. Read each pull request URL in
+  the issue's `attachments` that is in `repo` with
+  `gh pr view <url> --json state,author,headRefName,isCrossRepository,updatedAt`
+  and keep the open ones. A pull request is the factory's own when its
+  `author.login` is the login `gh auth status` prints, `<slug>[bot]`, or
+  `app/<slug>`, and its `isCrossRepository` is false. When an own pull request
+  exists, the card has no `takeover_pr`. Otherwise `takeover_pr` is the
+  remaining pull request with the newest `updatedAt`, and the card has none
+  when none remains.
 
 If a key still cannot be found, call `kanban_block` with kind `capability` and
 a reason that names the missing key. When `linear_agent_session_id` is known,

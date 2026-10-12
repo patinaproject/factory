@@ -607,7 +607,9 @@ git -C <path> status --porcelain --untracked-files=no # prints nothing
 ```
 
 The main checkout stays on its default branch. Kanban creates worktrees under
-`<path>/.worktrees/`.
+`<path>/.worktrees/`. `claude-session`, `push-signed`, and `refresh-checkouts`
+read `origin/HEAD` in every worktree of the checkout, so `check-install`
+prints a `checkout` line for a configured checkout that lacks it.
 
 **Node version.** The gateway's service puts Hermes' own Node first on
 `PATH`, and Hermes refuses a `PATH` override in config. That Node can be newer
@@ -974,10 +976,14 @@ each check. Report each result.
     still the pinned tag.
 14. `git -C <repo> status --porcelain` prints nothing. This repository holds no
     factory value.
-15. Push an issue's `gitBranchName` to GitHub with one commit, without a local
-    copy in the checkout, then delegate the issue. The first `claude-session`
-    line reports `adopted` with `source` `remote_branch`, the branch starts at
-    that commit, and the first `push-signed` publishes.
+15. Publish an issue's `gitBranchName` to GitHub with one commit as the App,
+    with `push-signed` from a clone outside the checkout, then delegate the
+    issue. The first `claude-session` line reports `adopted` with `source`
+    `remote_branch`, the branch starts at that commit, and the first
+    `push-signed` publishes. Then repeat with a branch a person pushed under
+    another issue's `gitBranchName` and no pull request. `claude-session`
+    refuses with a line that names the branch and the App, the card blocks,
+    and the person's branch is unchanged.
 16. Open a pull request as the GitHub App on a branch other than the issue's
     `gitBranchName`, link it to the issue, and delegate the issue. The card's
     branch is that pull request's head branch, and no second pull request
@@ -1110,6 +1116,8 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      `templates/render.py`.
    - An `owned refs` line: create the part 12 `refresh-owned-refs` job, or
      run it with `cron run` when it exists.
+   - A `checkout` line: the checkout is missing or has no `origin/HEAD`. Clone
+     it as in part 10, or run `git -C <path> remote set-head origin -a`.
    - A `dashboard sign-in` line: follow step 6 of
      [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
      or allow the `refresh_tokens` grant on the `saas` Access application when
