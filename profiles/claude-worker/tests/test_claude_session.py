@@ -353,6 +353,7 @@ class ClaudeSessionTest(GitFixture):
         self.settings = self.write_settings([self.repository], {"model": "transport-model", **claude_session})
         self.run_session()
         env = self.claude_call()["settings"]["content"]["env"]
+        self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", env)
         return {name: value for name, value in env.items() if name.endswith("_MODEL")}
 
     def test_tiers_without_models_stay_on_the_transport_model(self) -> None:
@@ -384,11 +385,10 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(env["CLAUDE_CODE_SUBAGENT_MODEL"], "transport-model")
 
     def test_invalid_tier_models_are_refused(self) -> None:
-        for value in ({"opus": "x"}, {"sonnet": 5}, {"sonnet": ""}, ["sonnet"], "sonnet"):
-            with self.subTest(tier_models=value):
-                self.settings = self.write_settings(
-                    [self.repository], {"model": "transport-model", "tier_models": value}
-                )
+        invalid = ({"opus": "x"}, {"sonnet": 5}, {"sonnet": ""}, ["sonnet"], "sonnet")
+        for model, value in [("transport-model", each) for each in invalid] + [("", {"opus": "x"})]:
+            with self.subTest(model=model, tier_models=value):
+                self.settings = self.write_settings([self.repository], {"model": model, "tier_models": value})
 
                 status, report = self.run_session()
 

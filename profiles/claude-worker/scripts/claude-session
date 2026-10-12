@@ -368,11 +368,10 @@ def tier_models(transport: dict) -> dict:
     return value
 
 
-def model_environment(transport: dict) -> dict:
+def model_environment(transport: dict, tiers: dict) -> dict:
     # The main loop and every tier without its own model stay on the transport model, because a proxy
     # answers `unknown provider for model ...` for an id it does not serve.
     model = transport["model"]
-    tiers = tier_models(transport)
     env = {"ANTHROPIC_MODEL": model, "ANTHROPIC_DEFAULT_OPUS_MODEL": model}
     env.update({f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL": tiers.get(tier, model) for tier in MODEL_TIERS})
     # A subagent that names no model takes this alias. CLAUDE_CODE_SUBAGENT_MODEL_FORCE stays unset so
@@ -392,8 +391,9 @@ def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
         if not os.environ.get(token_env):
             raise Refusal(f"auth_token_env names {token_env}, which is not set")
         env["ANTHROPIC_AUTH_TOKEN"] = os.environ[token_env]
+    tiers = tier_models(transport)
     if transport.get("model"):
-        env.update(model_environment(transport))
+        env.update(model_environment(transport, tiers))
     # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
     return {"env": env, "hooks": {"SessionStart": [{"hooks": [remove]}]}}

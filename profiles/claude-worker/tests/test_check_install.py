@@ -501,6 +501,14 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (0, ""))
 
+    def test_malformed_tier_models_are_reported_not_fatal(self) -> None:
+        self.claude_session(model="transport-model", tier_models=["sonnet"])
+
+        status, output = self.check()
+
+        self.assertEqual(status, 1)
+        self.assertIn("has a model but no tier_models.sonnet", output)
+
     def test_no_transport_model_needs_no_tiers(self) -> None:
         self.claude_session(model="")
 

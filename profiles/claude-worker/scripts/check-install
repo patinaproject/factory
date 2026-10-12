@@ -488,7 +488,8 @@ def check_model_tiers(settings, worker: Path) -> list:
     session = settings.get("claude_session") if isinstance(settings, dict) else None
     if not isinstance(session, dict) or not session.get("model"):
         return []
-    if (session.get("tier_models") or {}).get("sonnet"):
+    tiers = session.get("tier_models")
+    if isinstance(tiers, dict) and tiers.get("sonnet"):
         return []
     return [Drift(
         "model tier", f"claude_session in {worker}",

@@ -31,7 +31,7 @@ start when it finds one.
 `unknown provider for model ...` for any other model, and Claude Code retries
 until the run times out. Mapping every tier matters for the same reason:
 Claude Code sends background and subagent requests to its Haiku and subagent
-models. A tier with no `tier_models` entry therefore falls back to `model`,
+models. A tier with no `tier_models` entry falls back to `model`,
 which keeps a one-model proxy working but sends every subagent to the main
 agent's model. `check-install` reports a `model` with no `tier_models.sonnet`.
 
