@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from tests.support import SCRIPTS, git
+from tests.support import SCRIPTS, git, with_interpreter
 
 ROUTE_KEY = "platforms.webhook.extra.routes.linear"
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
@@ -143,7 +143,7 @@ class CheckInstallTest(unittest.TestCase):
         self.dashboard(scopes="openid profile email offline_access")
 
         self.hermes = self.tmp / "bin" / "fake-hermes"
-        self.install(self.tmp, "bin/fake-hermes", FAKE_HERMES)
+        self.install(self.tmp, "bin/fake-hermes", with_interpreter(FAKE_HERMES))
         os.chmod(self.hermes, 0o755)
 
         self.config(self.root, ROOT_CONFIG)
@@ -629,7 +629,7 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_hermes_is_found_in_the_installer_bin_without_path(self) -> None:
         home = self.tmp / "home"
-        self.install(home, ".local/bin/hermes", FAKE_HERMES)
+        self.install(home, ".local/bin/hermes", with_interpreter(FAKE_HERMES))
         os.chmod(home / ".local" / "bin" / "hermes", 0o755)
         self.launchd.plist(f"{str(home).lstrip('/')}/Library/LaunchAgents/ai.hermes.gateway.plist", "ai.hermes.gateway")
         env = {"PATH": "/usr/bin:/bin", **self.launchd.env, "HOME": str(home), "HERMES_HOME": str(self.worker)}
@@ -654,7 +654,7 @@ class Launchd:
         self.states_file = tmp / "launchd-states.json"
         self.launchctl = tmp / "bin" / "fake-launchctl"
         self.launchctl.parent.mkdir(parents=True, exist_ok=True)
-        self.launchctl.write_text(FAKE_LAUNCHCTL)
+        self.launchctl.write_text(with_interpreter(FAKE_LAUNCHCTL))
         os.chmod(self.launchctl, 0o755)
         self.home = tmp / "launchd-home"
         self.daemon = self.plist("Library/LaunchDaemons/com.example.cloudflared.plist", "com.example.cloudflared")
