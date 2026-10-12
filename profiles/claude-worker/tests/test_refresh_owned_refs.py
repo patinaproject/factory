@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import SCRIPTS
+from tests.support import SCRIPTS, with_interpreter
 
 TASKS = [
     {"id": "t1", "title": "ABC-1: fix", "body": "```text\nbranch: goodyear/abc-1-fix\n```\n", "branch_name": "goodyear/abc-1-fix", "status": "running"},
@@ -49,7 +49,7 @@ class RefreshOwnedRefsTest(unittest.TestCase):
     def fake_hermes(self, text: str) -> Path:
         path = self.tmp / "bin" / "hermes"
         path.parent.mkdir(exist_ok=True)
-        path.write_text(text)
+        path.write_text(with_interpreter(text))
         os.chmod(path, 0o755)
         return path
 
