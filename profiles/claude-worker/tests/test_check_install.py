@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import SCRIPTS, git
 
@@ -18,16 +22,70 @@ print(json.dumps({ROUTES!r}))
 """
 
 FAKE_HERMES = """#!/usr/bin/env python3
-import os, sys
+import json, os, sys
 key = sys.argv[3]
+home = os.environ["HERMES_HOME"]
 if key == "dashboard":
-    path = os.path.join(os.environ["HERMES_HOME"], "installed-dashboard.json")
+    path = os.path.join(home, "installed-dashboard.json")
+elif key.startswith("platforms.webhook.extra.routes."):
+    path = os.path.join(home, "installed-routes", key.rsplit(".", 1)[1] + ".json")
 else:
-    path = os.path.join(os.environ["HERMES_HOME"], "installed-routes", key.rsplit(".", 1)[1] + ".json")
+    config = json.load(open(os.path.join(home, "installed-config.json")))
+    if key not in config:
+        sys.exit("Config key not set: " + key)
+    print(json.dumps(config[key]))
+    sys.exit()
 if not os.path.exists(path):
-    sys.exit("Config key not set: " + sys.argv[3])
+    sys.exit("Config key not set: " + key)
 print(open(path).read())
 """
+
+FAKE_LAUNCHCTL = """#!/usr/bin/env python3
+import json, os, sys
+states = json.load(open(os.environ["FAKE_LAUNCHD_STATES"]))
+target = sys.argv[2]
+if target not in states:
+    sys.exit(113)
+print("ai.example = {\\n\\tactive count = 1\\n\\tstate = " + states[target] + "\\n}")
+"""
+
+SETTINGS = {"app_user_id": "u1", "repositories": []}
+ROOT_CONFIG = {
+    "model.provider": "claude-subscription-directsdk-experimental",
+    "model.default": "opus",
+    "platforms.webhook.enabled": True,
+    "platforms.webhook.extra.host": "127.0.0.1",
+    "platforms.webhook.extra.port": 8644,
+    "plugins.entries.linear-agent-session.settings": SETTINGS,
+    "kanban.max_in_progress": 4,
+    "kanban.review_dispatch": False,
+    "kanban.auto_decompose": False,
+    "streaming.enabled": True,
+    "platforms.slack.extra.native_task_cards": True,
+}
+WORKER_CONFIG = {key: ROOT_CONFIG[key] for key in (
+    "model.provider", "model.default", "plugins.entries.linear-agent-session.settings",
+)}
+
+
+def cron_job(name: str, minutes: int, deliver: str = "local", **fields) -> dict:
+    return {
+        "id": name, "name": name, "script": name, "no_agent": True, "enabled": True, "deliver": deliver,
+        "schedule": {"kind": "interval", "minutes": minutes, "display": f"every {minutes}m"},
+        "schedule_display": f"every {minutes}m", "prompt": "", **fields,
+    }
+
+
+WORKER_JOBS = [
+    cron_job("refresh-gh-app-login", 30),
+    cron_job("refresh-checkouts", 60),
+    cron_job("check-install", 60, "slack"),
+]
+
+SCRIPT = SCRIPTS / "check-install"
+loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
+check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(check_install)
 
 REPO_FILES = {
     "profiles/claude-worker/SOUL.md": "soul\n",
@@ -75,9 +133,20 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.tmp, "bin/fake-hermes", FAKE_HERMES)
         os.chmod(self.hermes, 0o755)
 
+        self.config(self.root, ROOT_CONFIG)
+        self.config(self.worker, WORKER_CONFIG)
+        self.cron(self.worker, WORKER_JOBS)
+        self.launchd = Launchd(self.tmp)
+
     def install(self, home: Path, path: str, text: str) -> None:
         (home / path).parent.mkdir(parents=True, exist_ok=True)
         (home / path).write_text(text)
+
+    def config(self, home: Path, config: dict) -> None:
+        self.install(home, "installed-config.json", json.dumps(config))
+
+    def cron(self, home: Path, jobs: list) -> None:
+        self.install(home, "cron/jobs.json", json.dumps({"jobs": jobs, "updated_at": "2026-10-12T00:00:00"}))
 
     def discovery(self, grants: list) -> None:
         self.install(
@@ -90,7 +159,7 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, "installed-dashboard.json", json.dumps(config))
 
     def check(self, *args: str) -> tuple:
-        env = {**os.environ, "HERMES_HOME": str(self.worker), "HERMES_BIN": str(self.hermes)}
+        env = {**os.environ, **self.launchd.env, "HERMES_HOME": str(self.worker), "HERMES_BIN": str(self.hermes)}
         proc = subprocess.run(
             [sys.executable, str(SCRIPTS / "check-install"), *args], env=env, capture_output=True, text=True
         )
@@ -199,6 +268,82 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(out.startswith(f"dashboard sign-in {self.root}: cannot read the issuer's discovery document"))
 
+    def test_config_key_that_differs_from_the_runbook(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "model.provider": "custom:proxy"})
+        self.config(self.root, {**ROOT_CONFIG, "kanban.review_dispatch": True})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config model.provider in {self.worker}: "
+                'is not "claude-subscription-directsdk-experimental" (part 4)\n'
+                f"config kanban.review_dispatch in {self.root}: is not false (part 10)\n"),
+        )
+
+    def test_config_drift_never_prints_the_live_value(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "platforms.webhook.extra.host": "s3cr3t-value"})
+
+        code, out = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("s3cr3t-value", out)
+
+    def test_declared_input_that_is_not_set(self) -> None:
+        config = dict(ROOT_CONFIG)
+        del config["model.default"]
+        self.config(self.root, {**config, "kanban.max_in_progress": ""})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config model.default in {self.root}: is not set to the operator's model alias (part 4)\n"
+                f"config kanban.max_in_progress in {self.root}: is not set to the operator's card limit (part 10)\n"),
+        )
+
+    def test_factory_settings_that_differ_between_homes(self) -> None:
+        settings = {**SETTINGS, "app_user_id": "u2"}
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config plugins.entries.linear-agent-session.settings: differs between {self.root} and {self.worker} "
+                "(part 10)\n"),
+        )
+
+    def test_missing_and_duplicated_cron_jobs(self) -> None:
+        self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2], WORKER_JOBS[2]])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-checkouts in {self.worker}: is missing (part 12)\n"
+                f"cron job check-install in {self.worker}: exists 2 times (part 12)\n"),
+        )
+
+    def test_cron_job_changed_by_hand(self) -> None:
+        self.cron(self.worker, [
+            cron_job("refresh-gh-app-login", 30, enabled=False),
+            cron_job("refresh-checkouts", 15, no_agent=False),
+            cron_job("check-install", 60, "local"),
+        ])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-gh-app-login in {self.worker}: is disabled (part 10)\n"
+                f"cron job refresh-checkouts in {self.worker}: runs every 15m, not every 60m (part 12)\n"
+                f"cron job refresh-checkouts in {self.worker}: is not a script-only job that runs refresh-checkouts "
+                "(part 12)\n"
+                f'cron job check-install in {self.worker}: delivers to "local", not the operator\'s chat platform '
+                "(part 12)\n"),
+        )
+
+    def test_cron_jobs_the_runbook_does_not_create(self) -> None:
+        self.cron(self.worker, [*WORKER_JOBS, cron_job("nightly-cleanup", 1440)])
+        self.cron(self.root, [cron_job("refresh-checkouts", 60)])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-checkouts in {self.root}: belongs to the worker profile (part 12)\n"
+                f"cron job nightly-cleanup in {self.worker}: is not a job the setup runbook creates\n"),
+        )
+
     def test_a_merge_after_the_last_fetch_is_seen(self) -> None:
         seed = self.tmp / "seed"
         (seed / "plugins" / "p1" / "__init__.py").write_text("merged\n")
@@ -223,7 +368,8 @@ class CheckInstallTest(unittest.TestCase):
         home = self.tmp / "home"
         self.install(home, ".local/bin/hermes", FAKE_HERMES)
         os.chmod(home / ".local" / "bin" / "hermes", 0o755)
-        env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "HERMES_HOME": str(self.worker)}
+        self.launchd.plist(f"{str(home).lstrip('/')}/Library/LaunchAgents/ai.hermes.gateway.plist", "ai.hermes.gateway")
+        env = {"PATH": "/usr/bin:/bin", **self.launchd.env, "HOME": str(home), "HERMES_HOME": str(self.worker)}
         proc = subprocess.run(
             ["/usr/bin/env", "python3", str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True
         )
@@ -235,6 +381,87 @@ class CheckInstallTest(unittest.TestCase):
         proc = subprocess.run([sys.executable, str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True)
 
         self.assertEqual((proc.returncode, proc.stdout), (2, ""))
+
+
+class Launchd:
+    """A file system root with the runbook's two plists and a fake launchctl that reports their state."""
+
+    def __init__(self, tmp: Path) -> None:
+        self.root = tmp / "launchd"
+        self.states_file = tmp / "launchd-states.json"
+        self.launchctl = tmp / "bin" / "fake-launchctl"
+        self.launchctl.parent.mkdir(parents=True, exist_ok=True)
+        self.launchctl.write_text(FAKE_LAUNCHCTL)
+        os.chmod(self.launchctl, 0o755)
+        self.home = tmp / "launchd-home"
+        self.daemon = self.plist("Library/LaunchDaemons/com.example.cloudflared.plist", "com.example.cloudflared")
+        self.agent = self.plist(
+            f"{str(self.home).lstrip('/')}/Library/LaunchAgents/ai.hermes.gateway.plist", "ai.hermes.gateway"
+        )
+        uid = os.getuid()
+        self.states({"system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running"})
+        self.env = {
+            "LAUNCHD_ROOT": str(self.root), "LAUNCHCTL_BIN": str(self.launchctl),
+            "FAKE_LAUNCHD_STATES": str(self.states_file), "HOME": str(self.home),
+        }
+
+    def plist(self, path: str, label: str, **fields) -> Path:
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(plistlib.dumps({
+            "Label": label, "RunAtLoad": True, "ProgramArguments": ["/bin/tool", "--token", "s3cr3t"], **fields,
+        }))
+        return target
+
+    def states(self, states: dict) -> None:
+        self.states_file.write_text(json.dumps(states))
+
+
+class CheckServicesTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, tmp)
+        self.launchd = Launchd(tmp)
+        env = mock.patch.dict(os.environ, self.launchd.env)
+        env.start()
+        self.addCleanup(env.stop)
+
+    def check(self) -> list:
+        return [str(d) for d in check_install.check_services(self.launchd.root, str(self.launchd.launchctl))]
+
+    def test_installed_running_services_are_silent(self) -> None:
+        self.assertEqual(self.check(), [])
+
+    def test_agent_loaded_from_a_login_session(self) -> None:
+        uid = os.getuid()
+        self.launchd.states({"system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running"})
+
+        self.assertEqual(self.check(), [])
+
+    def test_missing_and_ambiguous_plists(self) -> None:
+        self.launchd.agent.unlink()
+        self.launchd.plist("Library/LaunchDaemons/com.other.cloudflared.plist", "com.other.cloudflared")
+
+        self.assertEqual(self.check(), [
+            "service cloudflared tunnel: 2 plists match /Library/LaunchDaemons/*cloudflared*.plist (part 7)",
+            "service Hermes gateway: no plist matches ~/Library/LaunchAgents/ai.hermes.gateway.plist (part 15)",
+        ])
+
+    def test_service_that_does_not_start_at_load_or_is_not_running(self) -> None:
+        self.launchd.plist("Library/LaunchDaemons/com.example.cloudflared.plist", "com.example.cloudflared",
+                           RunAtLoad=False)
+        self.launchd.states({"system/com.example.cloudflared": "waiting"})
+
+        self.assertEqual(self.check(), [
+            "service cloudflared tunnel: does not run at load (part 7)",
+            "service cloudflared tunnel: is waiting, not running (part 7)",
+            "service Hermes gateway: is not loaded in launchd (part 15)",
+        ])
+
+    def test_program_arguments_are_never_printed(self) -> None:
+        self.launchd.states({})
+
+        self.assertNotIn("s3cr3t", "\n".join(self.check()))
 
 
 if __name__ == "__main__":

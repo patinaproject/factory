@@ -33,6 +33,11 @@ pass.
   minutes. Then run the part's check again.
 - **Run Hermes commands without a prompt.** Pass `-y` or `--yes-deps` where the
   command takes one, and redirect standard input from `/dev/null`.
+- **Keep `check-install` in step with the runbook.** A part that sets a
+  `config.yaml` key, creates a cron job, or installs a launchd service also has
+  a row in the `CONFIG`, `CRON`, or `SERVICES` table of
+  `profiles/claude-worker/scripts/check-install`. Change the part and its row
+  in the same change.
 
 A HUMAN CHECKPOINT looks like this in the parts below:
 
@@ -714,7 +719,12 @@ script fails on every tick with a `SyntaxError`.
 **Install drift job.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
 `origin/HEAD` of the checkout the profile was installed from. It also checks
-that the dashboard's OIDC sign-in can keep a user signed in. It prints one
+that the dashboard's OIDC sign-in can keep a user signed in. It also reports
+machine changes this runbook cannot reproduce: a `config.yaml` key from parts
+4, 6, 10, or 13 that differs from what the part sets, a cron job that is
+missing, duplicated, changed, or not created by the runbook, and, on macOS, a
+launchd service from part 7 or 15 that is not installed, does not run at load,
+or is not running. It never prints a config value. It prints one
 line per difference and nothing when the install is current. It fetches
 first, so a merge shows up within the hour. Deliver it where the operator
 reads it: the home channel of the platform from part 13, such as `slack`.
@@ -1006,6 +1016,10 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
      or allow the `refresh_tokens` grant on the `saas` Access application when
      the line names the issuer. Then restart the dashboard service.
+   - A `config`, `cron job`, or `service` line: the machine differs from what
+     the named part produces. If the runbook is right, run that part again.
+     If the machine is right, change the part and its row in `check-install`
+     in one pull request, as the replicability rule in `AGENTS.md` requires.
 4. Run `check-install` again. It prints nothing.
 5. If step 3 changed a plugin or a webhook route:
 

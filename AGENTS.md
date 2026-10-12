@@ -106,7 +106,7 @@ rule that only docs enforce is a candidate for a script, check, or test.
 | The SSH allowlist is one list of emails, never a domain; the sshd principals file mirrors it | `check-host-exposure --ssh-users`, which fails on drift and refuses a domain |
 | A privileged step runs as one script in the operator's terminal and refuses to lock anyone out | Docs only: the runbook's rule for privileged steps and the machine-wide block |
 | Agents on a factory machine know who owns ingress, how people reach the machine, and how to handle `sudo` | The machine-wide block, which setup part 17 compares with the template |
-| Every change to a factory environment lands in this repository in the same change, as a runbook step, template, script, or check, so a fresh install reproduces it. Real values go only to the private record | The machine-wide block; `templates/memory.py --check` in setup part 17; a check is tracked in #54 |
+| Every change to a factory environment lands in this repository in the same change, as a runbook step, template, script, or check, so a fresh install reproduces it. Real values go only to the private record | The machine-wide block; `templates/memory.py --check` in setup part 17; the `CONFIG`, `CRON`, and `SERVICES` tables in `profiles/claude-worker/scripts/check-install`, which report config keys, cron jobs, and launchd services that differ from the runbook |
 
 ## Build, Test, and Development Commands
 
