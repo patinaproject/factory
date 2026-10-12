@@ -23,10 +23,12 @@ An installation token expires after one hour. The worker profile's
 stores it with `gh auth login`. A Hermes cron job runs the script every 30
 minutes.
 
-Run this reference in two passes. Part 9 runs [Create the App](#create-the-app)
-through [Set the worker's `gh` directory](#set-the-workers-gh-directory). Part
-10 writes the settings and clones the checkouts, then returns here for
-[Sign the worker's `gh` in](#sign-the-workers-gh-in),
+Run this reference in two passes. Part 9 runs [Create the App](#create-the-app),
+or [Reuse an existing App](#reuse-an-existing-app), through
+[Set the worker's `gh` directory](#set-the-workers-gh-directory). Part 10
+writes the settings and returns here for
+[Sign the worker's `gh` in](#sign-the-workers-gh-in). It then clones the
+checkouts as the App, and returns for
 [Check the App's access](#check-the-apps-access),
 [Configure git in each checkout](#configure-git-in-each-checkout), and
 [Block plain pushes on the machine](#block-plain-pushes-on-the-machine).
@@ -68,8 +70,14 @@ If all of them hold, skip to the live test.
 
 ## Create the App
 
+If the operator already has a GitHub App for the factory, skip to
+[Reuse an existing App](#reuse-an-existing-app).
+
 If `env_has <home>/.env GITHUB_WEBHOOK_SECRET` prints `1`, keep that secret.
-A new secret breaks every webhook that uses the old one.
+A new secret breaks every webhook that uses the old one. When the Infisical
+folder already exists, the secret lives there. In the lines below, replace
+`env_set <home>/.env GITHUB_WEBHOOK_SECRET` with
+`infisical_set GITHUB_WEBHOOK_SECRET`.
 
 > **HUMAN CHECKPOINT.** Ask the operator to create a GitHub App under the
 > organization or account that owns the repositories, in
@@ -127,6 +135,99 @@ permission.
 The worker's next token, at most 30 minutes later, carries the new
 permission. To use it at once, run the `refresh-gh-app-login` job as in
 [Sign the worker's `gh` in](#sign-the-workers-gh-in).
+
+## Reuse an existing App
+
+Use this path when the operator already has a GitHub App for the factory. It
+creates nothing. It reads the App through GitHub's API with a JWT that the
+App's private key signs, so it needs no personal login.
+
+**Find the App ID and the key.** Read `github.app_id` and
+`github.private_key_path` from the settings of either home on a re-run. On a
+new machine, look for an App helper's configuration file next to the key, or
+ask the operator for the App ID from the App's **General** page. The key can
+stay where it is. It needs mode `0600`, and it must be outside every
+repository. Run the `python3` mode check in [Check](#check), then record its
+absolute path for `github.private_key_path`. Do not copy the key.
+
+Define these two functions. They never print the key or the JWT:
+
+```sh
+app_jwt() {
+  b64() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+  now=$(date +%s)
+  h=$(printf '{"alg":"RS256","typ":"JWT"}' | b64)
+  p=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$1" | b64)
+  s=$(printf '%s.%s' "$h" "$p" | openssl dgst -sha256 -sign "$2" | b64)
+  printf '%s.%s.%s' "$h" "$p" "$s"
+}
+app_api() {
+  curl -fsS -H "Authorization: Bearer $(app_jwt "$1" "$2")" \
+    -H 'Accept: application/vnd.github+json' "https://api.github.com$3"
+}
+```
+
+**Check the key, permissions, and events.**
+
+```sh
+app_api <app id> <key path> /app | python3 -c 'import json, sys; a = json.load(sys.stdin); print(a["slug"]); print(json.dumps(a["permissions"], sort_keys=True)); print(sorted(a["events"]))'
+```
+
+A `401` error means the key does not belong to that App ID. The slug is
+`<app-slug>`. Compare the permissions and events with the lists in
+[Create the App](#create-the-app). For a missing permission, follow
+[Upgrade an existing App's permissions](#upgrade-an-existing-apps-permissions).
+For a missing event, ask the operator to subscribe to it on the App's
+**Permissions & events** page.
+
+**Find the installation.**
+
+```sh
+app_api <app id> <key path> /app/installations | python3 -c 'import json, sys; [print(i["id"], i["account"]["login"], i["repository_selection"]) for i in json.load(sys.stdin)]'
+```
+
+The installation ID is the first value on the line for the account that owns
+the repositories. When no line names that account, follow
+[Install the App](#install-the-app). When the selection is `selected`, list
+the repositories the installation covers. The token stays in a variable and
+is never printed:
+
+```sh
+tok="$(curl -fsS -X POST -H "Authorization: Bearer $(app_jwt <app id> <key path>)" \
+  -H 'Accept: application/vnd.github+json' \
+  https://api.github.com/app/installations/<installation id>/access_tokens \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')"
+curl -fsS -H "Authorization: Bearer $tok" 'https://api.github.com/installation/repositories?per_page=100' \
+  | python3 -c 'import json, sys; [print(r["full_name"]) for r in json.load(sys.stdin)["repositories"]]'
+unset tok
+```
+
+Every configured repository must be in the list. Otherwise ask the operator to
+add the missing ones on the installation's settings page,
+`.../settings/installations/<installation id>`.
+
+**Find out who uses the webhook.**
+
+```sh
+app_api <app id> <key path> /app/hook/config
+app_api <app id> <key path> '/app/hook/deliveries?per_page=30' | python3 -c 'import json, sys; [print(d["delivered_at"], d["event"], d["status_code"]) for d in json.load(sys.stdin)]'
+```
+
+The config shows the webhook URL. GitHub masks the secret. When the URL
+is already `https://<hostname>/webhooks/github`, keep it. When it is another
+URL and recent deliveries succeed, something else receives the App's events.
+
+> **HUMAN CHECKPOINT.** Show the operator the current URL and the recent
+> deliveries. Ask whether anything still needs that URL. If something does,
+> stop and create a new App for the factory instead. If nothing does, ask them
+> to set the webhook URL to `https://<hostname>/webhooks/github` on the App's
+> **General** page, and to set the webhook secret with the lines in
+> [Create the App](#create-the-app). GitHub never returns the old secret, so
+> a factory with no copy of it needs a new one.
+
+Then record the values for part 10 as [Install the App](#install-the-app)
+describes, and continue with
+[Set the worker's `gh` directory](#set-the-workers-gh-directory).
 
 ## Download the private key
 
@@ -313,8 +414,9 @@ The route ignores events from repositories that are not configured.
 
 If a repository or organization webhook from an earlier setup also targets
 `https://<hostname>/webhooks/github`, the route receives each event twice.
-Under the operator's own admin `gh` login, without `GH_CONFIG_DIR`, list
-them:
+Listing them needs an admin login, which the factory machine does not have.
+Ask the operator to read **Settings → Webhooks** of each repository and of the
+organization, or to run these where their own admin `gh` login lives:
 
 ```sh
 gh api repos/<full_name>/hooks --jq '.[] | {id, url: .config.url}'

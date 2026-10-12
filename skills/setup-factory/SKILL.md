@@ -55,6 +55,7 @@ below first, and ask only when it prints nothing:
 | Value | Discover with |
 | --- | --- |
 | Hermes install checkout and its tag | `git -C <home>/hermes-agent describe --tags` |
+| Hermes release tag to pin | `tag_name` in `curl -s https://api.github.com/repos/NousResearch/hermes-agent/releases/latest`. Confirm the tag with the operator |
 | Existing factory settings: repositories, `app_user_id`, `kanban_url`, `claude_session`, and the `github` object | `hermes config get plugins.entries.linear-agent-session.settings --json` |
 | `<app-slug>` | `github.login` in the settings, without `[bot]` |
 | GitHub App ID | `gh api /apps/<app-slug> --jq .id`. Any `gh` login can read it |
@@ -63,6 +64,10 @@ below first, and ask only when it prints nothing:
 | Bot user ID | `gh api '/users/<app-slug>[bot]' --jq .id` |
 | Repositories the installation covers | `GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --jq '.repositories[].full_name'` |
 | Infisical project ID, environment, and folder | `grep -oE -e '--projectId[= ][^ ]+' -e '--env[= ][^ ]+' -e '--path[= ][^ ]+' <file>`, where `<file>` holds the `command` that `hermes config get secrets.command --json` prints: the script it names, or a file with that command line |
+| Proxy base URL, model alias, and token variable | A loopback listener in `lsof -nP -iTCP -sTCP:LISTEN`, the proxy's own configuration file, and its `/v1/models` list |
+| SST app, stage, Cloudflare account, and zone | `find ~ -maxdepth 4 -name 'sst.config.ts' -not -path '*/node_modules/*'`, then the stage configuration in that app. `dig +short <hostname>` shows whether the hostname already points at Cloudflare |
+| Existing tunnel | The `cloudflared` system service. On macOS, find its plist with `ls /Library/LaunchDaemons/*cloudflared*` and read only two keys: `plutil -extract Label raw <plist>` and `plutil -extract Program raw <plist>`. Never run `launchctl print` or read `ProgramArguments`, which can hold the tunnel token |
+| Slack workspace and channels | The connected Slack account, and the `SLACK_*` key names in `<home>/.env` or the secret source. Read key names only |
 | `kanban.max_in_progress` and the webhook port | `hermes config get kanban.max_in_progress` and `hermes config get platforms.webhook.extra.port` |
 
 When `gh` or `hermes` is not on the session's `PATH`, call it by its full
@@ -114,8 +119,12 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | The `default` board's `default_workdir` | Kanban board metadata, not `config.yaml` |
 
 When the factory uses Infisical, part 14 moves the Linear credentials, both
-webhook secrets, and the proxy token from `.env` into one Infisical folder.
-Earlier parts still write them to `.env` first.
+webhook secrets, and the proxy token from `.env` into one Infisical folder. On
+a new machine, earlier parts still write them to `.env` first. When the folder
+already exists, such as on a re-run, write each of those values straight into
+the folder with `infisical_set` below, in place of `env_set`. A part's
+`env_has` check for such a value then reads the folder's key names, as
+[`references/infisical.md`](references/infisical.md) shows.
 
 Write a secret into a `.env` file with this function. It reads the value from
 standard input, replaces any earlier line for the key, and keeps the file at
@@ -137,6 +146,21 @@ env_has() { if [ -f "$1" ]; then grep -c "^$2=." "$1"; else echo 0; fi; }
 
 `env_has <file> <KEY>` prints `1` when the key has a value and `0` when it does
 not.
+
+When the Infisical folder exists, write a secret into it with this function.
+It reads the value from standard input and passes it through a mode `0600`
+file that it deletes afterwards. Use it anywhere a part pipes into `env_set`.
+It needs an Infisical login that can write to the folder. The factory's machine
+identity can only read, so this runs under the operator's own Infisical login,
+in their terminal when the machine has none.
+
+```sh
+infisical_set() {
+  ( umask 077; f="$(mktemp)"; printf '%s=%s\n' "$1" "$(cat)" > "$f"
+    infisical secrets set --projectId <project id> --env <environment> \
+      --path <folder> --file "$f" >/dev/null; rm -f "$f" )
+}
+```
 
 When a secret comes from a web page, such as an app's client secret, ask the
 operator to run this in their own terminal. The value never reaches you:
@@ -193,8 +217,20 @@ git -C <install> rev-parse "<tag>^{commit}"   # same SHA as the line above
 If the tree is dirty, or `HEAD` has commits that the tag does not, stop. Report
 the output to the operator. Never reset, stash, or patch the install.
 
-**Install.** If Hermes is absent, install it at the pinned tag with the
-upstream installer from the Hermes README. Then run the check.
+**Install.** If Hermes is absent, resolve the pinned tag to its commit, then
+run the upstream installer from that commit with `--commit`:
+
+```sh
+sha="$(git ls-remote https://github.com/NousResearch/hermes-agent "refs/tags/<tag>" "refs/tags/<tag>^{}" | sort -k2 | tail -n1 | cut -f1)"
+[ -n "$sha" ] && curl -fsSL "https://raw.githubusercontent.com/NousResearch/hermes-agent/$sha/scripts/install.sh" \
+  | bash -s -- --commit "$sha" --dir <install> --hermes-home <home> --non-interactive
+```
+
+The `^{}` line names the commit of an annotated tag, so `sort` puts it last
+when it exists. An empty `sha` means the tag does not exist; stop and report
+it. The installer refuses a commit that is not on its default branch. In that
+case, add `--branch <branch>` with the branch that holds the tag. Then run the
+check.
 
 **Upgrade.** If the install is clean at an older tag, ask the operator before
 you move it to the new tag. Check out the tag and run the check.
@@ -286,11 +322,23 @@ object in place of the reply means the home's `.env` lacks
 **Keep `ANTHROPIC_*` out of the gateway.** The provider refuses to start when
 the environment holds `ANTHROPIC_AUTH_TOKEN` or another native override. Only
 `claude-session` sets `ANTHROPIC_*` variables, and only for the Claude Code
-process it starts. Each count must be `0`:
+process it starts. This check must print nothing:
 
 ```sh
-grep -c '^ANTHROPIC_' <home>/.env <worker>/.env
+grep -nE '^[^#]*ANTHROPIC_' <home>/.env <worker>/.env \
+  <home>/config.yaml <worker>/config.yaml \
+  "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" 2>/dev/null | cut -d: -f1,2
 ```
+
+Each line it prints is a file and a line number that sets the variable. It
+never prints the value. The check fails for that file. Comment lines do not
+count. Name each file and line to the operator, and remove the setting with
+their approval.
+
+Some local proxy apps offer a one-click "configure Claude Code" or "configure
+Hermes" action. That action writes `ANTHROPIC_*` into Claude Code's
+`settings.json` or into Hermes' `config.yaml`. Do not use it. Configure the
+proxy only through `claude_session`, as part 3 describes.
 
 A variable set in the gateway's service definition or the operator's shell
 profile also stops the provider, and the live test in part 15 then fails.
@@ -376,7 +424,9 @@ hermes config get platforms.webhook.extra.port    # the webhook port
 
 Parts 8 and 9 create the two secrets, because each one also goes into the
 Linear app's form or the GitHub App's form. A missing secret here is expected on
-a new machine.
+a new machine. When the Infisical folder already holds the secrets, check its
+key names instead, and have parts 8 and 9 write a new secret with
+`infisical_set`.
 
 **Enable** the listener on the loopback interface only. The default port is
 `8644`.
@@ -474,10 +524,21 @@ another worker profile name, set
 `plugins.entries.pr-ready-gate.settings.gated_profiles` in both homes and read
 it back the same way.
 
-**Repositories.** For each repository:
+**GitHub login.** Return to [`references/github.md`](references/github.md)
+and run its "Sign the worker's `gh` in" section now. It needs only the
+settings above. The clones below use that login.
+
+**Repositories.** Clone each repository as the App, through the worker's `gh`
+login. Never clone under a personal login, and never ask the operator to sign
+`gh` in for it.
 
 ```sh
-[ -d <path>/.git ] || gh repo clone <full_name> <path>
+[ -d <path>/.git ] || GH_CONFIG_DIR=<worker>/gh gh repo clone <full_name> <path>
+```
+
+Then check each checkout:
+
+```sh
 git -C <path> remote set-head origin -a
 git -C <path> symbolic-ref refs/remotes/origin/HEAD   # refs/remotes/origin/<default branch>
 git -C <path> status --porcelain --untracked-files=no # prints nothing
@@ -538,11 +599,11 @@ curl -fsSL https://bun.sh/install | BUN_INSTALL="$(dirname <bin dir>)" bash
 
 The installer also adds lines to the user's shell startup file. Leave them.
 
-**GitHub login and checkouts.** Return to
+**GitHub access and checkouts.** Return to
 [`references/github.md`](references/github.md) and run its
-"Sign the worker's `gh` in", "Check the App's access", "Configure git in
-each checkout", and "Block plain pushes on the machine" sections. They need
-the settings and the clones from this part. Continue only when
+"Check the App's access", "Configure git in each checkout", and "Block plain
+pushes on the machine" sections. They need the clones from this part.
+Continue only when
 `check-github-access` and `guard-git-push --check` print nothing.
 
 **Kanban.**
@@ -633,7 +694,10 @@ belongs to the worker profile.
 **Check.** `hermes -p claude-worker cron list` shows exactly one job named
 `refresh-checkouts`. `cron create` does not remove duplicates. If more than one
 exists, show the list to the operator and remove the extras with their
-approval.
+approval. `hermes cron list` for the default home shows none of the worker's
+jobs: `refresh-checkouts`, `refresh-gh-app-login`, and `check-install`. A copy
+there runs without the worker's scripts and settings, so remove it the same
+way. A second setup session runs this check before it creates anything.
 
 **Create** the job only when the list has none:
 

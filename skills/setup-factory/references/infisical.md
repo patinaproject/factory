@@ -57,6 +57,8 @@ All of these must hold:
   the token variable that `claude_session.auth_token_env` names.
 - No moved value remains in a `.env` file: `env_has` prints `0` for each value
   in the first table, in both files.
+- The machine identity reads one environment and nothing else, as
+  [Check the identity's scope](#check-the-identitys-scope) shows.
 
 If all of them hold, skip to [Verify](#verify).
 
@@ -92,6 +94,38 @@ names.
 The worker's processes can still read the `FACTORY_INFISICAL_` values. Keep
 the identity's access to one environment, so a worker can read no other
 secrets with it.
+
+### Check the identity's scope
+
+Run this for a new identity and for a reused one. A reused identity often
+carries grants from its earlier use, such as a project role or a second
+project.
+
+> **HUMAN CHECKPOINT.** Ask the operator to open the identity in
+> **Organization → Access Control → Identities** and read its projects. It
+> belongs to exactly one project, with project role `No Access`, and its only
+> additional privilege is the one in
+> [Create the machine identity](#create-the-machine-identity).
+
+Then sign in as the identity and try each other environment of the project.
+New projects have `dev`, `staging`, and `prod`. The project's settings page
+lists its environment slugs. These lines read only the two
+`FACTORY_INFISICAL_` keys from `<home>/.env` with `sed`, so they load nothing
+else from the file. This prints nothing when the scope is right:
+
+```sh
+( t=$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' <home>/.env)" \
+    INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' <home>/.env)" \
+    infisical login --method=universal-auth --silent --plain)
+  for env in <each other environment slug>; do
+    INFISICAL_TOKEN="$t" infisical export --silent --projectId <project id> --env "$env" --path / --format dotenv >/dev/null 2>&1 \
+      && echo "readable: $env"
+  done )
+```
+
+Each `readable:` line fails the check. Remove the extra grant, or create a new
+identity for the factory. Reuse its client ID only after the check passes, and
+give this machine its own client secret.
 
 ## Store the secrets
 
