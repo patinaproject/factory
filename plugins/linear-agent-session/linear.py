@@ -206,7 +206,10 @@ class LinearClient:
         except _Unauthorized:
             # Client credentials tokens have no refresh token; Linear's documented recovery is a new token.
             self._discard_token()
+        try:
             return self._post_graphql(query, variables)
+        except _Unauthorized:
+            raise LinearError("Linear rejected a newly issued token") from None
 
     def _post_graphql(self, query: str, variables: dict) -> dict:
         request = urllib.request.Request(
@@ -288,6 +291,8 @@ class LinearClient:
                 return response.status, response.read()
         except urllib.error.HTTPError as e:
             return e.code, e.read()
+        except urllib.error.URLError as e:
+            raise LinearError(f"Linear is unreachable: {e.reason}") from None
 
 
 class _Unauthorized(Exception):

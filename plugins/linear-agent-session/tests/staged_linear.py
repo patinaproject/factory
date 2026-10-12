@@ -3,7 +3,7 @@
 A test links this file as linear.py in a staged home's plugins/linear-agent-session.
 $HERMES_HOME/linear-fake.json lists the tokens Linear accepts. Each request is
 appended to $HERMES_HOME/linear-fake.log as one JSON line, and every token
-request issues minted-<n>, which Linear then accepts.
+request issues minted-<n>, which Linear then accepts unless reject_all is set.
 """
 from __future__ import annotations
 
@@ -33,8 +33,9 @@ def _fake_urlopen(request, timeout=None):
     if request.full_url.endswith("/oauth/token"):
         entry["form"] = dict(urllib.parse.parse_qsl(request.data.decode()))
         token = f"minted-{sum(1 for _ in _log_entries() if 'form' in _) + 1}"
-        state["accepted"].append(token)
-        state_path.write_text(json.dumps(state))
+        if not state.get("reject_all"):
+            state["accepted"].append(token)
+            state_path.write_text(json.dumps(state))
         response = _Response(200, {"access_token": token, "token_type": "Bearer", "expires_in": 2591999})
     elif request.get_header("Authorization", "").removeprefix("Bearer ") in state["accepted"]:
         response = _Response(200, {"data": {"viewer": {"id": "app-user"}}})

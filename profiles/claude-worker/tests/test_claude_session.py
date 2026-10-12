@@ -363,6 +363,15 @@ class ClaudeSessionTest(GitFixture):
         forms = [r["form"] for r in self.linear_requests(self.hermes_home) if "form" in r]
         self.assertEqual(forms, [{"grant_type": "client_credentials", "scope": "read,write,app:assignable,app:mentionable"}])
 
+    def test_a_linear_that_rejects_every_token_refuses_before_claude_starts(self) -> None:
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps({"accepted": [], "reject_all": True}))
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": "Linear token: Linear rejected a newly issued token"})
+        self.assertFalse(self.log.exists())
+
     def test_missing_linear_credentials_refuse_before_claude_starts(self) -> None:
         status, report = self.run_session(env={"LINEAR_CLIENT_SECRET": ""})
 
