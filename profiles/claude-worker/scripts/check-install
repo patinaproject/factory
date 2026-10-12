@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""Report where the live factory install differs from the repository.
+
+Compares the worker profile, the plugins in the root and worker homes, and the
+webhook routes against a commit of the repository, read with git plumbing so
+the checkout's working tree and branch do not matter. Silent when the install
+matches. Prints one line per difference and exits 1, or exits 2 when it cannot
+run.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import NamedTuple
+
+PROFILE = "profiles/claude-worker"
+PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
+ROUTES_KEY = "platforms.webhook.extra.routes"
+PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+
+class Drift(NamedTuple):
+    kind: str
+    where: str
+    detail: str
+
+    def __str__(self) -> str:
+        return f"{self.kind} {self.where}: {self.detail}"
+
+
+class Refusal(Exception):
+    pass
+
+
+class Commit(NamedTuple):
+    repo: Path
+    sha: str
+    label: str
+
+    @property
+    def short(self) -> str:
+        return self.sha[:7]
+
+    def files(self, path: str) -> dict:
+        """Map each file path under `path` to its blob id."""
+        out = git(self.repo, "ls-tree", "-r", "-z", self.sha, "--", path)
+        files = {}
+        for entry in filter(None, out.split("\0")):
+            meta, name = entry.split("\t", 1)
+            files[name] = meta.split()[2]
+        return files
+
+    def blob(self, blob_id: str) -> bytes:
+        return subprocess.run(
+            ["git", "cat-file", "blob", blob_id], cwd=self.repo, capture_output=True, check=True
+        ).stdout
+
+
+def git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refusal(f"git {' '.join(args)} failed in {repo}: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def compare_files(commit: Commit, files: dict, strip: str, home: Path) -> list:
+    """Return a detail for each file at the commit that is missing or different under `home`."""
+    details = []
+    for path, blob_id in sorted(files.items()):
+        relative = path[len(strip):]
+        installed = home / relative
+        if not installed.is_file():
+            details.append(f"{relative} is missing")
+        elif installed.read_bytes() != commit.blob(blob_id):
+            details.append(f"{relative} differs from {commit.label} at {commit.short}")
+    return details
+
+
+def check_profile(commit: Commit, worker: Path) -> list:
+    files = {}
+    for path in PROFILE_PATHS:
+        files.update(commit.files(path))
+    return [Drift("profile", "claude-worker", d) for d in compare_files(commit, files, f"{PROFILE}/", worker)]
+
+
+def check_plugins(commit: Commit, homes: list) -> list:
+    plugins: dict = {}
+    for path, blob_id in commit.files("plugins").items():
+        _, name, rest = path.split("/", 2)
+        if not rest.startswith("tests/"):
+            plugins.setdefault(name, {})[path] = blob_id
+    drifts = []
+    for name, files in sorted(plugins.items()):
+        for home in homes:
+            where = f"{name} in {home}"
+            installed = home / "plugins" / name
+            if not installed.is_dir():
+                drifts.append(Drift("plugin", where, "not installed"))
+                continue
+            details = compare_files(commit, files, f"plugins/{name}/", installed)
+            drifts.extend(Drift("plugin", where, d) for d in details)
+    return drifts
+
+
+def matches(rendered, installed) -> bool:
+    # Hermes expands ${VAR} secrets when it reads config, so a placeholder matches any installed value.
+    if isinstance(rendered, str) and PLACEHOLDER.match(rendered):
+        return installed is not None
+    if isinstance(rendered, dict) and isinstance(installed, dict):
+        return rendered.keys() == installed.keys() and all(matches(rendered[k], installed[k]) for k in rendered)
+    if isinstance(rendered, list) and isinstance(installed, list):
+        return len(rendered) == len(installed) and all(map(matches, rendered, installed))
+    return rendered == installed
+
+
+def check_routes(commit: Commit, root: Path, hermes: str) -> list:
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        for path, blob_id in commit.files("templates").items():
+            target = work / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(commit.blob(blob_id))
+        # render.py runs `hermes` by name, so put the chosen executable first on PATH under that name.
+        shim = work / "bin"
+        shim.mkdir()
+        (shim / "hermes").symlink_to(hermes)
+        env = {**os.environ, "HERMES_HOME": str(root), "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}"}
+        render = subprocess.run(
+            [sys.executable, str(work / "templates" / "render.py")], env=env, capture_output=True, text=True
+        )
+    if render.returncode != 0:
+        return [Drift("webhook routes", str(root), f"render.py failed at {commit.short}: {render.stderr.strip()}")]
+
+    drifts = []
+    env = {**os.environ, "HERMES_HOME": str(root)}
+    for name, route in json.loads(render.stdout).items():
+        # Without --raw, Hermes masks secrets; matches() never compares them.
+        proc = subprocess.run(
+            [hermes, "config", "get", f"{ROUTES_KEY}.{name}", "--json"], env=env, capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            drifts.append(Drift("webhook route", name, f"not installed in {root}"))
+        elif not matches(route, json.loads(proc.stdout)):
+            drifts.append(Drift("webhook route", name, f"differs from the route rendered at {commit.short}"))
+    return drifts
+
+
+def homes() -> tuple:
+    if not os.environ.get("HERMES_HOME"):
+        raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
+    worker = Path(os.environ["HERMES_HOME"]).resolve()
+    if worker.parent.name != "profiles":
+        raise Refusal(f"HERMES_HOME {worker} is not a profile home under <root>/profiles/")
+    return worker.parent.parent, worker
+
+
+def default_repo(worker: Path) -> Path:
+    distribution = worker / "distribution.yaml"
+    if not distribution.is_file():
+        raise Refusal(f"{distribution} does not exist; pass --repo")
+    for line in distribution.read_text().splitlines():
+        match = re.match(r"^source:\s*['\"]?(.+?)['\"]?\s*$", line)
+        if match:
+            return Path(match.group(1)).parents[1]
+    raise Refusal(f"{distribution} has no source: line; pass --repo")
+
+
+def resolve_commit(repo: Path, ref: str | None) -> Commit:
+    if ref is None:
+        label = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip().split("/", 1)[1]
+        ref = "origin/HEAD"
+    else:
+        label = ref
+    sha = git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").strip()
+    return Commit(repo, sha, label)
+
+
+def find_hermes() -> str:
+    # A cron job's PATH can lack the installer's bin directory, so fall back to where it puts hermes.
+    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
+    for candidate in filter(None, candidates):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--repo", type=Path, help="factory checkout; defaults to the worker's distribution source")
+    parser.add_argument("--ref", help="commit to compare against; defaults to origin/HEAD")
+    parser.add_argument("--fetch", action="store_true", help="run git fetch origin first")
+    args = parser.parse_args()
+    try:
+        root, worker = homes()
+        repo = args.repo or default_repo(worker)
+        if args.fetch:
+            git(repo, "fetch", "--quiet", "origin")
+        commit = resolve_commit(repo, args.ref)
+        hermes = find_hermes()
+        hermes = os.path.abspath(hermes)
+        drifts = [
+            *check_profile(commit, worker),
+            *check_plugins(commit, [root, worker]),
+            *check_routes(commit, root, hermes),
+        ]
+    except Refusal as exc:
+        print(f"check-install: {exc}", file=sys.stderr)
+        return 2
+    for drift in drifts:
+        print(drift)
+    return 1 if drifts else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
