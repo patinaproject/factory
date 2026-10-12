@@ -71,11 +71,6 @@ FINISH_RULE = (
     "timeout set, and run it again when it times out."
 )
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{FINISH_RULE}"
-COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
-QUIET_SECONDS = 1.0
-GRACE_SECONDS = 10.0
-LOCK_NAME = "claude-session.lock"
-SETTINGS_FILE_NAME = "claude-session.settings.json"
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
 LINEAR_MCP_CONFIG = json.dumps({"mcpServers": {"linear": {
@@ -83,6 +78,11 @@ LINEAR_MCP_CONFIG = json.dumps({"mcpServers": {"linear": {
     "url": "https://mcp.linear.app/mcp",
     "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
 }}})
+COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
+QUIET_SECONDS = 1.0
+GRACE_SECONDS = 10.0
+LOCK_NAME = "claude-session.lock"
+SETTINGS_FILE_NAME = "claude-session.settings.json"
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 
 
