@@ -52,6 +52,13 @@ CHECK_FILTER = {
 SELF_FILTER = {
     "any": [
         {"field": "event", "in": ["check_run", "check_suite", "workflow_run"]},
+        {
+            "all": [
+                {"field": "event", "equals": "pull_request"},
+                {"field": "action", "equals": "closed"},
+                {"field": "pull_request.merged", "equals": True},
+            ]
+        },
         {"not": {"field": "sender.login", "equals": "example-app[bot]"}},
     ]
 }

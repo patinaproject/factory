@@ -482,7 +482,7 @@ With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,
 so the card waits there for a person. GitHub triage moves it to `done` when the
 pull request merges, and back to the worker when a review requests changes.
 Cards in `review` run no worker, so they do not count against
-`kanban.max_in_progress` or `kanban.max_spawn`.
+`kanban.max_in_progress`.
 
 **Check.** `hermes config get kanban.review_dispatch` prints `false`.
 
@@ -647,15 +647,15 @@ each check. Report each result.
     still the pinned tag.
 14. `git -C <repo> status --porcelain` prints nothing. This repository holds no
     factory value.
-13. Push an issue's `gitBranchName` to GitHub with one commit, without a local
+15. Push an issue's `gitBranchName` to GitHub with one commit, without a local
     copy in the checkout, then delegate the issue. The first `claude-session`
     line reports `adopted` with `source` `remote_branch`, the branch starts at
     that commit, and the first `push-signed` publishes.
-14. Open a pull request as the GitHub App on a branch other than the issue's
+16. Open a pull request as the GitHub App on a branch other than the issue's
     `gitBranchName`, link it to the issue, and delegate the issue. The card's
     branch is that pull request's head branch, and no second pull request
     opens.
-15. Open a pull request as a person, link it to the issue, and delegate the
+17. Open a pull request as a person, link it to the issue, and delegate the
     issue. The card body carries `takeover_pr`, the worker starts from that
     pull request's head, and its own pull request links the original. Before
     it completes, the worker asks in Linear whether to close the original and
@@ -664,7 +664,7 @@ each check. Report each result.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` or `triage`
 card. The operator drags the card to Ready, which Hermes documents as a
-deliberate re-queue. Hermes v0.21.5 has no CLI command or tool for it. When a
+deliberate re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a
 GitHub event arrives for a done card, triage comments on the card and asks the
 operator to reopen the card from the Kanban dashboard. A card reaches `done`
 only when its pull request merges, so this applies to follow-up work after the

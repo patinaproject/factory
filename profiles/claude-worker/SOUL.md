@@ -120,6 +120,35 @@ for example `mktemp`, and resume:
 
 Run it in the background and wait on it exactly as in step 3.
 
+When the comments include a GitHub review that requested changes, the
+repository may require every review thread to be resolved before the pull
+request can merge. After the resumed run pushes its fix, resolve each thread
+that the fix addressed. `gh` acts as the factory's GitHub App, whose Pull
+requests read and write permission covers this. List the open threads:
+
+```sh
+gh api graphql -F owner=<owner> -F repo=<name> -F number=<pull request number> -f query='
+  query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 100) {
+          nodes { id isResolved path comments(first: 1) { nodes { body } } }
+        }
+      }
+    }
+  }'
+```
+
+Resolve each addressed thread by its `id`:
+
+```sh
+gh api graphql -F id=<thread id> -f query='
+  mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }'
+```
+
+Leave a thread open when the fix did not address it, and say why in a
+comment on the card.
+
 Without new comments, check the pull request from the worktree:
 
 ```sh
@@ -145,30 +174,42 @@ comments for a human reply about closing it.
   `gh pr close <takeover_pr> --comment "Superseded by <published_pr>."`.
 - The human declines: leave it open.
 
-Then call `kanban_request_review` with a one-sentence `summary` and `metadata`
-holding `session_id`, `worktree`, `branch`, and `published_pr` (the pull
-request URL). `pr-ready-gate` reads `published_pr`. The card waits in `review`
-until a person merges the pull request or requests changes on GitHub. GitHub
-triage then completes the card or hands it back to you.
+The handoff payload is the same for every call in this step:
 
-When the pull request's `state` is already `MERGED`, call `kanban_complete`
-with the same `summary` and `metadata` instead. The card's
-`completion_contract` also reads `published_pr`.
+- `summary`: one sentence.
+- `metadata`: `session_id`, `worktree`, `branch`, and `published_pr`, the pull
+  request URL. `pr-ready-gate` and the card's `completion_contract` read
+  `published_pr`.
+- The Linear activity's `external_urls`:
+  `[{"label": "Pull request", "url": <published_pr>}]`.
+
+Read the pull request's `state` from the step 4 `gh pr view` output, then make
+one call with the handoff payload:
+
+- `OPEN`: call `kanban_request_review`. The card waits in `review` until a
+  person merges the pull request or requests changes on GitHub. GitHub triage
+  then completes the card or hands it back to you.
+- `MERGED`: call `kanban_complete`.
+
+Then act on the result:
 
 - **Review accepted.** Post an `action` activity with `action`
-  `Ready for review`, `parameter` set to `published_pr`, and `external_urls`
-  set to `[{"label": "Pull request", "url": <published_pr>}]`. Do not post a
-  `response`, because it ends the Linear session before the pull request
-  merges. You are done.
+  `Ready for review`, `parameter` set to `published_pr`, and the handoff
+  `external_urls`. Do not post a `response`, because it ends the Linear
+  session before the pull request merges. You are done.
 - **Completion accepted.** Post a `response` activity that summarizes the
-  change, with the same `external_urls`. You are done.
+  change, with the handoff `external_urls`. You are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, a state other
-  than `CLEAN`, or a head commit that is not the worktree's `HEAD`.
+  than `CLEAN`, a head commit that is not the worktree's `HEAD`, or a
+  `MERGED` pull request sent to review.
   - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
     running. Run `gh pr checks <pr>` from the worktree. While any check is
-    pending, wait five minutes with a foreground `sleep 300`, call
-    `kanban_heartbeat`, and call `kanban_request_review` again. Keep waiting
-    up to one hour after the last push.
+    pending, wait five minutes with a foreground `sleep 300` and call
+    `kanban_heartbeat`. Then run the step 4 `gh pr view` again and make the
+    call that its `state` selects, because a person can merge the pull
+    request while you wait. Keep waiting up to one hour after the last push.
+  - `BLOCKED` with every check passed can mean unresolved review threads.
+    Resolve the threads the fix addressed as in step 4.
   - Otherwise, or when the wait runs out, write the refusal text to a message
     file and resume Claude with it, then return to step 4.
   - Do not block the card for a state Claude can still change. Each block

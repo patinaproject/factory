@@ -71,16 +71,16 @@ def call_hook(shell, env=WORKER_ENV, ctx=None, tool_name="kanban_complete", args
 
 class EvaluateTest(unittest.TestCase):
     def test_clean_open_ready_pr_at_local_head_passes(self):
-        self.assertEqual(gate.evaluate(CLEAN, HEAD), [])
+        self.assertEqual(gate.evaluate(CLEAN, HEAD, "kanban_complete"), [])
 
     def test_merged_pr_at_local_head_passes_whatever_its_merge_state(self):
         merged = {**CLEAN, "state": "MERGED", "mergeStateStatus": "UNKNOWN"}
-        self.assertEqual(gate.evaluate(merged, HEAD), [])
+        self.assertEqual(gate.evaluate(merged, HEAD, "kanban_complete"), [])
 
     def test_merged_pr_at_another_head_is_blocked(self):
         merged = {**CLEAN, "state": "MERGED", "mergeStateStatus": "UNKNOWN", "headRefOid": OTHER}
         self.assertEqual(
-            gate.evaluate(merged, HEAD),
+            gate.evaluate(merged, HEAD, "kanban_complete"),
             [f"headRefOid is '{OTHER}' but the worktree HEAD is '{HEAD}': push the worktree's commits, or pull if the remote branch is ahead"],
         )
 
@@ -92,19 +92,19 @@ class EvaluateTest(unittest.TestCase):
         }
         for field, (value, expected) in cases.items():
             with self.subTest(field=field):
-                failures = gate.evaluate({**CLEAN, field: value}, HEAD)
+                failures = gate.evaluate({**CLEAN, field: value}, HEAD, "kanban_complete")
                 self.assertEqual(len(failures), 1)
                 self.assertTrue(failures[0].startswith(expected), failures[0])
 
     def test_every_non_clean_merge_state_blocks(self):
         for status in ["UNSTABLE", "BEHIND", "BLOCKED", "DIRTY", "UNKNOWN", "HAS_HOOKS", "DRAFT", None]:
             with self.subTest(status=status):
-                failures = gate.evaluate({**CLEAN, "mergeStateStatus": status}, HEAD)
+                failures = gate.evaluate({**CLEAN, "mergeStateStatus": status}, HEAD, "kanban_complete")
                 self.assertEqual(len(failures), 1)
                 self.assertTrue(failures[0].startswith(f"mergeStateStatus is {status!r}"), failures[0])
 
     def test_missing_fields_fail_every_condition(self):
-        self.assertEqual(len(gate.evaluate({}, HEAD)), 4)
+        self.assertEqual(len(gate.evaluate({}, HEAD, "kanban_complete")), 4)
 
 
 class HookScopeTest(unittest.TestCase):
@@ -188,6 +188,17 @@ class HookDecisionTest(unittest.TestCase):
 
     def test_review_handoff_with_ready_pr_is_allowed(self):
         self.assertIsNone(call_hook(FakeShell(), tool_name="kanban_request_review"))
+
+    def test_review_handoff_with_merged_pr_is_blocked_toward_completion(self):
+        merged = {**CLEAN, "state": "MERGED", "mergeStateStatus": "UNKNOWN"}
+        result = call_hook(FakeShell(pr=merged), tool_name="kanban_request_review")
+        self.assertEqual(result["action"], "block")
+        self.assertIn("state is 'MERGED'", result["message"])
+        self.assertIn("call kanban_complete instead", result["message"])
+
+    def test_completion_with_merged_pr_is_allowed(self):
+        merged = {**CLEAN, "state": "MERGED", "mergeStateStatus": "UNKNOWN"}
+        self.assertIsNone(call_hook(FakeShell(pr=merged), tool_name="kanban_complete"))
 
     def test_review_handoff_without_a_pr_is_blocked(self):
         result = call_hook(FakeShell(gh_returncode=1), tool_name="kanban_request_review")

@@ -33,9 +33,11 @@ class GateError(Exception):
     pass
 
 
-def evaluate(pr: dict, local_head: str) -> list[str]:
+def evaluate(pr: dict, local_head: str, tool_name: str) -> list[str]:
     failures = []
     state = pr.get("state")
+    if state == "MERGED" and tool_name == "kanban_request_review":
+        return ["state is 'MERGED', so there is nothing left to review: call kanban_complete instead"]
     if state == "MERGED":
         # A merged pull request is past ready-to-merge; only its head still has to be the worker's commit.
         return _head_failures(pr, local_head)
@@ -81,7 +83,7 @@ def _published_pr(args: Any) -> Optional[str]:
     return None
 
 
-def check(args: Any, env: dict) -> tuple[str, list[str]]:
+def check(tool_name: str, args: Any, env: dict) -> tuple[str, list[str]]:
     workspace = env.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
         raise GateError("HERMES_KANBAN_WORKSPACE is not set, so the worktree is unknown")
@@ -102,7 +104,7 @@ def check(args: Any, env: dict) -> tuple[str, list[str]]:
         raise GateError(f"`gh pr view {target}` returned malformed JSON: {raw[:200]!r}")
     if not isinstance(pr, dict):
         raise GateError(f"`gh pr view {target}` returned {type(pr).__name__}, expected an object")
-    return pr.get("url") or target, evaluate(pr, local_head)
+    return pr.get("url") or target, evaluate(pr, local_head, tool_name)
 
 
 def make_hook(ctx: Any):
@@ -113,7 +115,7 @@ def make_hook(ctx: Any):
         if profile not in ctx.get_config("gated_profiles", default=DEFAULT_GATED_PROFILES):
             return None
         try:
-            pr, failures = check(args, dict(os.environ))
+            pr, failures = check(tool_name, args, dict(os.environ))
         except GateError as exc:
             return {
                 "action": "block",

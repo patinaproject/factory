@@ -166,10 +166,14 @@ Type `AgentSessionEvent`, action `prompted`, activity signal `stop`.
 
 1. Read the issue with `linear_issue` and find its card. If there is none,
    post a `response` saying there was no work to stop, and stop.
-2. If the card is `ready`, `running`, `todo`, or `review`, run
+2. If the card is `review`, first run
+   `hermes kanban reopen-review <task id> --reason stopped`. Hermes blocks only
+   a `ready` or `running` card, and this returns the card to `ready`.
+3. If the card is now `ready`, `running`, or `todo`, run
    `hermes kanban block <task id> stopped`. Blocking ends the worker's run, and
-   the Kanban dispatcher terminates a worker that outlives its run.
-3. Post a `response` on this agent session saying the work is stopped and the
+   the Kanban dispatcher terminates a worker that outlives its run. A blocked
+   card whose pull request merges still moves to `done` through GitHub triage.
+4. Post a `response` on this agent session saying the work is stopped and the
    card is blocked, and that a reply or a new delegation resumes it.
 
 ## Issue change
@@ -178,13 +182,18 @@ Type `Issue`. The issue is the data change issue.
 
 1. Read the issue with `linear_issue`.
 2. Find the issue's card.
-3. If the issue's `stateType` is `completed` or `canceled`, run
+3. If the issue's `stateType` is `completed` and the card is `review`,
+   comment on the card that the Linear issue is done, and stop. Do not archive
+   it. Merging the pull request usually marks the issue done, and GitHub
+   triage moves the card to `done` on the merge. Hermes cannot complete an
+   archived card, so archiving first would leave it unfinished.
+4. Otherwise, if the issue's `stateType` is `completed` or `canceled`, run
    `hermes kanban archive <task id>` when a card exists, and stop.
-4. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`, the
+5. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`, the
    issue was un-delegated. If a card exists and is not `blocked` and not
-   `done`, run `hermes kanban block <task id> undelegated`. Do not archive it.
-   Stop.
-5. Otherwise the issue was just delegated to the agent. Linear opens a new
+   `done`, stop it as in "Stop" steps 2 and 3, with reason `undelegated` in
+   place of `stopped`. Do not archive it. Stop.
+6. Otherwise the issue was just delegated to the agent. Linear opens a new
    agent session on an issue's first delegation, but a re-delegation can
    arrive with no "Session created" event.
    - Compare the issue's newest `agentSessions` entry whose `appUserId` is
