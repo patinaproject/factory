@@ -326,6 +326,16 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (1, f"config kanban.review_dispatch in {self.root}: is not false (part 10)\n"))
 
+    def test_default_assignee_that_would_route_an_unassigned_ready_card(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "kanban.default_assignee": "claude-worker"})
+
+        self.assertEqual(self.check(), (1, f"config kanban.default_assignee in {self.root}: is not unset (part 10)\n"))
+
+    def test_empty_default_assignee_is_unset(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "kanban.default_assignee": ""})
+
+        self.assertEqual(self.check(), (0, ""))
+
     def test_worker_wait_limit_that_differs_from_the_runbook(self) -> None:
         self.config(self.worker, {**WORKER_CONFIG, "terminal.timeout": 1200})
 

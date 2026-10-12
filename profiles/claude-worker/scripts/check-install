@@ -92,6 +92,10 @@ def one_of(*wants: Want) -> Want:
     return Want(lambda live: any(want.ok(live) for want in wants), " or ".join(want.text for want in wants))
 
 
+def unset() -> Want:
+    return Want(lambda live: live in (None, ""), "unset")
+
+
 def declared(what: str, *, besides: tuple = ()) -> Want:
     """A per-factory value from the runbook's inputs: any value counts, except an empty one or `besides`."""
     return Want(lambda live: live not in (None, "", *besides), what)
@@ -153,6 +157,7 @@ CONFIG = (
     ConfigKey(10, "kanban.max_in_progress", (ROOT,), declared("set to the operator's card limit")),
     ConfigKey(10, "kanban.review_dispatch", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.auto_decompose", (ROOT,), equal(False)),
+    ConfigKey(10, "kanban.default_assignee", (ROOT,), unset()),
     ConfigKey(5, "terminal.timeout", (WORKER,), equal(400)),
     ConfigKey(13, "streaming.enabled", (ROOT,), equal(True)),
     ConfigKey(13, "platforms.slack.extra.native_task_cards", (ROOT,), equal(True)),
