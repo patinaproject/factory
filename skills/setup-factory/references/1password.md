@@ -36,12 +36,17 @@ Ask the operator for these. None of them is a secret.
 | The Infisical project ID, environment, and folder from [`infisical.md`](infisical.md) | `<project id>`, `<environment>`, `<folder>` |
 | The directory that holds the tools setup installed | `<bin dir>`, for example `~/.local/bin` |
 | A directory for the wrapper that is not on the gateway's `PATH` | `<wrapper dir>`, for example `~/.local/libexec/op-wrapper` |
+| The owner-only files that hold the machine identity's client ID and client secret | `<home>/.env` by default, or separate mode `0600` files such as `<id file>` and `<secret file>` |
 
 ## Check
 
 Run these in a new operator login shell. All of them must hold:
 
-- `command -v op` prints `<wrapper dir>/op`.
+- `command -v op` prints `<wrapper dir>/op`. With the shell-function
+  alternative from [Install the op wrapper](#install-the-op-wrapper),
+  `type op` reports a function instead.
+- `ls -l` on each file that holds the machine identity's credentials shows
+  `-rw-------`, owned by the operator.
 - `op whoami` exits `0`.
 - `op user get --me | grep -c '^Type: *SERVICE_ACCOUNT'` prints `1`.
 - `op vault list --format json | python3 -c 'import json, sys; print(len(json.load(sys.stdin)))'`
@@ -56,8 +61,10 @@ If all of them hold, skip to [Verify](#verify).
 
 ## Install 1Password CLI
 
-Install the official `op` binary into `<bin dir>`. On macOS, the Homebrew cask
-can be blocked by system security policy. Use the direct download instead.
+Install the official `op` binary. On macOS, the Homebrew cask
+`1password-cli` works when system security policy allows it, and `<bin dir>`
+is then Homebrew's `bin` directory. When policy blocks the cask, use the
+direct download into `<bin dir>`.
 
 Download the latest release for the machine from the
 [1Password CLI release page](https://app-updates.agilebits.com/product_history/CLI2).
@@ -139,14 +146,25 @@ one.
 
 ## Install the op wrapper
 
-The wrapper gives the token to every shell type. A shell function covers only
-the shell that defines it, so the wrapper is a script on `PATH`, ahead of the
-real binary.
+The wrapper is a script that supplies the token to the real `op`. Two ways to
+reach it work:
+
+- **Recommended: the wrapper on `PATH` as `op`, ahead of the real binary.**
+  It covers every shell and every script the operator runs, because each one
+  finds `op` on `PATH`.
+- **Acceptable: a login-shell function named `op` that calls the wrapper.**
+  It covers only the shells that load the file that defines it. Scripts in
+  `sh` or `bash`, and shells of another type, run the real `op` with no
+  token.
+
+Either way, the wrapper reads the machine identity's credentials from files
+that only the operator can read, mode `0600`. Never export them as shell
+environment variables, which every process the shell starts inherits.
 
 The wrapper does these things:
 
-- It reads the machine identity credential from `<home>/.env` without
-  sourcing the file.
+- It reads the client ID and client secret from their owner-only files
+  without sourcing them, and passes them only to the `infisical login` call.
 - It signs in to Infisical as the machine identity, the same way the Hermes
   helper does.
 - It reads only `OP_SERVICE_ACCOUNT_TOKEN`, exports it, and runs the real
@@ -165,14 +183,14 @@ US Cloud.
 set -u
 export INFISICAL_DISABLE_UPDATE_CHECK=true
 real_op='<bin dir>/op'
-env_file='<home>/.env'
 
 with_timeout() { perl -e 'alarm shift; exec @ARGV or die "exec failed\n"' 20 "$@"; }
-env_value() { sed -n "s/^$1=//p" "$env_file" | head -n 1; }
+client_id() { sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' '<home>/.env' | head -n 1; }
+client_secret() { sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' '<home>/.env' | head -n 1; }
 fail() { echo "op wrapper: $1" >&2; exit 1; }
 
-t=$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$(env_value FACTORY_INFISICAL_CLIENT_ID)" \
-  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$(env_value FACTORY_INFISICAL_CLIENT_SECRET)" \
+t=$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$(client_id)" \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$(client_secret)" \
   with_timeout infisical login --method=universal-auth --silent --plain 2>/dev/null) \
   && [ -n "$t" ] || fail "Infisical sign-in failed"
 
@@ -190,12 +208,30 @@ exec "$real_op" "$@"
 `perl` keeps the timer through `exec`, so it works where `timeout` is not
 installed, as on macOS.
 
-Put `<wrapper dir>` ahead of `<bin dir>` on `PATH` in the login file of each
-shell the operator uses, such as `~/.zprofile` and `~/.bash_profile`:
+When the credentials live in their own files, such as under
+`~/.config/infisical/`, change `client_id` and `client_secret` to read those
+files, for example `head -n 1 '<id file>'`. Keep each file at mode `0600`.
+
+For the recommended setup, put `<wrapper dir>` ahead of `<bin dir>` on `PATH`
+in the login file of each shell the operator uses, such as `~/.zprofile` and
+`~/.bash_profile`:
 
 ```sh
 export PATH="<wrapper dir>:$PATH"
 ```
+
+For the function alternative, save the wrapper under another name, such as
+`<wrapper dir>/op-with-token`, and set `real_op` to the real binary's full
+path. Then define the function in the shell's startup file:
+
+```sh
+op() { '<wrapper dir>/op-with-token' "$@"; }
+```
+
+Pick the startup file with care. `~/.zshenv` loads in every `zsh`, including
+any `zsh` that Hermes agents start, so they can call the function too. The
+agent instructions forbid it, but a file that only interactive shells load,
+such as `~/.zshrc`, keeps the function out of their shells.
 
 Do not add `<wrapper dir>` to the `PATH` that the gateway's service definition
 sets. Hermes agents then run the real `op`, with no token.
