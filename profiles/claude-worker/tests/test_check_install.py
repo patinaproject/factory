@@ -482,6 +482,30 @@ class CheckInstallTest(unittest.TestCase):
         self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
         self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
 
+    def claude_session(self, **fields) -> None:
+        settings = {**SETTINGS, "claude_session": fields}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+
+    def test_transport_model_without_a_sonnet_tier_is_reported(self) -> None:
+        self.claude_session(model="transport-model", tier_models={"haiku": "haiku-model"})
+
+        self.assertEqual(self.check(), (
+            1,
+            f"model tier claude_session in {self.worker}: has a model but no tier_models.sonnet, "
+            "so every subagent runs on that model (part 3)\n",
+        ))
+
+    def test_transport_model_with_a_sonnet_tier_is_silent(self) -> None:
+        self.claude_session(model="transport-model", tier_models={"sonnet": "sonnet-model"})
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_no_transport_model_needs_no_tiers(self) -> None:
+        self.claude_session(model="")
+
+        self.assertEqual(self.check(), (0, ""))
+
     def checkout(self) -> Path:
         path = self.tmp / "checkout"
         git(self.tmp, "clone", "-q", str(self.tmp / "seed"), str(path))

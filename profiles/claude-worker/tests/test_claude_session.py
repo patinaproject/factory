@@ -349,6 +349,54 @@ class ClaudeSessionTest(GitFixture):
         self.assertNotIn("EXAMPLE_PROXY_TOKEN", call["env"])
         self.assertFalse(Path(settings_path).exists())
 
+    def model_env(self, claude_session: dict) -> dict:
+        self.settings = self.write_settings([self.repository], {"model": "transport-model", **claude_session})
+        self.run_session()
+        env = self.claude_call()["settings"]["content"]["env"]
+        return {name: value for name, value in env.items() if name.endswith("_MODEL")}
+
+    def test_tiers_without_models_stay_on_the_transport_model(self) -> None:
+        self.assertEqual(self.model_env({}), {
+            "ANTHROPIC_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "transport-model",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "transport-model",
+        })
+
+    def test_tier_models_route_subagents_off_the_transport_model(self) -> None:
+        tiers = {"sonnet": "sonnet-model", "haiku": "haiku-model", "fable": "fable-model"}
+        self.assertEqual(self.model_env({"tier_models": tiers}), {
+            "ANTHROPIC_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "transport-model",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "sonnet-model",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "haiku-model",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "fable-model",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+        })
+
+    def test_a_tier_without_a_model_stays_on_the_transport_model(self) -> None:
+        env = self.model_env({"tier_models": {"haiku": "haiku-model"}})
+
+        self.assertEqual(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "haiku-model")
+        self.assertEqual(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "transport-model")
+        self.assertEqual(env["CLAUDE_CODE_SUBAGENT_MODEL"], "transport-model")
+
+    def test_invalid_tier_models_are_refused(self) -> None:
+        for value in ({"opus": "x"}, {"sonnet": 5}, {"sonnet": ""}, ["sonnet"], "sonnet"):
+            with self.subTest(tier_models=value):
+                self.settings = self.write_settings(
+                    [self.repository], {"model": "transport-model", "tier_models": value}
+                )
+
+                status, report = self.run_session()
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {
+                    "error": f"claude_session.tier_models {value!r} must map sonnet, haiku, fable to non-empty model ids",
+                })
+
     def test_claude_gets_only_the_allowlisted_environment(self) -> None:
         self.run_session(env={"LC_ALL": "C", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1", "SOME_API_KEY": "x"})
 

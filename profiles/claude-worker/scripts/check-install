@@ -483,6 +483,19 @@ def check_checkouts(settings) -> list:
     return drifts
 
 
+def check_model_tiers(settings, worker: Path) -> list:
+    # Missing or malformed settings are check_config's to report.
+    session = settings.get("claude_session") if isinstance(settings, dict) else None
+    if not isinstance(session, dict) or not session.get("model"):
+        return []
+    if (session.get("tier_models") or {}).get("sonnet"):
+        return []
+    return [Drift(
+        "model tier", f"claude_session in {worker}",
+        "has a model but no tier_models.sonnet, so every subagent runs on that model (part 3)",
+    )]
+
+
 def homes() -> tuple:
     if not os.environ.get("HERMES_HOME"):
         raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
@@ -547,6 +560,7 @@ def main() -> int:
             *check_rejected_deliveries(root),
             *check_owned_refs(root),
             *check_checkouts(config_value(worker, hermes, SETTINGS_KEY)),
+            *check_model_tiers(config_value(worker, hermes, SETTINGS_KEY), worker),
         ]
         if sys.platform == "darwin":
             launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))
