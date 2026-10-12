@@ -12,7 +12,9 @@ run.
 
 It also checks that the config keys, cron jobs, and launchd services the setup
 runbook creates still match what it creates (the CONFIG, CRON, and SERVICES
-tables), that the worker home's secrets.command is the worker helper
+tables), that a cron job delivers only to a platform with a home channel in
+its profile, that the root home's check-install-alert wrapper matches the
+repository, that the worker home's secrets.command is the worker helper
 whenever the root home has a secret source, and that each configured
 repository checkout exists and has origin/HEAD set.
 
@@ -42,6 +44,10 @@ from typing import Callable, NamedTuple
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
 OWNED_REFS = "owned-refs.json"
+# Deliver values that name no platform, so no home channel is needed.
+NON_PLATFORM_TARGETS = ("local", "origin", "all")
+ROOT_ALERT_SCRIPT = "check-install-alert"
+ROOT_ALERT_SOURCE = f"skills/setup-factory/scripts/{ROOT_ALERT_SCRIPT}"
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -103,6 +109,12 @@ class CronJob(NamedTuple):
     name: str
     minutes: int
     deliver: Want
+    home: str = WORKER
+    script: str = ""
+
+    @property
+    def runs(self) -> str:
+        return self.script or self.name
 
 
 class Service(NamedTuple):
@@ -140,12 +152,17 @@ CONFIG = (
     ConfigKey(13, "platforms.slack.extra.native_task_cards", (ROOT,), equal(True)),
 )
 
-# Script-only jobs in the worker profile. Each runs the worker script of the same name.
+# Script-only jobs. A job belongs to the profile named by `home`: the worker for its own scripts, the root for a job
+# whose output must reach the operator's chat, because only the root profile runs the chat platform. A job runs the
+# script of the same name unless `script` names another.
 CRON = (
     CronJob(10, "refresh-gh-app-login", 30, equal("local")),
     CronJob(12, "refresh-checkouts", 60, equal("local")),
     CronJob(12, "refresh-owned-refs", 1, equal("local")),
-    CronJob(12, "check-install", 60, declared("the operator's chat platform", besides=("local",))),
+    CronJob(
+        12, "check-install", 60, declared("the operator's chat platform", besides=("local",)),
+        home=ROOT, script=ROOT_ALERT_SCRIPT,
+    ),
 )
 OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
 
@@ -384,33 +401,80 @@ def cron_differences(job: CronJob, live: dict) -> list:
     schedule = live["schedule"]
     if schedule.get("kind") != "interval" or schedule.get("minutes") != job.minutes:
         details.append(f"runs {live['schedule_display']}, not every {job.minutes}m")
-    if live["script"] != job.name or not live["no_agent"]:
-        details.append(f"is not a script-only job that runs {job.name}")
+    if live["script"] != job.runs or not live["no_agent"]:
+        details.append(f"is not a script-only job that runs {job.runs}")
     if not job.deliver.ok(live["deliver"]):
         details.append(f"delivers to {json.dumps(live['deliver'])}, not {job.deliver.text}")
     return details
 
 
-def check_cron(root: Path, worker: Path) -> list:
-    drifts = []
-    worker_jobs = cron_jobs(worker)
+def env_has(home: Path, name: str) -> bool:
+    """Whether `<home>/.env` sets `name` to a non-empty value. Values are never returned."""
+    path = home / ".env"
+    if not path.is_file():
+        return False
+    for line in path.read_text().splitlines():
+        key, sep, value = line.strip().removeprefix("export ").partition("=")
+        if sep and key.strip() == name and value.strip().strip("'\""):
+            return True
+    return False
+
+
+def unresolved_deliveries(home: Path, live: dict, hermes: str) -> list:
+    """Name each platform the job delivers to that has no home channel in the profile that owns the job.
+
+    Hermes resolves a bare platform name through that platform's home channel in the owning profile and drops the
+    output when it has none, which the scheduler logs as "no delivery target resolved".
+    """
+    details = []
+    for target in str(live["deliver"]).split(","):
+        platform = target.strip().lower()
+        if not platform or ":" in platform or platform in NON_PLATFORM_TARGETS or platform.startswith("bot-chat"):
+            continue
+        if env_has(home, f"{platform.upper()}_HOME_CHANNEL"):
+            continue
+        if config_value(home, hermes, f"platforms.{platform}.home_channel"):
+            continue
+        details.append(f"delivers to {platform}, which has no home channel in {home}, so Hermes drops its output")
+    return details
+
+
+def check_root_alert_script(commit: Commit, root: Path) -> list:
+    if ROOT_ALERT_SOURCE not in commit.files(ROOT_ALERT_SOURCE):
+        return []
+    installed = root / "scripts" / ROOT_ALERT_SCRIPT
+    where = str(installed)
+    if not installed.is_file():
+        return [Drift("script", where, f"is missing; install it from {ROOT_ALERT_SOURCE} (part 12)")]
+    if installed.read_bytes() != commit.blob(commit.files(ROOT_ALERT_SOURCE)[ROOT_ALERT_SOURCE]):
+        return [Drift("script", where, f"differs from {commit.label} at {commit.short} (part 12)")]
+    return []
+
+
+def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
+    homes = {ROOT: root, WORKER: worker}
+    live_jobs = {name: cron_jobs(home) for name, home in homes.items()}
+    drifts = check_root_alert_script(commit, root)
     for job in CRON:
-        where = f"{job.name} in {worker}"
-        found = [live for live in worker_jobs if live["name"] == job.name]
+        home = homes[job.home]
+        where = f"{job.name} in {home}"
+        found = [live for live in live_jobs[job.home] if live["name"] == job.name]
         if not found:
             drifts.append(Drift("cron job", where, f"is missing (part {job.part})"))
         elif len(found) > 1:
             drifts.append(Drift("cron job", where, f"exists {len(found)} times (part {job.part})"))
         for live in found:
-            drifts.extend(Drift("cron job", where, f"{d} (part {job.part})") for d in cron_differences(job, live))
-    parts = {job.name: job.part for job in CRON}
-    for home, jobs in ((root, cron_jobs(root)), (worker, worker_jobs)):
+            details = [*cron_differences(job, live), *unresolved_deliveries(home, live, hermes)]
+            drifts.extend(Drift("cron job", where, f"{d} (part {job.part})") for d in details)
+    owners = {job.name: job for job in CRON}
+    for name, jobs in live_jobs.items():
         for live in jobs:
-            where = f"{live['name']} in {home}"
-            if live["name"] not in parts:
+            where = f"{live['name']} in {homes[name]}"
+            owner = owners.get(live["name"])
+            if owner is None:
                 drifts.append(Drift("cron job", where, "is not a job the setup runbook creates"))
-            elif home == root:
-                drifts.append(Drift("cron job", where, f"belongs to the worker profile (part {parts[live['name']]})"))
+            elif owner.home != name:
+                drifts.append(Drift("cron job", where, f"belongs to the {owner.home} profile (part {owner.part})"))
     return drifts
 
 
@@ -541,7 +605,7 @@ def main() -> int:
             *check_plugins(commit, [root, worker]),
             *check_config({ROOT: root, WORKER: worker}, hermes),
             *check_worker_secrets(root, worker, hermes),
-            *check_cron(root, worker),
+            *check_cron(commit, root, worker, hermes),
             *check_routes(commit, root, hermes),
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),

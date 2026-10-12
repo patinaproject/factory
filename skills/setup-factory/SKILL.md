@@ -781,9 +781,10 @@ belongs to the worker profile.
 `refresh-checkouts`. `cron create` does not remove duplicates. If more than one
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
-jobs: `refresh-checkouts`, `refresh-owned-refs`, `refresh-gh-app-login`, and
-`check-install`. A copy there runs without the worker's scripts and settings,
-so remove it the same way. A second setup session runs this check before it
+jobs: `refresh-checkouts`, `refresh-owned-refs`, and `refresh-gh-app-login`.
+A copy there runs without the worker's scripts and settings, so remove it the
+same way. The default home holds exactly one job, `check-install`, described
+below. A second setup session runs this check before it
 creates anything.
 
 **Create** the job only when the list has none:
@@ -818,22 +819,41 @@ factory plugins in both homes, and the installed webhook routes with
 that the dashboard's OIDC sign-in can keep a user signed in. It also reports
 machine changes this runbook cannot reproduce: a `config.yaml` key from parts
 4, 6, 10, or 13 that differs from what the part sets, a cron job that is
-missing, duplicated, changed, or not created by the runbook, and, on macOS, a
-launchd service from part 7 or 15 that is not installed, does not run at load,
-or is not running, and `<home>/owned-refs.json` that is missing or older
-than 5 minutes. It never prints a config value. It prints one line per
-difference and nothing when the install is current. It fetches
-first, so a merge shows up within the hour. Deliver it where the operator
-reads it: the home channel of the platform from part 13, such as `slack`.
-On a first install, create it after part 13. Create the job when `cron list`
-has no `check-install` job:
+missing, duplicated, changed, not created by the runbook, or in the wrong
+profile, a cron job that delivers to a platform with no home channel in its
+profile, the root home's `scripts/check-install-alert` when it is missing or
+differs from the repository, and, on macOS, a launchd service from part 7 or 15
+that is not installed, does not run at load, or is not running, and
+`<home>/owned-refs.json` that is missing or older than 5 minutes. It never
+prints a config value. It prints one line per difference and nothing when the
+install is current. It fetches first, so a merge shows up within the hour.
+
+Deliver it where the operator reads it: the home channel of the platform from
+part 13, such as `slack`. Only the default (root) profile runs that platform
+and has its home channel. The gateway refuses the platform's credential in a
+second profile, and Hermes drops the output of a job whose profile has no home
+channel for its `--deliver` platform, logging `no delivery target resolved`.
+So this job belongs to the root profile, unlike the other jobs in this part.
+Hermes runs a cron script from the owning profile's own `scripts/` directory,
+so install the wrapper there. It runs the worker's current `check-install` with
+the worker home, so the job never runs a stale copy. On a first install, do
+this after part 13. Run it from the factory checkout:
 
 ```sh
-hermes -p claude-worker cron create "every 1h" --name check-install --no-agent --script check-install --deliver <platform> </dev/null
+install -m 0644 skills/setup-factory/scripts/check-install-alert <root>/scripts/check-install-alert
+```
+
+Then create the job when `hermes cron list` for the root profile has no
+`check-install` job:
+
+```sh
+hermes cron create "every 1h" --name check-install --no-agent --script check-install-alert --deliver <platform> </dev/null
 ```
 
 The job exits non-zero while drift exists, so its failure notice goes to the
-same platform.
+same platform. A factory that created this job in the worker profile earlier
+removes that copy with `hermes -p claude-worker cron remove <job id>`, with the
+operator's approval, after the root job exists.
 
 **Verify.** Run each job through Hermes once, then read its status:
 
@@ -1141,6 +1161,12 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
      or allow the `refresh_tokens` grant on the `saas` Access application when
      the line names the issuer. Then restart the dashboard service.
+   - A `script <root>/scripts/check-install-alert` line: install the wrapper
+     again with the part 12 `install` command.
+   - A `cron job check-install` line: the job is missing, in the wrong
+     profile, or delivers to a platform with no home channel. Create it in the
+     root profile as in part 12, and remove a leftover copy in the worker
+     profile. Set the platform's home channel in the root home as in part 13.
    - A `config`, `cron job`, or `service` line: the machine differs from what
      the named part produces. If the runbook is right, run that part again.
      If the machine is right, change the part and its row in `check-install`
