@@ -289,7 +289,15 @@ class ClaudeSessionTest(GitFixture):
 
     def test_an_idle_transcript_without_a_readable_context_starts_fresh(self) -> None:
         cwd = json.dumps({"type": "user", "cwd": str(self.worktree.resolve())})
-        for name, raw in (("no assistant usage", None), ("corrupt tail", f"{cwd}\nnot json\n{{broken")):
+        big = json.dumps({"type": "assistant", "message": {"usage": {
+            "input_tokens": 1, "cache_read_input_tokens": 1, "cache_creation_input_tokens": 1}}})
+        cut = json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 1}}})
+        cases = (
+            ("no assistant usage", None),
+            ("corrupt tail", f"{cwd}\nnot json\n{{broken"),
+            ("last usage incomplete", f"{cwd}\n{big}\n{cut}\n"),
+        )
+        for name, raw in cases:
             with self.subTest(name):
                 shutil.rmtree(self.claude_config / "projects", ignore_errors=True)
                 self.write_transcript(idle=HOUR, raw=raw)

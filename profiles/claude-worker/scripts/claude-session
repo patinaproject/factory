@@ -92,6 +92,7 @@ COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
 HANDOFF_RESULT_CHARS = 2000
+USAGE_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 QUIET_SECONDS = 1.0
 GRACE_SECONDS = 10.0
 TOOLCHAIN_CHECK_SECONDS = 120
@@ -280,16 +281,14 @@ def find_transcript(session_id: str, worktree: Path) -> Path | None:
 
 
 def session_id_for(issue_id: str, generation: int) -> str:
-    # Generation 0 keeps the ID every earlier run used. A fresh start takes the next generation,
-    # because `--session-id` refuses an ID whose transcript exists.
+    # A fresh start takes the next generation, because `--session-id` refuses an ID whose transcript exists.
     key = f"linear-issue:{issue_id}" if generation == 0 else f"linear-issue:{issue_id}:{generation}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
 def last_assistant(transcript: Path) -> tuple[int | None, str | None]:
-    """Context size of the last assistant turn that reported usage, and the last assistant text."""
     tokens = text = None
-    with open(transcript, encoding="utf-8") as lines:
+    with open(transcript, encoding="utf-8", errors="replace") as lines:
         for line in lines:
             try:
                 entry = json.loads(line)
@@ -299,15 +298,13 @@ def last_assistant(transcript: Path) -> tuple[int | None, str | None]:
             if not isinstance(message, dict) or entry.get("isSidechain") or message.get("model") == "<synthetic>":
                 continue
             usage = message.get("usage")
-            if isinstance(usage, dict):
-                parts = [usage.get(key) for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
-                if all(isinstance(part, int) and not isinstance(part, bool) for part in parts):
-                    tokens = sum(parts)
+            parts = [usage.get(key) for key in USAGE_KEYS] if isinstance(usage, dict) else []
+            ok = len(parts) == len(USAGE_KEYS) and all(isinstance(part, int) and not isinstance(part, bool) for part in parts)
+            tokens = sum(parts) if ok else None
             content = message.get("content")
             blocks = content if isinstance(content, list) else []
             said = "\n".join(b["text"] for b in blocks if isinstance(b, dict) and isinstance(b.get("text"), str)).strip()
-            if said:
-                text = said
+            text = said or None
     return tokens, text
 
 
@@ -319,7 +316,6 @@ def fresh_after_tokens(transport: dict) -> int:
 
 
 def plan_session(issue_id: str, worktree: Path, threshold: int, now: float) -> SessionPlan:
-    """Resume while the prompt cache is warm or the context is small; otherwise start a new session."""
     generation, latest = 0, None
     while found := find_transcript(session_id_for(issue_id, generation), worktree):
         latest, generation = found, generation + 1
@@ -654,9 +650,6 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     prefix = worker_entry_prefix(repo)
     worktree = resolve_worktree(workspace, repo["path"])
     check_toolchain(repo, worktree)
-    plan = plan_session(args.issue_id, worktree, threshold, time.time())
-    session_id = plan.session_id
-
     lock_path = Path(git(worktree, "rev-parse", "--absolute-git-dir")) / LOCK_NAME
     with open(lock_path, "w") as lock:
         try:
@@ -667,6 +660,8 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         # A killed run leaves its file behind; os.open would also keep that file's mode.
         settings_path.unlink(missing_ok=True)
         remove_on_stop(settings_path)
+        plan = plan_session(args.issue_id, worktree, threshold, time.time())
+        session_id = plan.session_id
         for running_id in filter(None, [plan.previous_id, session_id]):
             if session_process_running(running_id):
                 raise Refusal(f"a process for Claude session {running_id} is already running")
