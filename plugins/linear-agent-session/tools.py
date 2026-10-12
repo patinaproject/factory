@@ -53,7 +53,7 @@ ISSUE_ARGUMENT_NAMES = ("issue", "id", "issue_id")
 ISSUE_SCHEMA = {
     "name": "linear_issue",
     "description": (
-        "Read the Linear issue named by issue (UUID or ABC-123). Reads as the agent app and returns "
+        "Read the Linear issue named by `issue` (UUID or ABC-123). Reads as the agent app and returns "
         "id, identifier, title, url, gitBranchName, priority, priorityName, "
         "cardPriority (the Kanban card priority for this issue), "
         "state, stateType, delegate (the delegate's user ID, or null), attachments, and agentSessions "
@@ -66,7 +66,7 @@ ISSUE_SCHEMA = {
 SESSION_CREATE_SCHEMA = {
     "name": "linear_agent_session_create",
     "description": (
-        "Open an agent session on issue (UUID or ABC-123). Acts as the agent app, for a delegation "
+        "Open an agent session on `issue` (UUID or ABC-123). Acts as the agent app, for a delegation "
         "that arrived without a session. Returns the agent_session_id."
     ),
     "parameters": ISSUE_PARAMETERS,
@@ -91,7 +91,7 @@ DELEGATED_ISSUES_SCHEMA = {
 UNDELEGATE_SCHEMA = {
     "name": "linear_issue_undelegate",
     "description": (
-        "Undelegate the agent app from issue (UUID or ABC-123). Refuses an issue delegated to a "
+        "Undelegate the agent app from `issue` (UUID or ABC-123). Refuses an issue delegated to a "
         "different agent. Returns removed: false when the issue had no delegate."
     ),
     "parameters": ISSUE_PARAMETERS,

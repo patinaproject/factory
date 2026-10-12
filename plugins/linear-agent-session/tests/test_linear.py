@@ -225,11 +225,19 @@ class IssueArgumentTest(unittest.TestCase):
                 self.assertEqual(output, {"error": "pass issue: the issue UUID or identifier such as ABC-123"})
                 self.assertEqual(fake.graphql_requests, [])
 
-    def test_issue_schemas_require_nothing_hermes_would_refuse_first(self):
+    def test_hermes_lets_every_guessed_name_reach_the_handler(self):
+        # Hermes refuses a deferred tool_call that lacks a name in the schema's "required" list.
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA):
+            for name in ("issue", "id", "issue_id"):
+                with self.subTest(tool=schema["name"], name=name):
+                    missing = [r for r in schema["parameters"].get("required", []) if r not in {name: "ABC-9"}]
+                    self.assertEqual(missing, [])
+
+    def test_the_deferred_catalog_line_names_the_argument(self):
+        # Hermes lists a deferred tool by the first 60 characters of its description.
         for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA):
             with self.subTest(tool=schema["name"]):
-                self.assertNotIn("required", schema["parameters"])
-                self.assertEqual(list(schema["parameters"]["properties"]), ["issue"])
+                self.assertIn("`issue`", schema["description"][:60])
 
 
 class IssueTest(unittest.TestCase):
