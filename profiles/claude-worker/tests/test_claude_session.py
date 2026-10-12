@@ -149,25 +149,27 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(self.claude_call()["argv"][1], f"/patina-mode {DEFAULT_ENTRY}")
 
-    def test_worker_entry_template_is_rendered(self) -> None:
-        self.repository["worker_entry"] = "/work-issue {issue_identifier} {issue_id} {issue_url} {branch} {repo}"
-        self.settings = self.write_settings([self.repository])
-
-        self.run_session()
-
-        self.assertEqual(
-            self.claude_call()["argv"][1],
-            f"/work-issue ABC-123 {ISSUE_ID} https://linear.app/example/issue/ABC-123 abc-123-fix {REPO} {DEFAULT_ENTRY}",
-        )
-
-    def test_unexpected_error_is_reported_as_one_json_line(self) -> None:
-        self.repository["worker_entry"] = "Run {unknown_field}"
+    def test_worker_entry_with_fields_is_refused_before_claude_starts(self) -> None:
+        entry = "/patina-mode Work Linear issue {issue_identifier} on branch {branch}."
+        self.repository["worker_entry"] = entry
         self.settings = self.write_settings([self.repository])
 
         status, report = self.run_session()
 
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {
+            "error": f"worker_entry {entry!r} must be a plain prefix such as /patina-mode; "
+            "claude-session adds the issue, URL, repository, and branch itself",
+        })
+        self.assertFalse(self.log.exists())
+
+    def test_unexpected_error_is_reported_as_one_json_line(self) -> None:
+        missing = self.main / "no-such-message.txt"
+
+        status, report = self.run_session("--message-file", str(missing))
+
         self.assertEqual(status, 1)
-        self.assertEqual(report, {"error": "KeyError: 'unknown_field'"})
+        self.assertEqual(report, {"error": f"FileNotFoundError: [Errno 2] No such file or directory: '{missing}'"})
 
     def test_refuses_while_the_worktree_lock_is_held(self) -> None:
         lock_path = Path(git(self.worktree, "rev-parse", "--absolute-git-dir")) / "claude-session.lock"

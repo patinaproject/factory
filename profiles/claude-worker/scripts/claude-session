@@ -223,18 +223,29 @@ def max_turns_args(transport: dict) -> list[str]:
     return ["--max-turns", str(value)]
 
 
-def build_prompt(args: argparse.Namespace, repo: dict, branch: str, resumed: bool) -> str:
+def worker_entry_prefix(repo: dict) -> str:
+    prefix = repo.get("worker_entry") or ""
+    if "{" in prefix:
+        raise Refusal(
+            f"worker_entry {prefix!r} must be a plain prefix such as /patina-mode; "
+            "claude-session adds the issue, URL, repository, and branch itself"
+        )
+    return prefix
+
+
+def build_prompt(args: argparse.Namespace, prefix: str, branch: str, resumed: bool) -> str:
     message = Path(args.message_file).read_text() if args.message_file else ""
     if resumed:
         return message or RESUME_PROMPT
-    prefix = repo.get("worker_entry")
-    entry = (f"{prefix} {DEFAULT_WORKER_ENTRY}" if prefix else DEFAULT_WORKER_ENTRY).format(
+    entry = DEFAULT_WORKER_ENTRY.format(
         issue_id=args.issue_id,
         issue_identifier=args.issue_identifier,
         issue_url=args.issue_url,
         branch=branch,
         repo=args.repo,
     )
+    if prefix:
+        entry = f"{prefix} {entry}"
     if args.takeover_pr:
         entry = f"{entry}\n\n{TAKEOVER_ENTRY.format(url=args.takeover_pr)}"
     return f"{entry}\n\n{message}" if message else entry
@@ -248,6 +259,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     repo = find_repository(settings, args.repo)
     transport = settings.get("claude_session") or {}
     turn_limit = max_turns_args(transport)
+    prefix = worker_entry_prefix(repo)
     worktree = resolve_worktree(workspace, repo["path"])
     session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{args.issue_id}"))
 
@@ -265,7 +277,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         resumed = transcript_exists(session_id, worktree)
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),
-            "-p", build_prompt(args, repo, branch, resumed),
+            "-p", build_prompt(args, prefix, branch, resumed),
             "--output-format", "json",
             *turn_limit,
             "--permission-mode", "bypassPermissions",

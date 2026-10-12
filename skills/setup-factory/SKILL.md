@@ -433,7 +433,9 @@ Exactly one repository has `routing: default`. Leave
 set up a proxy. `worker_entry` is a prefix, such as `/patina-mode`, that
 `claude-session` puts before the built-in task prompt. The task prompt names
 the issue, its URL, the repository, and the branch, and is always sent. An
-empty `worker_entry` sends the task prompt alone. `claude_session.max_turns`
+empty `worker_entry` sends the task prompt alone. `claude-session` refuses a `worker_entry` that
+contains `{...}` fields, such as a full prompt from an older factory. Shorten
+it to the prefix. `claude_session.max_turns`
 caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
 one run can finish a whole task. A positive limit pauses a long task, such as
 a dependency upgrade, and the worker resumes it in a second run.

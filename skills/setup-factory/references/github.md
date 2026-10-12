@@ -302,7 +302,8 @@ also with `--no-verify` and in a repository with its own hooks. Fetches keep
 the normal URL, and `push-signed` publishes through GitHub's API, so neither
 changes. This changes the user's global git configuration, `~/.gitconfig`.
 Tell the operator before you run it. A remote with its own `pushurl` keeps
-that URL.
+that URL. To remove the guard, run
+`git config --global --unset-all url.no_push_use_push-signed/.pushInsteadOf`.
 
 ## Webhooks
 
