@@ -116,6 +116,14 @@ scope set, and the gateway then loses its token.
 On a machine without the plugin, the script prints no headers, and Claude Code
 asks for the usual OAuth sign-in.
 
+A worker run gets the Linear server in every repository, including one whose
+`.mcp.json` has no `headersHelper`. `claude-session` passes Claude Code a
+`--mcp-config` with a `linear` server whose `Authorization` header is
+`Bearer ${LINEAR_API_KEY}`. Claude Code fills in the run's token from the
+settings file. That entry replaces the repository's own `linear` server for
+the run only, so the repository needs no change, and a person's interactive
+session keeps the repository's own sign-in.
+
 Everything written through this server shows the app as its author.
 
 **Check.** In a checkout of this repository, run `claude mcp list` as the

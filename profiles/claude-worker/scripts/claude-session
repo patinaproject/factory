@@ -76,6 +76,13 @@ QUIET_SECONDS = 1.0
 GRACE_SECONDS = 10.0
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
+# Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
+# expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
+LINEAR_MCP_CONFIG = json.dumps({"mcpServers": {"linear": {
+    "type": "http",
+    "url": "https://mcp.linear.app/mcp",
+    "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
+}}})
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 
 
@@ -509,6 +516,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             "--permission-mode", "bypassPermissions",
             "--resume" if resumed else "--session-id", session_id,
             "--append-system-prompt", SYSTEM_PROMPT.format(push_signed=Path(__file__).resolve().with_name("push-signed")),
+            "--mcp-config", LINEAR_MCP_CONFIG,
         ]
         if transport.get("model"):
             command += ["--model", transport["model"]]

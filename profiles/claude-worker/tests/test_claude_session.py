@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -31,6 +32,10 @@ SYSTEM_PROMPT = (
     "timeout set, and run it again when it times out."
 )
 REPO = "example-org/example-repo"
+LINEAR_MCP_CONFIG = (
+    '{"mcpServers": {"linear": {"type": "http", "url": "https://mcp.linear.app/mcp", '
+    '"headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"}}}}'
+)
 DEFAULT_ENTRY = (
     "Work Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) in example-org/example-repo "
     "on branch abc-123-fix. First start the issue through this repository's own issue-start workflow, "
@@ -145,6 +150,7 @@ class ClaudeSessionTest(GitFixture):
             "--permission-mode", "bypassPermissions",
             "--session-id", SESSION_ID,
             "--append-system-prompt", SYSTEM_PROMPT,
+            "--mcp-config", LINEAR_MCP_CONFIG,
             "--settings", str(self.worktree_git_dir() / "claude-session.settings.json"),
         ])
         self.assertEqual(Path(call["cwd"]).resolve(), self.worktree)
@@ -165,6 +171,7 @@ class ClaudeSessionTest(GitFixture):
             "--permission-mode", "bypassPermissions",
             "--resume", SESSION_ID,
             "--append-system-prompt", SYSTEM_PROMPT,
+            "--mcp-config", LINEAR_MCP_CONFIG,
             "--settings", str(self.worktree_git_dir() / "claude-session.settings.json"),
         ])
 
@@ -312,6 +319,7 @@ class ClaudeSessionTest(GitFixture):
             "--permission-mode", "bypassPermissions",
             "--session-id", SESSION_ID,
             "--append-system-prompt", SYSTEM_PROMPT,
+            "--mcp-config", LINEAR_MCP_CONFIG,
             "--model", "example-model",
             "--settings", settings_path,
         ])
@@ -359,6 +367,19 @@ class ClaudeSessionTest(GitFixture):
         self.assertNotIn("LINEAR_API_KEY", call["env"])
         self.assertFalse(Path(call["argv"][-1]).exists())
         self.assertEqual([r for r in self.linear_requests(self.hermes_home) if "form" in r], [])
+
+    def test_the_linear_mcp_server_sends_the_run_token_without_putting_it_in_argv(self) -> None:
+        self.run_session()
+
+        call = self.claude_call()
+        argv = call["argv"]
+        server = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]["linear"]
+        env = call["settings"]["content"]["env"]
+        # Claude Code expands ${NAME} in MCP headers from its environment, which the settings env joins.
+        header = re.sub(r"\$\{(\w+)\}", lambda m: env[m.group(1)], server["headers"]["Authorization"])
+        self.assertEqual((server["type"], server["url"]), ("http", "https://mcp.linear.app/mcp"))
+        self.assertEqual(header, "Bearer cached-token")
+        self.assertFalse(any("cached-token" in arg for arg in argv))
 
     def test_a_revoked_cached_linear_token_is_replaced_with_the_plugin_scope(self) -> None:
         (self.hermes_home / "linear-fake.json").write_text(json.dumps({"accepted": []}))
