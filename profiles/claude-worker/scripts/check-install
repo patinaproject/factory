@@ -47,6 +47,14 @@ def equal(value) -> Want:
     return Want(lambda live: live == value, json.dumps(value))
 
 
+def prefixed(prefix: str, what: str) -> Want:
+    return Want(lambda live: isinstance(live, str) and live.startswith(prefix) and live != prefix, what)
+
+
+def one_of(*wants: Want) -> Want:
+    return Want(lambda live: any(want.ok(live) for want in wants), " or ".join(want.text for want in wants))
+
+
 def declared(what: str, *, besides: tuple = ()) -> Want:
     """A per-factory value from the runbook's inputs: any value counts, except an empty one or `besides`."""
     return Want(lambda live: live not in (None, "", *besides), what)
@@ -86,7 +94,11 @@ class Service(NamedTuple):
 # What each part of skills/setup-factory/SKILL.md sets. check_routes and check_dashboard cover the
 # routes and dashboard keys. Optional parts (3, 14) and secret-bearing keys are not listed.
 CONFIG = (
-    ConfigKey(4, "model.provider", BOTH, equal("claude-subscription-directsdk-experimental")),
+    ConfigKey(
+        4, "model.provider", BOTH,
+        one_of(equal("claude-subscription-directsdk-experimental"), prefixed("custom:", "custom:<proxy provider>")),
+        same_in_homes=True,
+    ),
     ConfigKey(4, "model.default", BOTH, declared("set to the operator's model alias")),
     ConfigKey(6, "platforms.webhook.enabled", (ROOT,), equal(True)),
     ConfigKey(6, "platforms.webhook.extra.host", (ROOT,), equal("127.0.0.1")),

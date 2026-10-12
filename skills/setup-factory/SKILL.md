@@ -86,7 +86,7 @@ your task notes, not in the repository.
 | --- | --- |
 | Hermes home directory (default `~/.hermes`) and install checkout | Every part |
 | Hermes release tag to pin, `v0.21.4` or later | Hermes |
-| Model alias for Hermes' own agent loop, for example `sonnet` | DirectSDK provider |
+| Model alias for Hermes' own agent loop, for example `sonnet` | Model provider |
 | Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
 | `kanban.max_in_progress` | Kanban |
 | Factory hostname, Cloudflare account, and zone | Ingress |
@@ -195,7 +195,7 @@ Run the parts in this order. Later parts depend on values from earlier ones.
 1. [Hermes](#1-hermes)
 2. [Claude Code CLI](#2-claude-code-cli)
 3. [Claude Code transport](#3-claude-code-transport)
-4. [DirectSDK model provider](#4-directsdk-model-provider)
+4. [Model provider](#4-model-provider)
 5. [Factory plugins and the worker profile](#5-factory-plugins-and-the-worker-profile)
 6. [Webhook secrets and listener](#6-webhook-secrets-and-listener)
 7. [Public ingress](#7-public-ingress)
@@ -276,12 +276,26 @@ This part is optional. Without a proxy, `claude-session` uses the CLI's own
 login from part 2. To set up a local Anthropic-compatible proxy, follow
 [`references/claude-transport.md`](references/claude-transport.md).
 
-## 4. DirectSDK model provider
+## 4. Model provider
 
-The provider runs Hermes' own agent loop on the Claude subscription. Configure
-it in the default home and in the worker profile. Part 5 creates the worker
-profile, so on a new machine run this part for `<home>` now and for the worker
-at the end of part 5.
+The model provider runs Hermes' own agent loop. Choose one of these and
+configure the same one in the default home and in the worker profile:
+
+| Provider | `model.provider` | Use it when |
+| --- | --- | --- |
+| DirectSDK | `claude-subscription-directsdk-experimental` | No proxy, or the operator wants only Claude Code on the proxy |
+| Proxy | `custom:<proxy provider>` | Part 3 set up a proxy and the operator wants Hermes on it too |
+
+`<proxy provider>` is a name the operator picks, such as `proxy`.
+`check-install` reports any other `model.provider`, and a value that differs
+between the two homes.
+
+Part 5 creates the worker profile, so on a new machine run this part for
+`<home>` now and for the worker at the end of part 5.
+
+### DirectSDK
+
+The provider runs Hermes' own agent loop on the Claude subscription.
 
 **Check**, for each home (`hermes` and `hermes -p claude-worker`):
 
@@ -326,7 +340,47 @@ when the chat appeared to finish. Each reply is `PONG`. A `{"title": ...}`
 object in place of the reply means the home's `.env` lacks
 `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1`.
 
-**Keep `ANTHROPIC_*` out of the gateway.** The provider refuses to start when
+### Proxy
+
+The provider sends Hermes' own agent loop to the proxy from part 3, through a
+Hermes custom provider. It needs the proxy port and, when the proxy requires a
+token, the token variable from part 3.
+
+**Check**, for each home (`hermes` and `hermes -p claude-worker`):
+
+```sh
+hermes config get model.provider                        # custom:<proxy provider>
+hermes config get model.default                         # an alias the proxy lists
+hermes config get providers.<proxy provider>.api        # http://127.0.0.1:<proxy port>
+hermes config get providers.<proxy provider>.transport  # anthropic_messages
+hermes config get providers.<proxy provider>.key_env    # <token variable>
+```
+
+When the proxy requires a token, `env_has <home>/.env <token variable>` and
+`env_has <worker>/.env <token variable>` each print `1`, or the Infisical
+folder holds the variable. The name does not start with `ANTHROPIC_`.
+
+**Configure** whatever the check found missing, in each home:
+
+```sh
+hermes config set providers.<proxy provider>.api http://127.0.0.1:<proxy port>
+hermes config set providers.<proxy provider>.transport anthropic_messages
+hermes config set providers.<proxy provider>.key_env <token variable>
+hermes config set model.provider custom:<proxy provider>
+hermes config set model.default <alias>
+```
+
+Skip the `key_env` line when the proxy needs no token. Part 3 stores the token
+in the Infisical folder or in `<worker>/.env`. Without Infisical, also store it
+in `<home>/.env` with `env_set`.
+
+**Verify** with the same `PONG` chats and `sqlite3` queries as DirectSDK. Each
+latest session names the alias and the billing provider `custom`, with non-zero
+token counts.
+
+### Keep `ANTHROPIC_*` out of the gateway
+
+This applies to either provider. The DirectSDK provider refuses to start when
 the environment holds `ANTHROPIC_AUTH_TOKEN` or another native override. Only
 `claude-session` sets `ANTHROPIC_*` variables, and only for the Claude Code
 process it starts. This check must print nothing:

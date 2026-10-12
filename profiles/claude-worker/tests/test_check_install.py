@@ -269,14 +269,34 @@ class CheckInstallTest(unittest.TestCase):
         self.assertTrue(out.startswith(f"dashboard sign-in {self.root}: cannot read the issuer's discovery document"))
 
     def test_config_key_that_differs_from_the_runbook(self) -> None:
-        self.config(self.worker, {**WORKER_CONFIG, "model.provider": "custom:proxy"})
         self.config(self.root, {**ROOT_CONFIG, "kanban.review_dispatch": True})
+
+        self.assertEqual(self.check(), (1, f"config kanban.review_dispatch in {self.root}: is not false (part 10)\n"))
+
+    def test_proxy_provider_from_part_3_is_accepted(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "model.provider": "custom:proxy"})
+        self.config(self.worker, {**WORKER_CONFIG, "model.provider": "custom:proxy"})
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_provider_the_runbook_does_not_document(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "model.provider": "openrouter"})
+        self.config(self.worker, {**WORKER_CONFIG, "model.provider": "openrouter"})
 
         self.assertEqual(
             self.check(),
-            (1, f"config model.provider in {self.worker}: "
-                'is not "claude-subscription-directsdk-experimental" (part 4)\n'
-                f"config kanban.review_dispatch in {self.root}: is not false (part 10)\n"),
+            (1, f"config model.provider in {self.root}: "
+                'is not "claude-subscription-directsdk-experimental" or custom:<proxy provider> (part 4)\n'
+                f"config model.provider in {self.worker}: "
+                'is not "claude-subscription-directsdk-experimental" or custom:<proxy provider> (part 4)\n'),
+        )
+
+    def test_provider_that_differs_between_homes(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "model.provider": "custom:proxy"})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config model.provider: differs between {self.root} and {self.worker} (part 4)\n"),
         )
 
     def test_config_drift_never_prints_the_live_value(self) -> None:

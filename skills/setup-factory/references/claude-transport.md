@@ -2,7 +2,9 @@
 
 `claude-session` can send Claude Code to an Anthropic-compatible endpoint, for
 example a local proxy. Claude Code still runs as the
-harness; only the model endpoint changes. The endpoint is optional. When
+harness; only the model endpoint changes. Hermes' own agent loop can use the
+same proxy through the proxy provider in part 4 of the skill. The endpoint is
+optional. When
 `claude_session` is empty, Claude Code uses whatever its user configuration
 says, which is its own login unless `~/.claude/settings.json` has an `env`
 block.
