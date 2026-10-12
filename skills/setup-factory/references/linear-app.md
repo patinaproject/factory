@@ -102,6 +102,35 @@ Expect `"app": true`. `viewer.id` is the app user ID, and it equals
 `app_user_id` in the settings. `"app": false` means the token acts as a person,
 not the app. Replace it with a token that Linear issued with `actor=app`.
 
+## Give Claude Code sessions Linear
+
+Claude Code sessions on the machine reach Linear through the app, so an agent
+never asks the operator to sign in. A user-scope MCP server named
+`linear-factory` connects to Linear's MCP server, and its `headersHelper` runs
+[`scripts/linear-mcp-headers`](../scripts/linear-mcp-headers) to send the app's
+token. The script takes the token from the plugin's client, which shares the
+gateway's token cache in `<home>`. Never get the token another way. Linear
+revokes all of an app's client credentials tokens when a request asks for a
+different scope set, and the gateway then loses its token.
+
+Everything this server writes shows the app as its author.
+
+**Check.** `claude mcp get linear-factory`, run as the gateway's user, shows
+scope `User`, the URL `https://mcp.linear.app/mcp`, and `Connected`.
+
+**Install.**
+
+```sh
+claude mcp add-json -s user linear-factory \
+  '{"type": "http", "url": "https://mcp.linear.app/mcp", "headersHelper": "python3 -I <repo>/skills/setup-factory/scripts/linear-mcp-headers"}'
+```
+
+The script reads `~/.hermes`. For another `<home>`, put `HERMES_HOME=<home>`
+before `python3` in the `headersHelper` command.
+
+**Verify.** Run the check again. Then start a session and ask it to read an
+issue with a `linear-factory` tool.
+
 ## Live test
 
 Run this after part 15 has restarted the gateway. Delegate a new test issue to

@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Print the Linear MCP server's request headers for Claude Code's headersHelper.
+
+Claude Code runs this when it connects to https://mcp.linear.app/mcp and sends
+the JSON object it prints as HTTP headers. The token is the factory's Linear
+agent app token from the linear-agent-session plugin's client, which shares the
+gateway's token cache. Never mint the token another way: Linear revokes all of
+an app's client credentials tokens when a request asks for a different scope
+set, and the gateway would lose its token.
+
+The app credentials come from <home>/.env, or from <home>/bin/factory-secrets
+when the factory keeps its secrets in Infisical. <home> is $HERMES_HOME, or
+~/.hermes.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+CREDENTIALS = ("LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET")
+
+
+def parse_dotenv(text: str) -> dict:
+    values = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.removeprefix("export ").partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def environment(home: Path) -> dict:
+    env = dict(os.environ)
+    dotenv = home / ".env"
+    if dotenv.exists():
+        env.update(parse_dotenv(dotenv.read_text(encoding="utf-8")))
+    helper = home / "bin" / "factory-secrets"
+    if not all(env.get(key) for key in CREDENTIALS) and helper.exists():
+        output = subprocess.run([str(helper)], env=env, capture_output=True, text=True, check=True).stdout
+        env.update({key: value for key, value in parse_dotenv(output).items() if key in CREDENTIALS})
+    env["HERMES_HOME"] = str(home)
+    return env
+
+
+def headers(home: Path) -> dict:
+    sys.path.insert(0, str(home / "plugins" / "linear-agent-session"))
+    import linear
+
+    return {"Authorization": f"Bearer {linear.client_from_env(environment(home))._access_token()}"}
+
+
+def main() -> int:
+    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    print(json.dumps(headers(home)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
