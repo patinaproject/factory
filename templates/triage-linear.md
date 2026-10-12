@@ -72,8 +72,9 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    `https://github.com/<owner>/<name>/issues/<number>`. If `<owner>/<name>`
    matches, ignoring case, a repository with routing `synced_github`, use that
    repository. Otherwise use the repository with routing `default`.
-4. Map the Linear priority to the card priority: Urgent (1) is 4, High (2) is 3,
-   Medium (3) is 2, Low (4) is 1, and No priority (0) is 0.
+4. Take the card priority from the issue's `cardPriority` and the priority
+   name from its `priorityName`. Use both exactly as `linear_issue` returns
+   them. Never derive them from `priority`.
 5. Find the issue's card. If there is none, look for cards this factory did
    not create: tasks whose status is not `done` or `archived`, whose `body`
    has no `linear_issue_id:` line, and whose `title` or `body` contains the
@@ -110,7 +111,7 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    ````sh
    hermes kanban create '<title>' \
      --assignee claude-worker \
-     --priority <card priority> \
+     --priority <cardPriority> \
      <card flags> \
      --branch '<branch>' \
      --idempotency-key 'linear:<issue id>' \
@@ -146,8 +147,7 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
      session saying the card must be reopened from the Kanban dashboard.
 7. If this run created the card, unblocked it, or moved it to this agent
    session, post one `action` activity on this agent session with `action`
-   `Queued as <task id>` and `parameter` `<priority name> · <repository full_name>`,
-   where the priority name is Urgent, High, Medium, Low, or No priority.
+   `Queued as <task id>` and `parameter` `<priorityName> · <repository full_name>`.
    <<queued_link>> Otherwise the card already belongs to this session: post
    nothing.
 

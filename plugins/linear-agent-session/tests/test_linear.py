@@ -241,6 +241,8 @@ class IssueTest(unittest.TestCase):
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "gitBranchName": "abc-123-fix-checkout",
                 "priority": 2,
+                "priorityName": "High",
+                "cardPriority": 3,
                 "state": "Todo",
                 "stateType": "unstarted",
                 "delegate": "app-user-1",
@@ -254,6 +256,15 @@ class IssueTest(unittest.TestCase):
             },
         )
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-123"})
+
+    def test_card_priority_inverts_the_linear_scale(self):
+        expected = {0: ("No priority", 0), 1: ("Urgent", 4), 2: ("High", 3), 3: ("Medium", 2), 4: ("Low", 1)}
+        for linear_priority, (name, card_priority) in expected.items():
+            with self.subTest(linear_priority=linear_priority):
+                response = json.loads(json.dumps(self.RESPONSE))
+                response["data"]["issue"]["priority"] = float(linear_priority)
+                issue = make_client(FakeLinear([(200, response)])).get_issue("ABC-123")
+                self.assertEqual((issue["priorityName"], issue["cardPriority"]), (name, card_priority))
 
     def test_issue_without_delegate(self):
         response = json.loads(json.dumps(self.RESPONSE))
