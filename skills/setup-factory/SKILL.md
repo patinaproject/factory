@@ -572,6 +572,18 @@ caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
 one run can finish a whole task. A positive limit pauses a long task, such as
 a dependency upgrade, and the worker resumes it in a second run.
 
+A card that waits in review leaves its Claude session idle past the 5-minute
+prompt cache, and a resumed large session re-writes its whole context at the
+cache-write price. `claude_session.fresh_after_tokens` sets the context size,
+in tokens, at which `claude-session` starts a new session instead. It is a
+positive integer and defaults to 100000. A run within 5 minutes of the
+session's last write always resumes. A later run resumes when the last
+context is under the setting, and otherwise starts a fresh session whose
+prompt names the branch, its commit, the previous transcript, and the previous
+run's last message. The run's JSON line reports `reason`: `new`, `warm`,
+`small`, `fresh-large-idle`, or `fresh-unreadable`. Leave the key out unless the
+default needs tuning.
+
 A repository whose workers verify on a simulator or emulator sets
 `toolchain_checks`, a list of shell commands, on its entry. Before each run,
 `claude-session` runs them in the worktree with the environment that Claude
