@@ -893,6 +893,12 @@ each check. Report each result.
     it completes, the worker asks in Linear whether to close the original and
     blocks with `needs_input`. It closes the original only after a human
     approves.
+18. Once a card's pull request is open, send a Linear `stop`, then reply in
+    the same agent session. In `hermes kanban show <task id> --json`, the
+    events after `blocked` are `unblocked`, `review_requested`, and
+    `review_reopened`. The next dispatcher tick starts a worker, no
+    `respawn_guarded` event with reason `active_pr` follows, and the card
+    completes without operator action.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` or `triage`
 card. The operator drags the card to Ready, which Hermes documents as a
