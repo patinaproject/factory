@@ -93,6 +93,11 @@ rule that only docs enforce is a candidate for a script, check, or test.
 | A new script is committed without the executable bit and run with `python3` | `push-signed` refuses a commit that adds an executable file, because GitHub's commit API cannot set file modes |
 | Commit type follows the changed paths | Docs only: "Commit type selection" below; commitlint checks only the format |
 | Tests never assert on documentation prose | Docs only: "Testing Guidelines" below |
+| Outside Access, a factory machine exposes only SSH, and SSH never accepts a password | `skills/setup-factory/scripts/check-host-exposure` in setup part 16, with tests in `skills/setup-factory/tests/` |
+| No sharing service is reachable, and the macOS firewall is on | `check-host-exposure` |
+| The SSH allowlist is one list of emails, never a domain; the sshd principals file mirrors it | `check-host-exposure --ssh-users`, which fails on drift and refuses a domain |
+| A privileged step runs as one script in the operator's terminal and refuses to lock anyone out | Docs only: the runbook's rule for privileged steps and the machine-wide block |
+| Agents on a factory machine know who owns ingress, how people reach the machine, and how to handle `sudo` | The machine-wide block, which setup part 17 compares with the template |
 
 ## Build, Test, and Development Commands
 
