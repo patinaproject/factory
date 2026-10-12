@@ -47,7 +47,8 @@ Run these in a new operator login shell. All of them must hold:
 - `op vault list --format json | python3 -c 'import json, sys; print(len(json.load(sys.stdin)))'`
   prints `1`, and `op vault list` names `<vault>`.
 - The Hermes helper output has no token line. The `helper_count` lines in
-  [Verify](#verify) each print `0`, for both homes.
+  [Verify](#verify) each print `token=0` with `keys=` greater than `0`, for
+  both homes.
 - `env_has <home>/.env OP_SERVICE_ACCOUNT_TOKEN` and
   `env_has <worker>/.env OP_SERVICE_ACCOUNT_TOKEN` each print `0`.
 
@@ -80,15 +81,26 @@ default
 
 > **HUMAN CHECKPOINT.** Ask the operator to do these in the 1Password web app:
 >
-> 1. Create the vault `<vault>`, and move only the operator-only credentials
+> 1. Open the account's billing page and note the number of seats in use.
+> 2. Create the vault `<vault>`, and move only the operator-only credentials
 >    into it.
-> 2. Create the service account `<service account name>`. Give it access to
+> 3. Create the service account `<service account name>`. Give it access to
 >    `<vault>` only, with the `read_items` permission only. Do not allow it to
 >    create vaults.
-> 3. 1Password shows the token once. Store it in the Infisical folder with the
+> 4. 1Password shows the token once. Store it in the Infisical folder with the
 >    `read -rs` line from [Store the secrets](infisical.md#store-the-secrets),
 >    with `<KEY>` set to `OP_SERVICE_ACCOUNT_TOKEN`. Do not paste it into chat,
 >    a file, or a `.env` file.
+
+Then confirm the cost.
+
+> **HUMAN CHECKPOINT.** Ask the operator to open the billing page again and
+> confirm that the service account added no seat. The number of seats in use
+> must match the number from step 1, and the monthly total must not change.
+> 1Password includes service accounts with the subscription
+> ([Secrets Automation](https://www.1password.dev/secrets-automation/)), but no
+> 1Password page states outright that one uses no seat. When the count went
+> up, stop and ask the operator whether to delete the service account.
 
 Check the folder by key names only:
 
@@ -204,15 +216,37 @@ helper_count() {
   cmd="$(hermes "$@" config get secrets.command --json 2>/dev/null </dev/null |
     python3 -c 'import json, sys; print(json.load(sys.stdin)["command"])')"
   [ -n "$cmd" ] || { echo "no secrets.command" >&2; return 1; }
-  FACTORY_INFISICAL_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' "$env_file")" \
-  FACTORY_INFISICAL_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' "$env_file")" \
-    sh -c "$cmd" | grep -c '^OP_SERVICE_ACCOUNT_TOKEN='
+  out="$(FACTORY_INFISICAL_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' "$env_file")" \
+    FACTORY_INFISICAL_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' "$env_file")" \
+    sh -c "$cmd")" || { echo "helper failed" >&2; return 1; }
+  keys="$(printf '%s\n' "$out" | grep -c '^[A-Za-z_][A-Za-z0-9_]*=')"
+  [ "$keys" -gt 0 ] || { echo "helper printed no KEY= lines" >&2; return 1; }
+  echo "keys=$keys token=$(printf '%s\n' "$out" | grep -c '^OP_SERVICE_ACCOUNT_TOKEN=')"
 }
-helper_count <home>/.env                     # 0
-helper_count <worker>/.env -p claude-worker  # 0
+helper_count <home>/.env                     # keys=<n> token=0
+helper_count <worker>/.env -p claude-worker  # keys=<n> token=0
 ```
 
+The check passes only when each line prints `token=0` and `keys=` is greater
+than `0`. When the helper exits nonzero or prints no `KEY=` line, the function
+prints one error line and returns `1`, so a broken helper cannot pass as
+`token=0`. `<n>` is the folder's count minus one.
+
 Also confirm that the gateway's `PATH` does not contain `<wrapper dir>`.
+
+## Rate limits
+
+1Password limits each service account token to 1,000 reads per hour on
+1Password, Families, and Teams accounts, and 10,000 on Business. All service
+accounts in one 1Password account share a daily limit of 1,000 requests on
+1Password and Families, 5,000 on Teams, and 50,000 on Business. Some `op`
+commands make more than one request
+([rate limits](https://www.1password.dev/service-accounts/rate-limits/)).
+
+Hermes never reads 1Password in this design, so the factory's own runs use
+none of these requests. Only the operator's `op` commands count, and those
+stay far below the limits, so the factory does not need a Connect server.
+To see the current usage, run `op service-account ratelimit`.
 
 ## Rotation
 
