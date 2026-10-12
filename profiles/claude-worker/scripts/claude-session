@@ -43,13 +43,19 @@ PUBLISH_RULE = (
     "commits that the GitHub App signs, which repositories requiring verified signatures need. To bring "
     "in the base branch, run `gh pr update-branch`, never a local merge."
 )
+CHECKS_RULE = (
+    "A finished check never runs again by itself, and the GitHub App cannot re-request a check. When a "
+    "check failed on a head that is behind the base branch, or a person says the cause of a failure is "
+    "fixed, run `gh pr update-branch <number>` so every check runs again on a new head, then wait for "
+    "that run before you judge the ready gate."
+)
 FINISH_RULE = (
     "Stop every background command, monitor, and watcher you started before you write your final result. "
     "The run ends when you finish, and anything still running is killed. To wait for CI, run a foreground "
     "command that ends on its own, such as `gh pr checks <number> --watch --fail-fast` with the tool's "
     "timeout set, and run it again when it times out."
 )
-SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{FINISH_RULE}"
+SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{CHECKS_RULE}\n\n{FINISH_RULE}"
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 QUIET_SECONDS = 1.0
 GRACE_SECONDS = 10.0
