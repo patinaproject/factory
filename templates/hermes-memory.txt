@@ -5,3 +5,5 @@ GitHub: gh acts as <<github_login>> through GH_CONFIG_DIR=<<gh_config_dir>>, an 
 Linear: the linear-agent-session tools sign in with the agent app's client credentials, which only the gateway holds. Check Linear with those tools on a real issue. Never curl api.linear.app or test a Linear token from the shell.
 §
 Slack: a message that reached you through Slack proves Slack works. The Slack tokens stay in the gateway on purpose.
+§
+Replicable setup: every machine change also lands in the factory repo, without its real values.
