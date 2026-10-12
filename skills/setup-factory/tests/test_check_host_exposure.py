@@ -84,6 +84,26 @@ class EvaluateTest(unittest.TestCase):
             ],
         )
 
+    def test_fails_when_ssh_reports_no_login_methods(self) -> None:
+        facts = check.Facts(ssh_methods={"192.0.2.54": []})
+        self.assertEqual(
+            self.failures(facts),
+            ["SSH on 192.0.2.54 did not report its login methods: check that sshd answers on this port"],
+        )
+
+    def test_fails_when_no_address_was_probed(self) -> None:
+        self.assertEqual(
+            self.failures(check.Facts(addresses=[])),
+            ["found no address another host can reach, so nothing was probed: pass --address"],
+        )
+
+    def test_fails_when_the_principals_file_cannot_be_read(self) -> None:
+        facts = check.Facts(principals=None, expected_principals={"ana"})
+        self.assertEqual(
+            self.failures(facts),
+            ["the SSH principals file cannot be read: run the check as the account people SSH into"],
+        )
+
     def test_passes_a_hardened_machine(self) -> None:
         facts = check.Facts(
             ssh_methods={"192.0.2.54": ["publickey"]},

@@ -46,6 +46,7 @@ class Facts:
     firewall_enabled: bool | None = None
     principals: set[str] | None = None
     expected_principals: set[str] | None = None
+    addresses: list[str] | None = None
 
 
 def exposed_addresses(ifconfig_text: str) -> list[str]:
@@ -83,7 +84,12 @@ def principals_for(emails: list[str]) -> set[str]:
 
 def evaluate(facts: Facts) -> list[tuple[bool, str]]:
     results = []
+    if facts.addresses == []:
+        results.append((False, "found no address another host can reach, so nothing was probed: pass --address"))
     for address, methods in facts.ssh_methods.items():
+        if not methods:
+            results.append((False, f"SSH on {address} did not report its login methods: check that sshd answers on this port"))
+            continue
         weak = [method for method in methods if method != "publickey"]
         if weak:
             results.append((False, f"SSH on {address} offers password login ({', '.join(weak)}): {SSH_FIX}"))
@@ -99,7 +105,9 @@ def evaluate(facts: Facts) -> list[tuple[bool, str]]:
         results.append((False, "the macOS application firewall is off: turn it on in System Settings > Network > Firewall"))
     elif facts.firewall_enabled:
         results.append((True, "the macOS application firewall is on"))
-    if facts.expected_principals is not None:
+    if facts.expected_principals is not None and facts.principals is None:
+        results.append((False, "the SSH principals file cannot be read: run the check as the account people SSH into"))
+    elif facts.expected_principals is not None:
         actual = facts.principals or set()
         missing = sorted(facts.expected_principals - actual)
         extra = sorted(actual - facts.expected_principals)
@@ -135,17 +143,21 @@ def probe_ssh(address: str, port: int) -> list[str]:
     return ssh_auth_methods(result.stderr)
 
 
-def read_principals(path: Path) -> set[str]:
+def read_principals(path: Path) -> set[str] | None:
     if not path.exists():
         return set()
-    return {line.strip() for line in path.read_text().splitlines() if line.strip() and not line.startswith("#")}
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    return {line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")}
 
 
 def gather(args: argparse.Namespace) -> Facts:
     addresses = args.address or exposed_addresses(
         subprocess.run(["ifconfig"], capture_output=True, text=True, check=True).stdout
     )
-    facts = Facts()
+    facts = Facts(addresses=list(addresses))
     for address in addresses:
         if port_open(address, args.ssh_port):
             facts.ssh_methods[address] = probe_ssh(address, args.ssh_port)
