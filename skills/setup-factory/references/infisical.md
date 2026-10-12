@@ -53,6 +53,9 @@ All of these must hold:
   [Configure both homes](#configure-both-homes).
 - Each of those commands prints `Command helper: applied <n> secrets` on its
   first line, where `<n>` is the number of values in the folder.
+- `<home>/bin/factory-secrets` exists, and `diff` against the script in
+  [Configure both homes](#configure-both-homes) shows no change, or only the
+  changes the operator approved there.
 - `hermes -p claude-worker config get terminal.env_passthrough --json` lists
   the token variable that `claude_session.auth_token_env` names.
 - No moved value remains in a `.env` file: `env_has` prints `0` for each value
@@ -151,9 +154,13 @@ The script guards against a slow or failed run:
   it prints nothing to stdout and exits `1`, so Hermes never reads partial
   output.
 
+The commands below write the script to `<home>/bin/factory-secrets.new`
+first, so they never overwrite a helper that an operator has tuned for this
+machine:
+
 ```sh
 mkdir -p <home>/bin
-cat > <home>/bin/factory-secrets <<'SH'
+cat > <home>/bin/factory-secrets.new <<'SH'
 #!/bin/sh
 export INFISICAL_DISABLE_UPDATE_CHECK=true
 bounded() { perl -e 'alarm shift; exec @ARGV or exit 127' 15 "$@"; }
@@ -174,7 +181,30 @@ done
 echo "factory-secrets: Infisical export failed after 3 attempts" >&2
 exit 1
 SH
-chmod 700 <home>/bin/factory-secrets
+chmod 700 <home>/bin/factory-secrets.new
+if [ -e <home>/bin/factory-secrets ]; then
+  diff -u <home>/bin/factory-secrets <home>/bin/factory-secrets.new && rm <home>/bin/factory-secrets.new
+else
+  mv <home>/bin/factory-secrets.new <home>/bin/factory-secrets
+fi
+```
+
+When the `diff` prints changes, keep both files and stop.
+
+> **HUMAN CHECKPOINT.** Show the operator the `diff` output and ask whether
+> to replace the existing helper. On approval, run
+> `mv <home>/bin/factory-secrets.new <home>/bin/factory-secrets`. Otherwise
+> run `rm <home>/bin/factory-secrets.new` and keep the existing helper. Then
+> confirm that `<home>/bin/factory-secrets.new` is gone and that
+> `<home>/bin/factory-secrets` exists with mode `700`.
+
+The documented script holds no secret. If the existing script holds a secret
+inline, do not print the `diff`. Ask the operator to compare the two files
+themselves.
+
+Then point both homes at the helper:
+
+```sh
 value="$(python3 -c 'import json, sys; print(json.dumps({"enabled": True, "helper_timeout_seconds": 100, "command": sys.argv[1]}))' "<home>/bin/factory-secrets")"
 hermes config set secrets.command "$value" </dev/null
 hermes -p claude-worker config set secrets.command "$value" </dev/null
@@ -185,6 +215,14 @@ A healthy run takes about two seconds. The worst case is 3 attempts of two
 15-second calls, plus two 2-second pauses, which is 94 seconds. The command
 sets `helper_timeout_seconds` to 100 to cover it. The Hermes default of 3
 seconds is too short.
+
+The 15-second bound stops only the `infisical` process itself. If a hung
+`infisical` starts a child process that keeps its stdout open, the attempt
+waits for that child, so one attempt can run past 15 seconds. The
+`helper_timeout_seconds` of 100 still stops the whole helper. Hermes then
+starts with no secrets, and the forged-signature check below catches it. Keep
+`helper_timeout_seconds` above the 94-second worst case when you change the
+bound, the attempts, or the pause.
 
 Hermes discards the helper's stderr. To see why a run fails, run the script
 with the two `FACTORY_INFISICAL_` values from `.env`. These lines read only
@@ -247,9 +285,9 @@ routes use the literal strings `${LINEAR_WEBHOOK_SECRET}` and
 `${GITHUB_WEBHOOK_SECRET}` as their signing secrets. Those strings are public,
 so anyone can sign a delivery that the routes accept. The forged-signature
 lines in part 15's local checks catch this. Run them after every gateway
-restart, not only during setup. If either prints anything but `401`, stop the
-gateway, run the helper by hand as shown above, and fix it before you start
-the gateway again.
+restart, not only during setup. If either prints anything but `401`, follow
+the HUMAN CHECKPOINT in part 15 to stop the gateway, run the helper by hand as
+shown above, and fix it before the operator starts the gateway again.
 
 A startup guard that refuses a route whose secret is still a `${...}`
 reference is not yet enforced in code. Until it is, the forged-signature check

@@ -747,10 +747,22 @@ forged_post github '${GITHUB_WEBHOOK_SECRET}' X-Hub-Signature-256 ping # github 
 
 A `401` proves something only when the same request signed with the real
 secret is accepted. The signed checks in
-[`references/cloudflare-sst.md`](references/cloudflare-sst.md) show that. If a
-forged line prints anything but `401`, stop the gateway and fix the secret
-source before it serves traffic. Run these lines after every gateway restart.
-A startup guard that refuses such a route is not yet enforced in code.
+[`references/cloudflare-sst.md`](references/cloudflare-sst.md) show that. Run
+these lines after every gateway restart. A startup guard that refuses such a
+route is not yet enforced in code.
+
+If a forged line prints anything but `401`, the gateway is serving a route
+that anyone can sign for. Stop it before you fix the secret source.
+
+> **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway stop` from a
+> shell outside Hermes, not from a Hermes session or tool. Then confirm that
+> `hermes gateway status` no longer shows a gateway PID and that
+> `lsof -nP -iTCP:8644 -sTCP:LISTEN` prints nothing.
+
+Fix the secret source, for example with the manual helper run in
+[`references/infisical.md`](references/infisical.md#configure-both-homes).
+Then ask the operator to start the gateway with `hermes gateway start` from a
+shell outside Hermes, and run the forged lines again.
 
 **External checks.** Run the checks at the end of
 [`references/cloudflare-sst.md`](references/cloudflare-sst.md).
@@ -886,14 +898,6 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    > `~/.hermes/logs/gateway.log` shows a startup after the install.
 
 6. Record the deployed commit in the private configuration record.
-
-## 16. Agent instructions
-
-Follow [`references/agent-instructions.md`](references/agent-instructions.md).
-It writes the factory's operating rules into `~/.claude/CLAUDE.md`, so every
-Claude Code session on the machine acts on GitHub as the App, publishes
-commits with `push-signed`, and knows where the private configuration record
-lives.
 
 ## Report
 
