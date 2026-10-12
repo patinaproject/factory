@@ -3,7 +3,8 @@
 
 Compares the worker profile, the plugins in the root and worker homes, and the
 webhook routes against a commit of the repository, read with git plumbing so
-the checkout's working tree and branch do not matter. Silent when the install
+the checkout's working tree and branch do not matter. Also checks that the
+dashboard's OIDC sign-in can keep a user signed in. Silent when the install
 matches. Prints one line per difference and exits 1, or exits 2 when it cannot
 run.
 """
@@ -17,12 +18,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
 ROUTES_KEY = "platforms.webhook.extra.routes"
+# Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
+DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
 
@@ -152,6 +156,42 @@ def check_routes(commit: Commit, root: Path, hermes: str) -> list:
     return drifts
 
 
+def check_dashboard(root: Path, hermes: str) -> list:
+    where = str(root)
+    proc = subprocess.run(
+        [hermes, "config", "get", "dashboard", "--json"],
+        env={**os.environ, "HERMES_HOME": str(root)}, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return [Drift("dashboard sign-in", where, f"hermes config get dashboard failed: {proc.stderr.strip()}")]
+    try:
+        dashboard = json.loads(proc.stdout)
+    except ValueError:
+        return [Drift("dashboard sign-in", where, "hermes config get dashboard did not return JSON")]
+    self_hosted = (dashboard.get("oauth") or {}).get("self_hosted") or {}
+    issuer = (self_hosted.get("issuer") or "").rstrip("/")
+    drifts = []
+    if not dashboard.get("public_url"):
+        drifts.append(Drift("dashboard sign-in", where, "dashboard.public_url is not set"))
+    if not issuer:
+        return [*drifts, Drift("dashboard sign-in", where, "dashboard.oauth.self_hosted.issuer is not set")]
+    if not self_hosted.get("client_id"):
+        drifts.append(Drift("dashboard sign-in", where, "dashboard.oauth.self_hosted.client_id is not set"))
+    if "offline_access" not in (self_hosted.get("scopes") or DEFAULT_OIDC_SCOPES).split():
+        drifts.append(Drift(
+            "dashboard sign-in", where,
+            "dashboard.oauth.self_hosted.scopes does not request offline_access, so the issuer returns no refresh token",
+        ))
+    try:
+        with urllib.request.urlopen(f"{issuer}/.well-known/openid-configuration", timeout=10) as resp:
+            grants = json.load(resp).get("grant_types_supported") or []
+    except (OSError, ValueError) as exc:
+        return [*drifts, Drift("dashboard sign-in", where, f"cannot read the issuer's discovery document: {exc}")]
+    if "refresh_tokens" not in grants and "refresh_token" not in grants:
+        drifts.append(Drift("dashboard sign-in", where, "the issuer does not offer the refresh_tokens grant"))
+    return drifts
+
+
 def homes() -> tuple:
     if not os.environ.get("HERMES_HOME"):
         raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
@@ -209,6 +249,7 @@ def main() -> int:
             *check_profile(commit, worker),
             *check_plugins(commit, [root, worker]),
             *check_routes(commit, root, hermes),
+            *check_dashboard(root, hermes),
         ]
     except Refusal as exc:
         print(f"check-install: {exc}", file=sys.stderr)

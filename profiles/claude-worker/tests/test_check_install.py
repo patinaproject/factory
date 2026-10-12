@@ -19,8 +19,11 @@ print(json.dumps({ROUTES!r}))
 
 FAKE_HERMES = """#!/usr/bin/env python3
 import os, sys
-name = sys.argv[3].rsplit(".", 1)[1]
-path = os.path.join(os.environ["HERMES_HOME"], "installed-routes", name + ".json")
+key = sys.argv[3]
+if key == "dashboard":
+    path = os.path.join(os.environ["HERMES_HOME"], "installed-dashboard.json")
+else:
+    path = os.path.join(os.environ["HERMES_HOME"], "installed-routes", key.rsplit(".", 1)[1] + ".json")
 if not os.path.exists(path):
     sys.exit("Config key not set: " + sys.argv[3])
 print(open(path).read())
@@ -64,6 +67,10 @@ class CheckInstallTest(unittest.TestCase):
         installed = {**ROUTES["linear"], "secret": "abc...1234"}
         self.install(self.root, "installed-routes/linear.json", json.dumps(installed))
 
+        self.issuer = self.tmp / "issuer"
+        self.discovery(["authorization_code_with_pkce", "refresh_tokens"])
+        self.dashboard(scopes="openid profile email offline_access")
+
         self.hermes = self.tmp / "bin" / "fake-hermes"
         self.install(self.tmp, "bin/fake-hermes", FAKE_HERMES)
         os.chmod(self.hermes, 0o755)
@@ -71,6 +78,16 @@ class CheckInstallTest(unittest.TestCase):
     def install(self, home: Path, path: str, text: str) -> None:
         (home / path).parent.mkdir(parents=True, exist_ok=True)
         (home / path).write_text(text)
+
+    def discovery(self, grants: list) -> None:
+        self.install(
+            self.issuer, ".well-known/openid-configuration", json.dumps({"grant_types_supported": grants})
+        )
+
+    def dashboard(self, *, public_url: str = "https://factory.example", issuer: str | None = None, **self_hosted) -> None:
+        self_hosted = {"issuer": self.issuer.as_uri() if issuer is None else issuer, "client_id": "cid", **self_hosted}
+        config = {"public_url": public_url, "oauth": {"client_id": "", "self_hosted": self_hosted}}
+        self.install(self.root, "installed-dashboard.json", json.dumps(config))
 
     def check(self, *args: str) -> tuple:
         env = {**os.environ, "HERMES_HOME": str(self.worker), "HERMES_BIN": str(self.hermes)}
@@ -125,6 +142,62 @@ class CheckInstallTest(unittest.TestCase):
         (self.root / "installed-routes" / "linear.json").unlink()
 
         self.assertEqual(self.check(), (1, f"webhook route linear: not installed in {self.root}\n"))
+
+    def test_dashboard_without_offline_access_cannot_get_a_refresh_token(self) -> None:
+        self.dashboard()
+
+        self.assertEqual(
+            self.check(),
+            (1, f"dashboard sign-in {self.root}: dashboard.oauth.self_hosted.scopes does not request offline_access, "
+                "so the issuer returns no refresh token\n"),
+        )
+
+    def test_dashboard_issuer_without_refresh_grant(self) -> None:
+        self.discovery(["authorization_code_with_pkce"])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"dashboard sign-in {self.root}: the issuer does not offer the refresh_tokens grant\n"),
+        )
+
+    def test_dashboard_without_public_url(self) -> None:
+        self.dashboard(public_url="", scopes="openid profile email offline_access")
+
+        self.assertEqual(
+            self.check(), (1, f"dashboard sign-in {self.root}: dashboard.public_url is not set\n")
+        )
+
+    def test_dashboard_without_oidc_issuer(self) -> None:
+        self.dashboard(issuer="", scopes="openid profile email offline_access")
+
+        self.assertEqual(
+            self.check(), (1, f"dashboard sign-in {self.root}: dashboard.oauth.self_hosted.issuer is not set\n")
+        )
+
+    def test_dashboard_without_client_id(self) -> None:
+        self.dashboard(client_id="", scopes="openid profile email offline_access")
+
+        self.assertEqual(
+            self.check(), (1, f"dashboard sign-in {self.root}: dashboard.oauth.self_hosted.client_id is not set\n")
+        )
+
+    def test_dashboard_config_that_is_not_json_does_not_hide_other_drift(self) -> None:
+        self.install(self.root, "installed-dashboard.json", "not json")
+        self.install(self.worker, "SOUL.md", "old soul\n")
+
+        self.assertEqual(
+            self.check(),
+            (1, f"profile claude-worker: SOUL.md differs from main at {self.sha}\n"
+                f"dashboard sign-in {self.root}: hermes config get dashboard did not return JSON\n"),
+        )
+
+    def test_unreadable_issuer_discovery(self) -> None:
+        (self.issuer / ".well-known" / "openid-configuration").unlink()
+
+        code, out = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertTrue(out.startswith(f"dashboard sign-in {self.root}: cannot read the issuer's discovery document"))
 
     def test_a_merge_after_the_last_fetch_is_seen(self) -> None:
         seed = self.tmp / "seed"

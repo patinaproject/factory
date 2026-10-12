@@ -639,7 +639,8 @@ script fails on every tick with a `SyntaxError`.
 
 **Install drift job.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
-`origin/HEAD` of the checkout the profile was installed from. It prints one
+`origin/HEAD` of the checkout the profile was installed from. It also checks
+that the dashboard's OIDC sign-in can keep a user signed in. It prints one
 line per difference and nothing when the install is current. It fetches
 first, so a merge shows up within the hour. Deliver it where the operator
 reads it: the home channel of the platform from part 13, such as `slack`.
@@ -839,6 +840,10 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.
    - A `webhook route <name>` line: run the part 11 install for that route.
+   - A `dashboard sign-in` line: follow step 6 of
+     [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
+     or allow the `refresh_tokens` grant on the `saas` Access application when
+     the line names the issuer. Then restart the dashboard service.
 4. Run `check-install` again. It prints nothing.
 5. If step 3 changed a plugin or a webhook route:
 
