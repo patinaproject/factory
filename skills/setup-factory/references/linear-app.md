@@ -102,6 +102,30 @@ Expect `"app": true`. `viewer.id` is the app user ID, and it equals
 `app_user_id` in the settings. `"app": false` means the token acts as a person,
 not the app. Replace it with a token that Linear issued with `actor=app`.
 
+## Give Claude Code sessions Linear
+
+Claude Code sessions in a checkout of this repository reach Linear through
+the app, so an agent never asks the operator to sign in. The `linear` server
+in the repository's `.mcp.json` has a `headersHelper` that runs
+[`scripts/linear-mcp-headers`](../scripts/linear-mcp-headers). The script
+sends the app's token from the plugin's client, which shares the gateway's
+token cache in `~/.hermes`. Never get the token another way. Linear revokes
+all of an app's client credentials tokens when a request asks for a different
+scope set, and the gateway then loses its token.
+
+On a machine without the plugin, the script prints no headers, and Claude Code
+asks for the usual OAuth sign-in.
+
+Everything written through this server shows the app as its author.
+
+**Check.** In a checkout of this repository, run `claude mcp list` as the
+gateway's user. Expect `linear: https://mcp.linear.app/mcp (HTTP) - ✔ Connected`.
+
+There is nothing to install. If the check reports `Needs authentication`,
+confirm that `<home>/plugins/linear-agent-session` exists and that
+`python3 -I skills/setup-factory/scripts/linear-mcp-headers` prints an
+`Authorization` key. Do not print its value.
+
 ## Live test
 
 Run this after part 15 has restarted the gateway. Delegate a new test issue to
