@@ -32,6 +32,9 @@ SESSION_CREATE_MUTATION = """mutation AgentSessionCreateOnIssue($input: AgentSes
   agentSessionCreateOnIssue(input: $input) { success agentSession { id } }
 }"""
 
+# Linear priority -> (name, Kanban card priority). Linear ranks Urgent 1 and Low 4; a card ranks higher numbers first.
+PRIORITIES = {0: ("No priority", 0), 1: ("Urgent", 4), 2: ("High", 3), 3: ("Medium", 2), 4: ("Low", 1)}
+
 ISSUE_QUERY = """query Issue($id: String!) {
   issue(id: $id) {
     id identifier title url branchName priority
@@ -139,9 +142,13 @@ class LinearClient:
 
     def get_issue(self, id_or_identifier: str) -> dict:
         issue = self._graphql(ISSUE_QUERY, {"id": id_or_identifier})["issue"]
+        priority = int(issue["priority"])
+        priority_name, card_priority = PRIORITIES[priority]
         return {
             **_issue_summary(issue),
-            "priority": int(issue["priority"]),
+            "priority": priority,
+            "priorityName": priority_name,
+            "cardPriority": card_priority,
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
             "agentSessions": sorted(
                 (

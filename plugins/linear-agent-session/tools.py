@@ -44,6 +44,7 @@ ISSUE_SCHEMA = {
     "name": "linear_issue",
     "description": (
         "Read a Linear issue as the agent app: id, identifier, title, url, gitBranchName, priority, "
+        "priorityName, cardPriority (the Kanban card priority for this issue), "
         "state, stateType, delegate (the delegate's user ID, or null), attachments, and agentSessions "
         "(id, status, createdAt, appUserId; newest first)."
     ),
