@@ -72,7 +72,7 @@ class ClaudeSessionTest(GitFixture):
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
 
-    def session_command(self, *extra: str, workspace: Path | None = None, env: dict | None = None):
+    def run_session(self, *extra: str, workspace: Path | None = None, env: dict | None = None):
         base = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
         base.update(
             HERMES_KANBAN_WORKSPACE=str(workspace or self.worktree),
@@ -86,23 +86,18 @@ class ClaudeSessionTest(GitFixture):
             **WORKER_SECRETS,
         )
         base.update(env or {})
-        return [
-            str(SCRIPTS / "claude-session"),
-            "--issue-id", ISSUE_ID,
-            "--issue-identifier", "ABC-123",
-            "--issue-url", "https://linear.app/example/issue/ABC-123",
-            "--repo", REPO,
-            "--settings-json", str(self.settings),
-            *extra,
-        ], base
-
-    def start_session(self) -> subprocess.Popen:
-        command, env = self.session_command()
-        return subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-    def run_session(self, *extra: str, workspace: Path | None = None, env: dict | None = None):
-        command, env = self.session_command(*extra, workspace=workspace, env=env)
-        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(
+            [
+                str(SCRIPTS / "claude-session"),
+                "--issue-id", ISSUE_ID,
+                "--issue-identifier", "ABC-123",
+                "--issue-url", "https://linear.app/example/issue/ABC-123",
+                "--repo", REPO,
+                "--settings-json", str(self.settings),
+                *extra,
+            ],
+            env=base, capture_output=True, text=True, timeout=120,
+        )
         lines = proc.stdout.splitlines()
         self.assertEqual(len(lines), 1, proc.stdout + proc.stderr)
         return proc.returncode, json.loads(lines[0])
@@ -312,8 +307,9 @@ class ClaudeSessionTest(GitFixture):
             "--model", "example-model",
             "--settings", settings_path,
         ])
-        self.assertEqual(call["settings"]["mode"], "0o600")
-        self.assertEqual(call["settings"]["content"]["env"], {
+        self.assertEqual(call["settings"], {
+            "mode": "0o600",
+            "content": {"env": {
                 "LINEAR_API_KEY": "cached-token",
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:9999",
                 "ANTHROPIC_AUTH_TOKEN": "token-value",
@@ -323,6 +319,7 @@ class ClaudeSessionTest(GitFixture):
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL": "example-model",
                 "ANTHROPIC_DEFAULT_FABLE_MODEL": "example-model",
                 "CLAUDE_CODE_SUBAGENT_MODEL": "example-model",
+            }},
         })
         self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
         self.assertNotIn("EXAMPLE_PROXY_TOKEN", call["env"])
@@ -350,61 +347,9 @@ class ClaudeSessionTest(GitFixture):
         self.run_session()
 
         call = self.claude_call()
-        self.assertEqual(call["settings"]["mode"], "0o600")
-        self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+        self.assertEqual(call["settings"], {"mode": "0o600", "content": {"env": {"LINEAR_API_KEY": "cached-token"}}})
         self.assertNotIn("LINEAR_API_KEY", call["env"])
         self.assertFalse(Path(call["argv"][-1]).exists())
-
-    def settings_path(self) -> Path:
-        return self.worktree_git_dir() / "claude-session.settings.json"
-
-    def test_claude_code_removes_the_settings_file_when_its_session_starts(self) -> None:
-        self.run_session()
-
-        settings = self.claude_call()["settings"]
-        self.assertEqual(settings["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
-        self.assertFalse(settings["exists_after_start"])
-
-    def test_signal_mid_run_removes_the_settings_file_and_ends_claude(self) -> None:
-        # Without the start hook, as when hooks are disabled, the file stays until claude-session removes it.
-        self.configure_fake_claude(skip_start_hooks=True, hold_seconds=600)
-        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            with self.subTest(signal=signum.name):
-                self.log.unlink(missing_ok=True)
-                session = self.start_session()
-                while not self.log.exists():
-                    if session.poll() is not None:
-                        self.fail(session.communicate())
-                    time.sleep(0.05)
-                self.assertTrue(self.settings_path().exists())
-
-                session.send_signal(signum)
-
-                session.communicate(timeout=30)
-                self.assertEqual(session.returncode, -signum)
-                self.assertFalse(self.settings_path().exists())
-                self.assert_process_gone(self.claude_call()["pid"])
-
-    def test_next_run_replaces_a_settings_file_left_by_a_killed_run(self) -> None:
-        self.settings_path().write_text('{"env": {"LINEAR_API_KEY": "stale-token"}}')
-        os.chmod(self.settings_path(), 0o644)
-        self.configure_fake_claude(skip_start_hooks=True)
-
-        status, _ = self.run_session()
-
-        settings = self.claude_call()["settings"]
-        self.assertEqual(status, 0)
-        self.assertEqual(settings["mode"], "0o600")
-        self.assertEqual(settings["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
-        self.assertFalse(self.settings_path().exists())
-
-    def test_refused_run_still_removes_a_stale_settings_file(self) -> None:
-        self.settings_path().write_text('{"env": {"LINEAR_API_KEY": "stale-token"}}')
-
-        status, _ = self.run_session(env={"LINEAR_CLIENT_SECRET": ""})
-
-        self.assertEqual(status, 2)
-        self.assertFalse(self.settings_path().exists())
 
     def test_missing_linear_credentials_refuse_before_claude_starts(self) -> None:
         status, report = self.run_session(env={"LINEAR_CLIENT_SECRET": ""})
@@ -432,7 +377,7 @@ class ClaudeSessionTest(GitFixture):
 
         call = self.claude_call()
         self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
-        self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+        self.assertEqual(call["settings"]["content"], {"env": {"LINEAR_API_KEY": "cached-token"}})
 
     def test_without_max_turns_the_run_has_no_turn_limit(self) -> None:
         for claude_session in ({}, {"max_turns": None}, {"max_turns": 0}):

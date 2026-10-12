@@ -7,10 +7,8 @@ mutations, so it never touches Kanban itself.
 
 Claude Code starts with the allowlisted environment in CHILD_ENV_NAMES and
 CHILD_ENV_PREFIXES. Every credential it needs, the Linear token and the proxy
-token, reaches it only through the per-run settings file, mode 0600. Claude Code
-removes that file through a SessionStart hook as soon as it has read it.
-claude-session also removes it before each run and when it ends, whether it
-returns or stops on SIGTERM, SIGINT, or SIGHUP.
+token, reaches it only through the per-run settings file, mode 0600, which is
+removed when the run ends.
 """
 from __future__ import annotations
 
@@ -19,7 +17,6 @@ import fcntl
 import json
 import os
 import re
-import shlex
 import select
 import signal
 import subprocess
@@ -74,18 +71,11 @@ QUIET_SECONDS = 1.0
 GRACE_SECONDS = 10.0
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
-STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 
 
 class Refusal(Exception):
     pass
-
-
-class Stopped(BaseException):
-    def __init__(self, signum: int) -> None:
-        super().__init__(signum)
-        self.signum = signum
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -266,7 +256,7 @@ def linear_api_key() -> str:
         raise Refusal(f"Linear token: {error}") from None
 
 
-def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
+def claude_settings(transport: dict, api_key: str) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
     env = {"LINEAR_API_KEY": api_key}
@@ -279,21 +269,7 @@ def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
         env["ANTHROPIC_AUTH_TOKEN"] = os.environ[token_env]
     if transport.get("model"):
         env.update({name: transport["model"] for name in MODEL_TIER_VARIABLES})
-    # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
-    remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
-    return {"env": env, "hooks": {"SessionStart": [{"hooks": [remove]}]}}
-
-
-def remove_on_stop(path: Path) -> None:
-    """Remove the settings file on SIGTERM, SIGINT, or SIGHUP, then unwind so claude is ended too."""
-    def stop(signum: int, _frame) -> None:
-        for each in STOP_SIGNALS:
-            signal.signal(each, signal.SIG_IGN)
-        path.unlink(missing_ok=True)
-        raise Stopped(signum)
-
-    for signum in STOP_SIGNALS:
-        signal.signal(signum, stop)
+    return {"env": env}
 
 
 def write_private(path: Path, settings: dict) -> None:
@@ -355,10 +331,8 @@ def run_claude(command: list[str], worktree: Path) -> tuple[dict | None, int, st
             start_new_session=True,
         )
         with proc:
-            try:
-                output, stdout = read_result(proc)
-            finally:
-                leftovers = end_run(proc)
+            output, stdout = read_result(proc)
+            leftovers = end_run(proc)
         if leftovers:
             print(f"claude-session: ended {len(leftovers)} process(es) left by claude: {sorted(leftovers)}", file=sys.stderr)
         stderr.seek(0)
@@ -455,10 +429,6 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Refusal(f"another claude-session holds {worktree}") from None
-        settings_path = lock_path.with_name(SETTINGS_FILE_NAME)
-        # A killed run leaves its file behind; os.open would also keep that file's mode.
-        settings_path.unlink(missing_ok=True)
-        remove_on_stop(settings_path)
         if session_process_running(session_id):
             raise Refusal(f"a process for Claude session {session_id} is already running")
 
@@ -476,9 +446,10 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         ]
         if transport.get("model"):
             command += ["--model", transport["model"]]
+        settings_path = lock_path.with_name(SETTINGS_FILE_NAME)
+        write_private(settings_path, claude_settings(transport, linear_api_key()))
         command += ["--settings", str(settings_path)]
         try:
-            write_private(settings_path, claude_settings(transport, linear_api_key(), settings_path))
             output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
@@ -504,10 +475,6 @@ def main() -> int:
     args = parser.parse_args()
     try:
         status, report = run(args)
-    except Stopped as stopped:
-        signal.signal(stopped.signum, signal.SIG_DFL)
-        os.kill(os.getpid(), stopped.signum)
-        raise
     except Refusal as refusal:
         status, report = 2, {"error": str(refusal)}
     except Exception as error:
