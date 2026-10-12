@@ -1179,20 +1179,17 @@ A merged change to `plugins/`, `profiles/`, or `templates/` is not live until
 it is installed. Hermes loads plugins and webhook routes only when the gateway
 starts. The worker reads `SOUL.md` and its scripts on each run.
 
-1. Bring the source checkout up to date. The source checkout is the one
-   `<worker>/distribution.yaml` points at, which is two levels above its
-   `source` line. Print it with:
+1. Find the source checkout. It is the checkout `<worker>/distribution.yaml`
+   points at, and this command prints it:
 
    ```sh
-   python3 -c "import re,pathlib,sys; print(pathlib.Path(re.search(r'^source:\s*(\S+)', pathlib.Path(sys.argv[1]).read_text(), re.M).group(1)).parents[1])" <worker>/distribution.yaml
+   HERMES_HOME=<worker> python3 <worker>/scripts/check-install --print-source
    ```
 
-   It must be on the default branch with no uncommitted changes. Fast-forward
-   only that checkout to `origin/HEAD`. Never touch the worker-owned
+   Fast-forward only that checkout to `origin/HEAD`. It must be on the default
+   branch with no uncommitted changes. Never touch the worker-owned
    checkouts, which are the configured repository checkouts the worker profile
-   uses. They change only through a Kanban card or `refresh-checkouts`. When
-   step 2 reports drift and this checkout is behind, its last line is a
-   `source checkout` line that names the checkout and the command.
+   uses. They change only through a Kanban card or `refresh-checkouts`.
 2. List what is out of date:
 
    ```sh
@@ -1211,8 +1208,10 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      `templates/render.py`.
    - An `owned refs` line: create the part 12 `refresh-owned-refs` job, or
      run it with `cron run` when it exists.
-   - A `source checkout` line: run the `git merge --ff-only` command it
-     prints, in the checkout it names, then run `check-install` again.
+   - A `source checkout` line: the source checkout is behind `origin/HEAD`.
+     When the line gives a `git merge --ff-only` command, run it as written,
+     then run `check-install` again. Otherwise the checkout is ahead, diverged,
+     on another branch, or dirty. Fix that by hand before you deploy.
    - A `checkout` line: the checkout is missing or has no `origin/HEAD`. Clone
      it as in part 10, or run `git -C <path> remote set-head origin -a`.
    - A `dashboard sign-in` line: follow step 6 of
