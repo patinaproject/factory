@@ -734,8 +734,13 @@ A factory card is one Linear issue, and its children would lack the key block
 the worker needs, so turn the decomposer off. A looping card then waits in
 `triage` for a person, and a reply on its Linear issue resumes it.
 
+Leave `kanban.default_assignee` unset. The resume steps in the triage prompt
+unassign a card so the dispatcher skips it while `kanban specify` rewrites it,
+and a default assignee would route the unassigned card to a worker first.
+
 **Check.** `hermes config get kanban.review_dispatch` and
-`hermes config get kanban.auto_decompose` each print `false`.
+`hermes config get kanban.auto_decompose` each print `false`, and
+`hermes config get kanban.default_assignee` prints nothing or an empty string.
 
 `default_workdir` is board metadata, so `hermes config get` does not show it.
 Read the board metadata with `hermes kanban boards --help` to find the listing
@@ -1065,12 +1070,14 @@ each check. Report each result.
     `review_reopened`. The next dispatcher tick starts a worker, no
     `respawn_guarded` event with reason `active_pr` follows, and the card
     completes without operator action.
-19. Move a card whose pull request is open to `triage`, for example by letting
-    it block twice for the same reason, then reply in its Linear agent session.
-    In `hermes kanban show <task id> --json`, the events after the reply are
-    `specified`, `edited`, `review_requested`, and `review_reopened`. The card's
-    title and body are unchanged, the next dispatcher tick starts a worker, and
-    no `respawn_guarded` event with reason `active_pr` follows.
+19. Move a card to `triage`, for example by letting it block twice for the same
+    reason, then reply in its Linear agent session. In
+    `hermes kanban show <task id> --json`, the events after the reply are
+    `assigned` with no assignee, `specified`, `edited`, and `assigned` to
+    `claude-worker`. The card's title and body are unchanged, the next
+    dispatcher tick starts a worker, and no `respawn_guarded` event follows
+    the last `assigned` event. Run it once with a pull request open and once
+    without.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate
@@ -1078,8 +1085,8 @@ re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a GitHub event
 arrives for a done card, triage comments on the card and asks the operator to
 reopen the card from the Kanban dashboard. A card reaches `done` only when its
 pull request merges, so this applies to follow-up work after the merge. A
-`triage` card needs no dashboard: its Linear reply runs `specify`, restores the
-title and body, and hands the card back through `reopen-review`.
+`triage` card needs no dashboard: its Linear reply unassigns the card, runs
+`specify`, restores the title and body, and assigns the card again.
 
 ## 16. Host exposure
 
