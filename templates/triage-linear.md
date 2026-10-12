@@ -162,9 +162,14 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
    in "Session created" step 6.
 4. If the card is `blocked`, read the issue with `linear_issue`. If its
    `delegate` is `<<app_user_id>>`, run `hermes kanban unblock <task id>`.
-5. If the card is `done` or `triage`, post a `thought` on this agent session
-   saying the reply is on the card, and that the card must be reopened from the
-   Kanban dashboard.
+5. Post one `thought` on this agent session, so the human sees that the reply
+   arrived. Name the card's task id, then add what happens next:
+   - You unblocked the card: the worker picks it up again.
+   - The card is `blocked` and the issue is not delegated to `<<app_user_id>>`:
+     the card stays blocked until the issue is delegated to the agent again.
+   - The card is `done` or `triage`: the card must be reopened from the Kanban
+     dashboard.
+   - Any other status: the reply is on the card for its worker.
 
 ## Stop
 
