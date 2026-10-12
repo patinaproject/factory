@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 
-from tests.support import SCRIPTS, GitFixture, git
+from tests.support import SCRIPTS, GitFixture, git, with_interpreter
 
 REPO = "example-org/example-repo"
 GITHUB_URL = f"https://github.com/{REPO}.git"
@@ -118,7 +118,7 @@ class PushSignedTest(GitFixture):
         git(self.main, "config", f"url.{self.origin}.insteadOf", GITHUB_URL)
         self.seed = git(self.main, "rev-parse", "HEAD")
         self.gh = self.tmp / "fake-gh"
-        self.gh.write_text(FAKE_GH)
+        self.gh.write_text(with_interpreter(FAKE_GH))
         os.chmod(self.gh, 0o755)
         self.log = self.tmp / "gh-calls.jsonl"
 

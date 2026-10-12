@@ -12,7 +12,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from tests.support import SCRIPTS
+from tests.support import SCRIPTS, with_interpreter
 
 APP_ID = "12345"
 INSTALLATION_ID = "67890"
@@ -71,7 +71,7 @@ class RefreshGhAppLoginTest(unittest.TestCase):
             check=True, capture_output=True,
         )
         self.fake_gh = self.tmp / "fake-gh"
-        self.fake_gh.write_text(FAKE_GH)
+        self.fake_gh.write_text(with_interpreter(FAKE_GH))
         os.chmod(self.fake_gh, 0o755)
         self.gh_log = self.tmp / "gh.json"
         self.gh_config_dir = self.tmp / "gh"
