@@ -10,33 +10,33 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
 from tests.support import SCRIPTS, git
 
-ROUTES = {"linear": {"events": ["AgentSessionEvent"], "secret": "${LINEAR_WEBHOOK_SECRET}", "prompt": "triage"}}
+ROUTE_KEY = "platforms.webhook.extra.routes.linear"
+RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
+ROUTE = {"events": ["AgentSessionEvent"], "secret": "${LINEAR_WEBHOOK_SECRET}", "prompt": "triage"}
 
 RENDER = f"""import json
-print(json.dumps({ROUTES!r}))
+print(json.dumps({{{RATE_LIMIT_KEY!r}: 600, {ROUTE_KEY!r}: {ROUTE!r}}}))
 """
 
 FAKE_HERMES = """#!/usr/bin/env python3
 import json, os, sys
 key = sys.argv[3]
-home = os.environ["HERMES_HOME"]
-if key == "dashboard":
-    path = os.path.join(home, "installed-dashboard.json")
-elif key.startswith("platforms.webhook.extra.routes."):
-    path = os.path.join(home, "installed-routes", key.rsplit(".", 1)[1] + ".json")
-else:
-    config = json.load(open(os.path.join(home, "installed-config.json")))
-    if key not in config:
-        sys.exit("Config key not set: " + key)
-    print(json.dumps(config[key]))
+config = os.path.join(os.environ["HERMES_HOME"], "installed-config.json")
+if os.path.exists(config) and key in json.load(open(config)):
+    print(json.dumps(json.load(open(config))[key]))
     sys.exit()
+if key == "dashboard":
+    path = os.path.join(os.environ["HERMES_HOME"], "installed-dashboard.json")
+else:
+    path = os.path.join(os.environ["HERMES_HOME"], "installed-config", key + ".json")
 if not os.path.exists(path):
-    sys.exit("Config key not set: " + key)
+    sys.exit("Config key not set: " + sys.argv[3])
 print(open(path).read())
 """
 
@@ -122,8 +122,9 @@ class CheckInstallTest(unittest.TestCase):
         self.install(
             self.worker, "distribution.yaml", f"name: claude-worker\nsource: {self.repo}/profiles/claude-worker\n"
         )
-        installed = {**ROUTES["linear"], "secret": "abc...1234"}
-        self.install(self.root, "installed-routes/linear.json", json.dumps(installed))
+        self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps({**ROUTE, "secret": "abc...1234"}))
+        self.install(self.root, f"installed-config/{RATE_LIMIT_KEY}.json", "600")
+        self.install(self.root, "logs/agent.log", "")
 
         self.issuer = self.tmp / "issuer"
         self.discovery(["authorization_code_with_pkce", "refresh_tokens"])
@@ -200,17 +201,56 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_route_differences(self) -> None:
-        stale = {**ROUTES["linear"], "prompt": "old triage", "secret": "abc...1234"}
-        self.install(self.root, "installed-routes/linear.json", json.dumps(stale))
+        stale = {**ROUTE, "prompt": "old triage", "secret": "abc...1234"}
+        self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps(stale))
 
         self.assertEqual(
-            self.check(), (1, f"webhook route linear: differs from the route rendered at {self.sha}\n")
+            self.check(), (1, f"webhook config {ROUTE_KEY}: differs from the value rendered at {self.sha}\n")
         )
 
     def test_missing_route(self) -> None:
-        (self.root / "installed-routes" / "linear.json").unlink()
+        (self.root / "installed-config" / f"{ROUTE_KEY}.json").unlink()
 
-        self.assertEqual(self.check(), (1, f"webhook route linear: not installed in {self.root}\n"))
+        self.assertEqual(self.check(), (1, f"webhook config {ROUTE_KEY}: not installed in {self.root}\n"))
+
+    def test_missing_rate_limit(self) -> None:
+        (self.root / "installed-config" / f"{RATE_LIMIT_KEY}.json").unlink()
+
+        self.assertEqual(self.check(), (1, f"webhook config {RATE_LIMIT_KEY}: not installed in {self.root}\n"))
+
+    def access_line(self, minutes_ago: int, route: str, status: int) -> str:
+        stamp = (datetime.now() - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%d %H:%M:%S")
+        return (
+            f'{stamp},430 INFO aiohttp.access: 127.0.0.1 [12/Oct/2026:16:35:23 +0700] '
+            f'"POST /webhooks/{route} HTTP/1.1" {status} 206 "-" "GitHub-Hookshot/7c39df5"\n'
+        )
+
+    def test_deliveries_rejected_in_the_last_hour_are_counted_per_route(self) -> None:
+        self.install(self.root, "logs/agent.log.1", self.access_line(50, "github", 429))
+        self.install(self.root, "logs/agent.log", "".join([
+            self.access_line(90, "github", 429),
+            self.access_line(30, "github", 200),
+            self.access_line(20, "github", 429),
+            self.access_line(10, "linear", 429),
+            "2026-10-12 16:35:23,431 INFO gateway: status 429 mentioned outside an access line\n",
+        ]))
+
+        self.assertEqual(self.check(), (1, (
+            "webhook route github: 2 rejected with HTTP 429 in the last hour; check platforms.webhook.extra.rate_limit\n"
+            "webhook route linear: 1 rejected with HTTP 429 in the last hour; check platforms.webhook.extra.rate_limit\n"
+        )))
+
+    def test_rejections_older_than_an_hour_and_other_statuses_are_silent(self) -> None:
+        self.install(self.root, "logs/agent.log", self.access_line(61, "github", 429) + self.access_line(5, "github", 200))
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_missing_gateway_log_is_reported(self) -> None:
+        (self.root / "logs" / "agent.log").unlink()
+
+        self.assertEqual(
+            self.check(), (1, f"webhook deliveries {self.root}: cannot read {self.root}/logs/agent.log to count 429 responses\n")
+        )
 
     def test_dashboard_without_offline_access_cannot_get_a_refresh_token(self) -> None:
         self.dashboard()

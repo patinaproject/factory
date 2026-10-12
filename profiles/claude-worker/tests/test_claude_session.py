@@ -3,18 +3,25 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
 from tests.support import SCRIPTS, GitFixture, git
 
-ISSUE_ID = "0b6c2a8e-1111-4222-8333-944455556666"
-SESSION_ID = "a62cb49b-8e77-5e0f-ba30-182967469dc0"
-PUBLISH_RULE = (
+# A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
+ISSUE_ID = str(uuid.uuid4())
+SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}"))
+SYSTEM_PROMPT = (
     f"Publish commits only by running {(SCRIPTS / 'push-signed').resolve()} from the worktree, never `git push`. "
     "It creates commits that the GitHub App signs, which repositories requiring verified signatures need. "
-    "To bring in the base branch, run `gh pr update-branch`, never a local merge."
+    "To bring in the base branch, run `gh pr update-branch`, never a local merge.\n\n"
+    "Stop every background command, monitor, and watcher you started before you write your final result. "
+    "The run ends when you finish, and anything still running is killed. To wait for CI, run a foreground "
+    "command that ends on its own, such as `gh pr checks <number> --watch --fail-fast` with the tool's "
+    "timeout set, and run it again when it times out."
 )
 REPO = "example-org/example-repo"
 DEFAULT_ENTRY = (
@@ -66,7 +73,7 @@ class ClaudeSessionTest(GitFixture):
                 "--settings-json", str(self.settings),
                 *extra,
             ],
-            env=base, capture_output=True, text=True,
+            env=base, capture_output=True, text=True, timeout=120,
         )
         lines = proc.stdout.splitlines()
         self.assertEqual(len(lines), 1, proc.stdout + proc.stderr)
@@ -103,7 +110,7 @@ class ClaudeSessionTest(GitFixture):
             "--max-turns", "40",
             "--permission-mode", "bypassPermissions",
             "--session-id", SESSION_ID,
-            "--append-system-prompt", PUBLISH_RULE,
+            "--append-system-prompt", SYSTEM_PROMPT,
         ])
         self.assertEqual(Path(call["cwd"]).resolve(), self.worktree)
 
@@ -122,7 +129,7 @@ class ClaudeSessionTest(GitFixture):
             "--max-turns", "40",
             "--permission-mode", "bypassPermissions",
             "--resume", SESSION_ID,
-            "--append-system-prompt", PUBLISH_RULE,
+            "--append-system-prompt", SYSTEM_PROMPT,
         ])
 
     def test_transcript_of_another_worktree_starts_a_fresh_session(self) -> None:
@@ -268,7 +275,7 @@ class ClaudeSessionTest(GitFixture):
             "--max-turns", "12",
             "--permission-mode", "bypassPermissions",
             "--session-id", SESSION_ID,
-            "--append-system-prompt", PUBLISH_RULE,
+            "--append-system-prompt", SYSTEM_PROMPT,
             "--model", "example-model",
             "--settings", settings_path,
         ])
@@ -335,6 +342,44 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(status, 1)
         self.assertEqual(report["error"], "claude run ended with error_during_execution (exit 0)")
         self.assertEqual(report["session_id"], SESSION_ID)
+
+    def leftover_pid(self) -> int:
+        return int((self.tmp / "leftover.pid").read_text())
+
+    def assert_process_gone(self, pid: int) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        os.kill(pid, signal.SIGKILL)
+        self.fail(f"process {pid} from the run was still alive")
+
+    def test_run_ends_when_claude_exits_but_a_child_holds_its_output(self) -> None:
+        started = time.monotonic()
+        status, report = self.run_session(env={"FAKE_CLAUDE_LEFTOVER_PID_FILE": str(self.tmp / "leftover.pid")})
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["result"], "Opened the pull request.")
+        self.assertLess(time.monotonic() - started, 60)
+        self.assert_process_gone(self.leftover_pid())
+
+    def test_run_ends_when_claude_waits_for_a_detached_background_command(self) -> None:
+        started = time.monotonic()
+        status, report = self.run_session(env={
+            "FAKE_CLAUDE_LEFTOVER_PID_FILE": str(self.tmp / "leftover.pid"),
+            "FAKE_CLAUDE_LEFTOVER_DETACHED": "1",
+            "FAKE_CLAUDE_WAITS_FOR_LEFTOVER": "1",
+        })
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["result"], "Opened the pull request.")
+        self.assertLess(time.monotonic() - started, 60)
+        self.assert_process_gone(self.leftover_pid())
+        listing = subprocess.run(["ps", "-Ao", "command="], capture_output=True, text=True, check=True).stdout
+        self.assertNotIn(SESSION_ID, listing)
 
     def head(self) -> str:
         return git(self.worktree, "rev-parse", "HEAD")

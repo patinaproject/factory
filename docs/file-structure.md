@@ -18,7 +18,7 @@
 │   ├── release-flow.md        # How releases are cut
 │   └── wiki-index.md          # Planned wiki pages
 ├── plugins/
-│   ├── linear-agent-session/  # Linear acknowledgement hook, activity, issue, and session tools, cli.py
+│   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, activity, issue, and session tools, cli.py
 │   └── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
 ├── profiles/
 │   └── claude-worker/         # Kanban worker profile distribution
@@ -34,7 +34,7 @@
 │       ├── SKILL.md
 │       └── references/        # Cloudflare and SST, Linear, GitHub, Slack, Claude transport, Infisical, 1Password, agent instructions
 ├── templates/
-│   ├── render.py              # Builds the linear and github webhook routes from settings
+│   ├── render.py              # Builds the webhook routes and rate limit from settings
 │   ├── triage-linear.md       # Linear triage prompt template
 │   └── triage-github.md       # GitHub triage prompt template
 ├── AGENTS.md                  # Shared agent and contributor workflow contract
