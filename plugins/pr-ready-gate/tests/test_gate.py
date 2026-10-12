@@ -213,6 +213,11 @@ class HookDecisionTest(unittest.TestCase):
         result = call_hook(FakeShell(pr={**CLEAN, **failed}), tool_name="kanban_request_review")
         self.assertEqual(result["action"], "block")
 
+    def test_review_handoff_after_changes_requested_waits_for_checks_to_register(self):
+        unregistered = {**AWAITING_RE_REVIEW, "statusCheckRollup": []}
+        result = call_hook(FakeShell(pr={**CLEAN, **unregistered}), tool_name="kanban_request_review")
+        self.assertEqual(result["action"], "block")
+
     def test_completion_after_changes_requested_is_still_blocked(self):
         result = call_hook(FakeShell(pr={**CLEAN, **AWAITING_RE_REVIEW}), tool_name="kanban_complete")
         self.assertEqual(result["action"], "block")

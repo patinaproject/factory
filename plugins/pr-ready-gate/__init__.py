@@ -65,6 +65,7 @@ def _awaiting_re_review(pr: dict) -> bool:
         pr.get("mergeStateStatus") == "BLOCKED"
         and pr.get("reviewDecision") == "CHANGES_REQUESTED"
         and isinstance(checks, list)
+        and bool(checks)
         and all(_check_passed(check) for check in checks)
     )
 
