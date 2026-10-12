@@ -25,7 +25,6 @@ FREE_TEXT_LINES = ("default effort", "session hook")
 
 
 def include_forms(config: Path, home: Path) -> list[str]:
-    """The `@` lines that name the sheet: absolute, plus `~` form under home."""
     sheet = config / SHEET
     forms = [f"@{sheet}"]
     if sheet.is_relative_to(home):
@@ -57,7 +56,7 @@ def add_include(text: str, form: str) -> str:
 
 
 def sheet_problems(text: str) -> list[str]:
-    """Role lines that name a slug the `Agent` tool rejects, or keep a placeholder."""
+    """Role lines that name a full `claude-` model ID, which the `Agent` tool rejects, or keep a placeholder."""
     problems = []
     for line in text.splitlines():
         match = ROLE_LINE.match(line)
@@ -92,7 +91,6 @@ def check(config: Path, home: Path) -> list[tuple[bool, str]]:
 
 
 def write(config: Path, home: Path) -> str:
-    """Add the include outside the block when absent; returns what happened."""
     claude_md = config / "CLAUDE.md"
     if not claude_md.is_file():
         raise ValueError(f"{claude_md} is missing; run setup part 17 first")
@@ -108,10 +106,7 @@ def write(config: Path, home: Path) -> str:
         return "unchanged"
     backup = claude_md.with_name(f"CLAUDE.md.bak-{time.strftime('%Y%m%d%H%M%S')}")
     shutil.copy2(claude_md, backup)
-    new_text = add_include(text, include_forms(config, home)[-1])
-    if marker_problem(new_text.splitlines()):
-        raise ValueError("the edit would break the marker pair")
-    claude_md.write_text(new_text)
+    claude_md.write_text(add_include(text, include_forms(config, home)[-1]))
     return f"added the include; backup at {backup}"
 
 
