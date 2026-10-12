@@ -348,7 +348,10 @@ profile also stops the provider, and the live test in part 15 then fails.
 ## 5. Factory plugins and the worker profile
 
 `<repo>` is the absolute path of this repository's checkout. Each profile has
-its own plugins directory, so install both plugins into both homes.
+its own plugins directory, so install all three plugins into both homes.
+`webhook-secret-guard` acts only in `<home>`, which serves the webhook
+routes, and is idle in `<worker>`; `check-install` expects every plugin in
+both homes.
 
 **Check**, for each home:
 
@@ -357,8 +360,9 @@ hermes plugins list
 hermes -p claude-worker plugins list
 ```
 
-Both list `linear-agent-session` and `pr-ready-gate`, enabled. On a fresh
-machine, install both now and skip the content check.
+Both list `linear-agent-session`, `pr-ready-gate`, and
+`webhook-secret-guard`, enabled. On a fresh machine, install all three now
+and skip the content check.
 
 On a re-run, `<worker>` already exists, and a listed plugin can still be
 older than the repository. First bring `<repo>` to an up-to-date default
@@ -380,8 +384,10 @@ plus `--force`.
 ```sh
 hermes plugins install "file://<repo>#plugins/linear-agent-session" --enable --yes-deps </dev/null
 hermes plugins install "file://<repo>#plugins/pr-ready-gate" --enable --yes-deps </dev/null
+hermes plugins install "file://<repo>#plugins/webhook-secret-guard" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/linear-agent-session" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/pr-ready-gate" --enable --yes-deps </dev/null
+hermes -p claude-worker plugins install "file://<repo>#plugins/webhook-secret-guard" --enable --yes-deps </dev/null
 ```
 
 To install from GitHub instead of a local checkout, use
@@ -825,8 +831,15 @@ forged_post github '${GITHUB_WEBHOOK_SECRET}' X-Hub-Signature-256 ping # github 
 A `401` proves something only when the same request signed with the real
 secret is accepted. The signed checks in
 [`references/cloudflare-sst.md`](references/cloudflare-sst.md) show that. Run
-these lines after every gateway restart. A startup guard that refuses such a
-route is not yet enforced in code.
+these lines after every gateway restart.
+
+The `webhook-secret-guard` plugin is the last line of defense. The gateway
+answers a forged delivery on such a route with `202` because it sends the
+status before plugins run, but the plugin drops the delivery before any agent
+run and logs
+`webhook-secret-guard: dropped a delivery on route <route>: secret is the unresolved reference ${<NAME>}`.
+At startup it logs one line per such route. A `202` from a forged line
+still means the secret source failed, so follow the steps below.
 
 If a forged line prints anything but `401`, the gateway is serving a route
 that anyone can sign for. Stop it before you fix the secret source.

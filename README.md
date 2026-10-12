@@ -26,6 +26,7 @@ skills, webhook routes, and cron). It never modifies Hermes source.
 | --- | --- | --- |
 | `plugins/linear-agent-session/` | Hermes plugin | Acknowledges Linear agent sessions within 10 seconds, and provides the `linear_agent_activity`, `linear_issue`, `linear_agent_session_create`, `linear_delegated_issues`, and `linear_issue_undelegate` tools as the Linear agent app |
 | `plugins/pr-ready-gate/` | Hermes plugin | Blocks `kanban_complete` and `kanban_request_review` until the pull request is merged, or out of draft, `CLEAN`, and at the worker's commit |
+| `plugins/webhook-secret-guard/` | Hermes plugin | Drops a webhook delivery before any agent run while its route's secret is still an unresolved `${NAME}` reference, and logs the route and the variable name |
 | `profiles/claude-worker/` | Hermes profile | The Kanban worker that drives Claude Code, with the `claude-session` launcher, the `refresh-checkouts` cron script, and the `push-signed` publisher for GitHub App signed commits |
 | `templates/` | Templates | `render.py` builds the `linear` and `github` webhook routes and their triage prompts from settings |
 | `skills/setup-factory/` | Agent skill | Sets up and checks a factory on a machine |
