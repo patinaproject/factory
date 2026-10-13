@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 # kanban_task_blocked is not one of Hermes' timeout-bounded hooks: it runs on the thread that blocks the
 # card, with no cap. This bound is the only one, and it stays under the 10 s Linear request timeout.
+# The post thread is not a daemon: a worker or CLI that exits right after the block still waits for it.
 POST_TIMEOUT_SECONDS = 8.0
 REASON_LIMIT = 500
 SESSION_LINE = re.compile(r"^linear_agent_session_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
@@ -46,11 +47,15 @@ def session_id(body: Optional[str]) -> Optional[str]:
 def activity_for(task_id: str, card: Card, reason: Optional[str], redact: Callable[[str], str]) -> Optional[dict]:
     """The activity that tells a person about a block, or None when the block needs nobody.
 
+    A triage park with no block kind is an undelegate, not a loop, so it posts nothing.
+
     The hook reports the card's committed state. A dependency wait fires the hook before its transaction
     commits, so its card still reads as running and falls through to None, as it should.
     """
     if card.status == "triage":
-        cause = f" ({card.block_kind})" if card.block_kind else ""
+        if not card.block_kind:
+            return None
+        cause = f" ({card.block_kind})"
         return _activity(
             "elicitation",
             f"Card {task_id} is parked in triage. It blocked twice in a row for the same reason{cause}, "
@@ -106,7 +111,7 @@ def make_blocked_hook(
             logger.exception("linear-agent-session: reporting the block of card %s failed", task_id)
 
     def on_blocked(task_id: str, board: Optional[str] = None, reason: Optional[str] = None, **_: Any) -> None:
-        worker = threading.Thread(target=post, args=(task_id, board, reason), daemon=True)
+        worker = threading.Thread(target=post, args=(task_id, board, reason), daemon=False)
         worker.start()
         worker.join(POST_TIMEOUT_SECONDS)
         if worker.is_alive():
