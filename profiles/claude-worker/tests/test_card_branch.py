@@ -217,6 +217,18 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(
             json.loads(proc.stdout), {"error": "gh could not run: No such file or directory"})
 
+    def test_a_gh_that_is_not_executable_gives_a_json_error_and_exit_1(self) -> None:
+        gh = self.tmp / "gh-not-executable"
+        gh.write_text("#!/bin/sh\n")
+        gh.chmod(0o644)
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "card_branch.py"), "--app", APP, "--repo", REPO, "--git-branch", X],
+            env={"PATH": "/usr/bin:/bin", "GH_BIN": str(gh)}, capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(json.loads(proc.stdout), {"error": f"{gh} could not run: Permission denied"})
+
     def test_a_branch_with_no_history_is_picked_as_it_is(self) -> None:
         self.assertEqual(self.run_command(), (0, {"branch": X, "takeover_pr": None}))
 

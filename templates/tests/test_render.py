@@ -328,6 +328,11 @@ class ValidationTest(unittest.TestCase):
                 render.build_routes(value)
             self.assertEqual(str(raised.exception), self.NO_LOGIN)
 
+    def test_a_login_without_the_bot_suffix_is_rejected(self):
+        with self.assertRaises(render.SettingsError) as raised:
+            render.build_routes(settings(github={"login": "example-app"}))
+        self.assertEqual(str(raised.exception), self.NO_LOGIN)
+
     def test_each_invalid_setting_is_rejected(self):
         for message, value in self.CASES.items():
             with self.subTest(message=message):
