@@ -78,7 +78,7 @@ EVENT_FILTER = {
                 {"field": "event", "equals": "issue_comment"},
                 {"field": "action", "in": ["created"]},
                 {"not": {"field": "comment.body", "regex": r"\A<!-- linear-linkback -->"}},
-                {"not": {"field": "comment.user.login", "in": ["cloudflare-workers-and-pages[bot]"]}},
+                {"not": {"field": "comment.user.login", "in": ["cloudflare-workers-and-pages[bot]", "vercel[bot]", "github-actions[bot]"]}},
                 {
                     "any": [
                         {
@@ -595,16 +595,16 @@ FILTER_CASES = [
     ("review comment on a human PR", "pull_request_review_comment", payload("created", pull_request=pull_request(HUMAN)), False),
     ("issue comment on an App PR", "issue_comment", payload("created", issue=issue(APP), comment=comment(HUMAN, "Please rename this.")), True),
     (
-        "review bot comment on an App PR",
+        "GitHub Actions comment on an App PR",
         "issue_comment",
         payload("created", sender="github-actions[bot]", issue=issue(APP), comment=comment("github-actions[bot]", "### Diff")),
-        True,
+        False,
     ),
     (
         "Vercel deploy notice on an App PR",
         "issue_comment",
         payload("created", sender="vercel[bot]", issue=issue(APP), comment=comment("vercel[bot]", "[vc]: #abc")),
-        True,
+        False,
     ),
     (
         "Cloudflare deploy notice on an App PR",

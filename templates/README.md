@@ -26,7 +26,7 @@ branch in `<home>/owned-refs.json`, a failed workflow run the App triggered on
 such a branch, a failed `check_run` on such a branch, or an `issues` event on an
 issue URL listed there. An `issue_comment` passes on a pull request the App
 opened, since its payload has no branch, or on a listed issue URL. Linear's
-linkback comment and Cloudflare's deploy notice never pass. The worker's
+linkback comment and the deploy and CI bots' notices (Cloudflare, Vercel, GitHub Actions) never pass. The worker's
 `refresh-owned-refs` cron job rewrites that file every minute with the branch
 and GitHub issue URL of every card not archived, and the route reads it on every
 delivery through Hermes' `in_file` operator. The route also drops events the
