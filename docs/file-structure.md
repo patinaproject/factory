@@ -18,6 +18,7 @@
 │   ├── release-flow.md        # How releases are cut
 │   └── wiki-index.md          # Planned wiki pages
 ├── plugins/
+│   ├── factory-uploads/       # Gateway platform plugin: Unix-socket broker that uploads evidence images, upload_token.py
 │   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, activity, issue, and session tools, cli.py
 │   └── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
 ├── profiles/
@@ -25,7 +26,7 @@
 │       ├── SOUL.md            # Worker instructions
 │       ├── config.yaml        # Toolsets, skills, plugins, and placeholder settings
 │       ├── distribution.yaml  # Profile distribution manifest
-│       └── scripts/           # claude-session, card_branch.py, upload_token.py, push-signed, worker-secrets, check-install, and the refresh cron scripts
+│       └── scripts/           # claude-session, card_branch.py, github-upload-image, push-signed, worker-secrets, check-install, and the refresh cron scripts
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
 │   └── ...                    # Repository maintenance scripts

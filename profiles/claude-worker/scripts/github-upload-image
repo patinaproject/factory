@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Upload evidence images through the gateway and print one <img> tag per file.
+
+Run it with python3. It reads image bytes and sends them over the gateway's
+Unix socket. The gateway holds the upload token, so this script never sees
+one. It uploads and nothing else: it never edits a pull request.
+
+Exit codes: 0 every file uploaded, 1 the gateway refused or failed a file,
+2 bad arguments or an unreadable file, 3 the gateway did not answer in time.
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import re
+import socket
+import struct
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SOCKET_ENV = "FACTORY_EVIDENCE_SOCKET"
+DEFAULT_SOCKET = Path.home() / ".hermes/factory-uploads.sock"
+WAIT_SECONDS = 30
+MAX_BYTES = 10 * 1024 * 1024
+MAX_WIDTH = 800
+REPLY_LIMIT = 65536
+GATEWAY_DOWN = (
+    "Image upload is unavailable right now because the gateway is not answering. "
+    "Attach the images to the Linear issue instead and say so in the pull request body."
+)
+GITHUB_REMOTE = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
+
+
+class GatewayDown(Exception):
+    pass
+
+
+def image_width(data: bytes) -> int | None:
+    """The pixel width of a png, gif, jpeg, or webp, or None when the header does not say."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return struct.unpack(">I", data[16:20])[0]
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return struct.unpack("<H", data[6:8])[0]
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        kind = data[12:16]
+        if kind == b"VP8 ":
+            return struct.unpack("<H", data[26:28])[0] & 0x3FFF
+        if kind == b"VP8L":
+            return (struct.unpack("<I", data[21:25])[0] & 0x3FFF) + 1
+        if kind == b"VP8X":
+            return int.from_bytes(data[24:27], "little") + 1
+    if data.startswith(b"\xff\xd8"):
+        at = 2
+        while at + 9 < len(data):
+            if data[at] != 0xFF:
+                return None
+            marker = data[at + 1]
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                return struct.unpack(">H", data[at + 7:at + 9])[0]
+            at += 2 + struct.unpack(">H", data[at + 2:at + 4])[0]
+    return None
+
+
+def img_tag(url: str, path: Path, data: bytes) -> str:
+    width = image_width(data)
+    size = f' width="{min(width, MAX_WIDTH)}"' if width else ""
+    return f'<img src="{html.escape(url)}" alt="{html.escape(path.stem)}"{size}>'
+
+
+def connect(path: str, wait: float, clock, sleep) -> socket.socket:
+    deadline = clock() + wait
+    while True:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(path)
+            return sock
+        except OSError:
+            sock.close()
+        if clock() >= deadline:
+            raise GatewayDown
+        sleep(0.5)
+
+
+def exchange(sock: socket.socket, header: dict, data: bytes) -> dict:
+    """Send one request and read the one-line reply. A broken connection is a failed upload."""
+    sock.settimeout(75)
+    try:
+        sock.sendall(json.dumps(header).encode() + b"\n" + data)
+    except OSError:
+        pass  # the gateway may answer a refusal before it reads every byte
+    reply = b""
+    try:
+        while not reply.endswith(b"\n") and len(reply) < REPLY_LIMIT:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            reply += chunk
+    except OSError:
+        pass
+    try:
+        return json.loads(reply)
+    except ValueError:
+        return {"ok": False, "message": "The gateway closed the connection before it answered. GitHub may or may not have stored the image."}
+
+
+def repository_from_git() -> str | None:
+    result = subprocess.run(
+        ["git", "remote", "get-url", "origin"], capture_output=True, text=True, check=False
+    )
+    match = GITHUB_REMOTE.search(result.stdout.strip()) if result.returncode == 0 else None
+    return match.group(1) if match else None
+
+
+def main(argv, env, out, err, clock=time.monotonic, sleep=time.sleep, repository=repository_from_git) -> int:
+    parser = argparse.ArgumentParser(
+        prog="github-upload-image",
+        description="Upload images for a pull request description and print one <img> tag per file.",
+    )
+    parser.add_argument("files", nargs="+", type=Path)
+    parser.add_argument("--repo", help="OWNER/REPO the pull request belongs to (default: this checkout's origin)")
+    args = parser.parse_args(argv)
+    repo = args.repo or repository()
+    if not repo:
+        print("error: cannot tell which repository to upload for; pass --repo OWNER/REPO", file=err)
+        return 2
+    loaded = []
+    for path in args.files:
+        if not path.is_file():
+            print(f"error: {path} is not a file", file=err)
+            return 2
+        data = path.read_bytes()
+        if len(data) > MAX_BYTES:
+            print(f"error: {path} is larger than {MAX_BYTES // (1024 * 1024)} MB", file=err)
+            return 2
+        loaded.append((path, data))
+    socket_path = env.get(SOCKET_ENV) or str(DEFAULT_SOCKET)
+    failed = False
+    for path, data in loaded:
+        try:
+            sock = connect(socket_path, WAIT_SECONDS, clock, sleep)
+        except GatewayDown:
+            print(f"error: {GATEWAY_DOWN}", file=err)
+            return 3
+        with sock:
+            reply = exchange(sock, {"op": "upload", "repo": repo, "name": path.name, "size": len(data)}, data)
+        if reply.get("ok"):
+            print(img_tag(reply["url"], path, data), file=out)
+        else:
+            failed = True
+            print(f"error: {path}: {reply.get('message', 'The upload failed.')}", file=err)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:], os.environ, sys.stdout, sys.stderr))
