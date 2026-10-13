@@ -1,7 +1,7 @@
 manifest_version: 2
 name: pr-ready-gate
 version: "0.1.0"
-description: "Blocks kanban_complete and kanban_request_review in gated worker profiles until the task's pull request is open, not a draft, mergeable (mergeStateStatus CLEAN), and at the worktree's HEAD, or already merged at the worktree's HEAD. A merged pull request blocks kanban_request_review and points the worker to kanban_complete."
+description: "Blocks kanban_complete and kanban_request_review in gated worker profiles until the task's pull request is open, not a draft, mergeable (mergeStateStatus CLEAN), and at the worktree's HEAD, or already merged at the worktree's HEAD. A merged pull request blocks kanban_request_review and points the worker to kanban_complete. kanban_request_review also accepts a pull request that GitHub holds at BLOCKED only for a missing or changes-requested review, once the gate has confirmed from the base branch rules that every required check passed, commits are signed, review threads are resolved, and no rule it cannot verify applies."
 provides_hooks:
   - pre_tool_call
 config_schema:
