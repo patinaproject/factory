@@ -173,9 +173,13 @@ def one_pixel_png() -> bytes:
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixel) + chunk(b"IEND", b"")
 
 
+# The gateway runs this with every factory secret in its environment, so gh sees only these.
+GH_ENV_NAMES = ("PATH", "HOME", "GH_CONFIG_DIR")
+
+
 def repository_id(repo: str) -> int:
-    """Look the id up as the GitHub App, with the upload token out of the environment."""
-    env = {k: v for k, v in os.environ.items() if k != "GITHUB_UPLOAD_TOKEN"}
+    """Look the id up as the GitHub App. gh gets only GH_ENV_NAMES, never the caller's secrets."""
+    env = {k: os.environ[k] for k in GH_ENV_NAMES if k in os.environ}
     env.setdefault("GH_CONFIG_DIR", str(WORKER_GH_DIR))
     gh = Path.home() / ".local/bin/gh"
     result = subprocess.run(
