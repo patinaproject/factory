@@ -4,17 +4,40 @@ import json
 import os
 import re
 import subprocess
-from typing import Any, Optional
+import time
+import urllib.parse
+from typing import Any, Callable, Optional
 
 DEFAULT_GATED_PROFILES = ["claude-worker"]
 # Hermes runs its completion contract inside complete_task only, so a review handoff needs this gate too.
 GATED_TOOLS = ("kanban_complete", "kanban_request_review")
-PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup"
+PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"
 PASSING_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
 PR_URL = re.compile(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/\d+/?$")
 # Hermes kills a pre_tool_call hook after 30s; up to three calls must fit inside that.
 GIT_TIMEOUT_SECONDS = 3
 GH_TIMEOUT_SECONDS = 20
+# The review handoff makes up to two more gh calls; the whole gate still has to fit in Hermes' 30s.
+GH_EXTRA_TIMEOUT_SECONDS = 4
+HOOK_BUDGET_SECONDS = 28
+# Rules whose only effect on a pull request is a merge-time or review-time requirement the gate checks or does not need.
+REVIEW_HANDOFF_RULES = frozenset(
+    {
+        "pull_request",
+        "required_status_checks",
+        "required_signatures",
+        "required_linear_history",
+        "deletion",
+        "non_fast_forward",
+        "creation",
+        "update",
+    }
+)
+THREAD_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){"
+    "reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved}} "
+    "commits(first:100){pageInfo{hasNextPage} nodes{commit{oid signature{isValid}}}}}}}"
+)
 
 MERGE_STATE_REMEDIES = {
     "BEHIND": "update the branch from the base branch and push",
@@ -37,7 +60,13 @@ class GateError(Exception):
     pass
 
 
-def evaluate(pr: dict, local_head: str, tool_name: str) -> list[str]:
+def evaluate(
+    pr: dict,
+    local_head: str,
+    tool_name: str,
+    other_blockers: Optional[Callable[[], list[str]]] = None,
+) -> list[str]:
+    """other_blockers lists every unmet branch rule except the approval, for a pull request that waits on a review."""
     failures = []
     state = pr.get("state")
     if state == "MERGED" and tool_name == "kanban_request_review":
@@ -50,24 +79,70 @@ def evaluate(pr: dict, local_head: str, tool_name: str) -> list[str]:
     if pr.get("isDraft") is not False:
         failures.append(f"isDraft is {pr.get('isDraft')!r}, expected False: {MERGE_STATE_REMEDIES['DRAFT']}")
     merge_state = pr.get("mergeStateStatus")
-    if tool_name == "kanban_request_review" and _awaiting_re_review(pr):
-        # A changes-requested review keeps GitHub at BLOCKED until the reviewer reviews again, which needs this handoff.
-        merge_state = "CLEAN"
+    hidden: list[str] = []
+    if tool_name == "kanban_request_review" and _awaiting_review(pr) and other_blockers is not None:
+        # Hold for a review keeps GitHub at BLOCKED until a reviewer acts, which needs this handoff.
+        # BLOCKED also covers other unmet rules, so the handoff passes only when the approval is the sole one.
+        hidden = other_blockers()
+        if not hidden:
+            merge_state = "CLEAN"
     if merge_state != "CLEAN":
         remedy = MERGE_STATE_REMEDIES.get(merge_state, "wait until GitHub reports CLEAN")
         failures.append(f"mergeStateStatus is {merge_state!r}, expected 'CLEAN': {remedy}")
-    return failures + _head_failures(pr, local_head)
+    return failures + hidden + _head_failures(pr, local_head)
 
 
-def _awaiting_re_review(pr: dict) -> bool:
+def _awaiting_review(pr: dict) -> bool:
     checks = pr.get("statusCheckRollup")
     return (
         pr.get("mergeStateStatus") == "BLOCKED"
-        and pr.get("reviewDecision") == "CHANGES_REQUESTED"
+        and pr.get("reviewDecision") in ("CHANGES_REQUESTED", "REVIEW_REQUIRED")
         and isinstance(checks, list)
         and bool(checks)
         and all(_check_passed(check) for check in checks)
     )
+
+
+def _rollup_name(check) -> Optional[str]:
+    if not isinstance(check, dict):
+        return None
+    return check.get("name") or check.get("context")
+
+
+def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) -> list[str]:
+    """Names every branch rule other than the approval that the pull request does not meet."""
+    problems = []
+    types = {rule.get("type") for rule in rules if isinstance(rule, dict)}
+    for unknown in sorted(str(t) for t in types - REVIEW_HANDOFF_RULES):
+        problems.append(f"branch rule {unknown!r} is one this gate cannot verify, so BLOCKED may not be only the review")
+    rollup = pr.get("statusCheckRollup") or []
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+            continue
+        for required in (rule.get("parameters") or {}).get("required_status_checks") or []:
+            context = required.get("context")
+            seen = [check for check in rollup if _rollup_name(check) == context]
+            if not seen:
+                problems.append(f"required check {context!r} has not passed: wait for it, or fix and push")
+    wants_threads = any(
+        isinstance(rule, dict)
+        and rule.get("type") == "pull_request"
+        and (rule.get("parameters") or {}).get("required_review_thread_resolution")
+        for rule in rules
+    )
+    if pr_state is not None and (wants_threads or "required_signatures" in types):
+        state = pr_state()
+        if wants_threads:
+            if state["threads_truncated"]:
+                problems.append("more than 100 review threads, so the gate cannot confirm they are all resolved")
+            elif state["unresolved_threads"]:
+                problems.append(f"{state['unresolved_threads']} review thread(s) are unresolved: resolve them")
+        if "required_signatures" in types:
+            if state["commits_truncated"]:
+                problems.append("more than 100 commits, so the gate cannot confirm each is signed")
+            elif state["unsigned_commits"]:
+                problems.append(f"{state['unsigned_commits']} commit(s) lack a verified signature: publish with push-signed")
+    return problems
 
 
 def _check_passed(check) -> bool:
@@ -123,6 +198,7 @@ def check(tool_name: str, args: Any, env: dict) -> tuple[str, list[str]]:
             ["git", "-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"], workspace, GIT_TIMEOUT_SECONDS
         )
         repo_args = []
+    started = time.monotonic()
     raw = _run(["gh", "pr", "view", target, "--json", PR_FIELDS, *repo_args], workspace, GH_TIMEOUT_SECONDS)
     try:
         pr = json.loads(raw)
@@ -130,7 +206,49 @@ def check(tool_name: str, args: Any, env: dict) -> tuple[str, list[str]]:
         raise GateError(f"`gh pr view {target}` returned malformed JSON: {raw[:200]!r}")
     if not isinstance(pr, dict):
         raise GateError(f"`gh pr view {target}` returned {type(pr).__name__}, expected an object")
-    return pr.get("url") or target, evaluate(pr, local_head, tool_name)
+    return pr.get("url") or target, evaluate(pr, local_head, tool_name, _blockers(pr, workspace, started))
+
+
+def _blockers(pr: dict, workspace: str, started: float) -> Optional[Callable[[], list[str]]]:
+    match = PR_URL.match(str(pr.get("url")))
+    base = pr.get("baseRefName")
+    if not match or not isinstance(base, str) or not base:
+        return None
+    repo = match.group(1)
+
+    def gh_json(args: list[str]):
+        remaining = HOOK_BUDGET_SECONDS - (time.monotonic() - started)
+        if remaining < 1:
+            raise GateError("the gate ran out of time before it could read the branch rules")
+        out = _run(["gh", *args], workspace, min(GH_EXTRA_TIMEOUT_SECONDS, int(remaining)))
+        try:
+            return json.loads(out)
+        except ValueError:
+            raise GateError(f"`gh {args[0]}` returned malformed JSON: {out[:200]!r}")
+
+    def pr_state() -> dict:
+        owner, name = repo.split("/")
+        number = pr["url"].rstrip("/").rsplit("/", 1)[1]
+        data = gh_json(["api", "graphql", "-f", f"query={THREAD_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={number}"])
+        try:
+            node = data["data"]["repository"]["pullRequest"]
+            threads, commits = node["reviewThreads"], node["commits"]
+            return {
+                "threads_truncated": threads["pageInfo"]["hasNextPage"],
+                "unresolved_threads": sum(1 for t in threads["nodes"] if not t["isResolved"]),
+                "commits_truncated": commits["pageInfo"]["hasNextPage"],
+                "unsigned_commits": sum(1 for c in commits["nodes"] if not (c["commit"].get("signature") or {}).get("isValid")),
+            }
+        except (KeyError, TypeError):
+            raise GateError(f"the review threads and commit signatures of {pr['url']} could not be read")
+
+    def blockers() -> list[str]:
+        rules = gh_json(["api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100"])
+        if not isinstance(rules, list):
+            raise GateError(f"the branch rules of {repo}:{base} could not be read")
+        return _unmet_rules(pr, rules, pr_state)
+
+    return blockers
 
 
 def make_hook(ctx: Any):

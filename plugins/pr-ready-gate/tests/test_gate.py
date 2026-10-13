@@ -19,7 +19,7 @@ OTHER = "b" * 40
 WORKSPACE = "/work/example-repo/.worktrees/task-1"
 BRANCH = "abc-123-example"
 PR_URL = "https://github.com/example-org/example-repo/pull/7"
-CLEAN = {"url": PR_URL, "isDraft": False, "mergeStateStatus": "CLEAN", "headRefOid": HEAD, "state": "OPEN"}
+CLEAN = {"url": PR_URL, "isDraft": False, "mergeStateStatus": "CLEAN", "headRefOid": HEAD, "state": "OPEN", "baseRefName": "main"}
 WORKER_ENV = {
     "HERMES_KANBAN_TASK": "t_1",
     "HERMES_KANBAN_WORKSPACE": WORKSPACE,
@@ -41,7 +41,9 @@ class FakeCtx:
 
 
 class FakeShell:
-    def __init__(self, pr=None, gh_stdout=None, gh_returncode=0, gh_raises=None, head=HEAD, branch=BRANCH):
+    def __init__(self, pr=None, gh_stdout=None, gh_returncode=0, gh_raises=None, head=HEAD, branch=BRANCH, rules=None, state=None):
+        self.rules = DEFAULT_RULES if rules is None else rules
+        self.state = REVIEW_STATE if state is None else state
         self.gh_stdout = json.dumps(pr if pr is not None else CLEAN) if gh_stdout is None else gh_stdout
         self.gh_returncode = gh_returncode
         self.gh_raises = gh_raises
@@ -56,6 +58,9 @@ class FakeShell:
             return subprocess.CompletedProcess(cmd, 0, stdout + "\n", "")
         if self.gh_raises:
             raise self.gh_raises
+        if cmd[1] == "api":
+            body = self.state if cmd[2] == "graphql" else self.rules
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
         stderr = "" if self.gh_returncode == 0 else "no pull requests found for branch"
         return subprocess.CompletedProcess(cmd, self.gh_returncode, self.gh_stdout, stderr)
 
@@ -64,15 +69,43 @@ class FakeShell:
 
 
 PASSING_CHECKS = [
-    {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
-    {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SKIPPED"},
-    {"__typename": "StatusContext", "state": "SUCCESS"},
+    {"__typename": "CheckRun", "name": "Required checks pass", "status": "COMPLETED", "conclusion": "SUCCESS"},
+    {"__typename": "CheckRun", "name": "Deploy", "status": "COMPLETED", "conclusion": "SKIPPED"},
+    {"__typename": "StatusContext", "context": "Preview", "state": "SUCCESS"},
 ]
 AWAITING_RE_REVIEW = {
     "mergeStateStatus": "BLOCKED",
     "reviewDecision": "CHANGES_REQUESTED",
     "statusCheckRollup": PASSING_CHECKS,
 }
+AWAITING_APPROVAL = {**AWAITING_RE_REVIEW, "reviewDecision": "REVIEW_REQUIRED"}
+DEFAULT_RULES = [
+    {"type": "deletion"},
+    {"type": "non_fast_forward"},
+    {"type": "pull_request", "parameters": {"required_approving_review_count": 1, "required_review_thread_resolution": True}},
+    {"type": "required_signatures"},
+    {"type": "required_linear_history"},
+    {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Required checks pass"}]}},
+]
+REVIEW_STATE = {
+    "data": {
+        "repository": {
+            "pullRequest": {
+                "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": True}]},
+                "commits": {
+                    "pageInfo": {"hasNextPage": False},
+                    "nodes": [{"commit": {"oid": HEAD, "signature": {"isValid": True}}}],
+                },
+            }
+        }
+    }
+}
+
+
+def state_with(**overrides):
+    node = json.loads(json.dumps(REVIEW_STATE["data"]["repository"]["pullRequest"]))
+    node.update(overrides)
+    return {"data": {"repository": {"pullRequest": node}}}
 
 
 def call_hook(shell, env=WORKER_ENV, ctx=None, tool_name="kanban_complete", args=None):
@@ -157,7 +190,7 @@ class HookDecisionTest(unittest.TestCase):
         gh_calls = [call for call in shell.calls if call[0][0] == "gh"]
         self.assertEqual(
             gh_calls,
-            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup"], WORKSPACE, 20)],
+            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"], WORKSPACE, 20)],
         )
 
     def test_published_pr_url_is_viewed_with_its_repo(self):
@@ -165,7 +198,7 @@ class HookDecisionTest(unittest.TestCase):
         self.assertIsNone(call_hook(shell, args={"metadata": {"published_pr": PR_URL}}))
         self.assertEqual(
             shell.gh_call()[0],
-            ["gh", "pr", "view", PR_URL, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup",
+            ["gh", "pr", "view", PR_URL, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName",
              "--repo", "example-org/example-repo"],
         )
 
@@ -217,6 +250,92 @@ class HookDecisionTest(unittest.TestCase):
         unregistered = {**AWAITING_RE_REVIEW, "statusCheckRollup": []}
         result = call_hook(FakeShell(pr={**CLEAN, **unregistered}), tool_name="kanban_request_review")
         self.assertEqual(result["action"], "block")
+
+    def review_handoff(self, pr, tool_name="kanban_request_review", **fake):
+        return call_hook(FakeShell(pr={**CLEAN, **pr}, **fake), tool_name=tool_name)
+
+    def assert_blocked(self, result, expected):
+        self.assertEqual(result["action"], "block")
+        self.assertIn(expected, result["message"])
+
+    def test_review_handoff_waiting_for_approval_is_allowed(self):
+        self.assertIsNone(self.review_handoff(AWAITING_APPROVAL))
+
+    def test_review_handoff_reads_the_rules_of_the_base_branch(self):
+        shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL, "baseRefName": "feature/x"})
+        call_hook(shell, tool_name="kanban_request_review")
+        api = [call[0][2] for call in shell.calls if call[0][:2] == ["gh", "api"]]
+        self.assertEqual(api[0], "repos/example-org/example-repo/rules/branches/feature%2Fx?per_page=100")
+
+    def test_completion_waiting_for_approval_is_blocked(self):
+        shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL})
+        result = call_hook(shell, tool_name="kanban_complete")
+        self.assert_blocked(result, "mergeStateStatus is 'BLOCKED'")
+        self.assertEqual([call for call in shell.calls if call[0][:2] == ["gh", "api"]], [])
+
+    def test_approval_wait_with_a_failing_check_is_refused(self):
+        failed = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Test", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": failed}), "mergeStateStatus is 'BLOCKED'")
+
+    def test_approval_wait_with_a_pending_check_is_refused(self):
+        pending = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Test", "status": "IN_PROGRESS", "conclusion": ""}]
+        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": pending}), "mergeStateStatus is 'BLOCKED'")
+
+    def test_approval_wait_with_a_required_check_missing_from_the_rollup_is_refused(self):
+        rules = [*DEFAULT_RULES[:-1], {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Validate pull request"}]}}]
+        self.assert_blocked(self.review_handoff(AWAITING_APPROVAL, rules=rules), "required check 'Validate pull request' has not passed")
+
+    def test_approval_wait_with_a_second_run_of_a_required_check_failing_is_refused(self):
+        twin = {"__typename": "CheckRun", "name": "Required checks pass", "status": "COMPLETED", "conclusion": "FAILURE"}
+        pr = {**AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, twin]}
+        self.assert_blocked(self.review_handoff(pr), "mergeStateStatus is 'BLOCKED'")
+
+    def test_approval_wait_with_no_registered_checks_is_refused_even_without_required_checks(self):
+        rules = [{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]
+        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": []}, rules=rules), "mergeStateStatus is 'BLOCKED'")
+
+    def test_approval_wait_on_a_draft_is_refused(self):
+        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "isDraft": True}), "isDraft is True")
+
+    def test_approval_wait_at_another_head_is_refused(self):
+        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "headRefOid": OTHER}), f"headRefOid is '{OTHER}'")
+
+    def test_approval_wait_with_an_unresolved_thread_is_refused(self):
+        state = state_with(reviewThreads={"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": True}, {"isResolved": False}]})
+        self.assert_blocked(self.review_handoff(AWAITING_APPROVAL, state=state), "1 review thread(s) are unresolved")
+
+    def test_approval_wait_with_unconfirmed_threads_is_refused(self):
+        state = state_with(reviewThreads={"pageInfo": {"hasNextPage": True}, "nodes": []})
+        self.assert_blocked(self.review_handoff(AWAITING_APPROVAL, state=state), "more than 100 review threads")
+
+    def test_approval_wait_with_an_unsigned_commit_is_refused(self):
+        commits = {"pageInfo": {"hasNextPage": False}, "nodes": [{"commit": {"oid": HEAD, "signature": None}}]}
+        self.assert_blocked(self.review_handoff(AWAITING_APPROVAL, state=state_with(commits=commits)), "1 commit(s) lack a verified signature")
+
+    def test_approval_wait_with_unconfirmed_commits_is_refused(self):
+        commits = {"pageInfo": {"hasNextPage": True}, "nodes": []}
+        self.assert_blocked(self.review_handoff(AWAITING_APPROVAL, state=state_with(commits=commits)), "more than 100 commits")
+
+    def test_approval_wait_under_an_unknown_rule_is_refused(self):
+        rules = [*DEFAULT_RULES, {"type": "required_deployments", "parameters": {}}]
+        self.assert_blocked(self.review_handoff(AWAITING_APPROVAL, rules=rules), "branch rule 'required_deployments' is one this gate cannot verify")
+
+    def test_approval_wait_whose_rules_cannot_be_read_is_refused(self):
+        self.assert_blocked(self.review_handoff(AWAITING_APPROVAL, rules={"message": "Not Found"}), "could not be read")
+
+    def test_thread_and_signature_reads_are_skipped_when_no_rule_asks_for_them(self):
+        rules = [{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]
+        shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL}, rules=rules)
+        self.assertIsNone(call_hook(shell, tool_name="kanban_request_review"))
+        self.assertNotIn("graphql", [call[0][2] for call in shell.calls if call[0][:2] == ["gh", "api"]])
+
+    def test_changes_requested_handoff_is_held_to_the_same_rules(self):
+        rules = [*DEFAULT_RULES, {"type": "code_scanning", "parameters": {}}]
+        self.assert_blocked(self.review_handoff(AWAITING_RE_REVIEW, rules=rules), "cannot verify")
+
+    def test_review_required_on_a_pr_that_is_not_blocked_gets_no_special_treatment(self):
+        pr = {**AWAITING_APPROVAL, "mergeStateStatus": "DIRTY"}
+        self.assert_blocked(self.review_handoff(pr), "mergeStateStatus is 'DIRTY'")
 
     def test_completion_after_changes_requested_is_still_blocked(self):
         result = call_hook(FakeShell(pr={**CLEAN, **AWAITING_RE_REVIEW}), tool_name="kanban_complete")
