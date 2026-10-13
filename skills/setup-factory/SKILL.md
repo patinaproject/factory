@@ -873,9 +873,12 @@ event or an `issue_comment` on an issue only when its issue URL, is listed in
 `<home>/owned-refs.json`, which the route reads on every delivery through
 Hermes' `in_file` operator. `refresh-owned-refs` rewrites that file
 every minute from `hermes kanban list --json` with the `branch_name` and
-`github_issue_url` of every card not archived, in one atomic step. Without the
+`github_issue_url` of every card not archived, in one atomic step. It also
+writes each card's `linear_issue_id`, a `done` card included. The `linear`
+route keeps a completed or canceled `Issue` update only when its issue id is
+listed, so triage never starts for a closed issue that has no card. Without the
 file the route drops every GitHub event except an `issue_comment` on the
-App's pull request. `check-install` reports the file when it
+App's pull request, and every completed or canceled `Issue` update. `check-install` reports the file when it
 is missing or older than 5 minutes. Create the job when `cron list` has no
 `refresh-owned-refs` job:
 
@@ -1270,7 +1273,13 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    HERMES_HOME=<worker> python3 <worker>/scripts/check-install
    ```
 
-3. Install each item it names:
+3. Install each item it names, with the profile first and the route last. The
+   `linear` route drops a completed or canceled `Issue` update unless its
+   issue id is in `<root>/owned-refs.json`. Update the profile, run
+   `refresh-owned-refs` once, confirm the file holds issue UUIDs, and only then
+   re-render the route. The reverse order drops every closure until the next
+   cron run. `check-install` reports a route that filters on issue ids while
+   the file holds none.
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.

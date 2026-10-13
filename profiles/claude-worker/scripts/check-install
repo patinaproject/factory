@@ -49,6 +49,8 @@ from typing import Callable, NamedTuple
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
 OWNED_REFS = "owned-refs.json"
+LINEAR_ISSUE_FIELD = "data.id"
+LINEAR_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Deliver values that name no platform, so no home channel is needed.
 NON_PLATFORM_TARGETS = ("local", "origin", "all")
 ROOT_ALERT_SCRIPT = "check-install-alert"
@@ -301,7 +303,24 @@ def check_routes(commit: Commit, root: Path, hermes: str) -> list:
             drifts.append(Drift("webhook config", key, f"not installed in {root}"))
         elif not matches(value, json.loads(proc.stdout)):
             drifts.append(Drift("webhook config", key, f"differs from the value rendered at {commit.short}"))
+        elif f'"{LINEAR_ISSUE_FIELD}"' in proc.stdout:
+            drifts.extend(check_linear_ids(root, key))
     return drifts
+
+
+def check_linear_ids(root: Path, key: str) -> list:
+    # Re-rendering the route before refresh-owned-refs ran drops every closure, so the order is checked here.
+    try:
+        refs = json.loads((root / OWNED_REFS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []  # check_owned_refs reports a missing file
+    if any(isinstance(ref, str) and LINEAR_ID.fullmatch(ref) for ref in refs):
+        return []
+    return [Drift(
+        "webhook config", key,
+        f"filters on Linear issue ids, but {root / OWNED_REFS} holds none; deploy the profile and run refresh-owned-refs "
+        "once before the route (part 11)",
+    )]
 
 
 def check_rejected_deliveries(root: Path) -> list:

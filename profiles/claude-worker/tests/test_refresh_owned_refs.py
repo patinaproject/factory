@@ -67,6 +67,22 @@ class RefreshOwnedRefsTest(unittest.TestCase):
         self.assertEqual(self.output.read_text(), json.dumps(EXPECTED, indent=2) + "\n")
         self.assertEqual(json.loads(self.output.read_text()), EXPECTED)
 
+    def test_writes_the_linear_issue_id_of_every_card_including_done_ones(self) -> None:
+        cards = [
+            {"id": "t6", "title": "ABC-6: open", "body": "```text\nlinear_issue_id: 00000000-0000-4000-8000-0000000000c1\nlinear_issue_identifier: ABC-6\n```\n", "branch_name": None, "status": "review"},
+            {"id": "t7", "title": "ABC-7: shipped", "body": "linear_issue_id: 00000000-0000-4000-8000-0000000000c2\n", "branch_name": None, "status": "done"},
+            {"id": "t8", "title": "ABC-8: no id", "body": "linear_issue_identifier: ABC-8\n", "branch_name": None, "status": "triage"},
+        ]
+        self.tasks.write_text(json.dumps(cards))
+
+        proc = self.run_script("--tasks-json", str(self.tasks), "--output", str(self.output))
+
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(
+            json.loads(self.output.read_text()),
+            ["00000000-0000-4000-8000-0000000000c1", "00000000-0000-4000-8000-0000000000c2"],
+        )
+
     def test_keeps_the_branch_of_a_card_hermes_bound_to_a_pull_request(self) -> None:
         bound = {
             "id": "t5",

@@ -12,6 +12,12 @@ whose values are what `hermes config set` installs at them:
   redeliver a rejected event. The default of 30 dropped review events, so the
   factory sets 600.
 
+The `linear` route keeps every `AgentSessionEvent` and every `Issue` update that
+changes `delegateId`. It keeps a completed or canceled `Issue` update only when
+the issue's id is listed in `<home>/owned-refs.json`, which holds each card's
+`linear_issue_id`. Deploy the profile and run `refresh-owned-refs` once before
+you re-render this route.
+
 The triage prompts are `triage-linear.md` and `triage-github.md`. In them,
 `triage-resume.md` is the one parked-card resume section that both prompts
 include through `<<triage_resume>>`. `<<name>>` marks a value the renderer fills from settings, and `{dot.path}` is a

@@ -19,7 +19,13 @@ from tests.support import SCRIPTS, git, with_interpreter
 
 ROUTE_KEY = "platforms.webhook.extra.routes.linear"
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
-ROUTE = {"events": ["AgentSessionEvent"], "secret": "${LINEAR_WEBHOOK_SECRET}", "prompt": "triage"}
+LINEAR_ID = "00000000-0000-4000-8000-0000000000c1"
+ROUTE = {
+    "events": ["AgentSessionEvent"],
+    "secret": "${LINEAR_WEBHOOK_SECRET}",
+    "prompt": "triage",
+    "filters": [{"field": "data.id", "in_file": "owned-refs.json"}],
+}
 
 RENDER = f"""import json
 print(json.dumps({{{RATE_LIMIT_KEY!r}: 600, {ROUTE_KEY!r}: {ROUTE!r}}}))
@@ -138,7 +144,7 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, f"scripts/{ALERT_SCRIPT}", REPO_FILES[ALERT_SOURCE])
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C0123\n")
         self.owned_refs = self.root / "owned-refs.json"
-        self.install(self.root, "owned-refs.json", '["goodyear/abc-1-fix"]\n')
+        self.install(self.root, "owned-refs.json", f'["goodyear/abc-1-fix", "{LINEAR_ID}"]\n')
 
         self.issuer = self.tmp / "issuer"
         self.discovery(["authorization_code_with_pkce", "refresh_tokens"])
@@ -565,6 +571,18 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"owned refs {self.owned_refs}: is missing; create or run the refresh-owned-refs cron job (part 12)\n"),
+        )
+
+    def test_route_filtering_on_linear_ids_with_no_ids_in_the_file(self) -> None:
+        self.owned_refs.write_text('["goodyear/abc-1-fix"]\n')
+
+        self.assertEqual(
+            self.check(),
+            (
+                1,
+                f"webhook config {ROUTE_KEY}: filters on Linear issue ids, but {self.owned_refs} holds none; "
+                "deploy the profile and run refresh-owned-refs once before the route (part 11)\n",
+            ),
         )
 
     def test_stale_owned_refs_file(self) -> None:
