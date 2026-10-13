@@ -318,7 +318,7 @@ class PromptSubstitutionTest(unittest.TestCase):
             "hermes kanban request-review <task id>",
             "hermes kanban reopen-review <task id> --reason",
         ]
-        section = render.triage_unblock_section()
+        section = render.triage_unblock_section().split("When one exists", 1)[1]
         positions = [section.index(command) for command in commands]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(len(set(positions)), len(commands))
@@ -336,6 +336,15 @@ class PromptSubstitutionTest(unittest.TestCase):
         review_rule, comment_rule = flat.split("4. For a", 1)
         self.assertIn("`blocked`, when the sender is a person (not a bot): unblock", review_rule)
         self.assertIn("when the sender is a person (not a bot) and the text asks for a change", comment_rule)
+        self.assertIn(
+            "`blocked`, when the sender is a person (not a bot): unblock it as "
+            '"Unblock a card" says, with the reason '
+            "`changes requested on GitHub; see the card comments`, "
+            "after step 1 has commented on the card",
+            review_rule,
+        )
+        self.assertIn("`pull_request_review` submitted as a comment", comment_rule)
+        self.assertIn("A thanks, an approval, or a bare question is not actionable", comment_rule)
         self.assertNotIn("hermes kanban unblock", rules)
 
     def test_the_linear_prompt_unblocks_through_the_shared_section_with_its_own_reason(self):
