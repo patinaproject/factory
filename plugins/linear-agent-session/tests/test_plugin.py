@@ -271,7 +271,7 @@ class RegisterTest(unittest.TestCase):
         for name, tool in ctx.tools.items():
             self.assertEqual(tool["toolset"], "linear_agent_session")
             self.assertEqual(tool["schema"]["name"], name)
-        self.assertEqual([name for name, _ in ctx.hooks], ["pre_gateway_dispatch"])
+        self.assertEqual([name for name, _ in ctx.hooks], ["pre_gateway_dispatch", "kanban_task_blocked"])
 
     def test_registered_handlers_call_linear(self):
         fake = FakeLinear([activity_ok("activity-9")])

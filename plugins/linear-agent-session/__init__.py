@@ -5,7 +5,7 @@ import logging
 import re
 from typing import Any, Callable, Mapping, Optional
 
-from . import linear, tools
+from . import blocks, linear, tools
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,7 @@ def register(ctx: Any) -> None:
             get_client, lambda: ctx.get_config("webhook_route", default="linear"), load_config_readonly
         ),
     )
+    ctx.register_hook("kanban_task_blocked", blocks.make_blocked_hook(get_client))
 
 
 def unresolved_routes(config: Mapping[str, Any]) -> dict[str, str]:

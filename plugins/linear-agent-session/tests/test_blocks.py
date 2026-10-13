@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+import re
+import sys
+import time
+import types
+import unittest
+from unittest import mock
+
+from tests import load_plugin
+
+plugin = load_plugin()
+blocks = sys.modules["linear_agent_session.blocks"]
+
+BODY = "```text\nlinear_issue_id: issue-1\nlinear_agent_session_id: session-1\nrepo: o/r\n```"
+SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def fake_redact(text):
+    return re.sub(r"sk-[A-Za-z0-9-]{6,}", "[redacted]", text)
+
+
+class RecordingClient:
+    def __init__(self, error=None, delay=0.0):
+        self.calls = []
+        self.error = error
+        self.delay = delay
+
+    def create_activity(self, agent_session_id, content, *, ephemeral=False):
+        time.sleep(self.delay)
+        if self.error:
+            raise self.error
+        self.calls.append((agent_session_id, content))
+        return "activity-1"
+
+
+def fire(status, kind, reason="needs the deploy key", body=BODY, client=None, load=None, task_id="t_1"):
+    client = client or RecordingClient()
+    card = blocks.Card(status, kind, body)
+    hook = blocks.make_blocked_hook(lambda: client, load or (lambda *_: card), fake_redact)
+    result = hook(task_id=task_id, board="default", reason=reason, run_id=3, assignee="claude-worker")
+    return client, result
+
+
+class ReportedBlockTest(unittest.TestCase):
+    def test_parked_card_posts_an_elicitation_that_says_triage(self):
+        client, _ = fire("triage", "needs_input", reason="which branch should I use")
+        ((session, content),) = client.calls
+        self.assertEqual(session, "session-1")
+        self.assertEqual(
+            content,
+            {
+                "type": "elicitation",
+                "body": "Card t_1 is parked in triage. It blocked twice in a row for the same reason (needs_input), "
+                "so Hermes stopped retrying it.\n\nReason: which branch should I use\n\nReply here to resume it.",
+            },
+        )
+
+    def test_a_transient_card_parked_in_triage_still_posts(self):
+        client, _ = fire("triage", "transient")
+        ((_, content),) = client.calls
+        self.assertEqual(content["type"], "elicitation")
+        self.assertIn("parked in triage", content["body"])
+
+    def test_untyped_card_parked_in_triage_posts_without_a_cause(self):
+        client, _ = fire("triage", None)
+        ((_, content),) = client.calls
+        self.assertIn("for the same reason, so Hermes", content["body"])
+
+    def test_needs_input_posts_an_elicitation(self):
+        client, _ = fire("blocked", "needs_input", reason="pick a name")
+        ((session, content),) = client.calls
+        self.assertEqual(session, "session-1")
+        self.assertEqual(
+            content,
+            {
+                "type": "elicitation",
+                "body": "Card t_1 is blocked and needs a person to decide.\n\nReason: pick a name\n\n"
+                "Reply here with your answer to resume it.",
+            },
+        )
+
+    def test_capability_posts_an_error(self):
+        client, _ = fire("blocked", "capability", reason="gh is not signed in")
+        ((_, content),) = client.calls
+        self.assertEqual(content["type"], "error")
+        self.assertEqual(
+            content["body"],
+            "Card t_1 is blocked: the worker lacks something it needs.\n\nReason: gh is not signed in\n\n"
+            "Fix the cause, then reply here to resume it.",
+        )
+
+    def test_one_block_posts_once(self):
+        client, _ = fire("blocked", "needs_input")
+        self.assertEqual(len(client.calls), 1)
+
+
+class SilentBlockTest(unittest.TestCase):
+    def test_transient_block_posts_nothing(self):
+        client, _ = fire("blocked", "transient")
+        self.assertEqual(client.calls, [])
+
+    def test_untyped_block_posts_nothing(self):
+        client, _ = fire("blocked", None)
+        self.assertEqual(client.calls, [])
+
+    def test_dependency_wait_posts_nothing(self):
+        for status in ("todo", "running", "ready"):
+            with self.subTest(status=status):
+                client, _ = fire(status, "dependency")
+                self.assertEqual(client.calls, [])
+
+    def test_card_without_a_session_posts_nothing(self):
+        with self.assertLogs("linear_agent_session.blocks", "WARNING") as logs:
+            client, _ = fire("triage", "needs_input", body="```text\nrepo: o/r\n```")
+        self.assertEqual(client.calls, [])
+        self.assertIn("t_1", logs.output[0])
+
+
+class SafetyTest(unittest.TestCase):
+    def test_failed_post_does_not_raise(self):
+        client = RecordingClient(error=RuntimeError("Linear is unreachable"))
+        with self.assertLogs("linear_agent_session.blocks", "ERROR") as logs:
+            _, result = fire("triage", "needs_input", client=client)
+        self.assertIsNone(result)
+        self.assertIn("t_1", logs.output[0])
+
+    def test_unreadable_card_does_not_raise(self):
+        def broken(*_):
+            raise OSError("database is locked")
+
+        with self.assertLogs("linear_agent_session.blocks", "ERROR"):
+            client, result = fire("triage", "needs_input", load=broken)
+        self.assertIsNone(result)
+        self.assertEqual(client.calls, [])
+
+    def test_slow_post_is_abandoned_at_the_deadline(self):
+        client = RecordingClient(delay=1.0)
+        with mock.patch.object(blocks, "POST_TIMEOUT_SECONDS", 0.05), self.assertLogs(
+            "linear_agent_session.blocks", "WARNING"
+        ):
+            started = time.monotonic()
+            fire("triage", "needs_input", client=client)
+        self.assertLess(time.monotonic() - started, 0.8)
+
+    def test_secret_in_the_reason_is_redacted(self):
+        client, _ = fire("blocked", "capability", reason=f"push failed with token {SECRET} for the repo")
+        ((_, content),) = client.calls
+        self.assertNotIn(SECRET, content["body"])
+        self.assertNotIn("sk-live", content["body"])
+        self.assertIn("token [redacted] for the repo", content["body"])
+
+    def test_secret_at_the_truncation_point_is_redacted_whole(self):
+        reason = "x" * (blocks.REASON_LIMIT - 10) + f" {SECRET}"
+        client, _ = fire("blocked", "capability", reason=reason)
+        ((_, content),) = client.calls
+        self.assertNotIn("sk-", content["body"])
+
+    def test_long_reason_is_truncated(self):
+        client, _ = fire("blocked", "needs_input", reason="word " * 400)
+        ((_, content),) = client.calls
+        reason = content["body"].split("Reason: ")[1].split("\n\n")[0]
+        self.assertLessEqual(len(reason), blocks.REASON_LIMIT + 3)
+        self.assertGreater(len(reason), blocks.REASON_LIMIT - 2)
+        self.assertTrue(reason.endswith("..."))
+
+    def test_missing_reason_is_said_plainly(self):
+        client, _ = fire("triage", "needs_input", reason=None)
+        ((_, content),) = client.calls
+        self.assertIn("Reason: no reason given", content["body"])
+
+
+class HermesBoundaryTest(unittest.TestCase):
+    def test_load_card_reads_the_committed_card_from_its_board(self):
+        seen = {}
+
+        class Connection:
+            def __enter__(self):
+                return "conn"
+
+            def __exit__(self, *exc):
+                return None
+
+        def connect_closing(board=None):
+            seen["board"] = board
+            return Connection()
+
+        def get_task(conn, task_id):
+            seen["read"] = (conn, task_id)
+            return types.SimpleNamespace(status="triage", block_kind="capability", body=BODY)
+
+        package = types.ModuleType("hermes_cli")
+        package.kanban_db = types.SimpleNamespace(get_task=get_task)
+        package.kanban_db_connect = types.SimpleNamespace(connect_closing=connect_closing)
+        with mock.patch.dict(sys.modules, {"hermes_cli": package}):
+            card = blocks.load_card("t_9", "factory")
+        self.assertEqual(card, blocks.Card("triage", "capability", BODY))
+        self.assertEqual(seen, {"board": "factory", "read": ("conn", "t_9")})
+
+    def test_hermes_redact_forces_redaction(self):
+        calls = []
+        module = types.ModuleType("agent.redact")
+        module.redact_sensitive_text = lambda text, force=False: calls.append(force) or "masked"
+        with mock.patch.dict(sys.modules, {"agent": types.ModuleType("agent"), "agent.redact": module}):
+            self.assertEqual(blocks.hermes_redact("secret"), "masked")
+        self.assertEqual(calls, [True])
+
+
+if __name__ == "__main__":
+    unittest.main()
