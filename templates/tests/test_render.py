@@ -141,6 +141,7 @@ LINEAR_FILTERS = [
                 "all": [
                     {"field": "updatedFrom.stateId", "exists": True},
                     {"field": "data.state.type", "in": ["completed", "canceled"]},
+                    {"field": "data.id", "in_file": "owned-refs.json"},
                 ]
             },
         ]
@@ -803,7 +804,11 @@ FILTER_CASES = [
 
 
 @unittest.skipUnless(WEBHOOK_FILTERS.is_file(), f"needs the Hermes checkout at {HERMES_AGENT_DIR}; CI skips this class")
-class HermesFilterTest(unittest.TestCase):
+class HermesFiltersCase(unittest.TestCase):
+    """Runs a rendered route through Hermes' own filter engine; subclasses name the route."""
+
+    route_name = ""
+
     @classmethod
     def setUpClass(cls):
         # webhook_filters imports hermes_constants lazily from the checkout root.
@@ -819,11 +824,15 @@ class HermesFilterTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"HERMES_HOME": str(self.home)})
         env.start()
         self.addCleanup(env.stop)
-        self.route = render.build_routes(SETTINGS)["github"]
+        self.route = render.build_routes(SETTINGS)[self.route_name]
         self.processor = self.filters.WebhookRouteProcessor()
 
     def matches(self, event_type: str, body: dict) -> bool:
         return self.processor.route_filters_match(self.route, body, event_type, {})
+
+
+class HermesFilterTest(HermesFiltersCase):
+    route_name = "github"
 
     def test_each_event_is_kept_or_dropped(self):
         (self.home / "owned-refs.json").write_text(json.dumps(OWNED_REFS))
@@ -839,6 +848,60 @@ class HermesFilterTest(unittest.TestCase):
         self.assertIs(dropped, False)
         self.assertIs(review, False)
         self.assertIs(self.matches("issue_comment", payload("created", issue=issue(APP), comment=comment(HUMAN, "Hi."))), True)
+
+
+CARD_ISSUES = [f"00000000-0000-4000-8000-{n:012d}" for n in range(1, 5)]
+CARDLESS_ISSUES = [f"00000000-0000-4000-8000-{n:012d}" for n in range(101, 144)]
+
+
+def linear_closure(issue_id: str, state_type: str = "completed", changed: str = "stateId") -> dict:
+    return {
+        "type": "Issue",
+        "action": "update",
+        "data": {"id": issue_id, "state": {"type": state_type}},
+        "updatedFrom": {changed: "00000000-0000-4000-8000-0000000000f0"},
+    }
+
+
+class LinearClosureReplayTest(HermesFiltersCase):
+    """Replays a 24 hour window: 4 closures of issues with a card, 43 of issues without one."""
+
+    route_name = "linear"
+
+    def setUp(self):
+        super().setUp()
+        (self.home / "owned-refs.json").write_text(json.dumps([OWNED_BRANCH, *CARD_ISSUES]))
+
+    def test_closures_of_issues_with_a_card_are_kept(self):
+        kept = [i for i in CARD_ISSUES if self.matches("Issue", linear_closure(i))]
+        self.assertEqual(kept, CARD_ISSUES)
+        self.assertIs(self.matches("Issue", linear_closure(CARD_ISSUES[0], "canceled")), True)
+
+    def test_closures_of_issues_without_a_card_are_dropped(self):
+        dropped = [i for i in CARDLESS_ISSUES if not self.matches("Issue", linear_closure(i))]
+        self.assertEqual(dropped, CARDLESS_ISSUES)
+        self.assertIs(self.matches("Issue", linear_closure(CARDLESS_ISSUES[0], "canceled")), False)
+
+    def test_session_events_and_delegate_changes_are_kept_without_a_card(self):
+        cardless = CARDLESS_ISSUES[0]
+        for action in ("created", "prompted"):
+            session = {"type": "AgentSessionEvent", "action": action, "agentSession": {"issue": {"id": cardless}}}
+            self.assertIs(self.matches("AgentSessionEvent", session), True)
+        delegate = linear_closure(cardless, "started", changed="delegateId")
+        self.assertIs(self.matches("Issue", delegate), True)
+        undelegate = linear_closure(cardless, "completed", changed="delegateId")
+        self.assertIs(self.matches("Issue", undelegate), True)
+
+    def test_a_state_that_is_not_a_closure_is_dropped_even_with_a_card(self):
+        self.assertIs(self.matches("Issue", linear_closure(CARD_ISSUES[0], "started")), False)
+        self.assertIs(self.matches("Issue", linear_closure(CARD_ISSUES[0], changed="title")), False)
+
+    def test_a_missing_owned_refs_file_drops_every_closure_and_keeps_sessions(self):
+        (self.home / "owned-refs.json").unlink()
+        with self.assertLogs(self.filters.logger, "WARNING"):
+            self.assertIs(self.matches("Issue", linear_closure(CARD_ISSUES[0])), False)
+        session = {"type": "AgentSessionEvent", "action": "created"}
+        self.assertIs(self.matches("AgentSessionEvent", session), True)
 
 
 if __name__ == "__main__":

@@ -336,6 +336,7 @@ def build_routes(settings: Any) -> dict:
                             "all": [
                                 {"field": "updatedFrom.stateId", "exists": True},
                                 {"field": "data.state.type", "in": ["completed", "canceled"]},
+                                owned("data.id"),
                             ]
                         },
                     ]
