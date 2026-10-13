@@ -85,10 +85,13 @@ EVIDENCE_RULE = (
 )
 FINISH_RULE = (
     "Stop every background command, monitor, and watcher you started before you write your final result. "
-    "The run ends when you finish, and anything still running is killed. To wait for CI, run a foreground "
-    "command that ends on its own, such as `gh pr checks <number> --watch --fail-fast` with the tool's "
-    "timeout set, and run it again when it times out."
+    "The run ends when you finish, and anything still running is killed. To wait for CI, run `python3 "
+    "{wait_for_checks} <number> --repo <owner/repo>` in the foreground. It returns within 4 minutes, "
+    "inside the 5-minute prompt cache: exit 0 means every check passed, 1 means a check failed, and 3 "
+    "means checks are still running, so run it again. A hook refuses `gh pr checks --watch`, `gh run "
+    "watch`, and any sleep or polling loop that waits longer."
 )
+CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
@@ -436,7 +439,12 @@ def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
         env.update(model_environment(transport, tiers))
     # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
-    return {"env": env, "hooks": {"SessionStart": [{"hooks": [remove]}]}}
+    # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
+    guard = {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(CI_WAIT_GUARD))}"}
+    return {"env": env, "hooks": {
+        "SessionStart": [{"hooks": [remove]}],
+        "PreToolUse": [{"matcher": "Bash", "hooks": [guard]}],
+    }}
 
 
 def remove_on_stop(path: Path) -> None:
@@ -649,6 +657,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             "--append-system-prompt", SYSTEM_PROMPT.format(
                 push_signed=Path(__file__).resolve().with_name("push-signed"),
                 upload_image=Path(__file__).resolve().with_name("github-upload-image"),
+                wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
             ),
             "--mcp-config", LINEAR_MCP_CONFIG,
         ]

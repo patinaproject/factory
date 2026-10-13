@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Claude Code PreToolUse hook for a worker's Bash calls: keep a CI wait inside the prompt cache.
+
+Claude Code feeds the pending tool call as JSON on stdin. A foreground wait over 5 minutes makes the
+next model call rewrite the whole context, so this hook refuses `gh pr checks --watch`, `gh run watch`,
+sleeps over MAX_WAIT_SECONDS, and sleep loops over `gh pr checks`, and tells the worker to run
+`wait-for-checks` instead. A call to `wait-for-checks` gets a tool timeout above its own budget and
+below the cache lifetime.
+
+Exit 0 allows the call (printing an input rewrite when it sets a timeout), exit 2 refuses it and
+Claude Code shows stderr to the model.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+
+MAX_WAIT_SECONDS = 270
+TOOL_TIMEOUT_MS = MAX_WAIT_SECONDS * 1000
+HELPER = "wait-for-checks"
+UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+WATCH = re.compile(r"\bgh\s+(?:pr\s+checks\b.*?(?:--watch\b|\s-w\b)|run\s+watch\b)", re.DOTALL)
+CHECKS_LOOP = re.compile(r"\b(?:for|while|until)\b")
+SLEEP = re.compile(r"\bsleep\s+(\d+(?:\.\d+)?)([smhd]?)\b")
+REFUSAL = (
+    "A foreground wait over {limit} seconds outlasts the 5-minute prompt cache, so the next call "
+    "rewrites the whole context. To wait for CI, run `python3 <scripts>/{helper} <number> --repo <owner/repo>`. "
+    "It returns within 4 minutes: exit 3 means checks are still running, so run it again."
+)
+
+
+def refusal(command: str) -> str | None:
+    if WATCH.search(command):
+        return "Refused: gh watches until checks finish"
+    longest = max((float(n) * UNIT_SECONDS[unit] for n, unit in SLEEP.findall(command)), default=0)
+    if longest > MAX_WAIT_SECONDS:
+        return f"Refused: sleep {longest:g} seconds"
+    if "pr checks" in command and SLEEP.search(command) and CHECKS_LOOP.search(command):
+        return "Refused: a polling loop over gh pr checks"
+    return None
+
+
+def decide(event: dict) -> tuple[int, str]:
+    """The exit code and the text for stderr (refusal) or stdout (input rewrite)."""
+    if event.get("tool_name") != "Bash":
+        return 0, ""
+    tool_input = event.get("tool_input") or {}
+    command = tool_input.get("command") or ""
+    reason = refusal(command)
+    if reason:
+        return 2, f"{reason}. " + REFUSAL.format(limit=MAX_WAIT_SECONDS, helper=HELPER)
+    if HELPER in command:
+        output = {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": {**tool_input, "timeout": TOOL_TIMEOUT_MS},
+        }}
+        return 0, json.dumps(output)
+    return 0, ""
+
+
+def main() -> int:
+    code, text = decide(json.load(sys.stdin))
+    if text:
+        print(text, file=sys.stderr if code else sys.stdout)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
