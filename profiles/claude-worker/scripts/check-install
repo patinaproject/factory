@@ -16,7 +16,9 @@ tables), that a cron job delivers only to a platform with a home channel in
 its profile, that the root home's check-install-alert wrapper matches the
 repository, that the worker home's secrets.command is the worker helper
 whenever the root home has a secret source, and that each configured
-repository checkout exists and has origin/HEAD set. When any difference is
+repository checkout exists and has origin/HEAD set, and that the root home's
+upload broker socket answers a status request and reports a token present. That
+check sends only {"op": "status"}, never uploads, and prints no value. When any difference is
 reported and the source checkout is not at origin/HEAD, the last line names
 that checkout. It gives the fast-forward command only when the checkout is
 behind, on the default branch, and clean. --ref turns the line off, because
@@ -36,6 +38,7 @@ import os
 import plistlib
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -101,6 +104,10 @@ def declared(what: str, *, besides: tuple = ()) -> Want:
     return Want(lambda live: live not in (None, "", *besides), what)
 
 
+def non_empty_list(what: str) -> Want:
+    return Want(lambda live: isinstance(live, list) and len(live) > 0, what)
+
+
 ROOT, WORKER = "root", "worker"
 BOTH = (ROOT, WORKER)
 
@@ -159,6 +166,11 @@ CONFIG = (
     ConfigKey(10, "kanban.auto_decompose", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.default_assignee", (ROOT,), unset()),
     ConfigKey(5, "terminal.timeout", (WORKER,), equal(400)),
+    ConfigKey(5, "platforms.factory_uploads.enabled", (ROOT,), equal(True)),
+    ConfigKey(
+        5, "platforms.factory_uploads.extra.repositories", (ROOT,),
+        non_empty_list("a non-empty list of <owner>/<repo> names"),
+    ),
     ConfigKey(13, "streaming.enabled", (ROOT,), equal(True)),
     ConfigKey(13, "platforms.slack.extra.native_task_cards", (ROOT,), equal(True)),
 )
@@ -390,6 +402,41 @@ def check_config(home_paths: dict, hermes: str) -> list:
             between = " and ".join(str(home_paths[home]) for home in entry.homes)
             drifts.append(Drift("config", entry.key, f"differs between {between} (part {entry.part})"))
     return drifts
+
+
+UPLOAD_SOCKET = "factory-uploads.sock"
+UPLOAD_STATUS_SECONDS = 5
+
+
+def check_upload_broker(root: Path) -> list:
+    """Ask the root home's upload broker for its status. Sends no upload and reports no value."""
+    path = root / UPLOAD_SOCKET
+
+    def drift(detail: str) -> list:
+        return [Drift("upload broker", str(path), f"{detail} (part 5)")]
+
+    reply = b""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(UPLOAD_STATUS_SECONDS)
+            client.connect(str(path))
+            client.sendall(b'{"op":"status"}\n')
+            while not reply.endswith(b"\n") and len(reply) < 65536:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                reply += chunk
+    except OSError:
+        return drift("is unreachable: the gateway is not listening on it")
+    try:
+        status = json.loads(reply)
+    except ValueError:
+        return drift("did not answer a status request with JSON")
+    if not isinstance(status, dict) or status.get("ok") is not True:
+        return drift("did not answer a status request with ok")
+    if status.get("token_present") is not True:
+        return drift("reports token_present false: the gateway holds no upload token")
+    return []
 
 
 def check_worker_secrets(root: Path, worker: Path, hermes: str) -> list:
@@ -677,6 +724,7 @@ def main() -> int:
             *check_plugins(commit, [root, worker]),
             *check_config({ROOT: root, WORKER: worker}, hermes),
             *check_worker_secrets(root, worker, hermes),
+            *check_upload_broker(root),
             *check_cron(commit, root, worker, hermes),
             *check_routes(commit, root, hermes),
             *check_dashboard(root, hermes),

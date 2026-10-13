@@ -6,9 +6,11 @@ import json
 import os
 import plistlib
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -63,6 +65,8 @@ ROOT_CONFIG = {
     "kanban.auto_decompose": False,
     "streaming.enabled": True,
     "platforms.slack.extra.native_task_cards": True,
+    "platforms.factory_uploads.enabled": True,
+    "platforms.factory_uploads.extra.repositories": ["example-org/example-repo"],
 }
 WORKER_CONFIG = {
     **{key: ROOT_CONFIG[key] for key in (
@@ -106,7 +110,47 @@ REPO_FILES = {
 }
 
 
+class FakeBroker:
+    """A Unix socket that answers each request with `reply` and records what it was sent."""
+
+    def __init__(self, path: Path, reply: bytes):
+        self.requests: list = []
+        self.reply = reply
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(str(path))
+        self.server.listen()
+        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.thread.start()
+
+    def serve(self) -> None:
+        while True:
+            try:
+                client, _ = self.server.accept()
+            except OSError:
+                return
+            with client:
+                request = b""
+                while not request.endswith(b"\n"):
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    request += chunk
+                self.requests.append(request)
+                client.sendall(self.reply)
+
+    def close(self) -> None:
+        self.server.close()
+
+
+OK_STATUS = json.dumps({"ok": True, "token_present": True, "last_state": None}).encode() + b"\n"
+
+
 class CheckInstallTest(unittest.TestCase):
+    def broker(self, reply: bytes = OK_STATUS) -> FakeBroker:
+        broker = FakeBroker(self.root / "factory-uploads.sock", reply)
+        self.addCleanup(broker.close)
+        return broker
+
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -153,6 +197,7 @@ class CheckInstallTest(unittest.TestCase):
         self.cron(self.worker, WORKER_JOBS)
         self.cron(self.root, ROOT_JOBS)
         self.launchd = Launchd(self.tmp)
+        self.uploads = self.broker()
 
     def install(self, home: Path, path: str, text: str) -> None:
         (home / path).parent.mkdir(parents=True, exist_ok=True)
@@ -358,6 +403,67 @@ class CheckInstallTest(unittest.TestCase):
         self.config(self.root, {**ROOT_CONFIG, "kanban.default_assignee": ""})
 
         self.assertEqual(self.check(), (0, ""))
+
+    def test_upload_platform_that_is_not_enabled(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "platforms.factory_uploads.enabled": False})
+
+        self.assertEqual(
+            self.check(), (1, f"config platforms.factory_uploads.enabled in {self.root}: is not true (part 5)\n")
+        )
+
+    def test_upload_platform_with_no_repositories_refuses_every_upload(self) -> None:
+        for repositories in ([], None, "example-org/example-repo"):
+            with self.subTest(repositories=repositories):
+                self.config(self.root, {**ROOT_CONFIG, "platforms.factory_uploads.extra.repositories": repositories})
+
+                code, out = self.check()
+
+                self.assertEqual(code, 1)
+                self.assertEqual(
+                    out,
+                    f"config platforms.factory_uploads.extra.repositories in {self.root}: "
+                    "is not a non-empty list of <owner>/<repo> names (part 5)\n",
+                )
+
+    def test_upload_platform_is_not_required_in_the_worker_home(self) -> None:
+        self.assertNotIn("platforms.factory_uploads.enabled", WORKER_CONFIG)
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_healthy_broker_gets_only_a_status_request(self) -> None:
+        self.assertEqual(self.check(), (0, ""))
+
+        self.assertEqual(self.uploads.requests, [b'{"op":"status"}\n'])
+
+    def test_broker_that_is_not_listening(self) -> None:
+        self.uploads.close()
+        (self.root / "factory-uploads.sock").unlink()
+
+        self.assertEqual(
+            self.check(),
+            (1, f"upload broker {self.root}/factory-uploads.sock: is unreachable: the gateway is not listening on it (part 5)\n"),
+        )
+
+    def test_broker_without_a_token(self) -> None:
+        self.uploads.reply = json.dumps({"ok": True, "token_present": False}).encode() + b"\n"
+
+        self.assertEqual(
+            self.check(),
+            (
+                1,
+                f"upload broker {self.root}/factory-uploads.sock: "
+                "reports token_present false: the gateway holds no upload token (part 5)\n",
+            ),
+        )
+
+    def test_broker_that_does_not_answer_a_status_request_properly(self) -> None:
+        for reply in (b"not json\n", b'{"ok": false}\n', b"[]\n", b""):
+            with self.subTest(reply=reply):
+                self.uploads.reply = reply
+
+                code, out = self.check()
+
+                self.assertEqual(code, 1)
+                self.assertIn("upload broker", out)
 
     def test_worker_wait_limit_that_differs_from_the_runbook(self) -> None:
         self.config(self.worker, {**WORKER_CONFIG, "terminal.timeout": 1200})

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
+import os
 import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import PNG, TOKEN, UUID_URL, FakeUploads, upload_token
 
@@ -261,3 +264,92 @@ class LifecycleTest(BrokerTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConnectionCapTest(BrokerTestCase):
+    async def idle_clients(self, count: int):
+        clients = [await asyncio.open_unix_connection(str(self.broker.socket_path)) for _ in range(count)]
+        await asyncio.sleep(0.1)
+        return clients
+
+    async def test_a_connection_past_the_cap_gets_a_fixed_refusal_and_a_freed_slot_works_again(self):
+        self.assertLessEqual(broker_module.MAX_CONNECTIONS, 8)
+        clients = await self.idle_clients(broker_module.MAX_CONNECTIONS)
+
+        reply = await self.upload()
+
+        self.assertEqual(reply, {"ok": False, "state": "refused", "message": broker_module.BUSY})
+        self.assertEqual(self.uploads.requests, [])
+        clients[0][1].close()
+        await asyncio.sleep(0.1)
+        self.assertTrue((await self.upload())["ok"])
+        for _, writer in clients[1:]:
+            writer.close()
+
+
+class UnexpectedErrorTest(BrokerTestCase):
+    async def broker_with(self, **overrides):
+        await self.broker.stop()
+        self.broker = broker_module.Broker(
+            self.home, [REPO], lambda: self.token, resolve_repository_id=lambda repo: 7,
+            base_url=self.uploads.base, **overrides,
+        )
+        self.assertTrue(await self.broker.start())
+        self.addAsyncCleanup(self.broker.stop)
+
+    async def test_an_unexpected_upload_error_is_audited_and_answered_with_a_fixed_message(self):
+        def explode(*args):
+            raise RuntimeError(f"boom {TOKEN}")
+
+        await self.broker_with(upload=explode)
+
+        with self.assertLogs("factory_uploads.broker", level="ERROR"):
+            reply = await self.upload()
+
+        self.assertEqual(reply, {"ok": False, "state": "error", "message": broker_module.FIXED_MESSAGES["error"]})
+        [line] = (self.home / "factory-uploads" / "log.jsonl").read_text().splitlines()
+        self.assertEqual(json.loads(line)["state"], "error")
+        self.assertNotIn(TOKEN, json.dumps(reply) + "".join(self.state_files().values()))
+
+    async def test_an_error_outside_the_upload_still_gets_a_fixed_reply(self):
+        with mock.patch.object(self.broker, "_status", side_effect=RuntimeError("boom")):
+            with self.assertLogs("factory_uploads.broker", level="ERROR"):
+                reply = await ask(self.broker.socket_path, {"op": "status"})
+
+        self.assertEqual(reply, {"ok": False, "state": "error", "message": broker_module.FIXED_MESSAGES["error"]})
+
+
+class StopTest(BrokerTestCase):
+    async def test_stop_closes_open_clients_and_does_not_wait_for_them(self):
+        reader, writer = await asyncio.open_unix_connection(str(self.broker.socket_path))
+        await asyncio.sleep(0.1)
+
+        await asyncio.wait_for(self.broker.stop(), 5)
+
+        self.assertEqual(await asyncio.wait_for(reader.read(), 5), b"")
+        writer.close()
+
+
+class NamedPathTest(BrokerTestCase):
+    async def test_a_path_named_in_a_request_is_never_opened(self):
+        outside = self.home / "secret-image.png"
+        outside.write_bytes(PNG + b"from the file")
+        opened = []
+        real_open, real_os_open = builtins.open, os.open
+
+        def spy_open(file, *args, **kwargs):
+            opened.append(str(file))
+            return real_open(file, *args, **kwargs)
+
+        def spy_os_open(path, *args, **kwargs):
+            opened.append(str(path))
+            return real_os_open(path, *args, **kwargs)
+
+        header, body = upload_request(name=str(outside))
+        header.update({"path": str(outside), "file": str(outside), "source": str(outside)})
+        with mock.patch.object(builtins, "open", spy_open), mock.patch.object(os, "open", spy_os_open):
+            reply = await ask(self.broker.socket_path, header, body)
+
+        self.assertTrue(reply["ok"])
+        self.assertEqual(self.uploads.requests[0]["body"], PNG)
+        self.assertFalse([path for path in opened if "secret-image" in path], opened)

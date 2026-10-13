@@ -35,6 +35,7 @@ STATE_DIR = "factory-uploads"
 HOURLY_QUOTA = 60
 QUOTA_WINDOW = 3600
 REQUEST_DEADLINE = 70
+MAX_CONNECTIONS = 4
 MAX_HEADER = 4096
 MAX_NAME = 200
 
@@ -44,6 +45,7 @@ FIXED_MESSAGES = {
     "no-access": "The upload token lacks write on the repository.",
     "error": "The upload failed. The gateway log has the detail.",
 }
+BUSY = "The upload broker is busy. Try again in a moment."
 BAD_REQUEST = "The request is not a valid upload request."
 NOT_ALLOWED = "That repository is not on the upload allowlist."
 OVER_QUOTA = f"The upload limit of {HOURLY_QUOTA} files an hour is used up."
@@ -91,6 +93,7 @@ class Broker:
         self._repository_ids: dict[str, int] = {}
         self._recent: list[float] = []
         self._server: asyncio.AbstractServer | None = None
+        self._clients: dict[asyncio.Task, asyncio.StreamWriter] = {}
 
     async def start(self) -> bool:
         """Listen on the socket. False when another gateway already listens on it."""
@@ -105,6 +108,11 @@ class Broker:
     async def stop(self) -> None:
         if self._server is not None:
             self._server.close()
+            # Since Python 3.12, wait_closed waits for every open client, so end them first.
+            for task, writer in list(self._clients.items()):
+                task.cancel()
+                writer.close()
+            await asyncio.gather(*self._clients, return_exceptions=True)
             await self._server.wait_closed()
             self._server = None
         self.socket_path.unlink(missing_ok=True)
@@ -121,10 +129,20 @@ class Broker:
         return True
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            reply = await asyncio.wait_for(self._reply(reader, writer), REQUEST_DEADLINE)
-        except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError):
-            reply = None
+        task = asyncio.current_task()
+        if len(self._clients) >= MAX_CONNECTIONS:
+            reply = self._failure("refused", BUSY)
+        else:
+            self._clients[task] = writer
+            try:
+                reply = await asyncio.wait_for(self._reply(reader, writer), REQUEST_DEADLINE)
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError):
+                reply = None
+            except Exception:
+                logger.exception("factory-uploads: unexpected error while serving a request")
+                reply = self._failure("error", FIXED_MESSAGES["error"])
+            finally:
+                self._clients.pop(task, None)
         if reply is not None:
             with contextlib.suppress(ConnectionError):
                 writer.write(json.dumps(reply).encode() + b"\n")
@@ -161,6 +179,11 @@ class Broker:
             logger.warning("factory-uploads: %s upload %s: %s", repo, error.state, error)
             message = str(error) if error.state == "refused" else FIXED_MESSAGES[error.state]
             return self._finish(entry, error.state, message)
+        except (asyncio.CancelledError, asyncio.IncompleteReadError, ConnectionError, asyncio.TimeoutError):
+            raise
+        except Exception:
+            logger.exception("factory-uploads: %s upload failed unexpectedly", repo)
+            return self._finish(entry, "error", FIXED_MESSAGES["error"])
         return self._finish(entry, "ok", url=url, expires_at=expires_at)
 
     @staticmethod
