@@ -603,9 +603,10 @@ host cannot verify. Claude Code gets `JAVA_HOME`, `ANDROID_HOME`,
 
 `kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
-empty to post no link. Set `github.login` so triage can tell the factory's own
-open pull requests from a person's. When it is empty, triage treats every open
-pull request as someone else's.
+empty to post no link. Set `github.login` to the App's
+`[bot]` login. It is required: `render.py` rejects a value that does not end
+in `[bot]`, and `claude-session` refuses a run that checks a branch for
+adoption without one.
 
 **Check**, for each home:
 

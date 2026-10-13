@@ -904,6 +904,28 @@ class ClaudeSessionTest(GitFixture):
             status, report, f"gh api repos/{REPO}/branches/abc-123-fix failed: gh: Not Found (HTTP 404)", start
         )
 
+    def test_a_missing_gh_is_refused_and_never_adopts(self) -> None:
+        self.publish_branch(BOT_LOGIN)
+        start = self.head()
+
+        missing = self.tmp / "no-gh"
+
+        status, report = self.run_session(env={"GH_BIN": str(missing)})
+
+        self.assert_refused_before_claude(status, report, f"{missing} could not run: No such file or directory", start)
+
+    def test_a_gh_that_is_not_executable_is_refused_and_never_adopts(self) -> None:
+        self.publish_branch(BOT_LOGIN)
+        start = self.head()
+
+        gh = self.tmp / "gh-not-executable"
+        gh.write_text("#!/bin/sh\n")
+        gh.chmod(0o644)
+
+        status, report = self.run_session(env={"GH_BIN": str(gh)})
+
+        self.assert_refused_before_claude(status, report, f"{gh} could not run: Permission denied", start)
+
     def test_remote_branch_at_the_default_branch_is_adopted(self) -> None:
         start = self.head()
         git(self.main, "push", "-q", "origin", "HEAD:refs/heads/abc-123-fix")

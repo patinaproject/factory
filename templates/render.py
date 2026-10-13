@@ -200,7 +200,7 @@ def validate(settings: Any) -> dict:
     if not isinstance(github, dict):
         raise SettingsError("github must be an object")
     login = github.get("login")
-    if not isinstance(login, str) or not login.strip():
+    if not isinstance(login, str) or not login.strip().endswith("[bot]"):
         raise SettingsError(
             "github.login must be the App's login, such as my-app[bot]; "
             "the github route keeps only the App's own events"

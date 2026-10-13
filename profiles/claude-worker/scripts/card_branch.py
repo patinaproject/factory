@@ -64,12 +64,12 @@ class BranchNotFound(GhFailed):
 
 
 def is_app(login: str, app: str) -> bool:
-    """True for the App's login in any form GitHub shows: `x[bot]`, `app/x`, or `x`."""
+    """True for the App's two forms GitHub shows: the `x[bot]` login and the `app/x` pull request author.
 
-    def slug(name: str) -> str:
-        return name.lower().removeprefix("app/").removesuffix("[bot]")
-
-    return slug(login) == slug(app)
+    `app` is the configured `[bot]` login. The bare name `x` is an ordinary account that a person can register.
+    """
+    bot = app.lower()
+    return login.lower() in (bot, "app/" + bot.removesuffix("[bot]"))
 
 
 # Keyed on (takeover pull request given, owner of origin/<branch> or None when it is missing).
@@ -131,7 +131,11 @@ def choose(git_branch: str, pulls: list[Pull], owners: Mapping[str, Owner | None
 
 
 def run_gh(*args: str) -> Any:
-    proc = subprocess.run([os.environ.get("GH_BIN", "gh"), "api", *args], capture_output=True, text=True)
+    gh = os.environ.get("GH_BIN", "gh")
+    try:
+        proc = subprocess.run([gh, "api", *args], capture_output=True, text=True)
+    except OSError as failure:
+        raise GhFailed(f"{gh} could not run: {failure.strerror or failure}") from failure
     if proc.returncode != 0:
         detail = proc.stderr.strip().splitlines()[0] if proc.stderr.strip() else "no error output"
         if "Branch not found" in proc.stderr:
