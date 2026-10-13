@@ -483,6 +483,9 @@ worker's home. `check-install` reports an install in the worker home.
 
 5. **Check.** `<home>/gateway_state.json` lists `factory_uploads` as
    `connected`, and `<home>/factory-uploads.sock` exists with mode `srw-------`.
+   `check-install` also checks the platform's config keys and sends the socket
+   `{"op":"status"}`. It reports a socket nobody listens on and a broker with
+   `token_present` false, and it never uploads.
    `python3 <home>/plugins/factory-uploads/upload_token.py --probe --repo <owner>/<repo>`
    is for the operator's own terminal: it prints the HTTP status and the
    attachment URL, never the token. The platform is not a chat platform, so

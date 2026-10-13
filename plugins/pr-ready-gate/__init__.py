@@ -14,12 +14,13 @@ GATED_TOOLS = ("kanban_complete", "kanban_request_review")
 PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"
 PASSING_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
 PR_URL = re.compile(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/\d+/?$")
-# Hermes kills a pre_tool_call hook after 30s; up to three calls must fit inside that.
+# Hermes kills a pre_tool_call hook after 30s (plugins.hook_callback_timeout), fails closed, and skips the hook for 60s.
+# One clock starts when the check starts, and every subprocess gets the smaller of its cap and the time left.
+HOOK_BUDGET_SECONDS = 25
 GIT_TIMEOUT_SECONDS = 3
-GH_TIMEOUT_SECONDS = 20
-# The review handoff makes up to two more gh calls; the whole gate still has to fit in Hermes' 30s.
-GH_EXTRA_TIMEOUT_SECONDS = 4
-HOOK_BUDGET_SECONDS = 28
+GH_TIMEOUT_SECONDS = 15
+GH_EXTRA_TIMEOUT_SECONDS = 6
+MIN_CALL_SECONDS = 1
 # Rules whose only effect on a pull request is a merge-time or review-time requirement the gate checks or does not need.
 REVIEW_HANDOFF_RULES = frozenset(
     {
@@ -163,12 +164,15 @@ def _head_failures(pr: dict, local_head: str) -> list[str]:
     ]
 
 
-def _run(cmd: list[str], cwd: str, timeout: int) -> str:
+def _run(cmd: list[str], cwd: str, cap: float, deadline: float) -> str:
     shown = " ".join(cmd)
+    timeout = min(cap, deadline - time.monotonic())
+    if timeout < MIN_CALL_SECONDS:
+        raise GateError(f"the gate ran out of time before it could run `{shown}`")
     try:
         proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise GateError(f"`{shown}` timed out after {timeout}s")
+        raise GateError(f"`{shown}` timed out after {timeout:.0f}s")
     except OSError as exc:
         raise GateError(f"`{shown}` could not run: {exc}")
     if proc.returncode != 0:
@@ -185,31 +189,31 @@ def _published_pr(args: Any) -> Optional[str]:
 
 
 def check(tool_name: str, args: Any, env: dict) -> tuple[str, list[str]]:
+    deadline = time.monotonic() + HOOK_BUDGET_SECONDS
     workspace = env.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
         raise GateError("HERMES_KANBAN_WORKSPACE is not set, so the worktree is unknown")
-    local_head = _run(["git", "-C", workspace, "rev-parse", "HEAD"], workspace, GIT_TIMEOUT_SECONDS)
+    local_head = _run(["git", "-C", workspace, "rev-parse", "HEAD"], workspace, GIT_TIMEOUT_SECONDS, deadline)
     pr_url = _published_pr(args)
     if pr_url:
         target = pr_url
         repo_args = ["--repo", PR_URL.match(pr_url).group(1)]
     else:
         target = env.get("HERMES_KANBAN_BRANCH") or _run(
-            ["git", "-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"], workspace, GIT_TIMEOUT_SECONDS
+            ["git", "-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"], workspace, GIT_TIMEOUT_SECONDS, deadline
         )
         repo_args = []
-    started = time.monotonic()
-    raw = _run(["gh", "pr", "view", target, "--json", PR_FIELDS, *repo_args], workspace, GH_TIMEOUT_SECONDS)
+    raw = _run(["gh", "pr", "view", target, "--json", PR_FIELDS, *repo_args], workspace, GH_TIMEOUT_SECONDS, deadline)
     try:
         pr = json.loads(raw)
     except ValueError:
         raise GateError(f"`gh pr view {target}` returned malformed JSON: {raw[:200]!r}")
     if not isinstance(pr, dict):
         raise GateError(f"`gh pr view {target}` returned {type(pr).__name__}, expected an object")
-    return pr.get("url") or target, evaluate(pr, local_head, tool_name, _blockers(pr, workspace, started))
+    return pr.get("url") or target, evaluate(pr, local_head, tool_name, _blockers(pr, workspace, deadline))
 
 
-def _blockers(pr: dict, workspace: str, started: float) -> Optional[Callable[[], list[str]]]:
+def _blockers(pr: dict, workspace: str, deadline: float) -> Optional[Callable[[], list[str]]]:
     match = PR_URL.match(str(pr.get("url")))
     base = pr.get("baseRefName")
     if not match or not isinstance(base, str) or not base:
@@ -217,10 +221,7 @@ def _blockers(pr: dict, workspace: str, started: float) -> Optional[Callable[[],
     repo = match.group(1)
 
     def gh_json(args: list[str]):
-        remaining = HOOK_BUDGET_SECONDS - (time.monotonic() - started)
-        if remaining < 1:
-            raise GateError("the gate ran out of time before it could read the branch rules")
-        out = _run(["gh", *args], workspace, min(GH_EXTRA_TIMEOUT_SECONDS, int(remaining)))
+        out = _run(["gh", *args], workspace, GH_EXTRA_TIMEOUT_SECONDS, deadline)
         try:
             return json.loads(out)
         except ValueError:

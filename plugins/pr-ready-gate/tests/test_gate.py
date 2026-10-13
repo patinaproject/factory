@@ -190,7 +190,7 @@ class HookDecisionTest(unittest.TestCase):
         gh_calls = [call for call in shell.calls if call[0][0] == "gh"]
         self.assertEqual(
             gh_calls,
-            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"], WORKSPACE, 20)],
+            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"], WORKSPACE, 15)],
         )
 
     def test_published_pr_url_is_viewed_with_its_repo(self):
@@ -312,6 +312,15 @@ class HookDecisionTest(unittest.TestCase):
         commits = {"pageInfo": {"hasNextPage": False}, "nodes": [{"commit": {"oid": HEAD, "signature": None}}]}
         self.assert_blocked(self.review_handoff(AWAITING_APPROVAL, state=state_with(commits=commits)), "1 commit(s) lack a verified signature")
 
+    def test_signatures_required_without_thread_resolution_still_reads_the_commits(self):
+        rules = [
+            {"type": "pull_request", "parameters": {"required_approving_review_count": 1}},
+            {"type": "required_signatures"},
+        ]
+        commits = {"pageInfo": {"hasNextPage": False}, "nodes": [{"commit": {"oid": HEAD, "signature": None}}]}
+        result = self.review_handoff(AWAITING_APPROVAL, rules=rules, state=state_with(commits=commits))
+        self.assert_blocked(result, "1 commit(s) lack a verified signature")
+
     def test_approval_wait_with_unconfirmed_commits_is_refused(self):
         commits = {"pageInfo": {"hasNextPage": True}, "nodes": []}
         self.assert_blocked(self.review_handoff(AWAITING_APPROVAL, state=state_with(commits=commits)), "more than 100 commits")
@@ -379,7 +388,7 @@ class FailClosedTest(unittest.TestCase):
         self.assert_blocks(FakeShell(gh_returncode=1), "exited 1: no pull requests found for branch")
 
     def test_gh_timeout_blocks(self):
-        self.assert_blocks(FakeShell(gh_raises=subprocess.TimeoutExpired("gh", 20)), "timed out after 20s")
+        self.assert_blocks(FakeShell(gh_raises=subprocess.TimeoutExpired("gh", 20)), "timed out after 15s")
 
     def test_gh_missing_blocks(self):
         self.assert_blocks(FakeShell(gh_raises=FileNotFoundError("gh")), "could not run")
@@ -393,6 +402,54 @@ class FailClosedTest(unittest.TestCase):
     def test_missing_workspace_blocks(self):
         env = {k: v for k, v in WORKER_ENV.items() if k != "HERMES_KANBAN_WORKSPACE"}
         self.assert_blocks(FakeShell(), "HERMES_KANBAN_WORKSPACE is not set", env=env)
+
+
+class SlowShell(FakeShell):
+    """Every call takes `delays[kind]` seconds on a fake clock and is killed at its timeout, as subprocess.run does."""
+
+    def __init__(self, delays, **kwargs):
+        super().__init__(pr={**CLEAN, **AWAITING_APPROVAL}, **kwargs)
+        self.delays = delays
+        self.now = 1000.0
+
+    def __call__(self, cmd, cwd=None, timeout=None, **kwargs):
+        kind = "git" if cmd[0] == "git" else "api" if cmd[1] == "api" else "view"
+        delay = self.delays[kind]
+        if delay >= timeout:
+            self.now += timeout
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        self.now += delay
+        return super().__call__(cmd, cwd=cwd, timeout=timeout, **kwargs)
+
+
+class TimeBudgetTest(unittest.TestCase):
+    def run_slow(self, delays):
+        shell = SlowShell(delays)
+        env = {k: v for k, v in WORKER_ENV.items() if k != "HERMES_KANBAN_BRANCH"}  # forces the second git call
+        start = shell.now
+        with mock.patch.object(gate.time, "monotonic", lambda: shell.now):
+            result = call_hook(shell, env=env, tool_name="kanban_request_review")
+        return result, shell.now - start
+
+    def test_slow_git_and_gh_block_before_hermes_would_kill_the_hook(self):
+        result, elapsed = self.run_slow({"git": 2.9, "view": 14.9, "api": 5.9})
+
+        self.assertEqual(result["action"], "block")
+        self.assertIn("timed out", result["message"])
+        self.assertLessEqual(elapsed, gate.HOOK_BUDGET_SECONDS)
+        self.assertLess(gate.HOOK_BUDGET_SECONDS, 30)
+
+    def test_a_call_that_starts_with_no_time_left_is_not_run(self):
+        result, elapsed = self.run_slow({"git": 2.9, "view": 14.9, "api": 3.9})
+
+        self.assertEqual(result["action"], "block")
+        self.assertIn("ran out of time", result["message"])
+        self.assertLessEqual(elapsed, gate.HOOK_BUDGET_SECONDS)
+
+    def test_fast_calls_still_pass(self):
+        result, _ = self.run_slow({"git": 0.1, "view": 0.5, "api": 0.5})
+
+        self.assertIsNone(result)
 
 
 class RegisterTest(unittest.TestCase):
