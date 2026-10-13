@@ -908,9 +908,11 @@ class ClaudeSessionTest(GitFixture):
         self.publish_branch(BOT_LOGIN)
         start = self.head()
 
-        status, report = self.run_session(env={"GH_BIN": "gh", "PATH": "/usr/bin:/bin"})
+        missing = self.tmp / "no-gh"
 
-        self.assert_refused_before_claude(status, report, "gh could not run: No such file or directory", start)
+        status, report = self.run_session(env={"GH_BIN": str(missing)})
+
+        self.assert_refused_before_claude(status, report, f"{missing} could not run: No such file or directory", start)
 
     def test_remote_branch_at_the_default_branch_is_adopted(self) -> None:
         start = self.head()
