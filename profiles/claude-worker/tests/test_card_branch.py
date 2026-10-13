@@ -104,10 +104,10 @@ class ChooseTest(unittest.TestCase):
         ))
 
     def test_the_apps_login_matches_in_every_form(self) -> None:
-        for login in ("factory-app[bot]", "app/factory-app", "factory-app", "Factory-App[bot]"):
+        for login in ("factory-app[bot]", "app/factory-app", "Factory-App[bot]"):
             with self.subTest(login):
                 self.assertTrue(card_branch.is_app(login, "factory-app[bot]"))
-        for login in ("tlmader", "factory-app-2[bot]", "other/factory-app"):
+        for login in ("tlmader", "factory-app", "Factory-App", "factory-app-2[bot]", "other/factory-app"):
             with self.subTest(login):
                 self.assertFalse(card_branch.is_app(login, "factory-app[bot]"))
 
@@ -206,6 +206,16 @@ class CommandTest(unittest.TestCase):
         lines = proc.stdout.splitlines()
         self.assertEqual(len(lines), 1, proc.stdout + proc.stderr)
         return proc.returncode, json.loads(lines[0])
+
+    def test_a_missing_gh_gives_a_json_error_and_exit_1(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "card_branch.py"), "--app", APP, "--repo", REPO, "--git-branch", X],
+            env={"PATH": str(self.tmp)}, capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(
+            json.loads(proc.stdout), {"error": "gh could not run: No such file or directory"})
 
     def test_a_branch_with_no_history_is_picked_as_it_is(self) -> None:
         self.assertEqual(self.run_command(), (0, {"branch": X, "takeover_pr": None}))
