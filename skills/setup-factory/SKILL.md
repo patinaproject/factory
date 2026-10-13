@@ -732,7 +732,8 @@ Hermes moves a card that blocks twice for the same reason to its `triage`
 column, and by default its decomposer then splits the card into child cards.
 A factory card is one Linear issue, and its children would lack the key block
 the worker needs, so turn the decomposer off. A looping card then waits in
-`triage` for a person, and a reply on its Linear issue resumes it.
+`triage` for a person, and a reply on its Linear issue, a changes-requested
+review, or an actionable comment on its pull request resumes it.
 
 Leave `kanban.default_assignee` unset. The resume steps in the triage prompt
 unassign a card so the dispatcher skips it while `kanban specify` rewrites it,
@@ -1078,6 +1079,12 @@ each check. Report each result.
     dispatcher tick starts a worker, and no `respawn_guarded` event follows
     the last `assigned` event. Run it once with a pull request open and once
     without.
+20. Move a card to `triage` with its pull request open, then submit a
+    `changes_requested` review on the pull request as a person. In
+    `hermes kanban show <task id> --json`, the events after the review are the
+    same as in check 19: `assigned` with no assignee, `specified`, `edited`,
+    and `assigned` to `claude-worker`, with the title and body unchanged. A
+    card in `review` still gets `review_reopened`.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate
@@ -1085,7 +1092,8 @@ re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a GitHub event
 arrives for a done card, triage comments on the card and asks the operator to
 reopen the card from the Kanban dashboard. A card reaches `done` only when its
 pull request merges, so this applies to follow-up work after the merge. A
-`triage` card needs no dashboard: its Linear reply unassigns the card, runs
+`triage` card needs no dashboard: its Linear reply, a changes-requested review, or an actionable pull request
+comment unassigns the card, runs
 `specify`, restores the title and body, and assigns the card again.
 
 ## 16. Host exposure
