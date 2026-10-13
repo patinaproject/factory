@@ -52,6 +52,8 @@ class FakeUploads:
                 self.end_headers()
                 self.wfile.write(body.encode())
 
+            do_GET = do_POST  # a followed 302 or 303 turns the POST into a GET
+
             def log_message(self, *args):
                 pass
 
@@ -163,12 +165,26 @@ class UploadTest(unittest.TestCase):
             upload_token.ALLOWED_ENDPOINTS, {"https://uploads.github.com/user-attachments/assets"}
         )
 
+    def test_a_lookalike_of_the_production_endpoint_is_refused_before_any_request(self):
+        with mock.patch.object(upload_token.urllib.request, "build_opener", side_effect=AssertionError("request built")):
+            for url in (
+                "https://uploads.github.com/user-attachments/assets/extra",
+                "https://uploads.github.com/user-attachments/assetsX",
+                "https://uploads.github.com.evil.com/user-attachments/assets",
+                "https://uploads.github.com@evil.com/user-attachments/assets",
+            ):
+                with self.assertRaises(upload_token.UploadError) as caught:
+                    upload_token.send_with_token(url, TOKEN, b"x", "application/octet-stream")
+                self.assertEqual(caught.exception.state, "refused", url)
+
     def test_a_redirect_is_not_followed_so_the_token_goes_nowhere_else(self):
-        with FakeUploads() as target:
-            with FakeUploads(status=307, headers={"Location": target.base + "/stolen"}) as server:
-                with self.assertRaises(upload_token.UploadError):
-                    upload_token.upload("a.png", PNG, 1, TOKEN, server.base)
-            self.assertEqual(target.requests, [])
+        for status in (302, 303, 307):
+            with self.subTest(status=status), FakeUploads() as target:
+                with FakeUploads(status=status, headers={"Location": target.base + "/stolen"}) as server:
+                    with self.assertRaises(upload_token.UploadError):
+                        upload_token.upload("a.png", PNG, 1, TOKEN, server.base)
+                    self.assertEqual(len(server.requests), 1)
+                self.assertEqual(target.requests, [])
 
     def test_a_reply_without_an_attachment_url_is_an_error(self):
         with FakeUploads(body={"url": "https://example.com/x.png"}) as server:
