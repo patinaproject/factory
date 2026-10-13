@@ -25,7 +25,7 @@
 │       ├── SOUL.md            # Worker instructions
 │       ├── config.yaml        # Toolsets, skills, plugins, and placeholder settings
 │       ├── distribution.yaml  # Profile distribution manifest
-│       └── scripts/           # claude-session, card_branch.py, push-signed, worker-secrets, check-install, and the refresh cron scripts
+│       └── scripts/           # claude-session, card_branch.py, upload_token.py, push-signed, worker-secrets, check-install, and the refresh cron scripts
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
 │   └── ...                    # Repository maintenance scripts
