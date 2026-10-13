@@ -107,6 +107,7 @@ class Broker:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        self.socket_path.unlink(missing_ok=True)
 
     async def _answers(self) -> bool:
         if not self.socket_path.exists():
