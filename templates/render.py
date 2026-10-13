@@ -27,8 +27,9 @@ LINEAR_EVENTS = ["AgentSessionEvent", "Issue"]
 # Hermes resolves a relative in_file path against the gateway's home.
 OWNED_REFS_FILE = "owned-refs.json"
 FAILED_CONCLUSIONS = ["failure", "timed_out", "action_required", "startup_failure"]
-# A bot whose pull request comments repeat a result the route already keeps as a failed check_run.
-CHECK_RUN_ECHO_BOTS = ["cloudflare-workers-and-pages[bot]"]
+# A bot whose pull request comments repeat a result the route already keeps as a failed check_run or workflow_run, or
+# only announce a deploy. Triage records each of them on the card and changes nothing.
+CHECK_RUN_ECHO_BOTS = ["cloudflare-workers-and-pages[bot]", "vercel[bot]", "github-actions[bot]"]
 LINEAR_LINKBACK = r"\A<!-- linear-linkback -->"
 LINEAR_SECRET = "${LINEAR_WEBHOOK_SECRET}"
 GITHUB_SECRET = "${GITHUB_WEBHOOK_SECRET}"
@@ -116,7 +117,7 @@ GITHUB_EVENT_TABLE = (
         "issue_comment",
         ("created",),
         "the App opened the pull request or the issue is a card's GitHub issue, "
-        "and the comment is neither Linear's linkback nor a Cloudflare deploy notice",
+        "and the comment is neither Linear's linkback nor a deploy or CI bot notice",
         keeps_issue_comment,
     ),
     GithubEvent(
