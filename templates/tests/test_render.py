@@ -284,6 +284,27 @@ class PromptSubstitutionTest(unittest.TestCase):
     def test_linear_prompt_names_the_app_user(self):
         self.assertIn("00000000-0000-4000-8000-000000000001", self.prompts["linear"])
 
+    def test_both_triage_prompts_carry_the_one_resume_section(self):
+        section = render.triage_resume_section()
+        for name, prompt in self.prompts.items():
+            with self.subTest(route=name):
+                self.assertEqual(prompt.count(section), 1)
+
+    def test_the_resume_section_runs_the_kanban_commands_in_order(self):
+        commands = [
+            "hermes kanban show <task id> --json",
+            "hermes kanban assign <task id> none",
+            "hermes kanban specify <task id>",
+            "hermes kanban edit <task id> --title",
+            "hermes kanban assign <task id> claude-worker",
+        ]
+        section = render.triage_resume_section()
+        positions = [section.rindex(command) for command in commands]
+        self.assertEqual(positions, sorted(positions))
+        for name, prompt in self.prompts.items():
+            with self.subTest(route=name):
+                self.assertIn(section, prompt)
+
     def test_prompts_keep_only_hermes_placeholders(self):
         for name, prompt in self.prompts.items():
             with self.subTest(route=name):

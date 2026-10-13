@@ -13,7 +13,8 @@ whose values are what `hermes config set` installs at them:
   factory sets 600.
 
 The triage prompts are `triage-linear.md` and `triage-github.md`. In them,
-`<<name>>` marks a value the renderer fills from settings, and `{dot.path}` is a
+`triage-resume.md` is the one parked-card resume section that both prompts
+include through `<<triage_resume>>`. `<<name>>` marks a value the renderer fills from settings, and `{dot.path}` is a
 Hermes payload placeholder that the webhook adapter fills per event.
 
 `GITHUB_EVENT_TABLE` in `render.py` lists each GitHub event and action triage

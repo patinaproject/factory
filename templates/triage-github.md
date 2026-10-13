@@ -86,12 +86,24 @@ If no card matches, stop. The event belongs to work the factory does not own.
    nothing more, because its worker sees the merged state and completes the
    card.
 3. For `pull_request_review` action `submitted` with review state
-   `changes_requested`, when the card is `review`, run
-   `hermes kanban reopen-review <task id> --reason 'changes requested on GitHub; see the card comments'`.
-   Hermes returns the card to its worker, which reads the comments and
-   addresses them. In any other status the comment from step 1 is enough.
-4. If the card's status was already `done` when the event arrived, the Kanban
+   `changes_requested`, act on the card's status:
+   - `review`: run
+     `hermes kanban reopen-review <task id> --reason 'changes requested on GitHub; see the card comments'`.
+     Hermes returns the card to its worker, which reads the comments and
+     addresses them.
+   - `triage`: resume it as "Resume a parked card" says, after step 1 has
+     commented on the card, so the worker finds the review there.
+   - Any other status: the comment from step 1 is enough.
+4. For a `pull_request_review` submitted as a comment, a `pull_request_review_comment`,
+   or an `issue_comment` on a pull request, when the card is `triage`, the
+   sender is a person (not a bot), and the text asks for a change or
+   reports a defect, resume the card as "Resume a parked card" says. A
+   thanks, an approval, or a bare question is not actionable: the comment from
+   step 1 is enough. In any other status the comment from step 1 is enough.
+5. If the card's status was already `done` when the event arrived, the Kanban
    CLI has no command that moves it back to `ready`. Read `linear_agent_session_id` from the card body and post
    a `thought` on that Linear agent session with `linear_agent_activity`,
    saying the event arrived after the card finished and that the card must be
    reopened from the Kanban dashboard.
+
+<<triage_resume>>
