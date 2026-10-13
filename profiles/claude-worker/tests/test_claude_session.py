@@ -37,9 +37,11 @@ SYSTEM_PROMPT = (
     "evidence. When the helper exits 3, attach the images to the Linear issue instead and say so in the pull "
     "request body.\n\n"
     "Stop every background command, monitor, and watcher you started before you write your final result. "
-    "The run ends when you finish, and anything still running is killed. To wait for CI, run a foreground "
-    "command that ends on its own, such as `gh pr checks <number> --watch --fail-fast` with the tool's "
-    "timeout set, and run it again when it times out."
+    "The run ends when you finish, and anything still running is killed. To wait for CI, run "
+    f"`python3 {(SCRIPTS / 'wait-for-checks').resolve()} <number> --repo <owner/repo>` in the foreground. It "
+    "returns within 4 minutes, inside the 5-minute prompt cache: exit 0 means every check passed, 1 means a "
+    "check failed, and 3 means checks are still running, so run it again. A hook refuses `gh pr checks "
+    "--watch`, `gh run watch`, and any sleep or polling loop that waits longer."
 )
 REPO = "example-org/example-repo"
 LINEAR_MCP_CONFIG = (
@@ -693,6 +695,22 @@ class ClaudeSessionTest(GitFixture):
         settings = self.claude_call()["settings"]
         self.assertEqual(settings["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
         self.assertFalse(settings["exists_after_start"])
+
+    def test_settings_register_the_ci_wait_guard_on_bash_calls(self) -> None:
+        self.run_session()
+
+        hooks = self.claude_call()["settings"]["content"]["hooks"]["PreToolUse"]
+        self.assertEqual([group["matcher"] for group in hooks], ["Bash"])
+        command = hooks[0]["hooks"][0]["command"]
+        refused = subprocess.run(
+            command, shell=True, capture_output=True, text=True,
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "gh pr checks 7 --watch"}}),
+        )
+        allowed = subprocess.run(
+            command, shell=True, capture_output=True, text=True,
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status"}}),
+        )
+        self.assertEqual((refused.returncode, allowed.returncode), (2, 0))
 
     def test_signal_mid_run_removes_the_settings_file_and_ends_claude(self) -> None:
         # Without the start hook, as when hooks are disabled, the file stays until claude-session removes it.
