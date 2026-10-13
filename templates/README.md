@@ -14,7 +14,8 @@ whose values are what `hermes config set` installs at them:
 
 The triage prompts are `triage-linear.md` and `triage-github.md`. In them,
 `triage-resume.md` is the one parked-card resume section that both prompts
-include through `<<triage_resume>>`. `<<name>>` marks a value the renderer fills from settings, and `{dot.path}` is a
+include through `<<triage_resume>>`. `triage-merged.md` is the merged-pull-request
+completion section that only the GitHub prompt includes through `<<triage_merged>>`. `<<name>>` marks a value the renderer fills from settings, and `{dot.path}` is a
 Hermes payload placeholder that the webhook adapter fills per event.
 
 `GITHUB_EVENT_TABLE` in `render.py` lists each GitHub event and action triage

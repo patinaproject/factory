@@ -316,6 +316,107 @@ class PromptSubstitutionTest(unittest.TestCase):
                 self.assertNotIn("}", stray)
 
 
+class MergedCardTest(unittest.TestCase):
+    """The merged-pull-request rule is machine input to the triage agent, so its commands and their order are a contract."""
+
+    def setUp(self):
+        routes = render.build_routes(SETTINGS)
+        self.section = render.triage_merged_section()
+        self.github = routes["github"]["prompt"]
+        self.linear = routes["linear"]["prompt"]
+
+    def bullet(self, status: str) -> str:
+        match = re.search(rf"^- `{status}`.*?(?=^- |\Z)", self.section, re.M | re.S)
+        self.assertIsNotNone(match, f"no rule for a {status} card")
+        return match.group(0)
+
+    def positions(self, text: str, commands: list) -> list:
+        for command in commands:
+            self.assertIn(command, text)
+        return [text.index(command) for command in commands]
+
+    def test_only_the_github_prompt_carries_the_section_once(self):
+        self.assertEqual(self.github.count(self.section), 1)
+        self.assertNotIn(self.section, self.linear)
+        self.assertNotRegex(self.github, r"<<[a-z_]+>>")
+
+    def test_the_merged_event_hands_every_status_to_the_section(self):
+        self.assertRegex(self.github, r"`pull_request` action `closed` with merged `True`, complete the card as\s+\"Complete a card whose pull request merged\"")
+        self.assertIn("merged `True`", self.section.split("\n\n")[1])
+        self.assertIn("is not a merge", self.section)
+
+    def test_each_status_has_one_rule(self):
+        statuses = set(re.findall(r"^- `([a-z]+)`", self.section, re.M))
+        self.assertEqual(statuses, {"running", "review", "todo", "triage"})
+        self.assertRegex(self.bullet("review"), r"`review`, `blocked`, or `ready`")
+
+    def test_a_running_card_is_left_to_its_worker(self):
+        rule = self.bullet("running")
+        self.assertNotIn("kanban_complete", rule)
+        self.assertNotIn("hermes kanban complete", rule)
+        self.assertNotIn("completion call", rule)
+        self.assertIn("`running`: do nothing more.", rule)
+        self.assertIn("Never complete, reclaim, or force a running card.", rule)
+
+    def test_review_blocked_and_ready_cards_run_no_command_before_completion(self):
+        rule = self.bullet("review")
+        self.assertIn("completion call", rule)
+        self.assertNotIn("hermes kanban", rule)
+
+    def test_a_todo_card_is_promoted_before_it_is_completed(self):
+        rule = self.bullet("todo")
+        positions = self.positions(rule, ["hermes kanban promote <task id> pull request merged", "completion call"])
+        self.assertEqual(positions, sorted(positions))
+
+    def test_a_triage_card_runs_the_unpark_commands_in_order_then_completes(self):
+        rule = self.bullet("triage")
+        commands = [
+            "hermes kanban show <task id> --json",
+            "hermes kanban assign <task id> none",
+            "hermes kanban specify <task id>",
+            "hermes kanban edit <task id> --title",
+            "hermes kanban promote <task id> pull request merged",
+            "Make the completion call.",
+        ]
+        positions = [rule.index(command) for command in commands]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn(
+            "hermes kanban assign <task id> claude-worker", rule[rule.index("Make the completion call.") :]
+        )
+
+    def test_the_completion_call_names_the_tool_and_its_arguments(self):
+        call = self.section[self.section.index("The completion call is") :]
+        for needle in ("kanban_complete", "`task_id`", "`summary`", "`published_pr`", "linear_agent_activity", "`Pull request`"):
+            self.assertIn(needle, call)
+        self.assertNotIn("claude-worker", call)
+
+    def test_a_card_is_reassigned_to_the_worker_only_when_specify_fails(self):
+        rule = self.bullet("triage")
+        reassign = "hermes kanban assign <task id> claude-worker"
+        self.assertEqual(rule.count(reassign), 1)
+        specify = rule[rule.index("hermes kanban specify <task id>") :].split("\n  4. ")[0]
+        self.assertIn(f"If it fails, run\n     `{reassign}`", specify)
+        self.assertNotIn(reassign, self.section[self.section.index("  4. ") :])
+
+    def test_a_refused_promote_or_completion_leaves_the_card_unassigned(self):
+        rule = self.bullet("triage")
+        promote = rule[rule.index("  5. ") : rule.index("  6. ")]
+        self.assertIn("comment the refusal with the pull request URL and stop. Leave the card\n     unassigned", promote)
+        self.assertNotIn("claude-worker", promote)
+        call = self.section[self.section.index("The completion call is") :]
+        self.assertIn("When it is refused, comment\nthe refusal with the pull request URL and stop.", call)
+        self.assertIn("Never assign the card after\n`specify` succeeded.", call)
+
+    def test_a_rewritten_card_is_never_completed(self):
+        rule = self.bullet("triage")
+        self.assertIn("Never complete the card while its title and body are the rewritten ones.", rule)
+
+    def test_the_merge_step_no_longer_limits_completion_to_three_statuses(self):
+        step = self.github[self.github.index("2. For `pull_request` action `closed`") :].split("\n3. ")[0]
+        self.assertNotIn("when the card is", step)
+        self.assertNotIn("kanban_complete", step)
+
+
 class ValidationTest(unittest.TestCase):
     CASES = {
         "settings must be an object": [],
@@ -688,6 +789,9 @@ FILTER_CASES = [
     ("failed Actions check run on an owned branch", "check_run", payload("completed", sender=APP, check_run=check_run(OWNED_BRANCH, "failure", "github-actions")), False),
     ("successful check run on an owned branch", "check_run", payload("completed", sender=APP, check_run=check_run(OWNED_BRANCH, "success")), False),
     ("the App merges its own PR", "pull_request", payload("closed", sender=APP, pull_request=pull_request(APP, merged=True)), True),
+    ("a person merges an App PR", "pull_request", payload("closed", sender=HUMAN, pull_request=pull_request(APP, merged=True)), True),
+    ("a person closes an App PR without merging", "pull_request", payload("closed", sender=HUMAN, pull_request=pull_request(APP)), True),
+    ("the App closes its own PR without merging", "pull_request", payload("closed", sender=APP, pull_request=pull_request(APP)), False),
     ("push to an App PR", "pull_request", payload("synchronize", sender=APP, pull_request=pull_request(APP)), False),
     ("human PR closed", "pull_request", payload("closed", pull_request=pull_request(HUMAN)), False),
     ("card's GitHub issue closed", "issues", payload("closed", repo="example-org/site", issue=issue(HUMAN, OWNED_ISSUE_URL, is_pull=False)), True),

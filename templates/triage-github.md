@@ -73,18 +73,8 @@ If no card matches, stop. The event belongs to work the factory does not own.
 1. Comment on the card. Name the event, its action, the sender, and the page.
    Quote the review or comment body, or name the failed check and its
    conclusion.
-2. For `pull_request` action `closed` with merged `True`, when the card is
-   `review`, `blocked`, or `ready`, call `kanban_complete` with `task_id`, a
-   one-sentence `summary` saying the pull request merged, and `metadata`
-   whose `published_pr` is the pull request URL. Hermes checks the merged pull
-   request's required checks before it moves the card to `done`. When it is
-   accepted, read `linear_agent_session_id` from the card body and post a
-   `response` on that session with `linear_agent_activity`, saying the pull
-   request merged. Set `external_urls` to one link labeled `Pull request`
-   whose URL is the pull request URL. When it is
-   refused, comment the refusal on the card and stop. A `running` card needs
-   nothing more, because its worker sees the merged state and completes the
-   card.
+2. For `pull_request` action `closed` with merged `True`, complete the card as
+   "Complete a card whose pull request merged" says, whatever its status.
 3. For `pull_request_review` action `submitted` with review state
    `changes_requested`, act on the card's status:
    - `review`: run
@@ -105,5 +95,7 @@ If no card matches, stop. The event belongs to work the factory does not own.
    a `thought` on that Linear agent session with `linear_agent_activity`,
    saying the event arrived after the card finished and that the card must be
    reopened from the Kanban dashboard.
+
+<<triage_merged>>
 
 <<triage_resume>>

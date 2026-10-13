@@ -764,7 +764,7 @@ hermes kanban boards set-default-workdir default <path of the default repository
 A worker hands a card with a merge-ready pull request to the `review` lane.
 With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,
 so the card waits there for a person. GitHub triage moves it to `done` when the
-pull request merges, and back to the worker when a review requests changes.
+pull request merges, from whatever status the card is in unless a worker is running it, and back to the worker when a review requests changes.
 Cards in `review` run no worker, so they do not count against
 `kanban.max_in_progress`.
 
@@ -1125,6 +1125,18 @@ each check. Report each result.
     same as in check 19: `assigned` with no assignee, `specified`, `edited`,
     and `assigned` to `claude-worker`, with the title and body unchanged. A
     card in `review` still gets `review_reopened`.
+
+21. Merge a card's pull request while the card is in `triage`, with no worker
+    running it. In `hermes kanban show <task id> --json`, the events after the
+    merge include, in this order, `assigned` with no assignee, `specified`,
+    `edited`, and `completed`. The card is `done`, its title and body are unchanged, and the
+    Linear agent session shows a `response` that the pull request merged. Repeat
+    with a card in `todo` (its events include `promoted_manual`, then `completed`) and in
+    `blocked` (its events include `completed`). A card with a worker running stays `running`
+    until its worker completes it, and a pull request closed without merging
+    changes no card. A refused promote or completion after `specify` leaves the
+    card unassigned, with a comment that names the pull request, and no
+    `assigned` event to `claude-worker` follows it.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate

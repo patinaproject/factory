@@ -279,6 +279,10 @@ def triage_resume_section() -> str:
     return _read_template("triage-resume.md").rstrip("\n")
 
 
+def triage_merged_section() -> str:
+    return _read_template("triage-merged.md").rstrip("\n")
+
+
 def _exclude_events_sent_by(login: str) -> dict:
     # A check failure on the App's own push names the App as sender, and the worker still needs it.
     # A merge the App performs, such as auto-merge, names the App too, and its card still has to complete.
@@ -360,6 +364,7 @@ def build_routes(settings: Any) -> dict:
                     "repositories": repos,
                     "events_that_matter": events_that_matter(GITHUB_EVENT_TABLE),
                     "triage_resume": triage_resume_section(),
+                    "triage_merged": triage_merged_section(),
                 },
             ),
         },
