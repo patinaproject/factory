@@ -585,6 +585,11 @@ class CheckInstallTest(unittest.TestCase):
             ),
         )
 
+    def test_route_filtering_on_linear_ids_with_an_empty_board(self) -> None:
+        self.owned_refs.write_text("[]\n")
+
+        self.assertEqual(self.check(), (0, ""))
+
     def test_stale_owned_refs_file(self) -> None:
         stale = time.time() - 600
         os.utime(self.owned_refs, (stale, stale))

@@ -314,6 +314,8 @@ def check_linear_ids(root: Path, key: str) -> list:
         refs = json.loads((root / OWNED_REFS).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []  # check_owned_refs reports a missing file
+    if not refs:
+        return []  # an empty board has no card to close; every triage-created card has a linear_issue_id line
     if any(isinstance(ref, str) and LINEAR_ID.fullmatch(ref) for ref in refs):
         return []
     return [Drift(

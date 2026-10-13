@@ -1277,7 +1277,10 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    `linear` route drops a completed or canceled `Issue` update unless its
    issue id is in `<root>/owned-refs.json`. Update the profile, run
    `refresh-owned-refs` once, confirm the file holds issue UUIDs, and only then
-   re-render the route. The reverse order drops every closure until the next
+   re-render the route. Find the job id with `hermes -p claude-worker cron list`
+   and run it with `hermes -p claude-worker cron run <job id>`, or wait one
+   minute for the cron schedule. An empty board (`[]`) is fine: it holds no
+   cards to close. The reverse order drops every closure until the next
    cron run. `check-install` reports a route that filters on issue ids while
    the file holds none.
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
