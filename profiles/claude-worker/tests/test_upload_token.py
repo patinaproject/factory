@@ -262,23 +262,30 @@ class ProbeTest(unittest.TestCase):
         self.assertNotIn("GITHUB_UPLOAD_TOKEN", seen["env"])
         self.assertEqual(seen["cmd"][1:], ["api", "repos/o/r", "--jq", ".id"])
 
-    def test_gh_gets_only_the_names_it_needs_to_act_as_the_app(self):
-        fake = "#!/usr/bin/env python3\nimport json, os, sys\nopen(sys.argv[0] + '.env', 'w').write(json.dumps(sorted(os.environ)))\nprint(7)\n"
+    def run_repository_id_under_fake_gh(self, env):
+        fake = "#!/usr/bin/env python3\nimport json, os, sys\nopen(sys.argv[0] + '.env', 'w').write(json.dumps(dict(os.environ)))\nprint(7)\n"
         with tempfile.TemporaryDirectory() as home:
             gh = Path(home) / ".local/bin/gh"
             gh.parent.mkdir(parents=True)
             gh.write_text(with_interpreter(fake))
             gh.chmod(0o755)
-            env = {
-                "HOME": home, "PATH": "/usr/bin:/bin", "GH_CONFIG_DIR": "/gh",
-                "LINEAR_CLIENT_SECRET": "x", "SLACK_BOT_TOKEN": "x",
-                "GITHUB_UPLOAD_TOKEN": TOKEN, "OP_SERVICE_ACCOUNT_TOKEN": "x",
-            }
-            with mock.patch.dict("os.environ", env, clear=True):
+            with mock.patch.dict("os.environ", {"HOME": home, **env}, clear=True):
                 self.assertEqual(upload_token.repository_id("o/r"), 7)
-            seen = json.loads(Path(str(gh) + ".env").read_text())
+            return json.loads(Path(str(gh) + ".env").read_text())
+
+    def test_gh_gets_only_the_names_it_needs_to_act_as_the_app(self):
+        seen = self.run_repository_id_under_fake_gh({
+            "PATH": "/usr/bin:/bin", "GH_CONFIG_DIR": "/gh",
+            "LINEAR_CLIENT_SECRET": "x", "SLACK_BOT_TOKEN": "x",
+            "GITHUB_UPLOAD_TOKEN": TOKEN, "OP_SERVICE_ACCOUNT_TOKEN": "x",
+        })
         interpreter_added = {"LC_CTYPE", "__CF_USER_TEXT_ENCODING"}
         self.assertEqual(sorted(set(seen) - interpreter_added), ["GH_CONFIG_DIR", "HOME", "PATH"])
+        self.assertEqual(seen["GH_CONFIG_DIR"], "/gh")
+
+    def test_gh_falls_back_to_the_worker_gh_dir_never_a_personal_login(self):
+        seen = self.run_repository_id_under_fake_gh({"PATH": "/usr/bin:/bin"})
+        self.assertEqual(seen["GH_CONFIG_DIR"], str(upload_token.WORKER_GH_DIR))
 
     def test_the_cli_requires_the_probe_flag_and_a_repository(self):
         with contextlib.redirect_stderr(io.StringIO()):
