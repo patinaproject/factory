@@ -1,0 +1,6 @@
+manifest_version: 2
+name: factory-uploads
+label: Factory uploads
+kind: platform
+version: "0.1.0"
+description: "Runs in the gateway only. Listens on a Unix socket in the Hermes home, accepts evidence images from the factory's own user, and uploads them to GitHub's attachment store with the operator's upload token. It is not a chat platform: it receives no messages, sends none, and is not a cron or send_message target."

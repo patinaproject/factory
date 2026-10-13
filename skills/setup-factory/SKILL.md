@@ -124,6 +124,8 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `OP_SERVICE_ACCOUNT_TOKEN`, when the factory uses 1Password | The factory's Infisical folder only, never a Hermes `.env`. It is for the operator only. The helper drops it, so Hermes agents never receive it, and the operator's `op` wrapper reads it |
 | `plugins.entries.linear-agent-session.settings` | `config.yaml` of both homes, same JSON |
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
+| `GITHUB_UPLOAD_TOKEN`, the operator's upload-only token | The factory's Infisical folder only, entered by the operator. The gateway loads it. Neither `.env` holds it, and the worker's `worker-secrets` drops it |
+| `platforms.factory_uploads.enabled` and `platforms.factory_uploads.extra.repositories` | `<home>/config.yaml` only |
 | `kanban.max_in_progress`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
 | The `default` board's `default_workdir` | Kanban board metadata, not `config.yaml` |
@@ -419,7 +421,8 @@ hermes plugins list
 hermes -p claude-worker plugins list
 ```
 
-Both list `linear-agent-session` and `pr-ready-gate`, enabled. On a fresh
+Both list `linear-agent-session` and `pr-ready-gate`, enabled. The root home
+also lists `factory-uploads`, enabled, and the worker home does not. On a fresh
 machine, install both now and skip the content check.
 
 On a re-run, `<worker>` already exists, and a listed plugin can still be
@@ -449,6 +452,42 @@ hermes -p claude-worker plugins install "file://<repo>#plugins/pr-ready-gate" --
 To install from GitHub instead of a local checkout, use
 `<owner>/<repo>#plugins/<name> --ref <40-character commit SHA>`. Add `--force`
 only to reinstall a plugin at a newer commit.
+
+**Gateway uploads, root home only.** The `factory-uploads` plugin runs inside
+the gateway and uploads evidence images with `GITHUB_UPLOAD_TOKEN`, so the
+worker never holds the token. Install it in the root home and never in the
+worker's home. `check-install` reports an install in the worker home.
+
+1. **Operator, in their own terminal.** Enter `GITHUB_UPLOAD_TOKEN` in the
+   factory's Infisical folder, as in [`references/infisical.md`](references/infisical.md).
+   Never ask for the value in chat. The gateway reads secret sources when it
+   starts, so a new or rotated token takes effect at the next gateway restart.
+2. Install and enable the plugin in the root home:
+
+   ```sh
+   hermes plugins install "file://<repo>#plugins/factory-uploads" --enable --yes-deps </dev/null
+   ```
+
+3. Enable the platform and list the repositories the broker may upload for,
+   as `<owner>/<repo>` names from the factory's `repositories` setting. An
+   empty list refuses every upload:
+
+   ```sh
+   hermes config set platforms.factory_uploads.enabled true
+   hermes config set platforms.factory_uploads.extra.repositories '["<owner>/<repo>"]'
+   ```
+
+4. > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
+   > from a shell outside Hermes. Hermes loads platform plugins only when the
+   > gateway starts.
+
+5. **Check.** `<home>/gateway_state.json` lists `factory_uploads` as
+   `connected`, and `<home>/factory-uploads.sock` exists with mode `srw-------`.
+   `python3 <home>/plugins/factory-uploads/upload_token.py --probe --repo <owner>/<repo>`
+   is for the operator's own terminal: it prints the HTTP status and the
+   attachment URL, never the token. The platform is not a chat platform, so
+   `hermes status` lists it without any channel and it is not a cron
+   `--deliver` or `send_message` target.
 
 **Worker profile.** If `<worker>` does not exist, install it. If it exists,
 update it. An update keeps the installed `config.yaml`. Pass `--force-config`

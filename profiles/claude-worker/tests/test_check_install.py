@@ -100,6 +100,7 @@ REPO_FILES = {
     "profiles/claude-worker/scripts/x": "#!/bin/sh\n",
     "plugins/p1/__init__.py": "plugin\n",
     "plugins/p1/tests/test_a.py": "test\n",
+    "plugins/factory-uploads/__init__.py": "uploads\n",
     "templates/render.py": RENDER,
     ALERT_SOURCE: "#!/usr/bin/env python3\nalert\n",
 }
@@ -124,6 +125,7 @@ class CheckInstallTest(unittest.TestCase):
         self.worker = self.root / "profiles" / "claude-worker"
         for home in (self.root, self.worker):
             self.install(home, "plugins/p1/__init__.py", "plugin\n")
+        self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
         self.install(self.worker, "SOUL.md", "soul\n")
         self.install(self.worker, "scripts/x", "#!/bin/sh\n")
         self.install(self.worker, "config.yaml", "model: local\n")
@@ -194,6 +196,27 @@ class CheckInstallTest(unittest.TestCase):
         shutil.rmtree(self.root / "plugins" / "p1")
 
         self.assertEqual(self.check(), (1, f"plugin p1 in {self.root}: not installed\n"))
+
+    def test_a_root_only_plugin_is_not_required_in_the_worker_home(self) -> None:
+        self.assertFalse((self.worker / "plugins" / "factory-uploads").exists())
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_root_only_plugin_is_required_in_the_root_home_and_compared_there(self) -> None:
+        self.install(self.root, "plugins/factory-uploads/__init__.py", "old\n")
+        self.assertEqual(
+            self.check(),
+            (1, f"plugin factory-uploads in {self.root}: __init__.py differs from main at {self.sha}\n"),
+        )
+        shutil.rmtree(self.root / "plugins" / "factory-uploads")
+        self.assertEqual(self.check(), (1, f"plugin factory-uploads in {self.root}: not installed\n"))
+
+    def test_a_root_only_plugin_installed_in_the_worker_home_is_reported(self) -> None:
+        self.install(self.worker, "plugins/factory-uploads/__init__.py", "uploads\n")
+
+        self.assertEqual(
+            self.check(),
+            (1, f"plugin factory-uploads in {self.worker}: installed, but it runs only in the root home\n"),
+        )
 
     def test_plugin_tests_are_ignored(self) -> None:
         self.install(self.worker, "plugins/p1/tests/test_a.py", "different\n")

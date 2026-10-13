@@ -68,6 +68,11 @@ private record, never to the repository.
 - Publish commits only with
   `GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/push-signed`.
   Never use `git push`.
+- One exception: a worker uploads images for pull requests with
+  `python3 <worker>/scripts/github-upload-image`. The gateway uploads them
+  with the operator's upload token. Never read, print, or use
+  `GITHUB_UPLOAD_TOKEN` yourself, never pass it to `gh`, and never upload
+  anything else through the broker.
 - `Resource not accessible by integration` means the App lacks a
   permission. Report it to the operator. Do not switch identities.
 - The App cannot create linked branches, so `gh issue develop` fails with a

@@ -235,7 +235,12 @@ def check_profile(commit: Commit, worker: Path) -> list:
     return [Drift("profile", "claude-worker", d) for d in compare_files(commit, files, f"{PROFILE}/", worker)]
 
 
+# Plugins that run in the gateway only. Their code lives in the root home and never in the worker's.
+ROOT_ONLY_PLUGINS = frozenset({"factory-uploads"})
+
+
 def check_plugins(commit: Commit, homes: list) -> list:
+    """`homes` is [root, worker]."""
     plugins: dict = {}
     for path, blob_id in commit.files("plugins").items():
         _, name, rest = path.split("/", 2)
@@ -243,7 +248,11 @@ def check_plugins(commit: Commit, homes: list) -> list:
             plugins.setdefault(name, {})[path] = blob_id
     drifts = []
     for name, files in sorted(plugins.items()):
-        for home in homes:
+        wanted = homes[:1] if name in ROOT_ONLY_PLUGINS else homes
+        for home in homes[len(wanted):]:
+            if (home / "plugins" / name).exists():
+                drifts.append(Drift("plugin", f"{name} in {home}", "installed, but it runs only in the root home"))
+        for home in wanted:
             where = f"{name} in {home}"
             installed = home / "plugins" / name
             if not installed.is_dir():

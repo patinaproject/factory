@@ -30,6 +30,12 @@ SYSTEM_PROMPT = (
     "check failed on a head that is behind the base branch, or a person says the cause of a failure is "
     "fixed, run `gh pr update-branch <number>` so every check runs again on a new head, then wait for "
     "that run before you judge the ready gate.\n\n"
+    "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
+    "shows its observable result, such as rendered command output or a probe. Run "
+    f"`python3 {(SCRIPTS / 'github-upload-image').resolve()} <file>...` on the images, then paste each `<img>` tag it "
+    "prints into the description under the section it proves, with a one-line caption. A local path is never "
+    "evidence. When the helper exits 3, attach the images to the Linear issue instead and say so in the pull "
+    "request body.\n\n"
     "Stop every background command, monitor, and watcher you started before you write your final result. "
     "The run ends when you finish, and anything still running is killed. To wait for CI, run a foreground "
     "command that ends on its own, such as `gh pr checks <number> --watch --fail-fast` with the tool's "
@@ -51,6 +57,7 @@ WORKER_SECRETS = {
     "LINEAR_WEBHOOK_SECRET": "x", "GITHUB_WEBHOOK_SECRET": "x", "FACTORY_INFISICAL_CLIENT_ID": "x",
     "FACTORY_INFISICAL_CLIENT_SECRET": "x", "SLACK_BOT_TOKEN": "x", "OP_SERVICE_ACCOUNT_TOKEN": "x",
     "EXAMPLE_PROXY_TOKEN": "token-value", "HERMES_KANBAN_TASK": "t_1", "GH_TOKEN": "x",
+    "GITHUB_UPLOAD_TOKEN": "github_pat_FAKE0123456789_abcdef",
 }
 ALLOWED_NAMES = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TZ", "NVM_DIR",
@@ -552,6 +559,24 @@ class ClaudeSessionTest(GitFixture):
                 self.assertEqual(report, {
                     "error": f"claude_session.tier_models {value!r} must map sonnet, haiku, fable to non-empty model ids",
                 })
+
+    def test_the_upload_token_never_reaches_claude_in_any_form(self) -> None:
+        self.run_session()
+
+        call = self.claude_call()
+        token = WORKER_SECRETS["GITHUB_UPLOAD_TOKEN"]
+        self.assertNotIn("GITHUB_UPLOAD_TOKEN", call["env"])
+        self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+        self.assertFalse(any(token in value for value in [*call["argv"], *call["env"].values()]))
+
+    def test_the_system_prompt_names_the_upload_helper_by_its_absolute_path(self) -> None:
+        self.run_session()
+
+        argv = self.claude_call()["argv"]
+        prompt = argv[argv.index("--append-system-prompt") + 1]
+        helper = (SCRIPTS / "github-upload-image").resolve()
+        self.assertIn(f"python3 {helper} <file>...", prompt)
+        self.assertTrue(helper.is_file())
 
     def test_claude_gets_only_the_allowlisted_environment(self) -> None:
         self.run_session(env={"LC_ALL": "C", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1", "SOME_API_KEY": "x"})

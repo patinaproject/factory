@@ -76,13 +76,20 @@ CHECKS_RULE = (
     "fixed, run `gh pr update-branch <number>` so every check runs again on a new head, then wait for "
     "that run before you judge the ready gate."
 )
+EVIDENCE_RULE = (
+    "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
+    "shows its observable result, such as rendered command output or a probe. Run `python3 {upload_image} "
+    "<file>...` on the images, then paste each `<img>` tag it prints into the description under the section "
+    "it proves, with a one-line caption. A local path is never evidence. When the helper exits 3, attach the "
+    "images to the Linear issue instead and say so in the pull request body."
+)
 FINISH_RULE = (
     "Stop every background command, monitor, and watcher you started before you write your final result. "
     "The run ends when you finish, and anything still running is killed. To wait for CI, run a foreground "
     "command that ends on its own, such as `gh pr checks <number> --watch --fail-fast` with the tool's "
     "timeout set, and run it again when it times out."
 )
-SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{FINISH_RULE}"
+SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
 LINEAR_MCP_CONFIG = json.dumps({"mcpServers": {"linear": {
@@ -639,7 +646,10 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             *turn_limit,
             "--permission-mode", "bypassPermissions",
             "--resume" if plan.resumed else "--session-id", session_id,
-            "--append-system-prompt", SYSTEM_PROMPT.format(push_signed=Path(__file__).resolve().with_name("push-signed")),
+            "--append-system-prompt", SYSTEM_PROMPT.format(
+                push_signed=Path(__file__).resolve().with_name("push-signed"),
+                upload_image=Path(__file__).resolve().with_name("github-upload-image"),
+            ),
             "--mcp-config", LINEAR_MCP_CONFIG,
         ]
         if transport.get("model"):
