@@ -279,6 +279,10 @@ def triage_resume_section() -> str:
     return _read_template("triage-resume.md").rstrip("\n")
 
 
+def triage_unblock_section() -> str:
+    return _read_template("triage-unblock.md").rstrip("\n")
+
+
 def _exclude_events_sent_by(login: str) -> dict:
     # A check failure on the App's own push names the App as sender, and the worker still needs it.
     # A merge the App performs, such as auto-merge, names the App too, and its card still has to complete.
@@ -345,6 +349,7 @@ def build_routes(settings: Any) -> dict:
                     "repositories": repos,
                     "queued_link": queued_link_sentence(config["kanban_url"]),
                     "card_branch": card_branch_command(hermes_home(), config["github_login"]),
+                    "triage_unblock": triage_unblock_section(),
                     "triage_resume": triage_resume_section(),
                 },
             ),
@@ -359,6 +364,7 @@ def build_routes(settings: Any) -> dict:
                 {
                     "repositories": repos,
                     "events_that_matter": events_that_matter(GITHUB_EVENT_TABLE),
+                    "triage_unblock": triage_unblock_section(),
                     "triage_resume": triage_resume_section(),
                 },
             ),

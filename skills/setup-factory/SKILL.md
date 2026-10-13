@@ -1125,6 +1125,15 @@ each check. Report each result.
     same as in check 19: `assigned` with no assignee, `specified`, `edited`,
     and `assigned` to `claude-worker`, with the title and body unchanged. A
     card in `review` still gets `review_reopened`.
+21. Move a card to `blocked` with its pull request open, then submit a
+    `changes_requested` review on the pull request as a person. In
+    `hermes kanban show <task id> --json`, the events after the review are
+    `unblocked`, `review_requested`, and `review_reopened`. The card's
+    comments show the review before those events, the next dispatcher tick
+    starts a worker, and no `respawn_guarded` event with reason `active_pr`
+    follows. Repeat with an actionable inline comment from a person. A review
+    or comment from a bot, an approval, a thanks, and a bare question leave the
+    card `blocked`.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate
