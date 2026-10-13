@@ -354,7 +354,9 @@ class MergedCardTest(unittest.TestCase):
         rule = self.bullet("running")
         self.assertNotIn("kanban_complete", rule)
         self.assertNotIn("hermes kanban complete", rule)
-        self.assertIn("Never complete, reclaim, or force", rule)
+        self.assertNotIn("completion call", rule)
+        self.assertIn("`running`: do nothing more.", rule)
+        self.assertIn("Never complete, reclaim, or force a running card.", rule)
 
     def test_review_blocked_and_ready_cards_run_no_command_before_completion(self):
         rule = self.bullet("review")
@@ -386,7 +388,28 @@ class MergedCardTest(unittest.TestCase):
         call = self.section[self.section.index("The completion call is") :]
         for needle in ("kanban_complete", "`task_id`", "`summary`", "`published_pr`", "linear_agent_activity", "`Pull request`"):
             self.assertIn(needle, call)
-        self.assertIn("hermes kanban assign <task id> claude-worker", call)
+        self.assertNotIn("claude-worker", call)
+
+    def test_a_card_is_reassigned_to_the_worker_only_when_specify_fails(self):
+        rule = self.bullet("triage")
+        reassign = "hermes kanban assign <task id> claude-worker"
+        self.assertEqual(rule.count(reassign), 1)
+        specify = rule[rule.index("hermes kanban specify <task id>") :].split("\n  4. ")[0]
+        self.assertIn(f"If it fails, run\n     `{reassign}`", specify)
+        self.assertNotIn(reassign, self.section[self.section.index("  4. ") :])
+
+    def test_a_refused_promote_or_completion_leaves_the_card_unassigned(self):
+        rule = self.bullet("triage")
+        promote = rule[rule.index("  5. ") : rule.index("  6. ")]
+        self.assertIn("comment the refusal with the pull request URL and stop. Leave the card\n     unassigned", promote)
+        self.assertNotIn("claude-worker", promote)
+        call = self.section[self.section.index("The completion call is") :]
+        self.assertIn("When it is refused, comment\nthe refusal with the pull request URL and stop.", call)
+        self.assertIn("Never assign the card after\n`specify` succeeded.", call)
+
+    def test_a_rewritten_card_is_never_completed(self):
+        rule = self.bullet("triage")
+        self.assertIn("Never complete the card while its title and body are the rewritten ones.", rule)
 
     def test_the_merge_step_no_longer_limits_completion_to_three_statuses(self):
         step = self.github[self.github.index("2. For `pull_request` action `closed`") :].split("\n3. ")[0]

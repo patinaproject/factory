@@ -1134,7 +1134,9 @@ each check. Report each result.
     with a card in `todo` (its events include `promoted_manual`, then `completed`) and in
     `blocked` (its events include `completed`). A card with a worker running stays `running`
     until its worker completes it, and a pull request closed without merging
-    changes no card.
+    changes no card. A refused promote or completion after `specify` leaves the
+    card unassigned, with a comment that names the pull request, and no
+    `assigned` event to `claude-worker` follows it.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate

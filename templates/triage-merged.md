@@ -29,8 +29,9 @@ just before you act and read `status` from it:
      Never complete the card while its title and body are the rewritten ones.
   5. `hermes kanban show <task id> --json`. If `status` is `todo`, run
      `hermes kanban promote <task id> pull request merged`. If it refuses,
-     run `hermes kanban assign <task id> claude-worker`, comment the refusal,
-     and stop.
+     comment the refusal with the pull request URL and stop. Leave the card
+     unassigned: an `assigned` event lifts the `active_pr` hold, and a worker
+     would start on a merged pull request.
   6. Make the completion call.
 - Any other status, such as `done` or `archived`: the comment from step 1 is
   enough.
@@ -43,5 +44,5 @@ holds the card. When it is accepted, read `linear_agent_session_id` from the
 card body and post a `response` on that session with `linear_agent_activity`,
 saying the pull request merged. Set `external_urls` to one link labeled
 `Pull request` whose URL is the pull request URL. When it is refused, comment
-the refusal on the card. If you unassigned the card in the `triage` steps, run
-`hermes kanban assign <task id> claude-worker` so a worker can finish it.
+the refusal with the pull request URL and stop. Never assign the card after
+`specify` succeeded.
