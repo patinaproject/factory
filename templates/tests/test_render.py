@@ -282,6 +282,11 @@ class PromptSubstitutionTest(unittest.TestCase):
             prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
         self.assertIn("python3 /srv/hermes/profiles/claude-worker/scripts/card_branch.py --app 'example-app[bot]'", prompt)
 
+    def test_the_linear_prompt_archives_cards_through_the_worker_profile_script(self):
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
+            prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        self.assertIn("`python3 /srv/hermes/profiles/claude-worker/scripts/archive_card.py <task id>`", prompt)
+
     def test_linear_prompt_names_the_app_user(self):
         self.assertIn("00000000-0000-4000-8000-000000000001", self.prompts["linear"])
 

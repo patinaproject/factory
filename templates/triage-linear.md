@@ -15,8 +15,10 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 - Stay read-only on GitHub. Read pull requests only with `gh pr view` or the `card_branch` command in
   "Session created". Do not
   run git, edit files, or write code.
-- An issue has one card for its whole life. Find it with
-  `hermes kanban list --json` after reading the issue with `linear_issue`. Try
+- An issue has one live card at a time. Find it with
+  `hermes kanban list --json` after reading the issue with `linear_issue`. The
+  list leaves out archived cards, so an archived card is never found, reused, or
+  unblocked, and delegating the issue again creates a new card. Try
   these keys in order and take the first task that matches:
   1. `branch_name` equals the issue's `gitBranchName`.
   2. `branch_name` equals `<gitBranchName>-takeover`.
@@ -27,6 +29,11 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
   the factory's own pull request branch has no branch key, so keys 3 and 4
   find it. Create a card only with the `hermes kanban create` command below,
   never with the `kanban_create` tool, which cannot set the branch.
+- Archive a card only with `<<archive_card>> <task id>`, never with
+  `hermes kanban archive`. Hermes keeps a dirty or unpushed worktree after an
+  archive, and that worktree would hold the card's branch against the next card
+  for the issue. The command also frees that branch. It prints one JSON line.
+  When it prints `error`, post that error as one `thought` on this agent session.
 - Add free-text card comments with the `kanban_comment` tool, not the shell.
 - To unblock a card, first read its `branch:` and `repo:` lines and run
   `gh pr view '<branch>' -R '<repo>' --json state`. When no pull request
@@ -144,8 +151,8 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
      `hermes kanban edit <task id> --body '<new body>'`. Then comment on the
      card that the Linear agent session moved from the old ID to the new one.
    - If its status is `blocked`, read its latest block reason from
-     `hermes kanban show <task id> --json`. When the reason is `undelegated` or
-     `stopped`, unblock it as "Rules" says. Leave a card blocked for
+     `hermes kanban show <task id> --json`. When the reason is `stopped`,
+     unblock it as "Rules" says. Leave a card blocked for
      any other reason blocked, and comment on it that the issue was delegated
      again.
    - If its status is `triage`, comment on the card that the issue was
@@ -224,12 +231,13 @@ Type `Issue`. The issue is the data change issue.
    GitHub triage or the worker moves the card to `done` on the merge. Hermes
    cannot complete an archived card, so archiving first would leave it
    unfinished.
-4. Otherwise, if the issue's `stateType` is `completed` or `canceled`, run
-   `hermes kanban archive <task id>` when a card exists, and stop.
+4. Otherwise, if the issue's `stateType` is `completed` or `canceled`, archive
+   the card as "Rules" says when a card exists, and stop.
 5. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`, the
-   issue was un-delegated. If a card exists and is not `blocked` and not
-   `done`, stop it as in "Stop" steps 2 and 3, with reason `undelegated` in
-   place of `stopped`. Do not archive it. Stop.
+   issue was un-delegated. If a card exists and is not `done`, archive it as
+   "Rules" says, whatever its status. Archiving ends a running worker. Do not
+   block the card or reopen its review. Delegating the issue again creates a
+   new card that continues on the same branch and pull request. Stop.
 6. Otherwise the issue was just delegated to the agent. Linear opens a new
    agent session on an issue's first delegation, but a re-delegation can
    arrive with no "Session created" event.
