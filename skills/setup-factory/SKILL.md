@@ -1131,6 +1131,16 @@ each check. Report each result.
     same as in check 19: `assigned` with no assignee, `specified`, `edited`,
     and `assigned` to `claude-worker`, with the title and body unchanged. A
     card in `review` still gets `review_reopened`.
+21. Block a card with `kanban_block` kind `needs_input`, then block a second
+    card twice in a row for the same reason so Hermes moves it to `triage`.
+    The first card's Linear agent session gets an `elicitation` that says the
+    card is blocked, and the second's gets an `elicitation` that says it is
+    parked in triage, each with the reason and "Reply here to resume it". A
+    `transient` block posts nothing. The `linear-agent-session` plugin does
+    this from Hermes' `kanban_task_blocked` hook, so both Hermes homes need
+    the plugin at the current commit, and the gateway needs a restart after a
+    reinstall. A failed post appears only in the log of the process that
+    blocked the card, as `reporting the block of card <id> failed`.
 
 21. Merge a card's pull request while the card is in `triage`, with no worker
     running it. In `hermes kanban show <task id> --json`, the events after the
