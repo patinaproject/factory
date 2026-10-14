@@ -5,8 +5,9 @@ Replays each commit oldest first through GitHub's Git Data API (blobs, a
 tree, a commit, then a fast-forward of the branch ref). GitHub signs a commit
 created this way when the caller authenticates as a GitHub App installation
 and sets no author or committer. All GitHub calls go through the gh CLI with
-the caller's auth. After publishing, the local branch moves to the signed remote commits, and
-uncommitted changes stay in place. Prints exactly one JSON line on stdout.
+the caller's auth. After publishing, the local branch moves to the signed
+remote commits, and uncommitted changes stay in place. Prints exactly one JSON
+line on stdout.
 """
 from __future__ import annotations
 
@@ -115,7 +116,7 @@ def read_commit(sha: str) -> Commit:
                 f"commit {sha} adds executable {path}; push-signed publishes no executable bits. "
                 "Commit the script without it and run it with its interpreter"
             )
-        if status != "A" and old_mode != new_mode:
+        if status != "A" and old_mode != new_mode and EXECUTABLE_FILE in (old_mode, new_mode):
             raise Refusal(f"commit {sha} changes the mode of {path}; push-signed publishes no mode changes")
         blob_read = subprocess.run(["git", "cat-file", "blob", blob], capture_output=True)
         if blob_read.returncode != 0:
@@ -125,7 +126,7 @@ def read_commit(sha: str) -> Commit:
     return commit
 
 
-def publish(repository: str, branch: str, expected_head: str, commit: Commit) -> str:
+def publish(repository: str, branch: str, parent: str, commit: Commit) -> str:
     git_data = f"repos/{repository}/git"
     entries = []
     for change in commit.changes:
@@ -135,8 +136,8 @@ def publish(repository: str, branch: str, expected_head: str, commit: Commit) ->
             blob = {"content": contents, "encoding": "base64"}
             entry["sha"] = gh_send(f"{git_data}/blobs", blob)["sha"]
         entries.append(entry)
-    tree = gh_send(f"{git_data}/trees", {"base_tree": remote_tree(repository, expected_head), "tree": entries})
-    created = gh_send(f"{git_data}/commits", {"message": commit.message, "tree": tree["sha"], "parents": [expected_head]})
+    tree = gh_send(f"{git_data}/trees", {"base_tree": remote_tree(repository, parent), "tree": entries})
+    created = gh_send(f"{git_data}/commits", {"message": commit.message, "tree": tree["sha"], "parents": [parent]})
     gh_send(f"{git_data}/refs/heads/{branch}", {"sha": created["sha"], "force": False}, method="PATCH")
     return created["sha"]
 

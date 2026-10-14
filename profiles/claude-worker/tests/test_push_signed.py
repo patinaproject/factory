@@ -92,7 +92,7 @@ if method == "POST" and resource == "commits":
     oid = git("commit-tree", body["tree"], *parents, data=body["message"].encode())
     reply({"sha": oid, "tree": {"sha": body["tree"]}})
 if method == "PATCH" and resource.startswith("refs/heads/"):
-    ref = "refs/" + resource[len("refs/"):]
+    ref = resource
     move_to = os.environ.get("FAKE_GH_MOVE_REF")
     if move_to:
         git("update-ref", ref, move_to)
@@ -337,6 +337,20 @@ class PushSignedTest(GitFixture):
         self.assertEqual(status, 0, report)
         self.assertEqual(self.remote_entry("moved"), "")
         self.assertEqual(self.requests("trees")[-1]["tree"], [{"path": "moved", "mode": "120000", "type": "blob", "sha": None}])
+
+    def test_a_file_replaced_by_a_symlink_is_published(self) -> None:
+        git(self.main, "checkout", "-q", "-b", "feature")
+        self.commit("guide.md", "guide\n", "Add guide")
+        (self.main / "guide.md").unlink()
+        os.symlink("README.md", self.main / "guide.md")
+        git(self.main, "commit", "-q", "-am", "Point guide at the readme")
+
+        status, report = self.push()
+
+        self.assertEqual(status, 0, report)
+        target = self.origin_git("rev-parse", f"{self.origin_branch()}:guide.md")
+        self.assertEqual(self.remote_entry("guide.md"), f"120000 blob {target}\tguide.md")
+        self.assertEqual(self.origin_git("cat-file", "blob", target), "README.md")
 
     def test_new_executable_is_refused(self) -> None:
         git(self.main, "checkout", "-q", "-b", "feature")
