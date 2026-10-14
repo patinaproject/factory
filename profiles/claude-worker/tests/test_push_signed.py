@@ -18,7 +18,7 @@ import base64, json, os, subprocess, sys
 args = sys.argv[1:]
 origin = os.environ["FAKE_GH_ORIGIN"]
 entry = {"argv": args}
-if args[:2] == ["api", "graphql"]:
+if "--input" in args:
     with open(args[args.index("--input") + 1]) as handle:
         entry["request"] = json.load(handle)
 with open(os.environ["FAKE_GH_LOG"], "a") as log:
@@ -57,41 +57,10 @@ def ref_sha(ref):
     return proc.stdout.strip() or None
 
 
-def create_commit(change):
-    ref = "refs/heads/" + change["branch"]["branchName"]
-    move_to = os.environ.get("FAKE_GH_MOVE_REF")
-    if move_to:
-        git("update-ref", ref, move_to)
-    expected = change["expectedHeadOid"]
-    current = ref_sha(ref)
-    if current != expected:
-        fail(f'Expected branch to point to "{expected}" but it did not. Pull and try again.')
-    index = {"GIT_INDEX_FILE": os.environ["FAKE_GH_LOG"] + ".index"}
-    git("read-tree", expected + "^{tree}", env=index)
-    files = change["fileChanges"]
-    for addition in files.get("additions", []):
-        blob = git("hash-object", "-w", "--stdin", data=base64.b64decode(addition["contents"]))
-        existing = git("ls-tree", expected, "--", addition["path"]).split(" ")[0]
-        git("update-index", "--add", "--cacheinfo", f"{existing or '100644'},{blob},{addition['path']}", env=index)
-    if os.environ.get("FAKE_GH_STRAY_FILE"):
-        blob = git("hash-object", "-w", "--stdin", data=b"stray\n")
-        git("update-index", "--add", "--cacheinfo", f"100644,{blob},stray.txt", env=index)
-    for deletion in files.get("deletions", []):
-        git("update-index", "--index-info", env=index, data=f"0 {'0' * 40}\t{deletion['path']}\n".encode())
-    tree = git("write-tree", env=index)
-    message = change["message"]["headline"]
-    if "body" in change["message"]:
-        message += "\n\n" + change["message"]["body"]
-    oid = git("commit-tree", tree, "-p", expected, "-m", message)
-    git("update-ref", ref, oid, expected)
-    reply({"data": {"createCommitOnBranch": {"commit": {"oid": oid}}}})
-
-
-if args[:2] == ["api", "graphql"]:
-    create_commit(entry["request"]["variables"]["input"])
 method = args[args.index("--method") + 1] if "--method" in args else "GET"
 path = next(a for a in args[1:] if a.startswith("repos/"))
 fields = dict(v.split("=", 1) for f, v in zip(args, args[1:]) if f in ("-f", "-F"))
+body = entry.get("request", {})
 prefix = "repos/" + os.environ["FAKE_GH_REPO"] + "/git/"
 if not path.startswith(prefix):
     fail("Not Found (HTTP 404)")
@@ -104,6 +73,34 @@ if method == "GET" and resource.startswith("ref/heads/"):
 if method == "POST" and resource == "refs":
     git("update-ref", fields["ref"], fields["sha"], "0" * 40)
     reply({"ref": fields["ref"], "object": {"sha": fields["sha"]}})
+if method == "POST" and resource == "blobs":
+    reply({"sha": git("hash-object", "-w", "--stdin", data=base64.b64decode(body["content"]))})
+if method == "POST" and resource == "trees":
+    index = {"GIT_INDEX_FILE": os.environ["FAKE_GH_LOG"] + ".index"}
+    git("read-tree", body["base_tree"], env=index)
+    for item in body["tree"]:
+        if item["sha"] is None:
+            git("update-index", "--index-info", env=index, data=f"0 {'0' * 40}\t{item['path']}\n".encode())
+        else:
+            git("update-index", "--add", "--cacheinfo", f"{item['mode']},{item['sha']},{item['path']}", env=index)
+    if os.environ.get("FAKE_GH_STRAY_FILE"):
+        blob = git("hash-object", "-w", "--stdin", data=b"stray\n")
+        git("update-index", "--add", "--cacheinfo", f"100644,{blob},stray.txt", env=index)
+    reply({"sha": git("write-tree", env=index)})
+if method == "POST" and resource == "commits":
+    parents = [arg for parent in body["parents"] for arg in ("-p", parent)]
+    oid = git("commit-tree", body["tree"], *parents, data=body["message"].encode())
+    reply({"sha": oid, "tree": {"sha": body["tree"]}})
+if method == "PATCH" and resource.startswith("refs/heads/"):
+    ref = "refs/" + resource[len("refs/"):]
+    move_to = os.environ.get("FAKE_GH_MOVE_REF")
+    if move_to:
+        git("update-ref", ref, move_to)
+    ancestor = subprocess.run(["git", "--git-dir", origin, "merge-base", "--is-ancestor", ref_sha(ref), body["sha"]])
+    if body["force"] or ancestor.returncode != 0:
+        fail("Update is not a fast forward (HTTP 422)")
+    git("update-ref", ref, body["sha"])
+    reply({"ref": ref, "object": {"sha": body["sha"]}})
 if method == "GET" and resource.startswith("commits/"):
     oid = resource[len("commits/"):]
     reply({"sha": oid, "tree": {"sha": git("rev-parse", oid + "^{tree}")}})
@@ -148,8 +145,9 @@ class PushSignedTest(GitFixture):
     def gh_argv(self) -> list:
         return [call["argv"] for call in self.gh_calls()]
 
-    def graphql_inputs(self) -> list:
-        return [call["request"]["variables"]["input"] for call in self.gh_calls() if "request" in call]
+    def requests(self, resource: str) -> list:
+        path = f"repos/{REPO}/git/{resource}"
+        return [call["request"] for call in self.gh_calls() if "request" in call and path in call["argv"]]
 
     def commit(self, path: str, content: str, message: str, mode: int = 0o644) -> str:
         file = self.main / path
@@ -207,26 +205,22 @@ class PushSignedTest(GitFixture):
         )
         self.assertEqual(self.origin_git("show", f"{remote_second}:one.txt"), "one")
         self.assertEqual(self.origin_git("show", f"{remote_second}:two.txt"), "two")
-        self.assertEqual(self.gh_argv(), [
+        self.assertEqual(self.gh_argv()[:2], [
             self.ref_get(),
             ["api", "--method", "POST", f"repos/{REPO}/git/refs", "-f", "ref=refs/heads/feature", "-f", f"sha={self.seed}"],
-            ["api", "graphql", "--input", self.gh_argv()[2][3]],
-            ["api", "graphql", "--input", self.gh_argv()[3][3]],
-            self.commit_get(remote_second),
         ])
-        self.assertEqual(self.graphql_inputs(), [
-            {
-                "branch": {"repositoryNameWithOwner": REPO, "branchName": "feature"},
-                "message": {"headline": "Add one", "body": "Explains one."},
-                "expectedHeadOid": self.seed,
-                "fileChanges": {"additions": [{"path": "one.txt", "contents": base64.b64encode(b"one\n").decode()}], "deletions": []},
-            },
-            {
-                "branch": {"repositoryNameWithOwner": REPO, "branchName": "feature"},
-                "message": {"headline": "Add two"},
-                "expectedHeadOid": remote_first,
-                "fileChanges": {"additions": [{"path": "two.txt", "contents": base64.b64encode(b"two\n").decode()}], "deletions": []},
-            },
+        self.assertEqual(self.gh_argv()[-1], self.commit_get(remote_second))
+        self.assertEqual(self.requests("blobs"), [
+            {"content": base64.b64encode(b"one\n").decode(), "encoding": "base64"},
+            {"content": base64.b64encode(b"two\n").decode(), "encoding": "base64"},
+        ])
+        self.assertEqual(self.requests("commits"), [
+            {"message": "Add one\n\nExplains one.", "tree": git(self.main, "rev-parse", f"{first}^{{tree}}"), "parents": [self.seed]},
+            {"message": "Add two", "tree": git(self.main, "rev-parse", f"{second}^{{tree}}"), "parents": [remote_first]},
+        ])
+        self.assertEqual(self.requests("refs/heads/feature"), [
+            {"sha": remote_first, "force": False},
+            {"sha": remote_second, "force": False},
         ])
         self.assertEqual(git(self.main, "rev-parse", "HEAD"), remote_second)
         self.assertEqual(git(self.main, "symbolic-ref", "--short", "HEAD"), "feature")
@@ -249,7 +243,7 @@ class PushSignedTest(GitFixture):
         self.assertEqual(report["created_branch"], False)
         self.assertEqual(report["published"], [{"local": third, "remote": head}])
         self.assertEqual(self.origin_git("rev-parse", f"{head}^"), published)
-        self.assertEqual([change["expectedHeadOid"] for change in self.graphql_inputs()], [published])
+        self.assertEqual([commit["parents"] for commit in self.requests("commits")], [[published]])
         self.assertEqual(self.gh_argv()[0], self.ref_get())
         self.assertEqual(self.gh_argv()[-1], self.commit_get(head))
         self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)
@@ -315,20 +309,43 @@ class PushSignedTest(GitFixture):
             "Bring the base branch in with gh pr update-branch, whose merges GitHub signs"
         )
 
-    def test_symlink_is_refused(self) -> None:
+    def remote_entry(self, path: str) -> str:
+        return self.origin_git("ls-tree", self.origin_branch(), "--", path)
+
+    def test_symlinks_are_published_added_renamed_and_deleted(self) -> None:
         git(self.main, "checkout", "-q", "-b", "feature")
         os.symlink("README.md", self.main / "link")
         git(self.main, "add", "link")
         git(self.main, "commit", "-q", "-m", "Add link")
-        sha = git(self.main, "rev-parse", "HEAD")
+        git(self.main, "mv", "link", "moved")
+        git(self.main, "commit", "-q", "-m", "Rename link")
 
-        self.assert_refused_before_any_write(f"commit {sha} writes symlink link; the API cannot create symlinks")
+        status, report = self.push()
+
+        self.assertEqual(status, 0, report)
+        target = self.origin_git("rev-parse", f"{self.origin_branch()}:moved")
+        self.assertEqual(self.remote_entry("moved"), f"120000 blob {target}\tmoved")
+        self.assertEqual(self.origin_git("cat-file", "blob", target), "README.md")
+        self.assertEqual(self.remote_entry("link"), "")
+        self.assertEqual(git(self.main, "rev-parse", "HEAD"), self.origin_branch())
+
+        git(self.main, "rm", "-q", "moved")
+        git(self.main, "commit", "-q", "-m", "Remove link")
+
+        status, report = self.push()
+
+        self.assertEqual(status, 0, report)
+        self.assertEqual(self.remote_entry("moved"), "")
+        self.assertEqual(self.requests("trees")[-1]["tree"], [{"path": "moved", "mode": "120000", "type": "blob", "sha": None}])
 
     def test_new_executable_is_refused(self) -> None:
         git(self.main, "checkout", "-q", "-b", "feature")
         sha = self.commit("tool.sh", "#!/bin/sh\n", "Add tool", mode=0o755)
 
-        self.assert_refused_before_any_write(f"commit {sha} adds executable tool.sh; the API cannot set file modes")
+        self.assert_refused_before_any_write(
+            f"commit {sha} adds executable tool.sh; push-signed publishes no executable bits. "
+            "Commit the script without it and run it with its interpreter"
+        )
 
     def test_mode_change_is_refused(self) -> None:
         git(self.main, "checkout", "-q", "-b", "feature")
@@ -337,7 +354,7 @@ class PushSignedTest(GitFixture):
         git(self.main, "commit", "-q", "-am", "Make tool executable")
         sha = git(self.main, "rev-parse", "HEAD")
 
-        self.assert_refused_before_any_write(f"commit {sha} changes the mode of tool.sh; the API cannot set file modes")
+        self.assert_refused_before_any_write(f"commit {sha} changes the mode of tool.sh; push-signed publishes no mode changes")
 
     def test_deleted_files_are_sent_as_deletions(self) -> None:
         git(self.main, "checkout", "-q", "-b", "feature")
@@ -347,10 +364,11 @@ class PushSignedTest(GitFixture):
         status, report = self.push()
 
         self.assertEqual(status, 0, report)
-        self.assertEqual(self.graphql_inputs()[0]["fileChanges"], {
-            "additions": [{"path": "other.txt", "contents": base64.b64encode(b"other\n").decode()}],
-            "deletions": [{"path": "README.md"}],
-        })
+        blob = git(self.main, "rev-parse", "HEAD:other.txt")
+        self.assertEqual(self.requests("trees")[0]["tree"], [
+            {"path": "README.md", "mode": "100644", "type": "blob", "sha": None},
+            {"path": "other.txt", "mode": "100644", "type": "blob", "sha": blob},
+        ])
         self.assertEqual(self.origin_git("ls-tree", "--name-only", self.origin_branch()), "other.txt")
 
     def test_default_branch_is_refused(self) -> None:
@@ -371,8 +389,7 @@ class PushSignedTest(GitFixture):
         status, report = self.push(env={"FAKE_GH_MOVE_REF": racer})
 
         self.assertEqual(status, 1)
-        self.assertTrue(report["error"].endswith(
-            f'gh: Expected branch to point to "{self.seed}" but it did not. Pull and try again.'), report)
+        self.assertTrue(report["error"].endswith("gh: Update is not a fast forward (HTTP 422)"), report)
         self.assertEqual(self.origin_branch(), racer)
         self.assertEqual(git(self.main, "rev-parse", "HEAD"), local)
 
