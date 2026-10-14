@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Publish the current branch's local commits to GitHub as signed commits.
 
-Replays each commit oldest first through the GraphQL createCommitOnBranch
-mutation, which GitHub signs when the caller authenticates as a GitHub App
-installation. All GitHub calls go through the gh CLI with the caller's auth.
-After publishing, the local branch moves to the signed remote commits, and
-uncommitted changes stay in place. Prints exactly one JSON line on stdout.
+Replays each commit oldest first through GitHub's Git Data API (blobs, a
+tree, a commit, then a fast-forward of the branch ref). GitHub signs a commit
+created this way when the caller authenticates as a GitHub App installation
+and sets no author or committer. All GitHub calls go through the gh CLI with
+the caller's auth. After publishing, the local branch moves to the signed
+remote commits, and uncommitted changes stay in place. Prints exactly one JSON
+line on stdout.
 """
 from __future__ import annotations
 
@@ -19,15 +21,10 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 
-CREATE_COMMIT = (
-    "mutation($input: CreateCommitOnBranchInput!)"
-    "{ createCommitOnBranch(input: $input){ commit { oid } } }"
-)
 GITHUB_URL = re.compile(
     r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+?)(?:\.git)?/?$"
 )
 EXECUTABLE_FILE = "100755"
-SYMLINK = "120000"
 SUBMODULE = "160000"
 
 
@@ -42,10 +39,8 @@ class Failure(Exception):
 @dataclass
 class Commit:
     sha: str
-    headline: str
-    body: str
-    additions: list = field(default_factory=list)
-    deletions: list = field(default_factory=list)
+    message: str
+    changes: list = field(default_factory=list)
 
 
 def git(*args: str) -> str:
@@ -74,6 +69,13 @@ def repository_name() -> str:
     return f"{match.group(1)}/{match.group(2)}"
 
 
+def gh_send(path: str, body: dict, method: str = "POST") -> dict:
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+        json.dump(body, handle)
+        handle.flush()
+        return gh("api", "--method", method, path, "--input", handle.name)
+
+
 def remote_head(repository: str, branch: str) -> str | None:
     proc = gh_call("api", f"repos/{repository}/git/ref/heads/{branch}")
     if proc.returncode != 0:
@@ -94,7 +96,7 @@ def read_commit(sha: str) -> Commit:
             f"commit {sha} has {len(parents)} parents; push-signed replays only single-parent commits. "
             "Bring the base branch in with gh pr update-branch, whose merges GitHub signs"
         )
-    commit = Commit(sha, git("log", "-1", "--format=%s", sha), git("log", "-1", "--format=%b", sha))
+    commit = Commit(sha, git("log", "-1", "--format=%B", sha))
     # Read raw so stripping cannot eat whitespace at the end of the last path.
     raw = subprocess.run(
         ["git", "diff-tree", "-r", "--no-renames", "-z", "--raw", parents[0], sha], capture_output=True, text=True
@@ -107,40 +109,37 @@ def read_commit(sha: str) -> Commit:
         if SUBMODULE in (old_mode, new_mode):
             raise Refusal(f"commit {sha} changes submodule {path}; the API cannot write submodules")
         if status == "D":
-            commit.deletions.append({"path": path})
+            commit.changes.append({"path": path, "mode": old_mode, "type": "blob", "sha": None})
             continue
-        if new_mode == SYMLINK:
-            raise Refusal(f"commit {sha} writes symlink {path}; the API cannot create symlinks")
         if status == "A" and new_mode == EXECUTABLE_FILE:
-            raise Refusal(f"commit {sha} adds executable {path}; the API cannot set file modes")
-        if status != "A" and old_mode != new_mode:
-            raise Refusal(f"commit {sha} changes the mode of {path}; the API cannot set file modes")
+            raise Refusal(
+                f"commit {sha} adds executable {path}; push-signed publishes no executable bits. "
+                "Commit the script without it and run it with its interpreter"
+            )
+        if status != "A" and old_mode != new_mode and EXECUTABLE_FILE in (old_mode, new_mode):
+            raise Refusal(f"commit {sha} changes the mode of {path}; push-signed publishes no mode changes")
         blob_read = subprocess.run(["git", "cat-file", "blob", blob], capture_output=True)
         if blob_read.returncode != 0:
             raise Failure(f"git cat-file blob {blob} failed: {blob_read.stderr.decode().strip()}")
-        contents = blob_read.stdout
-        commit.additions.append({"path": path, "contents": base64.b64encode(contents).decode()})
+        contents = base64.b64encode(blob_read.stdout).decode()
+        commit.changes.append({"path": path, "mode": new_mode, "type": "blob", "contents": contents})
     return commit
 
 
-def publish(repository: str, branch: str, expected_head: str, commit: Commit) -> str:
-    message = {"headline": commit.headline}
-    if commit.body:
-        message["body"] = commit.body
-    request = {
-        "query": CREATE_COMMIT,
-        "variables": {"input": {
-            "branch": {"repositoryNameWithOwner": repository, "branchName": branch},
-            "message": message,
-            "expectedHeadOid": expected_head,
-            "fileChanges": {"additions": commit.additions, "deletions": commit.deletions},
-        }},
-    }
-    with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
-        json.dump(request, handle)
-        handle.flush()
-        response = gh("api", "graphql", "--input", handle.name)
-    return response["data"]["createCommitOnBranch"]["commit"]["oid"]
+def publish(repository: str, branch: str, parent: str, commit: Commit) -> str:
+    git_data = f"repos/{repository}/git"
+    entries = []
+    for change in commit.changes:
+        entry = dict(change)
+        contents = entry.pop("contents", None)
+        if contents is not None:
+            blob = {"content": contents, "encoding": "base64"}
+            entry["sha"] = gh_send(f"{git_data}/blobs", blob)["sha"]
+        entries.append(entry)
+    tree = gh_send(f"{git_data}/trees", {"base_tree": remote_tree(repository, parent), "tree": entries})
+    created = gh_send(f"{git_data}/commits", {"message": commit.message, "tree": tree["sha"], "parents": [parent]})
+    gh_send(f"{git_data}/refs/heads/{branch}", {"sha": created["sha"], "force": False}, method="PATCH")
+    return created["sha"]
 
 
 def run() -> dict:

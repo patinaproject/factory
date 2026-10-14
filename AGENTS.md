@@ -122,7 +122,8 @@ rule that only docs enforce is a candidate for a script, check, or test.
 | Every configured checkout has `origin/HEAD`, which `claude-session`, `push-signed`, and `refresh-checkouts` read | `check_checkouts` in `profiles/claude-worker/scripts/check-install`, run hourly and in setup part 5 and "Deploy a merged factory change" |
 | When `gh issue develop` fails with `createLinkedBranch`, derive the branch name from the adapter's rule | Docs only: `docs/agents/issue-tracker.md` and the machine-wide block |
 | A repository with the Engineering plugin has Bun for its issue-handoff gate | Setup part 10 check |
-| A new script is committed without the executable bit and run with `python3` | `push-signed` refuses a commit that adds an executable file, because GitHub's commit API cannot set file modes |
+| A new script is committed without the executable bit and run with `python3` | `push-signed` refuses a commit that adds an executable file or changes a file mode. GitHub's Git Data API could set either, so this is the factory's rule, not an API limit |
+| `push-signed` publishes symlinks as signed commits, so a skill add or rename that moves overlay symlinks needs no `git push` | `publish` in `profiles/claude-worker/scripts/push-signed`, which writes each change as a Git Data tree entry with its mode; `test_symlinks_are_published_added_renamed_and_deleted` in `profiles/claude-worker/tests/test_push_signed.py` |
 | Commit type follows the changed paths | Docs only: "Commit type selection" below; commitlint checks only the format |
 | Tests never assert on documentation prose | Docs only: "Testing Guidelines" below |
 | The pstack model sheet's include appears once in `CLAUDE.md`, outside the factory block, and the block's marker pair stays intact | `skills/setup-factory/scripts/pstack-include`, run in setup part 17, with tests in `skills/setup-factory/tests/`; docs only for the sheet's values, which stay in the private record |
