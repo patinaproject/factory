@@ -45,8 +45,9 @@ TAKEOVER_START = {
 }
 TAKEOVER_RULES = (
     "Open your own ready pull request, and in its body credit the original author and link {url}. "
-    "Do not close {url}. The worker closes it after a human approves. If push-signed refuses one of its "
-    "commits, such as a merge commit, squash the pull request onto the default branch before you publish: "
+    "Do not close {url} and do not name it as superseded yourself. After your pull request is open, "
+    "claude-session adds a Supersedes line to its description and closes {url} with a comment that links it. "
+    "If push-signed refuses one of its commits, such as a merge commit, squash the pull request onto the default branch before you publish: "
     "check out the default branch under this branch's name, run `git merge --squash` with the pull "
     "request's head (fetch it again with `git fetch origin refs/pull/<number>/head` and use FETCH_HEAD), "
     "resolve conflicts once, and commit. Credit the original author with a "
@@ -190,6 +191,49 @@ def adopt_existing_work(
         adoption = Adoption(source.value, takeover_pr, git(worktree, "rev-parse", "FETCH_HEAD"))
     git(worktree, "reset", "--quiet", "--hard", adoption.head)
     return adoption
+
+
+def supersede_takeover(repo: str, branch: str, takeover_pr: str | None, login: str | None, gh=card_branch.run_gh) -> dict | None:
+    """Close the person's takeover pull request once the factory's own pull request for the branch is open.
+
+    Runs after each Claude turn, so a pull request opened later in the card is still caught. The result goes
+    in the run's report and never changes its status, because a person closes a pull request by hand when
+    this fails.
+    """
+    if not takeover_pr:
+        return None
+    result = {"pr": takeover_pr}
+    try:
+        if not login:
+            raise card_branch.GhFailed("github.login is not set in the settings")
+        match = PULL_URL.match(takeover_pr)
+        if not match or match.group(1).lower() != repo.lower():
+            return {**result, "action": "left", "reason": f"it is not a pull request in {repo}"}
+        number = match.group(2)
+        owner_name = repo.split("/")[0]
+        open_pulls = gh(f"repos/{repo}/pulls?state=open&head={owner_name}:{branch}&per_page=100")
+        factory = next((pull for pull in open_pulls if card_branch.is_app(pull["user"]["login"], login)), None)
+        if factory is None:
+            return {**result, "action": "waiting", "reason": f"no open pull request by {login} on {branch}"}
+        person = gh(f"repos/{repo}/pulls/{number}")
+        if person["state"] != "open":
+            return {**result, "action": "left", "reason": f"it is already {person['state']}"}
+        if card_branch.is_app(person["user"]["login"], login):
+            return {**result, "action": "left", "reason": "the App authored it"}
+        line = f"Supersedes #{number}"
+        body = factory.get("body") or ""
+        if not re.search(rf"Supersedes\s+(#{number}\b|{re.escape(takeover_pr)})", body):
+            try:
+                gh(f"repos/{repo}/pulls/{factory['number']}", "-X", "PATCH", "-f", f"body={body}\n\n{line}.".strip())
+            except card_branch.GhFailed as failure:
+                result["body_error"] = str(failure)
+        gh(f"repos/{repo}/issues/{number}/comments", "-X", "POST", "-f",
+           f"body=The factory opened #{factory['number']} from this pull request's work, so this one is closed "
+           f"and review continues there: {factory['html_url']}")
+        gh(f"repos/{repo}/pulls/{number}", "-X", "PATCH", "-f", "state=closed")
+        return {**result, "action": "closed", "replacement": factory["html_url"]}
+    except (card_branch.GhFailed, KeyError, TypeError) as failure:
+        return {**result, "action": "failed", "error": str(failure)}
 
 
 def load_settings(settings_file: str | None) -> dict:
@@ -669,8 +713,9 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
+        superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login) if output is not None else None
 
-    report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None}
+    report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None, "superseded": superseded}
     if output is None:
         return 1, {"error": f"claude exited {exit_code} without JSON output: {detail}", **report}
     report.update(subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"))

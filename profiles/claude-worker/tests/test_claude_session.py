@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import fcntl
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -73,8 +76,9 @@ TOOLCHAIN = {
 TAKEOVER_INTRO = f"The issue already has an open pull request, {TAKEOVER_PR}, on a branch the factory did not create."
 TAKEOVER_RULES = (
     f"Open your own ready pull request, and in its body credit the original author and link "
-    f"{TAKEOVER_PR}. Do not close {TAKEOVER_PR}. The worker closes it after a human approves. If push-signed "
-    "refuses one of its commits, such as a merge commit, squash the pull request onto the default branch before "
+    f"{TAKEOVER_PR}. Do not close {TAKEOVER_PR} and do not name it as superseded yourself. After your pull "
+    f"request is open, claude-session adds a Supersedes line to its description and closes {TAKEOVER_PR} with a "
+    "comment that links it. If push-signed refuses one of its commits, such as a merge commit, squash the pull request onto the default branch before "
     "you publish: check out the default branch under this branch's name, run `git merge --squash` with the pull "
     "request's head (fetch it again with `git fetch origin refs/pull/<number>/head` and use FETCH_HEAD), resolve "
     "conflicts once, and commit. Credit the original author with a Co-authored-by trailer "
@@ -189,6 +193,7 @@ class ClaudeSessionTest(GitFixture):
             "adopted": None,
             "subtype": "success",
             "num_turns": 7,
+            "superseded": None,
             "result": "Opened the pull request.",
         })
         call = self.claude_call()
@@ -1046,6 +1051,144 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertIsNone(report["adopted"])
         self.assertEqual(self.head(), pull)
+
+    def takeover_pair(self, **person) -> str:
+        """A person's pull request #7 and the factory's open pull request #9 on this card's branch."""
+        self.push_upstream_commit("pull", "refs/pull/7/head")
+        self.github.add_pull(7, "person-branch", **person)
+        self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body="Adds the thing.")
+        return f"https://github.com/{REPO}/pull/9"
+
+    def test_takeover_pull_request_is_commented_on_and_closed_once_and_the_replacement_names_it(self) -> None:
+        replacement = self.takeover_pair()
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+        again = self.run_session("--takeover-pr", TAKEOVER_PR)[1]
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["superseded"], {"pr": TAKEOVER_PR, "action": "closed", "replacement": replacement})
+        self.assertEqual(again["superseded"]["action"], "left")
+        self.assertEqual(self.github.pull(7)["state"], "closed")
+        self.assertEqual(len(self.github.comments(7)), 1)
+        self.assertIn(replacement, self.github.comments(7)[0])
+        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.\n\nSupersedes #7.")
+        self.assertEqual(self.github.pull(9)["state"], "open")
+
+    def test_supersedes_line_the_worker_already_wrote_is_not_repeated(self) -> None:
+        self.takeover_pair()
+        self.github.state["pulls"]["9"]["body"] = "Supersedes #7 by Ada."
+        self.github.save()
+
+        self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(self.github.pull(9)["body"], "Supersedes #7 by Ada.")
+        self.assertEqual(self.github.pull(7)["state"], "closed")
+
+    def test_pull_request_the_app_authored_is_never_closed(self) -> None:
+        self.takeover_pair(author=BOT_LOGIN)
+
+        _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(report["superseded"]["action"], "left")
+        self.assertEqual(self.github.pull(7)["state"], "open")
+        self.assertEqual(self.github.comments(7), [])
+        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+
+    def test_pull_request_the_app_authored_as_app_slash_form_is_never_closed(self) -> None:
+        self.takeover_pair(author="app/" + BOT_LOGIN.removesuffix("[bot]"))
+
+        self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(self.github.pull(7)["state"], "open")
+
+    def test_already_closed_or_merged_takeover_pull_request_gets_no_comment(self) -> None:
+        self.takeover_pair(state="closed", merged=True)
+
+        _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(report["superseded"]["action"], "left")
+        self.assertEqual(self.github.comments(7), [])
+        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+
+    def test_takeover_pull_request_stays_open_until_the_factory_pull_request_is_open(self) -> None:
+        self.takeover_pair()
+        self.github.state["pulls"]["9"]["state"] = "closed"
+        self.github.save()
+
+        _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(report["superseded"]["action"], "waiting")
+        self.assertEqual(self.github.pull(7)["state"], "open")
+        self.assertEqual(self.github.comments(7), [])
+
+    def test_a_person_pull_request_on_the_cards_branch_is_not_taken_for_the_factorys(self) -> None:
+        self.takeover_pair()
+        self.github.state["pulls"]["9"]["user"] = {"login": "person"}
+        self.github.save()
+
+        _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(report["superseded"]["action"], "waiting")
+        self.assertEqual(self.github.pull(7)["state"], "open")
+
+    def test_no_takeover_pull_request_closes_nothing(self) -> None:
+        self.takeover_pair()
+
+        _, report = self.run_session()
+
+        self.assertIsNone(report["superseded"])
+        self.assertEqual(self.github.pull(7)["state"], "open")
+        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+
+    def test_a_failed_close_is_reported_and_does_not_fail_the_run(self) -> None:
+        self.takeover_pair()
+        self.github.fail_writes()
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["subtype"], "success")
+        self.assertEqual(report["superseded"]["action"], "failed")
+        self.assertIn("Resource not accessible", report["superseded"]["error"])
+        self.assertEqual(self.github.pull(7)["state"], "open")
+
+    @staticmethod
+    def session_module():
+        if str(SCRIPTS) not in sys.path:
+            sys.path.insert(0, str(SCRIPTS))
+        loader = importlib.machinery.SourceFileLoader("claude_session_under_test", str(SCRIPTS / "claude-session"))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        return module
+
+    def test_a_failed_body_edit_does_not_stop_the_close(self) -> None:
+        module = self.session_module()
+        calls = []
+
+        def gh(path, *options):
+            calls.append((path, options))
+            if path.endswith("/pulls/9"):
+                raise module.card_branch.GhFailed("gh api failed: HTTP 403")
+            if "head=" in path:
+                return [{"user": {"login": BOT_LOGIN}, "number": 9, "html_url": "https://x/9", "body": ""}]
+            return {"state": "open", "user": {"login": "person"}, "head": {"ref": "person-branch"}}
+
+        result = module.supersede_takeover(REPO, "abc-123-fix", TAKEOVER_PR, BOT_LOGIN, gh=gh)
+
+        self.assertEqual(result["action"], "closed")
+        self.assertIn("HTTP 403", result["body_error"])
+        self.assertIn((f"repos/{REPO}/pulls/7", ("-X", "PATCH", "-f", "state=closed")), calls)
+
+    def test_takeover_pull_request_of_another_repository_is_not_closed(self) -> None:
+        calls = []
+
+        result = self.session_module().supersede_takeover(
+            REPO, "abc-123-fix", "https://github.com/other-org/other-repo/pull/7", BOT_LOGIN,
+            gh=lambda *args: calls.append(args) or [{"user": {"login": BOT_LOGIN}, "number": 9, "html_url": "u"}],
+        )
+
+        self.assertEqual(result["action"], "left")
+        self.assertFalse([call for call in calls if "-X" in call])
 
     def test_started_branch_is_left_alone(self) -> None:
         self.publish_branch("tlmader")
