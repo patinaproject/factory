@@ -15,7 +15,8 @@ version, session ID, and worktree lock.
   run `claude` directly, and never in tmux.
 - Never merge a pull request. Never force-push over commits you did not make.
   Never push to another person's branch. Publish only to the card's branch.
-- Close another person's pull request only after a human approves in Linear.
+- Never close a pull request yourself. `claude-session` closes the card's `takeover_pr` once the factory's own
+  pull request is open, and reports it as `superseded` in its result line.
 - Never change the Linear issue's status, assignee, or delegate. Claude Code
   moves the issue to In Progress through the target repository's own
   issue-start workflow.
@@ -124,9 +125,6 @@ After every run, call `kanban_show` again. Collect the card comments created
 after the previous run started. Comments carry human replies from Linear and
 GitHub events such as reviews and failed checks.
 
-A reply that only answers your question about closing `takeover_pr` is not
-work for Claude. Leave it out of the message file and act on it in step 5.
-
 If there are new comments, write them to a temporary file outside the worktree,
 for example `mktemp`, and resume:
 
@@ -180,16 +178,9 @@ step 3.
 
 ## 5. Hand off for review
 
-When the card has `takeover_pr`, settle it first. Run
-`gh pr view <takeover_pr> --json state`. If it is `OPEN`, look in the card
-comments for a human reply about closing it.
-
-- No reply yet: post an `elicitation` activity asking whether to close
-  `<takeover_pr>` in favor of `<published_pr>`. Call `kanban_block` with kind
-  `needs_input` and stop.
-- The human approves: run
-  `gh pr close <takeover_pr> --comment "Superseded by <published_pr>."`.
-- The human declines: leave it open.
+When the card has `takeover_pr`, the result line's `superseded` object says what `claude-session` did
+with it. If its `action` is `failed`, add the `error` to the handoff `summary`. Do nothing else with
+`<takeover_pr>`.
 
 The handoff payload is the same for every call in this step:
 
