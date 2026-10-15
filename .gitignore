@@ -10,3 +10,6 @@ node_modules/
 
 # Python bytecode caches from running the tests.
 __pycache__/
+
+# Agent scratch folders. check-install counts untracked files as uncommitted work.
+.claude/scratch/

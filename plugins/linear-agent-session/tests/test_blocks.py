@@ -239,6 +239,14 @@ class HermesBoundaryTest(unittest.TestCase):
             self.assertEqual(blocks.hermes_redact("secret"), "masked")
         self.assertEqual(calls, [True])
 
+    def test_hermes_redact_masks_bare_linear_tokens_that_hermes_leaves(self):
+        module = types.ModuleType("agent.redact")
+        module.redact_sensitive_text = lambda text, force=False: text
+        reason = "key lin_api_FAKE1234abcdEFGH and lin_oauth_FAKE5678wxyz were used"
+        with mock.patch.dict(sys.modules, {"agent": types.ModuleType("agent"), "agent.redact": module}):
+            masked = blocks.hermes_redact(reason)
+        self.assertEqual(masked, "key [redacted] and [redacted] were used")
+
 
 if __name__ == "__main__":
     unittest.main()
