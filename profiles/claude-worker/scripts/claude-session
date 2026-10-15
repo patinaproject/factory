@@ -193,6 +193,21 @@ def adopt_existing_work(
     return adoption
 
 
+def person_pushed_after(gh, repo: str, person: dict, factory: dict) -> bool:
+    """True unless the factory's pull request carries all of the person's work.
+
+    The work is carried when the person's head is an ancestor of the factory's head. When the factory squashed
+    and the ancestry is gone, it is carried when no commit on the person's pull request is newer than the
+    factory's pull request.
+    """
+    compare = gh(f"repos/{repo}/compare/{factory['head']['sha']}...{person['head']['sha']}?per_page=1")
+    if compare["status"] in ("behind", "identical"):
+        return False
+    last_page = max(1, -(-person["commits"] // 100))
+    commits = gh(f"repos/{repo}/pulls/{person['number']}/commits?per_page=100&page={last_page}")
+    return any(commit["commit"]["committer"]["date"] > factory["created_at"] for commit in commits)
+
+
 def supersede_takeover(repo: str, branch: str, takeover_pr: str | None, login: str | None, gh=card_branch.run_gh) -> dict | None:
     """Close the person's takeover pull request once the factory's own pull request for the branch is open.
 
@@ -220,6 +235,8 @@ def supersede_takeover(repo: str, branch: str, takeover_pr: str | None, login: s
             return {**result, "action": "left", "reason": f"it is already {person['state']}"}
         if card_branch.is_app(person["user"]["login"], login):
             return {**result, "action": "left", "reason": "the App authored it"}
+        if person_pushed_after(gh, repo, person, factory):
+            return {**result, "action": "left", "reason": "person pushed after takeover"}
         line = f"Supersedes #{number}"
         body = factory.get("body") or ""
         if not re.search(rf"Supersedes\s+(#{number}\b|{re.escape(takeover_pr)})", body):

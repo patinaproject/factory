@@ -125,9 +125,6 @@ After every run, call `kanban_show` again. Collect the card comments created
 after the previous run started. Comments carry human replies from Linear and
 GitHub events such as reviews and failed checks.
 
-A reply that only answers your question about closing `takeover_pr` is not
-work for Claude. Leave it out of the message file and act on it in step 5.
-
 If there are new comments, write them to a temporary file outside the worktree,
 for example `mktemp`, and resume:
 

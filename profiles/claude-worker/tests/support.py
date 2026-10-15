@@ -99,6 +99,13 @@ elif parts[3] == "pulls" and len(parts) == 4:
         {**pull, "number": int(number)} for number, pull in state["pulls"].items()
         if pull["state"] == "open" and pull["head"]["ref"] == head
     ]))
+elif parts[3] == "compare":
+    base, _, head = parts[4].partition("...")
+    print(json.dumps({"status": state.get("compare", {}).get(parts[4], "diverged")}))
+elif parts[3] == "pulls" and len(parts) == 6 and parts[5] == "commits":
+    dates = state["commit_dates"][parts[4]]
+    page = int(parse_qs(query).get("page", ["1"])[0])
+    print(json.dumps([{"commit": {"committer": {"date": date}}} for date in dates[(page - 1) * 100:page * 100]]))
 elif parts[3] == "pulls":
     pull = state["pulls"][parts[4]]
     fields = {args[i + 1].partition("=")[0]: args[i + 1].partition("=")[2] for i, arg in enumerate(args) if arg == "-f"}
@@ -142,12 +149,20 @@ class FakeGithub:
 
     def add_pull(self, number: int, head: str, *, state: str = "open", merged: bool = False,
                  head_repo: str | None = None, updated_at: str = "2026-10-01T00:00:00Z",
-                 author: str = "person", body: str = "") -> None:
+                 author: str = "person", body: str = "", created_at: str = "2026-10-01T00:00:00Z",
+                 commit_dates: tuple = ("2026-09-30T00:00:00Z",)) -> None:
         self.state["pulls"][str(number)] = {
             "state": state, "merged": merged, "updated_at": updated_at, "user": {"login": author}, "body": body,
             "html_url": f"https://github.com/{self.state['repo']}/pull/{number}",
-            "head": {"ref": head, "repo": {"full_name": head_repo or self.state["repo"]}},
+            "created_at": created_at, "commits": len(commit_dates),
+            "head": {"ref": head, "sha": f"sha{number}", "repo": {"full_name": head_repo or self.state["repo"]}},
         }
+        self.state.setdefault("commit_dates", {})[str(number)] = list(commit_dates)
+        self.save()
+
+    def set_compare(self, base: int, head: int, status: str) -> None:
+        """What GitHub answers when it compares pull request `base`'s head with pull request `head`'s head."""
+        self.state.setdefault("compare", {})[f"sha{base}...sha{head}"] = status
         self.save()
 
     def pull(self, number: int) -> dict:
