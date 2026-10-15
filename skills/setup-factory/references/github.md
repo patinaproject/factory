@@ -530,8 +530,9 @@ It recreates each local commit through GitHub's Git Data API as the App. It
 uploads the changed blobs, builds a tree, creates the commit with no author or
 committer, and fast-forwards the branch. GitHub signs those commits. Tree
 entries keep their mode, so symlinks publish as symlinks. `push-signed` still
-refuses a new executable file, a mode change, a submodule, and a merge
-commit. A commit is verified only when it is
+refuses a new executable file, a change to a file's executable bit, a
+submodule, and a merge commit. It resumes after a partial publish by reusing
+the signed copies already on the branch, and never forces the ref. A commit is verified only when it is
 signed with a key that GitHub links to the committer's account, or when GitHub
 itself creates the commit. A GitHub App cannot register a signing key, so a
 bot commit made locally and pushed with `git push` is never verified. A

@@ -93,8 +93,34 @@ elif parts[3] == "activity":
         {"activity_type": "branch_creation", "ref": "refs/heads/" + ref, "actor": {"login": login}}
         for login in reversed(creators)
     ][:1]))
+elif parts[3] == "pulls" and len(parts) == 4:
+    head = parse_qs(query)["head"][0].partition(":")[2]
+    print(json.dumps([
+        {**pull, "number": int(number)} for number, pull in state["pulls"].items()
+        if pull["state"] == "open" and pull["head"]["ref"] == head
+    ]))
+elif parts[3] == "compare":
+    base, _, head = parts[4].partition("...")
+    print(json.dumps({"status": state.get("compare", {}).get(parts[4], "diverged")}))
+elif parts[3] == "pulls" and len(parts) == 6 and parts[5] == "commits":
+    dates = state["commit_dates"][parts[4]]
+    page = int(parse_qs(query).get("page", ["1"])[0])
+    print(json.dumps([{"commit": {"committer": {"date": date}}} for date in dates[(page - 1) * 100:page * 100]]))
 elif parts[3] == "pulls":
-    print(json.dumps(state["pulls"][parts[4]]))
+    pull = state["pulls"][parts[4]]
+    fields = {args[i + 1].partition("=")[0]: args[i + 1].partition("=")[2] for i, arg in enumerate(args) if arg == "-f"}
+    if "-X" in args:
+        if state.get("fail_writes"):
+            sys.exit("gh: Resource not accessible by integration (HTTP 403)")
+        pull.update(fields)
+        json.dump(state, open(state_path, "w"))
+    print(json.dumps({**pull, "number": int(parts[4])}))
+elif parts[3] == "issues" and "-X" in args:
+    if state.get("fail_writes"):
+        sys.exit("gh: Resource not accessible by integration (HTTP 403)")
+    state.setdefault("comments", {}).setdefault(parts[4], []).append(args[args.index("-f") + 1].partition("=")[2])
+    json.dump(state, open(state_path, "w"))
+    print(json.dumps({}))
 else:
     sys.exit("gh: Not Found (HTTP 404)")
 """
@@ -122,11 +148,31 @@ class FakeGithub:
         self.save()
 
     def add_pull(self, number: int, head: str, *, state: str = "open", merged: bool = False,
-                 head_repo: str | None = None, updated_at: str = "2026-10-01T00:00:00Z") -> None:
+                 head_repo: str | None = None, updated_at: str = "2026-10-01T00:00:00Z",
+                 author: str = "person", body: str = "", created_at: str = "2026-10-01T00:00:00Z",
+                 commit_dates: tuple = ("2026-09-30T00:00:00Z",)) -> None:
         self.state["pulls"][str(number)] = {
-            "state": state, "merged": merged, "updated_at": updated_at,
-            "head": {"ref": head, "repo": {"full_name": head_repo or self.state["repo"]}},
+            "state": state, "merged": merged, "updated_at": updated_at, "user": {"login": author}, "body": body,
+            "html_url": f"https://github.com/{self.state['repo']}/pull/{number}",
+            "created_at": created_at, "commits": len(commit_dates),
+            "head": {"ref": head, "sha": f"sha{number}", "repo": {"full_name": head_repo or self.state["repo"]}},
         }
+        self.state.setdefault("commit_dates", {})[str(number)] = list(commit_dates)
+        self.save()
+
+    def set_compare(self, base: int, head: int, status: str) -> None:
+        """What GitHub answers when it compares pull request `base`'s head with pull request `head`'s head."""
+        self.state.setdefault("compare", {})[f"sha{base}...sha{head}"] = status
+        self.save()
+
+    def pull(self, number: int) -> dict:
+        return json.loads(self.state_path.read_text())["pulls"][str(number)]
+
+    def comments(self, number: int) -> list:
+        return json.loads(self.state_path.read_text()).get("comments", {}).get(str(number), [])
+
+    def fail_writes(self) -> None:
+        self.state["fail_writes"] = True
         self.save()
 
     def env(self) -> dict:

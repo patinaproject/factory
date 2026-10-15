@@ -1109,10 +1109,14 @@ each check. Report each result.
     opens.
 17. Open a pull request as a person, link it to the issue, and delegate the
     issue. The card body carries `takeover_pr`, the worker starts from that
-    pull request's head, and its own pull request links the original. Before
-    it completes, the worker asks in Linear whether to close the original and
-    blocks with `needs_input`. It closes the original only after a human
-    approves.
+    pull request's head, and its own pull request links the original. Once that
+    pull request is open, the run's `claude-session` line reports `superseded`
+    with `action` `closed`, the original is closed with a comment that links
+    the replacement, and the replacement's description ends with
+    `Supersedes #<number>`. If the person pushed commits that the replacement lacks
+    after it opened, the line reports `left` with `person pushed after takeover`
+    and the original stays open. The original's branch is unchanged. Run the card
+    again and the line reports `left`, with no second comment.
 18. Once a card's pull request is open, send a Linear `stop`, then reply in
     the same agent session. In `hermes kanban show <task id> --json`, the
     events after `blocked` are `unblocked`, `review_requested`, and

@@ -76,6 +76,11 @@ if method == "POST" and resource == "refs":
 if method == "POST" and resource == "blobs":
     reply({"sha": git("hash-object", "-w", "--stdin", data=base64.b64decode(body["content"]))})
 if method == "POST" and resource == "trees":
+    fail_at = os.environ.get("FAKE_GH_FAIL_TREE_NUMBER")
+    with open(os.environ["FAKE_GH_LOG"]) as log:
+        tree_calls = sum(1 for line in log if prefix + "trees" in json.loads(line)["argv"])
+    if fail_at and tree_calls == int(fail_at):
+        fail("Service Unavailable (HTTP 503)")
     index = {"GIT_INDEX_FILE": os.environ["FAKE_GH_LOG"] + ".index"}
     git("read-tree", body["base_tree"], env=index)
     for item in body["tree"]:
@@ -384,6 +389,94 @@ class PushSignedTest(GitFixture):
             {"path": "other.txt", "mode": "100644", "type": "blob", "sha": blob},
         ])
         self.assertEqual(self.origin_git("ls-tree", "--name-only", self.origin_branch()), "other.txt")
+
+    def test_executable_bit_removal_is_refused(self) -> None:
+        self.commit("tool.sh", "#!/bin/sh\n", "Add tool", mode=0o755)
+        git(self.main, "push", "-q", "origin", "main")
+        git(self.main, "checkout", "-q", "-b", "feature")
+        os.chmod(self.main / "tool.sh", 0o644)
+        git(self.main, "commit", "-q", "-am", "Drop the executable bit")
+        sha = git(self.main, "rev-parse", "HEAD")
+
+        self.assert_refused_before_any_write(f"commit {sha} changes the mode of tool.sh; push-signed publishes no mode changes")
+
+    def test_symlink_to_executable_is_refused(self) -> None:
+        git(self.main, "checkout", "-q", "-b", "feature")
+        os.symlink("README.md", self.main / "tool.sh")
+        git(self.main, "add", "tool.sh")
+        git(self.main, "commit", "-q", "-m", "Add link")
+        (self.main / "tool.sh").unlink()
+        (self.main / "tool.sh").write_text("#!/bin/sh\n")
+        os.chmod(self.main / "tool.sh", 0o755)
+        git(self.main, "add", "tool.sh")
+        git(self.main, "commit", "-q", "-m", "Replace the link with a script")
+        sha = git(self.main, "rev-parse", "HEAD")
+
+        self.assert_refused_before_any_write(f"commit {sha} changes the mode of tool.sh; push-signed publishes no mode changes")
+
+    def test_a_directory_replaced_by_a_file_publishes(self) -> None:
+        git(self.main, "checkout", "-q", "-b", "feature")
+        self.commit("a.txt", "scratch\n", "Add a placeholder")
+        (self.main / "a").mkdir()
+        (self.main / "a" / "b").write_text("inside\n")
+        git(self.main, "add", "a/b")
+        git(self.main, "commit", "-q", "-m", "Add a directory")
+        git(self.main, "rm", "-q", "a/b")
+        (self.main / "a").write_text("now a file\n")
+        git(self.main, "add", "a")
+        git(self.main, "commit", "-q", "-m", "Replace the directory with a file")
+
+        status, report = self.push()
+
+        self.assertEqual(status, 0, report)
+        blob = git(self.main, "rev-parse", "HEAD:a")
+        self.assertEqual(self.requests("trees")[-1]["tree"], [
+            {"path": "a/b", "mode": "100644", "type": "blob", "sha": None},
+            {"path": "a", "mode": "100644", "type": "blob", "sha": blob},
+        ])
+        self.assertEqual(self.remote_entry("a"), f"100644 blob {blob}\ta")
+        self.assertEqual(git(self.main, "rev-parse", "HEAD"), self.origin_branch())
+
+    def partial_publish(self) -> tuple:
+        git(self.main, "checkout", "-q", "-b", "feature")
+        shas = [self.commit(f"{name}.txt", f"{name}\n", f"Add {name}") for name in ("one", "two", "three")]
+        status, report = self.push(env={"FAKE_GH_FAIL_TREE_NUMBER": "2"})
+        self.assertEqual(status, 1, report)
+        self.assertEqual(git(self.main, "rev-parse", "HEAD"), shas[-1])
+        signed = self.origin_branch()
+        self.assertEqual(self.origin_git("log", "--format=%s", f"{self.seed}..{signed}"), "Add one")
+        return shas, signed
+
+    def test_a_rerun_resumes_after_a_partial_publish(self) -> None:
+        shas, signed = self.partial_publish()
+        self.log.unlink()
+
+        status, report = self.push()
+
+        self.assertEqual(status, 0, report)
+        head = self.origin_branch()
+        second = self.origin_git("rev-parse", f"{head}^")
+        self.assertEqual(report["published"], [{"local": shas[1], "remote": second}, {"local": shas[2], "remote": head}])
+        self.assertEqual(self.origin_git("rev-parse", f"{second}^"), signed)
+        self.assertEqual(self.origin_git("log", "--format=%s", f"{self.seed}..{head}").splitlines(), ["Add three", "Add two", "Add one"])
+        self.assertEqual([commit["parents"] for commit in self.requests("commits")], [[signed], [second]])
+        self.assertEqual([patch["force"] for patch in self.requests("refs/heads/feature")], [False, False])
+        self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)
+
+    def test_a_rerun_refuses_when_a_person_added_to_the_partial_publish(self) -> None:
+        shas, signed = self.partial_publish()
+        tree = self.origin_git("rev-parse", f"{signed}^{{tree}}")
+        person = self.origin_commit(tree, signed, "Someone's change", "Someone", "person@example.com")
+        self.origin_git("update-ref", "refs/heads/feature", person)
+        self.log.unlink()
+
+        status, report = self.push()
+
+        self.assertEqual(status, 2)
+        self.assertIn("has commits this branch lacks", report["error"])
+        self.assertEqual(self.origin_branch(), person)
+        self.assertEqual(git(self.main, "rev-parse", "HEAD"), shas[-1])
+        self.assertEqual(self.gh_argv(), [self.ref_get()])
 
     def test_default_branch_is_refused(self) -> None:
         self.commit("one.txt", "one\n", "Add one")
