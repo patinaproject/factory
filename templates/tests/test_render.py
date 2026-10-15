@@ -306,6 +306,52 @@ class PromptSubstitutionTest(unittest.TestCase):
             with self.subTest(route=name):
                 self.assertIn(section, prompt)
 
+    def test_both_triage_prompts_carry_the_one_unblock_section(self):
+        section = render.triage_unblock_section()
+        for name, prompt in self.prompts.items():
+            with self.subTest(route=name):
+                self.assertEqual(prompt.count(section), 1)
+
+    def test_the_unblock_section_runs_the_kanban_commands_in_order(self):
+        commands = [
+            "hermes kanban unblock <task id>",
+            "hermes kanban request-review <task id>",
+            "hermes kanban reopen-review <task id> --reason",
+        ]
+        section = render.triage_unblock_section().split("When one exists", 1)[1]
+        positions = [section.index(command) for command in commands]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(len(set(positions)), len(commands))
+
+    def test_the_github_prompt_unblocks_a_blocked_card_through_the_shared_section(self):
+        prompt = self.prompts["github"]
+        heading = render.triage_unblock_section().splitlines()[0]
+        self.assertEqual(heading, "## Unblock a card")
+        rules = prompt.split("## Record the event", 1)[1].split(heading, 1)[0]
+        blocked = [line for line in rules.splitlines() if "`blocked`" in line and "unblock it as" in line]
+        self.assertEqual(len(blocked), 2)
+        self.assertIn("`changes requested on GitHub; see the card comments`", rules)
+        self.assertIn("`feedback on GitHub; see the card comments`", rules)
+        flat = " ".join(rules.split())
+        review_rule, comment_rule = flat.split("4. For a", 1)
+        self.assertIn("`blocked`, when the sender is a person (not a bot): unblock", review_rule)
+        self.assertIn("when the sender is a person (not a bot) and the text asks for a change", comment_rule)
+        self.assertIn(
+            "`blocked`, when the sender is a person (not a bot): unblock it as "
+            '"Unblock a card" says, with the reason '
+            "`changes requested on GitHub; see the card comments`, "
+            "after step 1 has commented on the card",
+            review_rule,
+        )
+        self.assertIn("`pull_request_review` submitted as a comment", comment_rule)
+        self.assertIn("A thanks, an approval, or a bare question is not actionable", comment_rule)
+        self.assertNotIn("hermes kanban unblock", rules)
+
+    def test_the_linear_prompt_unblocks_through_the_shared_section_with_its_own_reason(self):
+        prompt = self.prompts["linear"]
+        self.assertIn("resumed from Linear; see the card comments", prompt)
+        self.assertEqual(prompt.count("hermes kanban request-review <task id>"), 1)
+
     def test_prompts_keep_only_hermes_placeholders(self):
         for name, prompt in self.prompts.items():
             with self.subTest(route=name):
