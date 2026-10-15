@@ -11,7 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
-from tests.support import BOT_LOGIN, SCRIPTS, FakeGithub, GitFixture, git
+from tests.support import BOT_LOGIN, SCRIPTS, FakeGithub, GitFixture, git, with_interpreter
 
 # A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
 ISSUE_ID = str(uuid.uuid4())
@@ -968,6 +968,20 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session(env={"GH_BIN": str(gh)})
 
         self.assert_refused_before_claude(status, report, f"{gh} could not run: Permission denied", start)
+
+    def test_a_github_server_error_is_refused_as_transient_after_retries(self) -> None:
+        self.publish_branch(BOT_LOGIN)
+        start = self.head()
+        gh = self.tmp / "gh-server-error"
+        gh.write_text(with_interpreter("#!/usr/bin/env python3\nimport sys\nsys.exit('gh: HTTP 500')\n"))
+        gh.chmod(0o755)
+
+        status, report = self.run_session(env={"GH_BIN": str(gh)})
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": f"gh api repos/{REPO}/branches/abc-123-fix failed: gh: HTTP 500", "transient": True})
+        self.assertEqual(self.head(), start)
+        self.assertFalse(self.log.exists())
 
     def test_remote_branch_at_the_default_branch_is_adopted(self) -> None:
         start = self.head()

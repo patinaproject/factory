@@ -118,6 +118,10 @@ class Refusal(Exception):
     pass
 
 
+class Transient(Refusal):
+    """A refusal that clears on its own, so the worker blocks the card as transient."""
+
+
 class Adoption(NamedTuple):
     source: str
     ref: str
@@ -175,6 +179,8 @@ def adopt_existing_work(
         )
     try:
         branch_owner = card_branch.owner(card_branch.run_gh, repo, branch, login)
+    except card_branch.GhServerError as failure:
+        raise Transient(str(failure)) from failure
     except card_branch.GhFailed as failure:
         raise Refusal(str(failure)) from failure
     source = card_branch.adoption(pull_ref is not None, branch_owner)
@@ -695,6 +701,8 @@ def main() -> int:
         signal.signal(stopped.signum, signal.SIG_DFL)
         os.kill(os.getpid(), stopped.signum)
         raise
+    except Transient as refusal:
+        status, report = 2, {"error": str(refusal), "transient": True}
     except Refusal as refusal:
         status, report = 2, {"error": str(refusal)}
     except Exception as error:

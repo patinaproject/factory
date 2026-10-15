@@ -115,8 +115,12 @@ process output once it exits. It prints one JSON line.
   timeout is never a crash.
 - On failure the line holds `error`. A refusal that another process holds the
   worktree means a second worker is running this card: post an `error`
-  activity saying so, call `kanban_block` with kind `transient`, and stop. For any other error, post an `error` activity with
-  the message, call `kanban_block` with kind `capability`, and stop.
+  activity saying so, call `kanban_block` with kind `transient`, and stop. A
+  failure line with `"transient": true` is a GitHub server error that outlasted
+  the retries: post an `error` activity with the message, call `kanban_block`
+  with kind `transient`, and stop. For any other error, post an `error`
+  activity with the message, call `kanban_block` with kind `capability`, and
+  stop.
 
 ## 4. Pick up new comments and resume
 

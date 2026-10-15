@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import shutil
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from tests.support import SCRIPTS, FakeGithub
+from tests.support import SCRIPTS, FakeGithub, with_interpreter
 
 sys.path.insert(0, str(SCRIPTS))
 import card_branch  # noqa: E402
@@ -190,6 +192,77 @@ class OwnerTest(unittest.TestCase):
     def test_a_pull_request_of_another_repository_is_refused(self) -> None:
         with self.assertRaises(card_branch.GhFailed):
             card_branch.read_pulls(lambda endpoint: {}, REPO, ["https://github.com/someone/else/pull/1"])
+
+
+SCRIPTED_GH = """#!/usr/bin/env python3
+import json, os, sys
+path = os.environ["SCRIPTED_GH"]
+replies = json.load(open(path))
+calls = replies.pop("calls") + 1
+exit_code, out = replies["queue"].pop(0)
+replies["calls"] = calls
+json.dump(replies, open(path, "w"))
+(sys.stdout if exit_code == 0 else sys.stderr).write(out)
+sys.exit(exit_code)
+"""
+
+
+class RunGhTest(unittest.TestCase):
+    """run_gh against a gh that answers from a queue, so each reply and the number of calls are known."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        gh = self.tmp / "gh"
+        gh.write_text(with_interpreter(SCRIPTED_GH))
+        os.chmod(gh, 0o755)
+        self.state = self.tmp / "replies.json"
+        env = mock.patch.dict(os.environ, {"GH_BIN": str(gh), "SCRIPTED_GH": str(self.state)})
+        env.start()
+        self.addCleanup(env.stop)
+        sleep = mock.patch.object(card_branch.time, "sleep")
+        self.sleep = sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def queue(self, *replies: tuple[int, str]) -> None:
+        self.state.write_text(json.dumps({"calls": 0, "queue": [list(reply) for reply in replies]}))
+
+    def calls(self) -> int:
+        return json.loads(self.state.read_text())["calls"]
+
+    def test_two_server_errors_then_success_returns_the_answer(self) -> None:
+        self.queue((1, "gh: HTTP 500\n"), (1, "gh: Server Error (HTTP 502)\n"), (0, '{"name": "x"}'))
+
+        self.assertEqual(card_branch.run_gh("repos/a/b/branches/x"), {"name": "x"})
+        self.assertEqual(self.calls(), 3)
+        self.assertEqual([call.args for call in self.sleep.call_args_list], [(1,), (2,)])
+
+    def test_three_server_errors_raise_a_server_error(self) -> None:
+        self.queue((1, "gh: HTTP 500\n"), (1, "gh: HTTP 500\n"), (1, "gh: HTTP 503\n"), (0, "{}"))
+
+        with self.assertRaises(card_branch.GhServerError) as caught:
+            card_branch.run_gh("repos/a/b/branches/x")
+
+        self.assertEqual(str(caught.exception), "gh api repos/a/b/branches/x failed: gh: HTTP 503")
+        self.assertEqual(self.calls(), 3)
+
+    def test_a_client_error_is_not_retried(self) -> None:
+        self.queue((1, "gh: Resource not accessible by integration (HTTP 403)\n"), (0, "{}"))
+
+        with self.assertRaises(card_branch.GhFailed) as caught:
+            card_branch.run_gh("repos/a/b/branches/x")
+
+        self.assertNotIsInstance(caught.exception, card_branch.GhServerError)
+        self.assertEqual(self.calls(), 1)
+        self.sleep.assert_not_called()
+
+    def test_a_missing_branch_is_not_retried(self) -> None:
+        self.queue((1, "gh: Branch not found (HTTP 404)\n"), (0, "{}"))
+
+        with self.assertRaises(card_branch.BranchNotFound):
+            card_branch.run_gh("repos/a/b/branches/x")
+
+        self.assertEqual(self.calls(), 1)
 
 
 class CommandTest(unittest.TestCase):
