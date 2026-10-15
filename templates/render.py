@@ -240,6 +240,10 @@ def card_branch_command(home: Path, github_login: str) -> str:
     return f"python3 {shlex.quote(str(script))} --app {shlex.quote(github_login)}"
 
 
+def archive_card_command(home: Path) -> str:
+    return f"python3 {shlex.quote(str(home / 'profiles' / 'claude-worker' / 'scripts' / 'archive_card.py'))}"
+
+
 def _or_list(items: list) -> str:
     if len(items) <= 2:
         return " or ".join(items)
@@ -356,6 +360,7 @@ def build_routes(settings: Any) -> dict:
                     "queued_link": queued_link_sentence(config["kanban_url"]),
                     "card_branch": card_branch_command(hermes_home(), config["github_login"]),
                     "triage_unblock": triage_unblock_section(),
+                    "archive_card": archive_card_command(hermes_home()),
                     "triage_resume": triage_resume_section(),
                 },
             ),
