@@ -126,6 +126,28 @@ def read_commit(sha: str) -> Commit:
     return commit
 
 
+def signed_prefix(base: str, remote: str, local: list) -> int | None:
+    """Count the leading local commits that the remote chain already carries.
+
+    A publish that failed partway leaves signed copies on the remote. They are
+    not ancestors of the local branch, but each one has the tree of the local
+    commit at the same position. Returns None when the remote holds anything else.
+    """
+    listing = subprocess.run(
+        ["git", "rev-list", "--reverse", "--topo-order", "--parents", f"{base}..{remote}"],
+        capture_output=True, text=True,
+    )
+    rows = [line.split() for line in listing.stdout.splitlines()]
+    if listing.returncode != 0 or not rows or len(rows) > len(local):
+        return None
+    previous = base
+    for (sha, *parents), mine in zip(rows, local):
+        if parents != [previous] or git("rev-parse", f"{sha}^{{tree}}") != git("rev-parse", f"{mine}^{{tree}}"):
+            return None
+        previous = sha
+    return len(rows)
+
+
 def publish(repository: str, branch: str, parent: str, commit: Commit) -> str:
     git_data = f"repos/{repository}/git"
     entries = []
@@ -136,6 +158,8 @@ def publish(repository: str, branch: str, parent: str, commit: Commit) -> str:
             blob = {"content": contents, "encoding": "base64"}
             entry["sha"] = gh_send(f"{git_data}/blobs", blob)["sha"]
         entries.append(entry)
+    # The tree request cannot hold a path as both a file and a directory, so a directory replaced by a file needs its deletions first.
+    entries.sort(key=lambda entry: entry["sha"] is not None)
     tree = gh_send(f"{git_data}/trees", {"base_tree": remote_tree(repository, parent), "tree": entries})
     created = gh_send(f"{git_data}/commits", {"message": commit.message, "tree": tree["sha"], "parents": [parent]})
     gh_send(f"{git_data}/refs/heads/{branch}", {"sha": created["sha"], "force": False}, method="PATCH")
@@ -169,10 +193,14 @@ def run() -> dict:
     elif git("rev-parse", f"{remote}^{{tree}}") == head_tree:
         start = head
     else:
-        raise Refusal(
-            f"{branch} on {repository} has commits this branch lacks; "
-            "update from the remote (for example git pull --ff-only)"
-        )
+        local = git("rev-list", "--reverse", "--topo-order", f"{base}..{head}").split()
+        done = signed_prefix(base, remote, local)
+        if done is None:
+            raise Refusal(
+                f"{branch} on {repository} has commits this branch lacks; "
+                "update from the remote (for example git pull --ff-only)"
+            )
+        start = local[done - 1]
     commits = [read_commit(sha) for sha in git("rev-list", "--reverse", "--topo-order", f"{start}..{head}").split()]
 
     if created:
