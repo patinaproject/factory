@@ -217,8 +217,13 @@ Then act on the result:
 - **Completion accepted.** Post a `response` activity that summarizes the
   change, with the handoff `external_urls`. You are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, a state other
-  than `CLEAN`, a head commit that is not the worktree's `HEAD`, or a
-  `MERGED` pull request sent to review.
+  than `CLEAN` for completion, a head commit that is not the worktree's
+  `HEAD`, or a `MERGED` pull request sent to review. A pull request that
+  waits only on an approving review passes `kanban_request_review` once the
+  latest run of each check passes, so `BLOCKED` alone is not a reason to
+  stop. A refusal that names a pending check means wait, then call again.
+  Block for `needs_input` only after the same call fails once the checks
+  have settled.
   - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
     running. Run `gh pr checks <pr> --watch --fail-fast` from the worktree
     as one foreground call with the tool's timeout set to 400, and run it

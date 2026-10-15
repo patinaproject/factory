@@ -73,6 +73,23 @@ PASSING_CHECKS = [
     {"__typename": "CheckRun", "name": "Deploy", "status": "COMPLETED", "conclusion": "SKIPPED"},
     {"__typename": "StatusContext", "context": "Preview", "state": "SUCCESS"},
 ]
+
+def validate_runs(*conclusions):
+    """Check runs of one check, oldest first, in the shape `gh pr view --json statusCheckRollup` returns."""
+    return [
+        {
+            "__typename": "CheckRun",
+            "workflowName": "Pull request",
+            "name": "Validate pull request",
+            "status": "COMPLETED",
+            "conclusion": conclusion,
+            "startedAt": f"2026-10-14T01:{9 + index:02d}:23Z",
+            "completedAt": f"2026-10-14T01:{9 + index:02d}:37Z",
+        }
+        for index, conclusion in enumerate(conclusions)
+    ]
+
+
 AWAITING_RE_REVIEW = {
     "mergeStateStatus": "BLOCKED",
     "reviewDecision": "CHANGES_REQUESTED",
@@ -280,6 +297,47 @@ class HookDecisionTest(unittest.TestCase):
     def test_approval_wait_with_a_pending_check_is_refused(self):
         pending = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Test", "status": "IN_PROGRESS", "conclusion": ""}]
         self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": pending}), "mergeStateStatus is 'BLOCKED'")
+
+    def test_approval_wait_ignores_a_failed_run_that_a_newer_run_of_the_same_check_replaced(self):
+        self.assertIsNone(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, *validate_runs("FAILURE", "SUCCESS")]}))
+
+    def test_the_order_of_the_rollup_does_not_pick_the_latest_run(self):
+        reversed_runs = list(reversed(validate_runs("FAILURE", "SUCCESS")))
+        self.assertIsNone(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, *reversed_runs]}))
+
+    def test_approval_wait_is_refused_when_the_latest_run_failed_and_names_the_check(self):
+        pr = {**AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, *validate_runs("SUCCESS", "FAILURE")]}
+        result = self.review_handoff(pr)
+        self.assert_blocked(result, "check 'Validate pull request' is FAILURE")
+        self.assertNotIn("is SUCCESS", result["message"])
+
+    def test_approval_wait_is_refused_while_a_rerun_is_pending_and_names_the_check(self):
+        pending = {**validate_runs("SUCCESS")[0], "status": "IN_PROGRESS", "conclusion": "", "completedAt": "0001-01-01T00:00:00Z", "startedAt": "0001-01-01T00:00:00Z"}
+        pr = {**AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, *validate_runs("SUCCESS"), pending]}
+        self.assert_blocked(self.review_handoff(pr), "check 'Validate pull request' is IN_PROGRESS: wait for it")
+
+    def test_same_named_checks_of_different_workflows_are_separate_checks(self):
+        other = {**validate_runs("FAILURE")[0], "workflowName": "Preview", "startedAt": "2026-10-14T01:00:00Z"}
+        pr = {**AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, *validate_runs("SUCCESS"), other]}
+        self.assert_blocked(self.review_handoff(pr), "check 'Validate pull request' is FAILURE")
+
+    def test_a_status_context_is_replaced_by_its_newer_report(self):
+        old = {"__typename": "StatusContext", "context": "ci/legacy", "state": "FAILURE", "startedAt": "2026-10-14T01:09:00Z"}
+        new = {**old, "state": "SUCCESS", "startedAt": "2026-10-14T01:12:00Z"}
+        self.assertIsNone(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, old, new]}))
+
+    def test_runs_without_a_timestamp_resolve_to_the_one_that_does_not_pass(self):
+        runs = [{k: v for k, v in run.items() if k not in ("startedAt", "completedAt")} for run in validate_runs("SUCCESS", "FAILURE")]
+        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, *runs]}), "is FAILURE")
+
+    def test_completion_refusal_names_a_pending_check(self):
+        pending = {**validate_runs("SUCCESS")[0], "status": "QUEUED", "conclusion": ""}
+        pr = {**CLEAN, "mergeStateStatus": "UNSTABLE", "statusCheckRollup": [pending]}
+        self.assert_blocked(call_hook(FakeShell(pr=pr)), "check 'Validate pull request' is QUEUED")
+
+    def test_completion_waiting_for_approval_stays_blocked_despite_a_replaced_failure(self):
+        pr = {**CLEAN, **AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, *validate_runs("FAILURE", "SUCCESS")]}
+        self.assert_blocked(call_hook(FakeShell(pr=pr)), "mergeStateStatus is 'BLOCKED'")
 
     def test_approval_wait_with_a_required_check_missing_from_the_rollup_is_refused(self):
         rules = [*DEFAULT_RULES[:-1], {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Validate pull request"}]}}]

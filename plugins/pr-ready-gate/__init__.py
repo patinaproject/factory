@@ -13,6 +13,7 @@ DEFAULT_GATED_PROFILES = ["claude-worker"]
 GATED_TOOLS = ("kanban_complete", "kanban_request_review")
 PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"
 PASSING_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
+PENDING_STATES = frozenset({"PENDING", "EXPECTED", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED"})
 PR_URL = re.compile(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/\d+/?$")
 # Hermes kills a pre_tool_call hook after 30s (plugins.hook_callback_timeout), fails closed, and skips the hook for 60s.
 # One clock starts when the check starts, and every subprocess gets the smaller of its cap and the time left.
@@ -90,18 +91,79 @@ def evaluate(
     if merge_state != "CLEAN":
         remedy = MERGE_STATE_REMEDIES.get(merge_state, "wait until GitHub reports CLEAN")
         failures.append(f"mergeStateStatus is {merge_state!r}, expected 'CLEAN': {remedy}")
+        failures += _unfinished_checks(pr)
     return failures + hidden + _head_failures(pr, local_head)
 
 
 def _awaiting_review(pr: dict) -> bool:
-    checks = pr.get("statusCheckRollup")
+    checks = _latest_checks(pr)
     return (
         pr.get("mergeStateStatus") == "BLOCKED"
         and pr.get("reviewDecision") in ("CHANGES_REQUESTED", "REVIEW_REQUIRED")
-        and isinstance(checks, list)
         and bool(checks)
         and all(_check_passed(check) for check in checks)
     )
+
+
+def _latest_checks(pr: dict) -> list:
+    """The rollup lists every run on the head. GitHub judges only the latest run of each check, so the gate does too.
+
+    A run that has not finished is the newest. Otherwise the later startedAt wins, and a tie or a missing
+    timestamp goes to the run that does not pass, so the gate errs toward refusing.
+    """
+    rollup = pr.get("statusCheckRollup")
+    if not isinstance(rollup, list):
+        return []
+    latest: dict = {}
+    for index, check in enumerate(rollup):
+        key = _check_key(check, index)
+        if key not in latest or _recency(check) > _recency(latest[key]):
+            latest[key] = check
+    return list(latest.values())
+
+
+def _check_key(check, index: int):
+    if not isinstance(check, dict):
+        return ("unreadable", index)
+    if "context" in check and "name" not in check:
+        return ("status", check["context"])
+    return ("check", check.get("workflowName"), check.get("name"))
+
+
+def _recency(check) -> tuple:
+    if not isinstance(check, dict):
+        return (True, "", True)
+    if "state" in check:
+        finished = check["state"] not in PENDING_STATES
+    else:
+        finished = check.get("status") == "COMPLETED"
+    stamp = check.get("startedAt") or check.get("completedAt") or ""
+    return (not finished, stamp, not _check_passed(check))
+
+
+def _check_status(check) -> str:
+    if not isinstance(check, dict):
+        return "unreadable"
+    if "state" in check:
+        return check["state"]
+    if check.get("status") != "COMPLETED":
+        return check.get("status") or "unknown"
+    return check.get("conclusion") or "unknown"
+
+
+def _unfinished_checks(pr: dict) -> list[str]:
+    """Names each latest check that does not pass, so a worker can tell a pending run from a failure."""
+    lines = []
+    for check in _latest_checks(pr):
+        if _check_passed(check):
+            continue
+        status = _check_status(check)
+        name = _rollup_name(check) or "unnamed check"
+        if status in PENDING_STATES:
+            lines.append(f"check {name!r} is {status}: wait for it, then call the tool again")
+        else:
+            lines.append(f"check {name!r} is {status}: fix it and push, then call the tool again")
+    return lines
 
 
 def _rollup_name(check) -> Optional[str]:
