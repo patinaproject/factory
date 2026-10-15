@@ -1083,9 +1083,11 @@ each check. Report each result.
 8. A reply in Linear during a run is picked up when the run ends, and the next
    run resumes the same Claude session ID.
 9. A Linear `stop` stops the worker and blocks the card.
-10. Un-delegating stops the worker and blocks the card with reason
-    `undelegated`. Delegating again unblocks the same card, which resumes the
-    same branch, worktree, and session.
+10. Un-delegating stops the worker and archives the card, whatever its
+    status, so `hermes kanban list --json` no longer shows it. Delegating again
+    creates a new card that continues on the same branch and pull request, and
+    `git -C <repo> worktree add` can check that branch out even when the
+    archived card kept a dirty worktree.
 11. A mention without delegation gets an answer and creates no card.
 12. No more than `kanban.max_in_progress` workers run at once, and no `claude`
     process runs outside a Kanban worker.
