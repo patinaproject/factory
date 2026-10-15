@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import sys
+import tempfile
+import textwrap
 import time
 import types
 import unittest
@@ -12,6 +16,7 @@ from tests import load_plugin
 plugin = load_plugin()
 blocks = sys.modules["linear_agent_session.blocks"]
 
+PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BODY = "```text\nlinear_issue_id: issue-1\nlinear_agent_session_id: session-1\nrepo: o/r\n```"
 SECRET = "sk-live-abcdefghijklmnopqrstuvwxyz0123456789"
 
@@ -62,11 +67,6 @@ class ReportedBlockTest(unittest.TestCase):
         self.assertEqual(content["type"], "elicitation")
         self.assertIn("parked in triage", content["body"])
 
-    def test_untyped_card_parked_in_triage_posts_without_a_cause(self):
-        client, _ = fire("triage", None)
-        ((_, content),) = client.calls
-        self.assertIn("for the same reason, so Hermes", content["body"])
-
     def test_needs_input_posts_an_elicitation(self):
         client, _ = fire("blocked", "needs_input", reason="pick a name")
         ((session, content),) = client.calls
@@ -103,6 +103,16 @@ class SilentBlockTest(unittest.TestCase):
     def test_untyped_block_posts_nothing(self):
         client, _ = fire("blocked", None)
         self.assertEqual(client.calls, [])
+
+    def test_untyped_card_parked_in_triage_posts_nothing(self):
+        client, _ = fire("triage", None)
+        self.assertEqual(client.calls, [])
+
+    def test_session_line_must_start_a_line(self):
+        body = "```text\nnote: linear_agent_session_id: other\nrepo: o/r\n```"
+        self.assertIsNone(blocks.session_id(body))
+        self.assertEqual(blocks.session_id("repo: o/r\n  linear_agent_session_id: s-2"), None)
+        self.assertEqual(blocks.session_id("repo: o/r\nlinear_agent_session_id: s-2\n"), "s-2")
 
     def test_dependency_wait_posts_nothing(self):
         for status in ("todo", "running", "ready"):
@@ -143,6 +153,30 @@ class SafetyTest(unittest.TestCase):
             fire("triage", "needs_input", client=client)
         self.assertLess(time.monotonic() - started, 0.8)
 
+    def test_post_slower_than_the_deadline_survives_the_process_exiting(self):
+        marker = os.path.join(tempfile.mkdtemp(), "posted")
+        script = textwrap.dedent(
+            """
+            import sys, time
+            from tests import load_plugin
+            load_plugin()
+            blocks = sys.modules["linear_agent_session.blocks"]
+            blocks.POST_TIMEOUT_SECONDS = 0.05
+
+            class SlowClient:
+                def create_activity(self, session, content, *, ephemeral=False):
+                    time.sleep(0.6)
+                    open(sys.argv[1], "w").write(session)
+
+            card = blocks.Card("blocked", "needs_input", "linear_agent_session_id: session-1")
+            hook = blocks.make_blocked_hook(lambda: SlowClient(), lambda *_: card, lambda t: t)
+            hook(task_id="t_1", board=None, reason="r")
+            """
+        )
+        subprocess.run([sys.executable, "-c", script, marker], cwd=PLUGIN_ROOT, check=True, timeout=30)
+        with open(marker) as handle:
+            self.assertEqual(handle.read(), "session-1")
+
     def test_secret_in_the_reason_is_redacted(self):
         client, _ = fire("blocked", "capability", reason=f"push failed with token {SECRET} for the repo")
         ((_, content),) = client.calls
@@ -151,7 +185,7 @@ class SafetyTest(unittest.TestCase):
         self.assertIn("token [redacted] for the repo", content["body"])
 
     def test_secret_at_the_truncation_point_is_redacted_whole(self):
-        reason = "x" * (blocks.REASON_LIMIT - 10) + f" {SECRET}"
+        reason = "x" * (blocks.REASON_LIMIT - 6) + f" {SECRET}"
         client, _ = fire("blocked", "capability", reason=reason)
         ((_, content),) = client.calls
         self.assertNotIn("sk-", content["body"])
