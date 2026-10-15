@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 # The post thread is not a daemon: a worker or CLI that exits right after the block still waits for it.
 POST_TIMEOUT_SECONDS = 8.0
 REASON_LIMIT = 500
+# Hermes' redactor masks a Linear key only after "Bearer", so a bare key survives it.
+LINEAR_TOKEN = re.compile(r"lin_(?:api|oauth)_[A-Za-z0-9]+")
 SESSION_LINE = re.compile(r"^linear_agent_session_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 
 
@@ -36,7 +38,7 @@ def load_card(task_id: str, board: Optional[str]) -> Card:
 def hermes_redact(text: str) -> str:
     from agent.redact import redact_sensitive_text
 
-    return redact_sensitive_text(text, force=True)
+    return LINEAR_TOKEN.sub("[redacted]", redact_sensitive_text(text, force=True))
 
 
 def session_id(body: Optional[str]) -> Optional[str]:
