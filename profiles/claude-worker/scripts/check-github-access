@@ -4,8 +4,9 @@
 Runs as the gh login that GH_CONFIG_DIR selects. Compares the App's permissions
 with the ones the factory needs, then, for each configured repository, makes
 the reads that pr-ready-gate and Hermes' Kanban completion contract make: a
-pull request, its base branch rules, its check runs, and its commit statuses, and
-the repository activity that card_branch reads to tell the App's branches from a person's.
+pull request, its base branch rules, its check runs, its commit statuses, and its
+workflow runs, and the repository activity that card_branch reads to tell the App's
+branches from a person's. Actions needs write so a worker can re-run failed jobs.
 
 Silent when every read succeeds. Prints one line per missing permission or
 refused read, naming the permission to grant, and exits 1. Exits 2 when it
@@ -42,7 +43,7 @@ PULL_REQUESTS = Permission("pull_requests", "Pull requests", "write")
 ISSUES = Permission("issues", "Issues", "write")
 CHECKS = Permission("checks", "Checks", "read")
 STATUSES = Permission("statuses", "Commit statuses", "read")
-ACTIONS = Permission("actions", "Actions", "read")
+ACTIONS = Permission("actions", "Actions", "write")
 METADATA = Permission("metadata", "Metadata", "read")
 REQUIRED = (CONTENTS, PULL_REQUESTS, ISSUES, CHECKS, STATUSES, ACTIONS, METADATA)
 
@@ -139,6 +140,7 @@ def check_repository(repo: str) -> list[str]:
         (CHECKS, f"check runs of {sha[:7]}", f"repos/{repo}/commits/{sha}/check-runs?per_page=1"),
         (STATUSES, f"commit statuses of {sha[:7]}", f"repos/{repo}/commits/{sha}/statuses?per_page=1"),
         (CONTENTS, "the branch creation activity", f"repos/{repo}/activity?activity_type=branch_creation&per_page=1"),
+        (ACTIONS, f"workflow runs of {sha[:7]}", f"repos/{repo}/actions/runs?head_sha={sha}&per_page=1"),
     ]
     for permission, what, endpoint in reads:
         try:
