@@ -1170,6 +1170,15 @@ each check. Report each result.
     or comment from a bot, an approval, a thanks, and a bare question leave the
     card `blocked`.
 
+24. Merge a card's pull request past a failing required check while the
+    card is in `review` and its Linear issue is In Progress. The card's
+    comments include `Merged with failing required checks:` with the check
+    names, the card is `blocked` with block kind `needs_input`, and the Linear
+    agent session gets one `elicitation` that says the pull request merged and
+    asks whether the issue is done. Mark the Linear issue Done, and the card is
+    archived. Repeat with the issue already Done before the merge: the card is
+    archived with the same comment, and the session gets no post.
+
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate
 re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a GitHub event

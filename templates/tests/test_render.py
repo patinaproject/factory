@@ -436,8 +436,14 @@ class MergedCardTest(unittest.TestCase):
             "hermes kanban assign <task id> claude-worker", rule[rule.index("Make the completion call.") :]
         )
 
+    def completion_call(self) -> str:
+        return self.section[self.section.index("The completion call is") :].split("\n\n")[0]
+
+    def failing_checks(self) -> str:
+        return self.section[self.section.index("### A merge with failing required checks") :]
+
     def test_the_completion_call_names_the_tool_and_its_arguments(self):
-        call = self.section[self.section.index("The completion call is") :]
+        call = self.completion_call()
         for needle in ("kanban_complete", "`task_id`", "`summary`", "`published_pr`", "linear_agent_activity", "`Pull request`"):
             self.assertIn(needle, call)
         self.assertNotIn("claude-worker", call)
@@ -455,9 +461,58 @@ class MergedCardTest(unittest.TestCase):
         promote = rule[rule.index("  5. ") : rule.index("  6. ")]
         self.assertIn("comment the refusal with the pull request URL and stop. Leave the card\n     unassigned", promote)
         self.assertNotIn("claude-worker", promote)
-        call = self.section[self.section.index("The completion call is") :]
-        self.assertIn("When it is refused, comment\nthe refusal with the pull request URL and stop.", call)
+        call = self.completion_call()
+        self.assertIn("Otherwise comment\nthe refusal with the pull request URL and stop.", call)
         self.assertIn("Never assign the card after\n`specify` succeeded.", call)
+
+    def test_only_a_failed_acceptance_routes_to_the_failing_checks_rule(self):
+        call = self.completion_call()
+        positions = self.positions(
+            call,
+            [
+                "When it is refused, run\n`hermes kanban show <task id> --json`",
+                "`pr_acceptance`",
+                "`classification` is `failure`",
+                '"A merge with failing required checks"',
+                "Otherwise comment",
+            ],
+        )
+        self.assertEqual(positions, sorted(positions))
+
+    def test_failing_checks_archive_a_completed_issue_after_the_marker_comment(self):
+        rule = self.failing_checks()
+        archive = f"{render.archive_card_command(render.hermes_home())} <task id>"
+        positions = self.positions(
+            rule, ["`Merged with failing required checks: <names>.`", "`linear_issue`", "`stateType` is `completed`", archive]
+        )
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("hermes kanban archive", rule)
+
+    def test_failing_checks_block_an_open_issue_once_as_needs_input(self):
+        rule = self.failing_checks()
+        block = "hermes kanban block <task id> '<reason>' --kind needs_input"
+        self.assertEqual(rule.count("hermes kanban block"), 1)
+        self.assertIn(block, rule)
+        review = rule[rule.index("   - `review`") : rule.index("   - `blocked`")]
+        positions = self.positions(review, ["hermes kanban reopen-review <task id>", "then the `ready` command"])
+        self.assertEqual(positions, sorted(positions))
+        blocked = rule[rule.index("   - `blocked`") :].split("\n\n")[0]
+        self.assertNotIn("hermes kanban", blocked)
+        self.assertIn("`elicitation`", blocked)
+        self.assertIn("`linear_agent_activity`", blocked)
+
+    def test_failing_checks_never_assign_or_complete_the_card(self):
+        rule = self.failing_checks()
+        for needle in ("hermes kanban assign", "kanban_complete", "hermes kanban unblock"):
+            self.assertNotIn(needle, rule)
+
+    def test_linear_triage_archives_on_the_marker_the_github_route_writes(self):
+        marker = "Merged with failing required checks:"
+        self.assertIn(f"`{marker} <names>.`", self.failing_checks())
+        change = self.linear[self.linear.index("## Issue change") :]
+        step = change[change.index("\n3. ") : change.index("\n4. ")]
+        positions = self.positions(step, ["merged", f"`{marker}`", 'archive it as "Rules" says', "Otherwise"])
+        self.assertEqual(positions, sorted(positions))
 
     def test_a_rewritten_card_is_never_completed(self):
         rule = self.bullet("triage")

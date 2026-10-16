@@ -285,7 +285,8 @@ def triage_resume_section() -> str:
 
 
 def triage_merged_section() -> str:
-    return _read_template("triage-merged.md").rstrip("\n")
+    values = {"archive_card": archive_card_command(hermes_home())}
+    return render_prompt(_read_template("triage-merged.md"), values).rstrip("\n")
 
 
 def triage_unblock_section() -> str:
