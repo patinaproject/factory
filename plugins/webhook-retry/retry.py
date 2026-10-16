@@ -56,9 +56,10 @@ def route_toolsets(hermes: str, home: Path, route: str) -> str:
         [hermes, "config", "get", f"platforms.webhook.extra.routes.{route}.toolsets", "--json"],
         env={**os.environ, "HERMES_HOME": str(home)}, capture_output=True, text=True,
     )
-    if proc.returncode != 0:
+    try:
+        value = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except ValueError:
         return ""
-    value = json.loads(proc.stdout)
     return ",".join(value) if isinstance(value, list) else (value or "")
 
 
@@ -133,15 +134,16 @@ class Run:
     def replay(self, entry: dict[str, Any]) -> tuple[int, str, Optional[dict]]:
         hermes = self.hermes_factory()
         toolsets = route_toolsets(hermes, self.home, entry["route"])
+        if not toolsets:
+            return 1, f"route {entry['route']} has no toolsets in the config", None
         with tempfile.TemporaryDirectory(prefix="webhook-retry-") as scratch:
             query = Path(scratch) / "query.txt"
             report = Path(scratch) / "report.json"
             query.write_text(REPLAY_PREAMBLE.format(delivered_at=entry["delivered_at"]) + entry["prompt"])
             os.chmod(query, 0o600)
-            command = [hermes, "chat", "-Q", "--oneshot", "--query-file", str(query)]
-            if toolsets:
-                command += ["-t", toolsets]
-            command += ["--source", "webhook-retry"]
+            command = [
+                hermes, "chat", "-Q", "--oneshot", "--query-file", str(query), "-t", toolsets, "--source", "webhook-retry",
+            ]
             proc = subprocess.run(
                 command, capture_output=True, text=True,
                 env={**os.environ, "HERMES_HOME": str(self.home), "WEBHOOK_RETRY_REPORT": str(report)},

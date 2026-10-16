@@ -18,6 +18,9 @@ FAKE_HERMES = textwrap.dedent(
     import json, os, sys
     args = sys.argv[1:]
     if args[:2] == ["config", "get"]:
+        if "routes.unknown." in args[2]:
+            sys.stderr.write("Config key not set")
+            sys.exit(1)
         print(json.dumps(["terminal", "linear_agent_session"]))
         sys.exit(0)
     query = open(args[args.index("--query-file") + 1]).read()
@@ -169,6 +172,15 @@ class RetryTest(unittest.TestCase):
             {"old": "given_up", "tired": "given_up", "fresh": "pending"},
         )
         self.assertEqual(self.chats(), [])
+
+    def test_a_route_without_toolsets_fails_without_running(self):
+        self.seed(entry("lost", route="unknown"))
+
+        result = self.run_retry()
+
+        stored = self.entries()[chat_key("lost", "unknown")]
+        self.assertEqual(result.stdout, "retried unknown lost: failed (1)\nwebhook retry queue drained\n")
+        self.assertEqual((stored["state"], stored["last_error"], self.chats()), ("failed", "route unknown has no toolsets in the config", []))
 
     def test_a_retry_cut_short_is_never_run_again(self):
         self.seed(entry("cut", state="running"))
