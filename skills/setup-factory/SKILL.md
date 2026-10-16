@@ -999,12 +999,18 @@ factory, do these before the restart:
   factory's cards, set `kanban.dispatch_profiles` to `[claude-worker]`. Confirm
   with `hermes kanban dispatch --dry-run --json`: `spawned` lists only
   `claude-worker` cards.
-- `hermes gateway restart` waits for running work, including in-process cron
-  jobs, before it restarts, and the gateway refuses webhooks while it waits.
-  Restart when no long cron job is running.
+- `hermes gateway restart` waits for running chat work, including in-process
+  cron jobs, before it restarts, and the gateway refuses webhooks while it
+  waits. It does not wait for Kanban workers. They run inside the gateway's
+  launchd job, so a restart kills a running worker. Restart with
+  `python3 <worker>/scripts/safe-gateway-restart` instead. It waits, up to an
+  hour by default, until no card is `running`, and then runs
+  `hermes gateway restart`. It restarts nothing and exits 1 when a card is
+  still running at the deadline.
 
-> **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart` from
-> a shell outside Hermes, not from a Hermes session or tool.
+> **HUMAN CHECKPOINT.** Ask the operator to run
+> `python3 <worker>/scripts/safe-gateway-restart` from a shell outside Hermes,
+> not from a Hermes session or tool.
 
 If the gateway does not run as a service yet, install it as one with the
 Hermes CLI's gateway service command (see `hermes gateway --help`), so it
@@ -1377,8 +1383,10 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
 4. Run `check-install` again. It prints nothing.
 5. If step 3 changed a plugin or a webhook config key:
 
-   > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
-   > from a shell outside Hermes. Then confirm that
+   > **HUMAN CHECKPOINT.** Ask the operator to run
+   > `python3 <worker>/scripts/safe-gateway-restart` from a shell outside
+   > Hermes. It restarts the gateway only when no Kanban worker is running, so
+   > the restart never kills one. Then confirm that
    > `~/.hermes/logs/gateway.log` shows a startup after the install.
 
 6. Record the deployed commit in the private configuration record.

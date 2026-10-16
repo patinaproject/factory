@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Restart the Hermes gateway only while no Kanban worker is running.
+
+`hermes gateway restart` drains chat work and in-process cron jobs, but not the
+Kanban workers the dispatcher spawned. They run inside the gateway's launchd
+job, and launchd ends the job, so a running worker is killed. This command waits
+until the board has no `running` card, restarts the gateway, and prints one JSON
+line.
+
+It exits 0 after a restart. It exits 1 and does not restart when a card is
+still running after `--timeout` seconds, or when the board cannot be read. The
+line names the running cards. A worker can start between the last check and the
+restart, so the board must read empty on two checks `--settle` seconds apart.
+Run it from a shell outside Hermes, and run it again after a refusal.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+
+
+class Failed(Exception):
+    pass
+
+
+def running_cards(hermes: str) -> list[str]:
+    try:
+        proc = subprocess.run(
+            [hermes, "kanban", "list", "--status", "running", "--json"],
+            capture_output=True, text=True,
+        )
+    except OSError as failure:
+        raise Failed(f"{hermes} could not run: {failure.strerror or failure}") from failure
+    if proc.returncode != 0:
+        raise Failed(f"kanban list failed with exit {proc.returncode}")
+    try:
+        cards = json.loads(proc.stdout)
+    except json.JSONDecodeError as failure:
+        raise Failed("kanban list printed no JSON") from failure
+    return [card["id"] for card in cards]
+
+
+def wait_for_idle(hermes: str, timeout: float, interval: float, settle: float) -> list[str]:
+    """Return [] once two reads `settle` apart both find no running card, else the last running cards."""
+    deadline = time.monotonic() + timeout
+    while True:
+        running = running_cards(hermes)
+        if not running:
+            time.sleep(settle)
+            running = running_cards(hermes)
+            if not running:
+                return []
+        if time.monotonic() + interval > deadline:
+            return running
+        time.sleep(interval)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--hermes", default="hermes", help="the hermes command")
+    parser.add_argument("--timeout", type=float, default=3600, help="seconds to wait for running cards")
+    parser.add_argument("--interval", type=float, default=30, help="seconds between checks")
+    parser.add_argument("--settle", type=float, default=10, help="seconds between the two empty reads")
+    args = parser.parse_args(argv)
+    try:
+        running = wait_for_idle(args.hermes, args.timeout, args.interval, args.settle)
+    except Failed as failure:
+        print(json.dumps({"restarted": False, "error": str(failure)}))
+        return 1
+    if running:
+        print(json.dumps({"restarted": False, "error": "cards still running", "running": running}))
+        return 1
+    restart = subprocess.run([args.hermes, "gateway", "restart"])
+    print(json.dumps({"restarted": restart.returncode == 0, "exit": restart.returncode}))
+    return restart.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
