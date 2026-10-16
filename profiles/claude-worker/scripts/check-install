@@ -13,7 +13,7 @@ run.
 It also checks that the config keys, cron jobs, and launchd services the setup
 runbook creates still match what it creates (the CONFIG, CRON, and SERVICES
 tables), that a cron job delivers only to a platform with a home channel in
-its profile, that the root home's check-install-alert wrapper matches the
+its profile, that the root home's cron wrappers match the
 repository, that the worker home's secrets.command is the worker helper
 whenever the root home has a secret source, and that each configured
 repository checkout exists and has origin/HEAD set, and that the root home's
@@ -57,7 +57,7 @@ LINEAR_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 # Deliver values that name no platform, so no home channel is needed.
 NON_PLATFORM_TARGETS = ("local", "origin", "all")
 ROOT_ALERT_SCRIPT = "check-install-alert"
-ROOT_ALERT_SOURCE = f"skills/setup-factory/scripts/{ROOT_ALERT_SCRIPT}"
+ROOT_WRAPPERS = (ROOT_ALERT_SCRIPT, "retry-failed-webhooks")
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -188,6 +188,7 @@ CRON = (
         12, "check-install", 60, declared("the operator's chat platform", besides=("local",)),
         home=ROOT, script=ROOT_ALERT_SCRIPT,
     ),
+    CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
 )
 OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
 
@@ -250,7 +251,7 @@ def check_profile(commit: Commit, worker: Path) -> list:
 
 
 # Plugins that run in the gateway only. Their code lives in the root home and never in the worker's.
-ROOT_ONLY_PLUGINS = frozenset({"factory-uploads"})
+ROOT_ONLY_PLUGINS = frozenset({"factory-uploads", "webhook-retry"})
 
 
 def check_plugins(commit: Commit, homes: list) -> list:
@@ -527,22 +528,25 @@ def unresolved_deliveries(home: Path, live: dict, hermes: str) -> list:
     return details
 
 
-def check_root_alert_script(commit: Commit, root: Path) -> list:
-    if ROOT_ALERT_SOURCE not in commit.files(ROOT_ALERT_SOURCE):
-        return []
-    installed = root / "scripts" / ROOT_ALERT_SCRIPT
-    where = str(installed)
-    if not installed.is_file():
-        return [Drift("script", where, f"is missing; install it from {ROOT_ALERT_SOURCE} (part 12)")]
-    if installed.read_bytes() != commit.blob(commit.files(ROOT_ALERT_SOURCE)[ROOT_ALERT_SOURCE]):
-        return [Drift("script", where, f"differs from {commit.label} at {commit.short} (part 12)")]
-    return []
+def check_root_wrappers(commit: Commit, root: Path) -> list:
+    drifts = []
+    for name in ROOT_WRAPPERS:
+        source = f"skills/setup-factory/scripts/{name}"
+        if source not in commit.files(source):
+            continue
+        installed = root / "scripts" / name
+        where = str(installed)
+        if not installed.is_file():
+            drifts.append(Drift("script", where, f"is missing; install it from {source} (part 12)"))
+        elif installed.read_bytes() != commit.blob(commit.files(source)[source]):
+            drifts.append(Drift("script", where, f"differs from {commit.label} at {commit.short} (part 12)"))
+    return drifts
 
 
 def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
     homes = {ROOT: root, WORKER: worker}
     live_jobs = {name: cron_jobs(home) for name, home in homes.items()}
-    drifts = check_root_alert_script(commit, root)
+    drifts = check_root_wrappers(commit, root)
     for job in CRON:
         home = homes[job.home]
         where = f"{job.name} in {home}"

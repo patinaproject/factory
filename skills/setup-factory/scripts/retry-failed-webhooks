@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""Rerun webhook deliveries that failed on a usage limit, from the root profile.
+
+Only the default profile runs the chat platform, so only its cron jobs can
+deliver to the operator's home channel. Hermes runs a cron script from that
+profile's own `scripts/` directory, so setup installs this wrapper there. It
+runs the webhook-retry plugin's retry command from the same home, and passes
+its output and exit status through for Hermes to deliver.
+"""
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+home = os.environ.get("HERMES_HOME")
+if not home:
+    sys.exit("retry-failed-webhooks: HERMES_HOME is not set")
+script = Path(home) / "plugins" / "webhook-retry" / "retry.py"
+if not script.is_file():
+    sys.exit(f"retry-failed-webhooks: {script} does not exist")
+sys.exit(subprocess.run([sys.executable, str(script), *sys.argv[1:]]).returncode)

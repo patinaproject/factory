@@ -422,7 +422,7 @@ hermes -p claude-worker plugins list
 ```
 
 Both list `linear-agent-session` and `pr-ready-gate`, enabled. The root home
-also lists `factory-uploads`, enabled, and the worker home does not. On a fresh
+also lists `factory-uploads` and `webhook-retry`, enabled, and the worker home lists neither. On a fresh
 machine, install both now and skip the content check.
 
 On a re-run, `<worker>` already exists, and a listed plugin can still be
@@ -491,6 +491,17 @@ worker's home. `check-install` reports an install in the worker home.
    attachment URL, never the token. The platform is not a chat platform, so
    `hermes status` lists it without any channel and it is not a cron
    `--deliver` or `send_message` target.
+
+**Webhook retry, root home only.** The `webhook-retry` plugin runs inside the
+gateway. It records each webhook delivery, queues one whose agent turn fails on
+a usage limit, and clears it when the turn finishes. The `retry-failed-webhooks`
+cron job in part 12 reruns the queued deliveries. Install and enable the plugin
+in the root home and never in the worker's home. `check-install` reports an
+install in the worker home. It takes effect at the next gateway restart.
+
+```sh
+hermes plugins install "file://<repo>#plugins/webhook-retry" --enable --yes-deps </dev/null
+```
 
 **Worker profile.** If `<worker>` does not exist, install it. If it exists,
 update it. An update keeps the installed `config.yaml`. Pass `--force-config`
@@ -856,8 +867,8 @@ exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
 jobs: `refresh-checkouts`, `refresh-owned-refs`, and `refresh-gh-app-login`.
 A copy there runs without the worker's scripts and settings, so remove it the
-same way. The default home holds exactly one job, `check-install`, described
-below. A second setup session runs this check before it
+same way. The default home holds two jobs, `check-install` and
+`retry-failed-webhooks`, described below. A second setup session runs this check before it
 creates anything.
 
 **Create** the job only when the list has none:
@@ -897,8 +908,9 @@ machine changes this runbook cannot reproduce: a `config.yaml` key from parts
 4, 6, 10, or 13 that differs from what the part sets, a cron job that is
 missing, duplicated, changed, not created by the runbook, or in the wrong
 profile, a cron job that delivers to a platform with no home channel in its
-profile, the root home's `scripts/check-install-alert` when it is missing or
-differs from the repository, and, on macOS, a launchd service from part 7 or 15
+profile, the root home's `scripts/check-install-alert` and
+`scripts/retry-failed-webhooks` when one is missing or differs from the
+repository, and, on macOS, a launchd service from part 7 or 15
 that is not installed, does not run at load, or is not running, and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never
 prints a config value. It prints one line per difference and nothing when the
@@ -932,6 +944,28 @@ The job exits non-zero while drift exists, so its failure notice goes to the
 same platform. A factory that created this job in the worker profile earlier
 removes that copy with `hermes -p claude-worker cron remove <job id>`, with the
 operator's approval, after the root job exists.
+
+**Webhook retry job.** The `webhook-retry` plugin from part 5 keeps a queue in
+`<root>/webhook-retry/`. A delivery whose triage turn fails on a usage limit
+waits there until the limit resets. This job reruns the due deliveries every 10
+minutes, oldest first and one at a time, and stops at the first usage limit.
+It prints a line only when something happened, so Hermes delivers nothing on a
+quiet run. It belongs to the root profile for the same reason as
+`check-install`. Install the wrapper and create the job when `hermes cron list`
+for the root profile has no `retry-failed-webhooks` job:
+
+```sh
+install -m 0644 skills/setup-factory/scripts/retry-failed-webhooks <root>/scripts/retry-failed-webhooks
+hermes cron create "every 10m" --name retry-failed-webhooks --no-agent --script retry-failed-webhooks --deliver <platform> </dev/null
+```
+
+To inspect the queue, run the command from the root home:
+`HERMES_HOME=<root> python3 <root>/plugins/webhook-retry/retry.py --list`
+prints one line per delivery and never its prompt. Add `--now` to retry every
+queued delivery at once, or `--drop <delivery>` to remove one. A delivery that
+is older than 48 hours or has failed 8 retries is given up and stays listed
+until dropped. A retry that a crash or timeout cut short is marked failed and
+never run again, because its turn may already have changed a card.
 
 **Verify.** Run each job through Hermes once, then read its status:
 
@@ -1345,8 +1379,11 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
      or allow the `refresh_tokens` grant on the `saas` Access application when
      the line names the issuer. Then restart the dashboard service.
-   - A `script <root>/scripts/check-install-alert` line: install the wrapper
-     again with the part 12 `install` commands, which create `<root>/scripts` first.
+   - A `script <root>/scripts/check-install-alert` or
+     `<root>/scripts/retry-failed-webhooks` line: install the wrapper again
+     with the part 12 `install` commands, which create `<root>/scripts` first.
+   - A `cron job retry-failed-webhooks` line: create the job in the root
+     profile as in part 12.
    - A `cron job check-install` line: the job is missing, in the wrong
      profile, or delivers to a platform with no home channel. Create it in the
      root profile as in part 12, and remove a leftover copy in the worker
