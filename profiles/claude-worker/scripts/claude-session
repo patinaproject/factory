@@ -294,6 +294,24 @@ def claude_config_dir() -> Path:
     return Path(configured) if configured else Path.home() / ".claude"
 
 
+def trust_checkout(main: Path) -> None:
+    """Persist Claude Code's workspace trust for the main checkout, which keys trust for its worktrees.
+
+    Without it, Claude Code skips the repository's MCP headersHelper commands. Nobody accepts a trust dialog
+    on a factory machine, so the run records it. The file is rewritten only when the flag is missing."""
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    path = Path(configured) / ".claude.json" if configured else Path.home() / ".claude.json"
+    config = json.loads(path.read_text()) if path.exists() else {}
+    project = config.setdefault("projects", {}).setdefault(str(main), {})
+    if project.get("hasTrustDialogAccepted") is True:
+        return
+    project["hasTrustDialogAccepted"] = True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staged = path.with_name(f"{path.name}.claude-session-{os.getpid()}")
+    write_private(staged, config)
+    os.replace(staged, path)
+
+
 def transcript_cwd(transcript: Path) -> str | None:
     with open(transcript, encoding="utf-8") as lines:
         for line in lines:
@@ -725,6 +743,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         if transport.get("model"):
             command += ["--model", transport["model"]]
         command += ["--settings", str(settings_path)]
+        trust_checkout(Path(repo["path"]).resolve())
         try:
             write_private(settings_path, claude_settings(transport, linear_api_key(), settings_path))
             output, exit_code, detail = run_claude(command, worktree)
