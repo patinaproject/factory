@@ -41,7 +41,8 @@ class FakeCtx:
 
 
 class FakeShell:
-    def __init__(self, pr=None, gh_stdout=None, gh_returncode=0, gh_raises=None, head=HEAD, branch=BRANCH, rules=None, state=None):
+    def __init__(self, pr=None, gh_stdout=None, gh_returncode=0, gh_raises=None, head=HEAD, branch=BRANCH, rules=None, state=None, post_returncode=0):
+        self.post_returncode = post_returncode
         self.rules = DEFAULT_RULES if rules is None else rules
         self.state = REVIEW_STATE if state is None else state
         self.gh_stdout = json.dumps(pr if pr is not None else CLEAN) if gh_stdout is None else gh_stdout
@@ -58,6 +59,9 @@ class FakeShell:
             return subprocess.CompletedProcess(cmd, 0, stdout + "\n", "")
         if self.gh_raises:
             raise self.gh_raises
+        if cmd[1:4] == ["api", "-X", "POST"]:
+            stderr = "" if self.post_returncode == 0 else "Reviews may only be requested from collaborators"
+            return subprocess.CompletedProcess(cmd, self.post_returncode, "{}", stderr)
         if cmd[1] == "api":
             body = self.state if cmd[2] == "graphql" else self.rules
             return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
@@ -96,6 +100,10 @@ REVIEW_STATE = {
                     "pageInfo": {"hasNextPage": False},
                     "nodes": [{"commit": {"oid": HEAD, "signature": {"isValid": True}}}],
                 },
+                "latestOpinionatedReviews": {
+                    "pageInfo": {"hasNextPage": False},
+                    "nodes": [{"state": "CHANGES_REQUESTED", "author": {"login": "reviewer"}, "commit": {"oid": OTHER}}],
+                },
             }
         }
     }
@@ -106,6 +114,13 @@ def state_with(**overrides):
     node = json.loads(json.dumps(REVIEW_STATE["data"]["repository"]["pullRequest"]))
     node.update(overrides)
     return {"data": {"repository": {"pullRequest": node}}}
+
+
+def review_nodes(*reviews):
+    return {
+        "pageInfo": {"hasNextPage": False},
+        "nodes": [{"state": "CHANGES_REQUESTED", "author": {"login": login}, "commit": {"oid": oid}} for login, oid in reviews],
+    }
 
 
 def call_hook(shell, env=WORKER_ENV, ctx=None, tool_name="kanban_complete", args=None):
@@ -257,6 +272,31 @@ class HookDecisionTest(unittest.TestCase):
     def assert_blocked(self, result, expected):
         self.assertEqual(result["action"], "block")
         self.assertIn(expected, result["message"])
+
+    def test_changes_requested_on_the_current_head_is_refused(self):
+        reviews = review_nodes(("reviewer", HEAD))
+        self.assert_blocked(
+            self.review_handoff(AWAITING_RE_REVIEW, state=state_with(latestOpinionatedReviews=reviews)),
+            "reviewer requested changes on the current head",
+        )
+
+    def test_changes_requested_on_the_current_head_is_refused_without_thread_or_signature_rules(self):
+        rules = [{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]
+        reviews = review_nodes(("reviewer", HEAD))
+        self.assert_blocked(
+            self.review_handoff(AWAITING_RE_REVIEW, rules=rules, state=state_with(latestOpinionatedReviews=reviews)),
+            "reviewer requested changes on the current head",
+        )
+
+    def test_more_than_100_reviews_is_refused(self):
+        reviews = {"pageInfo": {"hasNextPage": True}, "nodes": []}
+        self.assert_blocked(
+            self.review_handoff(AWAITING_RE_REVIEW, state=state_with(latestOpinionatedReviews=reviews)),
+            "more than 100 reviews",
+        )
+
+    def test_changes_requested_on_an_older_head_is_allowed(self):
+        self.assertIsNone(self.review_handoff(AWAITING_RE_REVIEW))
 
     def test_review_handoff_waiting_for_approval_is_allowed(self):
         self.assertIsNone(self.review_handoff(AWAITING_APPROVAL))
@@ -483,11 +523,114 @@ class TimeBudgetTest(unittest.TestCase):
         self.assertIsNone(result)
 
 
+LANDED_IN_REVIEW = json.dumps({"success": True, "task_id": "t_1", "run_id": 3, "status": "review"})
+HANDOFF_ARGS = {"summary": "done", "metadata": {"published_pr": PR_URL}}
+# patinaproject/patinaproject#2896: head 0fa2d74, tlmader's changes-requested review on 1fa05af.
+P2896_HEAD = "0fa2d744095a6d378a9df3540f1641531d7facfe"
+P2896_REVIEWED = "1fa05af2732555ab7b653c1764a94287cd76a700"
+P2896 = {
+    **CLEAN,
+    "headRefOid": P2896_HEAD,
+    "mergeStateStatus": "BLOCKED",
+    "reviewDecision": "CHANGES_REQUESTED",
+    "statusCheckRollup": [
+        {"__typename": "CheckRun", "name": "Validate pull request", "workflowName": "Pull request", "status": "COMPLETED",
+         "conclusion": "SUCCESS", "startedAt": "2026-10-16T03:03:27Z", "completedAt": "2026-10-16T03:03:39Z"},
+        {"__typename": "CheckRun", "name": "Required checks pass", "workflowName": "Preview", "status": "COMPLETED",
+         "conclusion": "SUCCESS", "startedAt": "2026-10-16T03:00:53Z", "completedAt": "2026-10-16T03:01:01Z"},
+    ],
+}
+P2896_RULES = [{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]
+
+
+def call_review_hook(shell, result=LANDED_IN_REVIEW, ctx=None, tool_name="kanban_request_review", args=HANDOFF_ARGS):
+    hook = gate.make_review_hook(ctx or FakeCtx())
+    with mock.patch.dict(os.environ, WORKER_ENV, clear=True), mock.patch.object(gate.subprocess, "run", shell):
+        return hook(tool_name=tool_name, args=args, result=result, task_id="s", status="ok")
+
+
+class ReviewHookTest(unittest.TestCase):
+    def posts(self, shell):
+        return [call[0] for call in shell.calls if call[0][1:4] == ["api", "-X", "POST"]]
+
+    def shell(self, reviews, pr=None, **fake):
+        state = state_with(latestOpinionatedReviews=reviews)
+        return FakeShell(pr={**CLEAN, **AWAITING_RE_REVIEW, **(pr or {})}, state=state, **fake)
+
+    def test_the_reviewer_on_an_older_head_is_asked_again_and_named_in_the_result(self):
+        shell = FakeShell(pr=P2896, rules=P2896_RULES, state=state_with(latestOpinionatedReviews=review_nodes(("tlmader", P2896_REVIEWED))))
+        shell.head = P2896_HEAD
+        result = json.loads(call_review_hook(shell))
+        self.assertEqual(result, {**json.loads(LANDED_IN_REVIEW), "re_requested_reviewers": ["tlmader"]})
+        self.assertEqual(
+            self.posts(shell),
+            [["gh", "api", "-X", "POST", "repos/example-org/example-repo/pulls/7/requested_reviewers", "-f", "reviewers[]=tlmader"]],
+        )
+
+    def test_only_the_stale_reviewer_is_asked(self):
+        shell = self.shell(review_nodes(("stale", OTHER), ("fresh", HEAD), ("also-stale", "c" * 40)))
+        result = json.loads(call_review_hook(shell))
+        self.assertEqual(result["re_requested_reviewers"], ["stale", "also-stale"])
+        self.assertEqual([post[-1] for post in self.posts(shell)], ["reviewers[]=stale", "reviewers[]=also-stale"])
+
+    def test_a_review_on_the_current_head_is_never_asked_again(self):
+        shell = self.shell(review_nodes(("fresh", HEAD)))
+        self.assertIsNone(call_review_hook(shell))
+        self.assertEqual(self.posts(shell), [])
+
+    def test_a_failed_request_is_reported_and_the_handoff_still_stands(self):
+        shell = self.shell(review_nodes(("reviewer", OTHER)), post_returncode=22)
+        result = json.loads(call_review_hook(shell))
+        self.assertEqual(result["status"], "review")
+        self.assertNotIn("re_requested_reviewers", result)
+        self.assertIn("reviewer:", result["re_request_failures"][0])
+        self.assertIn("Reviews may only be requested from collaborators", result["re_request_failures"][0])
+
+    def test_an_unreadable_pull_request_is_reported_and_the_handoff_still_stands(self):
+        result = json.loads(call_review_hook(FakeShell(gh_returncode=1)))
+        self.assertEqual(result["status"], "review")
+        self.assertIn("no pull requests found", result["re_request_failures"][0])
+
+    def test_nothing_is_sent_when_the_card_completes(self):
+        shell = self.shell(review_nodes(("reviewer", OTHER)))
+        done = json.dumps({"success": True, "status": "done"})
+        self.assertIsNone(call_review_hook(shell, result=done, tool_name="kanban_complete"))
+        self.assertIsNone(call_review_hook(shell, result=LANDED_IN_REVIEW, tool_name="kanban_complete"))
+        self.assertIsNone(call_review_hook(shell, result=done))
+        self.assertEqual(shell.calls, [])
+
+    def test_a_refused_handoff_sends_nothing(self):
+        shell = self.shell(review_nodes(("reviewer", OTHER)))
+        self.assertIsNone(call_review_hook(shell, result=json.dumps({"error": "pr-ready-gate blocked"})))
+        self.assertEqual(shell.calls, [])
+
+    def test_a_merged_pull_request_is_not_asked(self):
+        shell = self.shell(review_nodes(("reviewer", OTHER)), pr={"state": "MERGED"})
+        self.assertIsNone(call_review_hook(shell))
+        self.assertEqual(self.posts(shell), [])
+
+    def test_awaiting_a_first_approval_asks_nobody(self):
+        shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL})
+        self.assertIsNone(call_review_hook(shell))
+        self.assertEqual(self.posts(shell), [])
+
+    def test_a_deleted_reviewer_is_never_asked(self):
+        reviews = {"pageInfo": {"hasNextPage": False}, "nodes": [{"state": "CHANGES_REQUESTED", "author": None, "commit": {"oid": OTHER}}]}
+        shell = self.shell(reviews)
+        self.assertIsNone(call_review_hook(shell))
+        self.assertEqual(self.posts(shell), [])
+
+    def test_an_ungated_profile_is_ignored(self):
+        shell = self.shell(review_nodes(("reviewer", OTHER)))
+        self.assertIsNone(call_review_hook(shell, ctx=FakeCtx(profile="default")))
+        self.assertEqual(shell.calls, [])
+
+
 class RegisterTest(unittest.TestCase):
-    def test_registers_one_pre_tool_call_hook_that_gates(self):
+    def test_registers_the_gate_and_the_review_hook(self):
         ctx = FakeCtx()
         gate.register(ctx)
-        self.assertEqual([name for name, _ in ctx.hooks], ["pre_tool_call"])
+        self.assertEqual([name for name, _ in ctx.hooks], ["pre_tool_call", "transform_tool_result"])
         hook = ctx.hooks[0][1]
         with mock.patch.dict(os.environ, WORKER_ENV, clear=True), \
                 mock.patch.object(gate.subprocess, "run", FakeShell(pr={**CLEAN, "state": "CLOSED"})):
