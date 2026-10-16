@@ -43,7 +43,7 @@ class Commit:
     sha: str
     message: str
     changes: list = field(default_factory=list)
-    second: str | None = None
+    second_parent: str | None = None
 
 
 def git(*args: str) -> str:
@@ -120,10 +120,10 @@ def check_merge(sha: str, parents: list, first: bool, default: str, base_head: s
 
 
 def read_commit(sha: str, parents: list) -> Commit:
-    commit = Commit(sha, git("log", "-1", "--format=%B", sha), second=parents[1] if len(parents) > 1 else None)
+    commit = Commit(sha, git("log", "-1", "--format=%B", sha), second_parent=parents[1] if len(parents) > 1 else None)
     # A merge's own work is what differs from its base side too. Every other
     # path came from the base head, whose blobs the remote already holds.
-    own = {path for _, path in raw_diff(parents[1], sha)} if commit.second else None
+    own = {path for _, path in raw_diff(parents[1], sha)} if commit.second_parent else None
     for (old_mode, new_mode, _, blob, status), path in raw_diff(parents[0], sha):
         if SUBMODULE in (old_mode, new_mode):
             raise Refusal(f"commit {sha} changes submodule {path}; the API cannot write submodules")
@@ -201,7 +201,8 @@ def publish(repository: str, branch: str, parent: str, commit: Commit) -> str:
     # The tree request cannot hold a path as both a file and a directory, so a directory replaced by a file needs its deletions first.
     entries.sort(key=lambda entry: entry["sha"] is not None)
     tree = gh_send(f"{git_data}/trees", {"base_tree": remote_tree(repository, parent), "tree": entries})
-    created = gh_send(f"{git_data}/commits", {"message": commit.message, "tree": tree["sha"], "parents": [parent, *([commit.second] if commit.second else [])]})
+    parents = [parent, commit.second_parent] if commit.second_parent else [parent]
+    created = gh_send(f"{git_data}/commits", {"message": commit.message, "tree": tree["sha"], "parents": parents})
     gh_send(f"{git_data}/refs/heads/{branch}", {"sha": created["sha"], "force": False}, method="PATCH")
     return created["sha"]
 

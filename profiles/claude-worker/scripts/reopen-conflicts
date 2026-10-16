@@ -7,10 +7,12 @@ job runs this script every few minutes. It lists the App's open pull requests
 that belong to a `review` or `blocked` card and, for each one GitHub reports as
 `CONFLICTING`, comments on the card and hands it back to its worker. A card is
 sent back once per pull request head: the comment ends with the line
-`conflict_head: <sha>`, and a card whose comments already hold that line for the
-current head is skipped. A worker that blocks on the same head is not unblocked
-in a loop, and a worker that pushes a new head that still conflicts is told
-again. `UNKNOWN` mergeability changes nothing, because GitHub resolves it on a
+`conflict_head: <sha>`, and a `blocked` card whose comments already hold that
+line for the current head is skipped. A worker that blocks on the same head is
+not unblocked in a loop, and a worker that pushes a new head that still
+conflicts is told again. A `review` card that holds the line is a handback that
+failed partway, because the ready gate refuses a conflicting head, so the
+review reopen runs again. `UNKNOWN` mergeability changes nothing, because GitHub resolves it on a
 later run. Prints one line per card sent back, `<task id> <pull request url>`.
 A failure for one repository or card goes to stderr and the others still run.
 Exits 1 when any failed, or 2 when HERMES_HOME is not a profile home or the
@@ -120,12 +122,14 @@ def comment_text(pull: dict) -> str:
     )
 
 
-def send_back(hermes: str, task: dict, pull: dict) -> None:
+def send_back(hermes: str, task: dict, pull: dict, sent: bool) -> None:
+    """Every step either moves the card or leaves it where the next run repeats the step."""
     task_id = task["id"]
-    run(hermes, "kanban", "comment", task_id, comment_text(pull))
     if task["status"] == "blocked":
         run(hermes, "kanban", "unblock", task_id)
         run(hermes, "kanban", "request-review", task_id)
+    if not sent:
+        run(hermes, "kanban", "comment", task_id, comment_text(pull))
     run(hermes, "kanban", "reopen-review", task_id, "--reason", HANDBACK_REASON)
 
 
@@ -152,15 +156,16 @@ def main() -> int:
             continue
         for task in tasks:
             pull = next(
-                (p for p in pulls if p["headRefName"] == task["branch_name"] and card_branch.is_app(p["author"]["login"], login)),
+                (p for p in pulls if p["headRefName"] == task["branch_name"] and card_branch.is_app((p.get("author") or {}).get("login", ""), login)),
                 None,
             )
             if pull is None or pull["mergeable"] != "CONFLICTING":
                 continue
             try:
-                if already_sent(hermes, task["id"], pull["headRefOid"]):
+                sent = already_sent(hermes, task["id"], pull["headRefOid"])
+                if sent and task["status"] == "blocked":
                     continue
-                send_back(hermes, task, pull)
+                send_back(hermes, task, pull, sent)
             except (Failed, ValueError) as failure:
                 print(f"reopen-conflicts: {task['id']}: {failure}", file=sys.stderr)
                 failed = True

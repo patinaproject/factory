@@ -131,9 +131,9 @@ class ReopenConflictsTest(unittest.TestCase):
 
         self.assertEqual((proc.returncode, proc.stdout), (0, f"t_2 https://github.com/{REPO}/pull/8\n"))
         self.assertEqual(self.writes(), [
-            ["kanban", "comment", "t_2", self.comment(8, base="develop")],
             ["kanban", "unblock", "t_2"],
             ["kanban", "request-review", "t_2"],
+            ["kanban", "comment", "t_2", self.comment(8, base="develop")],
             ["kanban", "reopen-review", "t_2", "--reason", "merge conflict with the base branch; see the card comments"],
         ])
 
@@ -161,6 +161,26 @@ class ReopenConflictsTest(unittest.TestCase):
             ["kanban", "comment", "t_2", self.comment(8, NEW_HEAD)],
             ["kanban", "reopen-review", "t_2", "--reason", "merge conflict with the base branch; see the card comments"],
         ])
+
+    def test_a_review_card_that_carries_the_head_only_reopens_again(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1")]
+        self.state["comments"] = {"t_1": [{"body": self.comment(7)}]}
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, f"t_1 https://github.com/{REPO}/pull/7\n"))
+        self.assertEqual(self.writes(), [
+            ["kanban", "reopen-review", "t_1", "--reason", "merge conflict with the base branch; see the card comments"],
+        ])
+
+    def test_a_pull_request_with_no_author_is_ignored(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1"), card("t_2", "review", "abc-2")]
+        self.state["pulls"][REPO] = [{**pull(7, "abc-1"), "author": None}, pull(8, "abc-2")]
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, f"t_2 https://github.com/{REPO}/pull/8\n"))
 
     def test_a_pull_request_from_a_person_is_ignored(self) -> None:
         self.state["tasks"] = [card("t_1", "review", "abc-1")]
