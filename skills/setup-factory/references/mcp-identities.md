@@ -108,7 +108,9 @@ checkout with the run's environment, settings, and MCP config, reads the
 status of each server, and stops before Claude Code reaches the model. It
 prints an `mcp <server> in <owner>/<name>` line for each server that is not
 `connected` and not in `mcp_left_out`, and a line for each `FACTORY_MCP_` name
-missing from `terminal.env_passthrough`. It prints no value.
+missing from `terminal.env_passthrough`. It prints no value. The environment
+that runs `check-install` must hold each `FACTORY_MCP_` value, as a worker
+does. Otherwise the probe reports the unset name instead of the statuses.
 
 To read every status for one repository:
 
