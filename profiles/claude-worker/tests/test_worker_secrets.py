@@ -21,6 +21,7 @@ LINEAR_CLIENT_ID=id
 GITHUB_WEBHOOK_SECRET=x
 SLACK_BOT_TOKEN=x
 CLAUDE_PROXY_TOKEN=t
+SENTRY_ACCESS_TOKEN=st
 OP_SERVICE_ACCOUNT_TOKEN=x
 FACTORY_INFISICAL_CLIENT_SECRET=x
 LINEAR_CLIENT_SECRET=s
@@ -75,6 +76,17 @@ class WorkerSecretsTest(unittest.TestCase):
                 (self.worker / "config.yaml").write_text(config)
 
                 self.assertEqual(self.run_script(), (0, "LINEAR_CLIENT_ID=id\nLINEAR_CLIENT_SECRET=s\n"))
+
+    def test_sentry_token_env_adds_only_that_variable(self) -> None:
+        (self.worker / "config.yaml").write_text(CONFIG + '          sentry_token_env: "SENTRY_ACCESS_TOKEN"\n')
+
+        code, out = self.run_script()
+
+        self.assertEqual((code, out), (
+            0, "LINEAR_CLIENT_ID=id\nCLAUDE_PROXY_TOKEN=t\nSENTRY_ACCESS_TOKEN=st\nLINEAR_CLIENT_SECRET=s\n"
+        ))
+        for name in FORBIDDEN:
+            self.assertNotIn(name, out)
 
     def test_refuses_any_argument(self) -> None:
         self.assertEqual(self.run_script("--help"), (2, ""))

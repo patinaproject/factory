@@ -29,6 +29,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import quote
 
 import card_branch
 
@@ -64,7 +65,12 @@ HANDOFF = (
 PUBLISH_RULE = (
     "Publish commits only by running {push_signed} from the worktree, never `git push`. It creates "
     "commits that the GitHub App signs, which repositories requiring verified signatures need. To bring "
-    "in the base branch, run `gh pr update-branch`, never a local merge."
+    "in the base branch, run `gh pr update-branch`. When GitHub reports the pull request as conflicting "
+    "(`mergeable: CONFLICTING`) and update-branch refuses, fetch, run `git merge origin/<base>`, resolve "
+    "the conflicts, commit the merge, and publish it with push-signed, which accepts a merge of the current "
+    "base head. Then wait for checks and finish through the ready gate as usual. When you cannot resolve a "
+    "conflict with confidence, for example both sides change the same behavior, do not guess: run "
+    "`hermes kanban block <task id> --kind needs_input '<reason naming each conflicting file>'` once and stop."
 )
 LINEAR_RULE = (
     "Reach Linear only with the token in LINEAR_API_KEY, which the factory's Linear agent app issued for this "
@@ -72,17 +78,20 @@ LINEAR_RULE = (
     "set revokes the factory's tokens."
 )
 CHECKS_RULE = (
-    "A finished check never runs again by itself, and the GitHub App cannot re-request a check. When a "
-    "check failed on a head that is behind the base branch, or a person says the cause of a failure is "
-    "fixed, run `gh pr update-branch <number>` so every check runs again on a new head, then wait for "
-    "that run before you judge the ready gate."
+    "A finished check never runs again by itself. When a check failed on a head that is behind the base "
+    "branch, or a person says the cause of a failure is fixed, run `gh pr update-branch <number>` so every "
+    "check runs again on a new head. When a required check failed in a test or step the pull request does "
+    "not change, such as a timeout, run `gh run rerun <run-id> --failed` once for that run. Wait for the "
+    "new run with `wait-for-checks` before you judge the ready gate. When a re-run fails again, block the "
+    "card and name both attempts' URLs."
 )
 EVIDENCE_RULE = (
     "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
     "shows its observable result, such as rendered command output or a probe. Run `python3 {upload_image} "
     "<file>...` on the images, then paste each `<img>` tag it prints into the description under the section "
-    "it proves, with a one-line caption. A local path is never evidence. When the helper exits 3, attach the "
-    "images to the Linear issue instead and say so in the pull request body."
+    "it proves, with a one-line caption. A local path is never evidence. The App's token cannot upload, so "
+    "this helper replaces `gh pr edit --attach` and browser uploads, even where a skill names them. When the "
+    "helper exits 3, attach the images to the Linear issue instead and say so in the pull request body."
 )
 FINISH_RULE = (
     "Stop every background command, monitor, and watcher you started before you write your final result. "
@@ -96,11 +105,15 @@ CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
-LINEAR_MCP_CONFIG = json.dumps({"mcpServers": {"linear": {
+LINEAR_MCP_SERVER = {
     "type": "http",
     "url": "https://mcp.linear.app/mcp",
     "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
-}}})
+}
+# Replaces a repository's `sentry` server, whose OAuth sign-in needs a browser. `Sentry-Bearer` sends a
+# static Sentry token, and the `inspect` skill exposes only Sentry's read-only tools.
+SENTRY_MCP_URL = "https://mcp.sentry.dev/mcp?skills=inspect"
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
@@ -197,15 +210,20 @@ def person_pushed_after(gh, repo: str, person: dict, factory: dict) -> bool:
     """True unless the factory's pull request carries all of the person's work.
 
     The work is carried when the person's head is an ancestor of the factory's head. When the factory squashed
-    and the ancestry is gone, it is carried when no commit on the person's pull request is newer than the
-    factory's pull request.
+    and the ancestry is gone, it is carried when the person's branch, in this repository, saw no activity after
+    the factory's pull request opened. Commit dates play no part, because a commit can be pushed long after it
+    was made. A branch in a fork has no activity here, so it is never carried.
     """
     compare = gh(f"repos/{repo}/compare/{factory['head']['sha']}...{person['head']['sha']}?per_page=1")
     if compare["status"] in ("behind", "identical"):
         return False
-    last_page = max(1, -(-person["commits"] // 100))
-    commits = gh(f"repos/{repo}/pulls/{person['number']}/commits?per_page=100&page={last_page}")
-    return any(commit["commit"]["committer"]["date"] > factory["created_at"] for commit in commits)
+    if compare["status"] != "diverged":
+        return True
+    if ((person["head"].get("repo") or {}).get("full_name") or "").lower() != repo.lower():
+        return True
+    ref = quote(person["head"]["ref"], safe="/")
+    records = gh(f"repos/{repo}/activity?ref=refs/heads/{ref}&per_page=1")
+    return not records or records[0]["timestamp"] > factory["created_at"]
 
 
 def supersede_takeover(repo: str, branch: str, takeover_pr: str | None, login: str | None, gh=card_branch.run_gh) -> dict | None:
@@ -244,12 +262,16 @@ def supersede_takeover(repo: str, branch: str, takeover_pr: str | None, login: s
                 gh(f"repos/{repo}/pulls/{factory['number']}", "-X", "PATCH", "-f", f"body={body}\n\n{line}.".strip())
             except card_branch.GhFailed as failure:
                 result["body_error"] = str(failure)
-        gh(f"repos/{repo}/issues/{number}/comments", "-X", "POST", "-f",
-           f"body=The factory opened #{factory['number']} from this pull request's work, so this one is closed "
-           f"and review continues there: {factory['html_url']}")
         gh(f"repos/{repo}/pulls/{number}", "-X", "PATCH", "-f", "state=closed")
-        return {**result, "action": "closed", "replacement": factory["html_url"]}
-    except (card_branch.GhFailed, KeyError, TypeError) as failure:
+        result.update(action="closed", replacement=factory["html_url"])
+        try:
+            gh(f"repos/{repo}/issues/{number}/comments", "-X", "POST", "-f",
+               f"body=The factory opened #{factory['number']} from this pull request's work, so this one is closed "
+               f"and review continues there: {factory['html_url']}")
+        except card_branch.GhFailed as failure:
+            result["comment_error"] = str(failure)
+        return result
+    except (card_branch.GhFailed, json.JSONDecodeError, KeyError, TypeError) as failure:
         return {**result, "action": "failed", "error": str(failure)}
 
 
@@ -502,10 +524,47 @@ def model_environment(transport: dict, tiers: dict) -> dict:
     return env
 
 
+def sentry_token_env(transport: dict) -> str | None:
+    name = transport.get("sentry_token_env")
+    if not name:
+        return None
+    # The settings env also carries LINEAR_API_KEY and ANTHROPIC_*, which would overwrite the token.
+    if not isinstance(name, str) or not ENV_NAME.match(name) or name == "LINEAR_API_KEY" or name.startswith("ANTHROPIC_"):
+        raise Refusal(
+            f"claude_session.sentry_token_env {name!r} must name an environment variable other than "
+            "LINEAR_API_KEY and ANTHROPIC_*"
+        )
+    if not os.environ.get(name):
+        raise Refusal(f"sentry_token_env names {name}, which is not set")
+    return name
+
+
+def mcp_config(transport: dict) -> str:
+    servers = {"linear": LINEAR_MCP_SERVER}
+    sentry = sentry_token_env(transport)
+    if sentry:
+        servers["sentry"] = {
+            "type": "http",
+            "url": SENTRY_MCP_URL,
+            "headers": {"Authorization": f"Sentry-Bearer ${{{sentry}}}"},
+        }
+    return json.dumps({"mcpServers": servers})
+
+
+def disabled_mcp_servers(transport: dict) -> list[str]:
+    value = transport.get("disabled_mcp_servers") or []
+    if not isinstance(value, list) or not all(isinstance(name, str) and name for name in value):
+        raise Refusal(f"claude_session.disabled_mcp_servers {value!r} must be a list of MCP server names")
+    return value
+
+
 def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
     env = {"LINEAR_API_KEY": api_key}
+    sentry = sentry_token_env(transport)
+    if sentry:
+        env[sentry] = os.environ[sentry]
     if transport.get("base_url"):
         env["ANTHROPIC_BASE_URL"] = transport["base_url"]
     token_env = transport.get("auth_token_env")
@@ -520,10 +579,14 @@ def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
     # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
     guard = {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(CI_WAIT_GUARD))}"}
-    return {"env": env, "hooks": {
+    settings = {"env": env, "hooks": {
         "SessionStart": [{"hooks": [remove]}],
         "PreToolUse": [{"matcher": "Bash", "hooks": [guard]}],
     }}
+    disabled = disabled_mcp_servers(transport)
+    if disabled:
+        settings["disabledMcpjsonServers"] = disabled
+    return settings
 
 
 def remove_on_stop(path: Path) -> None:
@@ -702,6 +765,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     repo = find_repository(settings, args.repo)
     transport = settings.get("claude_session") or {}
     turn_limit = max_turns_args(transport)
+    mcp = mcp_config(transport)
     threshold = fresh_after_tokens(transport)
     prefix = worker_entry_prefix(repo)
     worktree = resolve_worktree(workspace, repo["path"])
@@ -738,7 +802,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
                 upload_image=Path(__file__).resolve().with_name("github-upload-image"),
                 wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
             ),
-            "--mcp-config", LINEAR_MCP_CONFIG,
+            "--mcp-config", mcp,
         ]
         if transport.get("model"):
             command += ["--model", transport["model"]]

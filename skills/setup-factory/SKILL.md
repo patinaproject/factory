@@ -118,6 +118,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
 | The token variable that `claude_session.auth_token_env` names | `<worker>/.env`. Never name it `ANTHROPIC_*` |
+| The Sentry token variable that `claude_session.sentry_token_env` names, when workers read Sentry | `<worker>/.env`. See [Sentry access](references/sentry.md) |
 | `FACTORY_INFISICAL_CLIENT_ID` and `FACTORY_INFISICAL_CLIENT_SECRET`, when the factory uses Infisical | `<home>/.env` holds the default home's machine identity and `<worker>/.env` the worker's, which reads only the worker's three keys. Claude Code receives neither: `claude-session` starts it from an allowlist of variable names |
 | Cloudflare tunnel token | The `cloudflared` system service only |
 | `CLOUDFLARE_API_TOKEN` | The SST app's own secret storage or environment |
@@ -596,7 +597,7 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
-  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "max_turns": 0}
+  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "sentry_token_env": "", "disabled_mcp_servers": [], "max_turns": 0}
 }
 ```
 
@@ -613,6 +614,8 @@ it to the prefix. `claude_session.max_turns`
 caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
 one run can finish a whole task. A positive limit pauses a long task, such as
 a dependency upgrade, and the worker resumes it in a second run.
+`claude_session.sentry_token_env` and `disabled_mcp_servers` stay empty unless
+workers read Sentry, as [Sentry access](references/sentry.md) describes.
 
 A card that waits in review leaves its Claude session idle past the 5-minute
 prompt cache, and a resumed large session re-writes its whole context at the
@@ -854,7 +857,8 @@ belongs to the worker profile.
 `refresh-checkouts`. `cron create` does not remove duplicates. If more than one
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
-jobs: `refresh-checkouts`, `refresh-owned-refs`, and `refresh-gh-app-login`.
+jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`, and
+`refresh-gh-app-login`.
 A copy there runs without the worker's scripts and settings, so remove it the
 same way. The default home holds exactly one job, `check-install`, described
 below. A second setup session runs this check before it
@@ -887,6 +891,19 @@ is missing or older than 5 minutes. Create the job when `cron list` has no
 
 ```sh
 hermes -p claude-worker cron create "every 1m" --name refresh-owned-refs --no-agent --script refresh-owned-refs </dev/null
+```
+
+**Conflict job.** GitHub sends no webhook when a pull request starts to
+conflict because its base branch moved. `reopen-conflicts` lists the App's
+open pull requests for every `review` or `blocked` card every 5 minutes. For
+each one GitHub reports as `CONFLICTING`, it comments on the card and hands
+the card back to its worker. The worker merges the base branch, resolves the
+conflicts, and publishes the merge with `push-signed`. A card is sent back
+once per pull request head, so a worker that blocks on the same head stays
+blocked. Create the job when `cron list` has no `reopen-conflicts` job:
+
+```sh
+hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null
 ```
 
 **Install drift job.** `check-install` compares the live worker profile, the
@@ -1114,9 +1131,11 @@ each check. Report each result.
     with `action` `closed`, the original is closed with a comment that links
     the replacement, and the replacement's description ends with
     `Supersedes #<number>`. If the person pushed commits that the replacement lacks
-    after it opened, the line reports `left` with `person pushed after takeover`
-    and the original stays open. The original's branch is unchanged. Run the card
-    again and the line reports `left`, with no second comment.
+    after it opened, whatever the commits' dates, or built on the replacement's
+    head, or opened the original from a fork, the line reports `left` with
+    `person pushed after takeover` and the original stays open. The original's
+    branch is unchanged. Run the card again and the line reports `left`, with
+    no second comment.
 18. Once a card's pull request is open, send a Linear `stop`, then reply in
     the same agent session. In `hermes kanban show <task id> --json`, the
     events after `blocked` are `unblocked`, `review_requested`, and

@@ -201,15 +201,28 @@ one call with the handoff payload:
 
 Then act on the result:
 
-- **Review accepted.** Post an `action` activity with `action`
-  `Ready for review`, `parameter` set to `published_pr`, and the handoff
+- **Review accepted.** Post one `action` activity with the handoff
   `external_urls`. Do not post a `response`, because it ends the Linear
   session before the pull request merges. You are done.
+  - When the result has `re_requested_reviewers`, `pr-ready-gate` asked
+    those reviewers to review again because their changes-requested review
+    is on an older head. Set `action` to
+    `Changes are in, re-requested review from` and `parameter` to the
+    reviewers' logins, each with a leading `@`, separated by a comma and a
+    space.
+  - Otherwise set `action` to `Ready for review` and `parameter` to
+    `published_pr`.
+  - When the result has `re_request_failures`, the gate could not ask
+    someone. Name each failure in the activity's `parameter` after the
+    reviewers or the pull request URL.
 - **Completion accepted.** Post a `response` activity that summarizes the
   change, with the handoff `external_urls`. You are done.
-- **Refused by `pr-ready-gate`.** The refusal says why: draft, a state other
-  than `CLEAN`, a head commit that is not the worktree's `HEAD`, or a
-  `MERGED` pull request sent to review.
+- **Refused by `pr-ready-gate`.** The refusal says why: draft, an unmet
+  branch rule, a head commit that is not the worktree's `HEAD`, or a
+  `MERGED` pull request sent to review. It names each check whose latest
+  run is failing or pending. A pull request that is `BLOCKED` only for an
+  approving review passes `kanban_request_review`, so never wait for
+  `CLEAN` before you hand it to review.
   - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
     running. Run `gh pr checks <pr> --watch --fail-fast` from the worktree
     as one foreground call with the tool's timeout set to 400, and run it
