@@ -1189,14 +1189,21 @@ each check. Report each result.
     or comment from a bot, an approval, a thanks, and a bare question leave the
     card `blocked`.
 
-24. Merge a card's pull request past a failing required check while the
-    card is in `review` and its Linear issue is In Progress. The card's
-    comments include `Merged with failing required checks:` with the check
-    names, the card is `blocked` with block kind `needs_input`, and the Linear
-    agent session gets one `elicitation` that says the pull request merged and
-    asks whether the issue is done. A reply in the session leaves the card
-    `blocked`. Mark the Linear issue Done, and the card is archived. Repeat with the issue already Done before the merge: the card is
-    archived with the same comment, and the session gets no post.
+24. Merge a card's pull request while Hermes still holds a failed check run
+    against it, with the card in `review` and its Linear issue In Progress.
+    First merge past a check whose newest run failed. The card's comments
+    include `Merge refused by Hermes: required checks failed:` with the check
+    names, the card is unassigned and `blocked` with block kind `needs_input`,
+    and the Linear agent session gets one `elicitation` that says the pull
+    request merged and asks whether the issue is done. A reply in the session
+    leaves the card `blocked`. Mark the Linear issue Done, and the card is
+    archived. Then repeat with a check that failed once and passed on a newer
+    run (re-run it before the merge). The comment is
+    `Merge refused by Hermes: Hermes counted failed runs that newer passing runs replaced:`
+    and the elicitation says the checks passed on their newest runs. Repeat
+    either case with the issue already Done before the merge: the card is
+    archived with the same comment, and the session gets no post. In every case
+    the card stays unassigned.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate
