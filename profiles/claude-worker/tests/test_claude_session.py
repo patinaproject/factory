@@ -652,6 +652,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(call["settings"]["mode"], "0o600")
         self.assertEqual(call["settings"]["content"]["env"], {
                 "LINEAR_API_KEY": "cached-token",
+                "ENABLE_TOOL_SEARCH": "true",
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:9999",
                 "ANTHROPIC_AUTH_TOKEN": "token-value",
                 "ANTHROPIC_MODEL": "example-model",
@@ -719,7 +720,7 @@ class ClaudeSessionTest(GitFixture):
         call = self.claude_call()
         token = WORKER_SECRETS["GITHUB_UPLOAD_TOKEN"]
         self.assertNotIn("GITHUB_UPLOAD_TOKEN", call["env"])
-        self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+        self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true"})
         self.assertFalse(any(token in value for value in [*call["argv"], *call["env"].values()]))
 
     def test_the_system_prompt_names_the_upload_helper_by_its_absolute_path(self) -> None:
@@ -839,7 +840,7 @@ class ClaudeSessionTest(GitFixture):
 
         call = self.claude_call()
         self.assertEqual(call["settings"]["mode"], "0o600")
-        self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+        self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true"})
         self.assertNotIn("LINEAR_API_KEY", call["env"])
         self.assertFalse(Path(call["argv"][-1]).exists())
         self.assertEqual([r for r in self.linear_requests(self.hermes_home) if "form" in r], [])
@@ -857,6 +858,13 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(header, "Bearer cached-token")
         self.assertFalse(any("cached-token" in arg for arg in argv))
 
+    def test_mcp_tool_schemas_are_deferred_behind_tool_search_on_a_proxy_transport(self) -> None:
+        self.settings = self.write_settings([self.repository], {"base_url": "http://127.0.0.1:9999"})
+
+        self.run_session()
+
+        self.assertEqual(self.claude_call()["settings"]["content"]["env"]["ENABLE_TOOL_SEARCH"], "true")
+
     def test_a_sentry_token_reaches_a_read_only_sentry_server_only_through_the_settings_file(self) -> None:
         self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
 
@@ -872,7 +880,7 @@ class ClaudeSessionTest(GitFixture):
             "headers": {"Authorization": "Sentry-Bearer ${EXAMPLE_SENTRY_TOKEN}"},
         })
         self.assertEqual(sorted(servers), ["linear", "sentry"])
-        self.assertEqual(env, {"LINEAR_API_KEY": "cached-token", "EXAMPLE_SENTRY_TOKEN": "sntryu_example"})
+        self.assertEqual(env, {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true", "EXAMPLE_SENTRY_TOKEN": "sntryu_example"})
         self.assertEqual(call["settings"]["mode"], "0o600")
         self.assertNotIn("EXAMPLE_SENTRY_TOKEN", call["env"])
         self.assertFalse(any("sntryu_example" in arg for arg in argv))
@@ -911,7 +919,7 @@ class ClaudeSessionTest(GitFixture):
                 call = self.claude_call()
                 argv = call["argv"]
                 self.assertEqual(argv[argv.index("--mcp-config") + 1], LINEAR_MCP_CONFIG)
-                self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+                self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true"})
                 self.assertNotIn("disabledMcpjsonServers", call["settings"]["content"])
 
     def test_disabled_mcp_servers_reach_the_settings_file(self) -> None:
@@ -940,7 +948,7 @@ class ClaudeSessionTest(GitFixture):
 
         self.run_session()
 
-        self.assertEqual(self.claude_call()["settings"]["content"]["env"], {"LINEAR_API_KEY": "minted-1"})
+        self.assertEqual(self.claude_call()["settings"]["content"]["env"], {"LINEAR_API_KEY": "minted-1", "ENABLE_TOOL_SEARCH": "true"})
         cache = self.hermes_home / "plugin-data" / "linear-agent-session" / "token.json"
         self.assertEqual(json.loads(cache.read_text())["access_token"], "minted-1")
         forms = [r["form"] for r in self.linear_requests(self.hermes_home) if "form" in r]
@@ -962,7 +970,7 @@ class ClaudeSessionTest(GitFixture):
         self.run_session()
 
         settings = self.claude_call()["settings"]
-        self.assertEqual(settings["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+        self.assertEqual(settings["content"]["env"], {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true"})
         self.assertFalse(settings["exists_after_start"])
 
     def test_settings_register_the_ci_wait_guard_on_bash_calls(self) -> None:
@@ -1011,7 +1019,7 @@ class ClaudeSessionTest(GitFixture):
         settings = self.claude_call()["settings"]
         self.assertEqual(status, 0)
         self.assertEqual(settings["mode"], "0o600")
-        self.assertEqual(settings["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+        self.assertEqual(settings["content"]["env"], {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true"})
         self.assertFalse(self.settings_path().exists())
 
     def test_refused_run_still_removes_a_stale_settings_file(self) -> None:
@@ -1048,7 +1056,7 @@ class ClaudeSessionTest(GitFixture):
 
         call = self.claude_call()
         self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
-        self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+        self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true"})
 
     def test_without_max_turns_the_run_has_no_turn_limit(self) -> None:
         for claude_session in ({}, {"max_turns": None}, {"max_turns": 0}):
