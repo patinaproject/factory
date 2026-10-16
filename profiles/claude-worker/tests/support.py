@@ -55,7 +55,11 @@ if options.get("leftover_pid_file"):
     leftover = subprocess.Popen(["sleep", "600"], start_new_session=bool(options.get("leftover_detached")))
     with open(options["leftover_pid_file"], "w") as pid_file:
         pid_file.write(str(leftover.pid))
+for line in options.get("transcript_lines", []):
+    with open(options["transcript"], "a") as transcript:
+        transcript.write(json.dumps(line) + "\\n")
 print(json.dumps({
+    **options.get("output", {}),
     "type": "result",
     "subtype": options.get("subtype", "success"),
     "is_error": False,

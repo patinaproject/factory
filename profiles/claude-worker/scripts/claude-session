@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
@@ -124,6 +125,13 @@ CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
 HANDOFF_RESULT_CHARS = 2000
 USAGE_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+# The result line's usage keys, after the camelCase keys of claude's `modelUsage`.
+MODEL_USAGE_KEYS = (
+    ("input_tokens", "inputTokens"),
+    ("cache_read_input_tokens", "cacheReadInputTokens"),
+    ("cache_creation_input_tokens", "cacheCreationInputTokens"),
+    ("output_tokens", "outputTokens"),
+)
 QUIET_SECONDS = 1.0
 GRACE_SECONDS = 10.0
 TOOLCHAIN_CHECK_SECONDS = 120
@@ -364,26 +372,54 @@ def session_id_for(issue_id: str, generation: int) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
-def last_assistant(transcript: Path) -> tuple[int | None, str | None]:
-    tokens = text = None
-    with open(transcript, encoding="utf-8", errors="replace") as lines:
+def main_messages(transcript: Path, offset: int = 0) -> Iterator[dict]:
+    """Yield the main session's assistant messages from a byte offset on, without subagents or synthetic replies."""
+    with open(transcript, "rb") as lines:
+        lines.seek(offset)
         for line in lines:
             try:
-                entry = json.loads(line)
+                entry = json.loads(line.decode("utf-8", "replace"))
             except ValueError:
                 continue
             message = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
-            if not isinstance(message, dict) or entry.get("isSidechain") or message.get("model") == "<synthetic>":
-                continue
-            usage = message.get("usage")
-            parts = [usage.get(key) for key in USAGE_KEYS] if isinstance(usage, dict) else []
-            ok = len(parts) == len(USAGE_KEYS) and all(isinstance(part, int) and not isinstance(part, bool) for part in parts)
-            tokens = sum(parts) if ok else None
-            content = message.get("content")
-            blocks = content if isinstance(content, list) else []
-            said = "\n".join(b["text"] for b in blocks if isinstance(b, dict) and isinstance(b.get("text"), str)).strip()
-            text = said or None
+            if isinstance(message, dict) and not entry.get("isSidechain") and message.get("model") != "<synthetic>":
+                yield message
+
+
+def context_tokens(message: dict) -> int | None:
+    usage = message.get("usage")
+    parts = [usage.get(key) for key in USAGE_KEYS] if isinstance(usage, dict) else []
+    ok = len(parts) == len(USAGE_KEYS) and all(isinstance(part, int) and not isinstance(part, bool) for part in parts)
+    return sum(parts) if ok else None
+
+
+def last_assistant(transcript: Path) -> tuple[int | None, str | None]:
+    tokens = text = None
+    for message in main_messages(transcript):
+        tokens = context_tokens(message)
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else []
+        said = "\n".join(b["text"] for b in blocks if isinstance(b, dict) and isinstance(b.get("text"), str)).strip()
+        text = said or None
     return tokens, text
+
+
+def first_context(transcript: Path | None, offset: int) -> int | None:
+    """The context size of the run's first call: the first main message the run appended past offset."""
+    if transcript is None:
+        return None
+    return next((context_tokens(message) for message in main_messages(transcript, offset)), None)
+
+
+def model_usage(output: dict) -> dict | None:
+    """Copy only the token counts from claude's per-model usage, which includes every subagent's calls."""
+    models = output.get("modelUsage")
+    if not isinstance(models, dict):
+        return None
+    return {
+        model: {key: counts.get(name) for key, name in MODEL_USAGE_KEYS}
+        for model, counts in models.items() if isinstance(counts, dict)
+    }
 
 
 def fresh_after_tokens(transport: dict) -> int:
@@ -849,6 +885,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             command += ["--model", transport["model"]]
         command += ["--settings", str(settings_path)]
         trust_checkout(Path(repo["path"]).resolve())
+        offset = plan.previous.stat().st_size if plan.resumed else 0
         try:
             write_private(settings_path, claude_settings(transport, linear_api_key(), settings_path))
             output, exit_code, detail = run_claude(command, worktree)
@@ -857,11 +894,13 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         if output is not None:
             seen_path.write_text(json.dumps([*seen, *map(comment_key, comments)]))
         superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login) if output is not None else None
+        first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
 
     report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None, "superseded": superseded}
     if output is None:
         return 1, {"error": f"claude exited {exit_code} without JSON output: {detail}", **report}
     report.update(subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"))
+    report.update(usage=model_usage(output), first_context_tokens=first)
     if report["subtype"] not in COMPLETED_SUBTYPES:
         return 1, {"error": f"claude run ended with {report['subtype']} (exit {exit_code})", **report}
     return 0, report
