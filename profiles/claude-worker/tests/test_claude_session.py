@@ -603,6 +603,46 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(env["HOME"], os.environ["HOME"])
         self.assertIn("PATH", env)
 
+    def test_run_trusts_the_main_checkout_and_keeps_other_config(self) -> None:
+        config_file = self.claude_config / ".claude.json"
+        self.claude_config.mkdir(parents=True, exist_ok=True)
+        config_file.write_text(json.dumps({
+            "userID": "u1",
+            "projects": {str(self.main.resolve()): {"allowedTools": ["Bash"]}, "/elsewhere": {"x": 1}},
+        }))
+
+        code, _ = self.run_session()
+
+        self.assertEqual(code, 0)
+        config = json.loads(config_file.read_text())
+        self.assertEqual(config["userID"], "u1")
+        self.assertEqual(config["projects"]["/elsewhere"], {"x": 1})
+        self.assertEqual(
+            config["projects"][str(self.main.resolve())], {"allowedTools": ["Bash"], "hasTrustDialogAccepted": True}
+        )
+        self.assertEqual(config_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(sorted(p.name for p in self.claude_config.iterdir() if p.name.startswith(".claude.json")),
+                         [".claude.json"])
+
+    def test_run_creates_the_config_when_claude_has_none(self) -> None:
+        code, _ = self.run_session()
+
+        self.assertEqual(code, 0)
+        config = json.loads((self.claude_config / ".claude.json").read_text())
+        self.assertEqual(config, {"projects": {str(self.main.resolve()): {"hasTrustDialogAccepted": True}}})
+
+    def test_run_leaves_an_already_trusted_config_untouched(self) -> None:
+        config_file = self.claude_config / ".claude.json"
+        self.claude_config.mkdir(parents=True, exist_ok=True)
+        original = json.dumps({"projects": {str(self.main.resolve()): {"hasTrustDialogAccepted": True}}}, indent=7)
+        config_file.write_text(original)
+        os.utime(config_file, (1, 1))
+
+        self.run_session()
+
+        self.assertEqual(config_file.read_text(), original)
+        self.assertEqual(config_file.stat().st_mtime, 1)
+
     def test_claude_gets_the_mobile_toolchain_locations(self) -> None:
         self.run_session(env=TOOLCHAIN)
 
