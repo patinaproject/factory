@@ -55,6 +55,8 @@ TAKEOVER_RULES = (
     "Co-authored-by trailer on the commits you publish."
 )
 RESUME_PROMPT = "Continue."
+COMMENTS_SEEN_NAME = "claude-comments-seen.json"
+COMMENTS_INTRO = "New comments on this card since your last run, oldest first. Act on them:"
 HANDOFF = (
     "This card continues earlier work. Its previous Claude session sat idle past the prompt cache and had "
     "grown large, so this session starts fresh. The branch is {branch}, at commit {head}. Read the pull "
@@ -637,10 +639,40 @@ def handoff_text(plan: SessionPlan, branch: str, head: str) -> str | None:
     return HANDOFF.format(branch=branch, head=head, transcript=plan.previous, result=result)
 
 
+def card_comments(card_json: str | None, task_id: str) -> list[dict]:
+    if card_json:
+        return json.loads(Path(card_json).read_text())["comments"]
+    proc = subprocess.run(["hermes", "kanban", "show", task_id, "--json"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refusal(f"hermes kanban show {task_id} failed: {proc.stderr.strip()}")
+    return json.loads(proc.stdout)["comments"]
+
+
+def comment_key(comment: dict) -> list:
+    return [comment["created_at"], comment["author"], comment["body"]]
+
+
+def unseen_comments(comments: list[dict], seen: list[list], own: str) -> str:
+    """The card comments Claude has not been shown, as one message, or "" when there are none.
+
+    A run gets every comment not yet in `seen`, whenever it was written: before the first run,
+    while the card waited in ready, blocked, or triage, or during an earlier run. A time boundary
+    such as "since the last run started" loses the comments on one side of it.
+    """
+    fresh = [
+        c for c in comments
+        if comment_key(c) not in seen and c["author"] != own and (c["body"] or "").strip()
+    ]
+    if not fresh:
+        return ""
+    return "\n".join([COMMENTS_INTRO, *(f"- {c['author']}: {c['body'].strip()}" for c in fresh)])
+
+
 def build_prompt(
-    args: argparse.Namespace, prefix: str, branch: str, resumed: bool, adopted: Adoption | None, handoff: str | None
+    args: argparse.Namespace, prefix: str, branch: str, resumed: bool, adopted: Adoption | None, handoff: str | None,
+    comments: str,
 ) -> str:
-    message = Path(args.message_file).read_text() if args.message_file else ""
+    message = "\n\n".join(filter(None, [Path(args.message_file).read_text() if args.message_file else "", comments]))
     if resumed:
         return message or RESUME_PROMPT
     entry = DEFAULT_WORKER_ENTRY.format(
@@ -761,6 +793,9 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
         raise Refusal("HERMES_KANBAN_WORKSPACE is not set; claude-session runs only inside a Kanban worker")
+    task_id = os.environ.get("HERMES_KANBAN_TASK")
+    if not task_id:
+        raise Refusal("HERMES_KANBAN_TASK is not set; claude-session runs only inside a Kanban worker")
     settings = load_settings(args.settings_json)
     repo = find_repository(settings, args.repo)
     transport = settings.get("claude_session") or {}
@@ -790,9 +825,14 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         login = (settings.get("github") or {}).get("login")
         adopted = adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
         handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"))
+        # A successful run marks this snapshot as seen, so a comment that lands mid-run goes to the next run.
+        comments = card_comments(args.card_json, task_id)
+        seen_path = lock_path.with_name(COMMENTS_SEEN_NAME)
+        seen = json.loads(seen_path.read_text()) if seen_path.exists() else []
+        own = os.environ.get("HERMES_PROFILE") or Path(os.environ.get("HERMES_HOME", "")).name
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),
-            "-p", build_prompt(args, prefix, branch, plan.resumed, adopted, handoff),
+            "-p", build_prompt(args, prefix, branch, plan.resumed, adopted, handoff, unseen_comments(comments, seen, own)),
             "--output-format", "json",
             *turn_limit,
             "--permission-mode", "bypassPermissions",
@@ -813,6 +853,8 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
+        if output is not None:
+            seen_path.write_text(json.dumps([*seen, *map(comment_key, comments)]))
         superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login) if output is not None else None
 
     report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None, "superseded": superseded}
@@ -833,6 +875,7 @@ def main() -> int:
     parser.add_argument("--message-file")
     parser.add_argument("--takeover-pr")
     parser.add_argument("--settings-json")
+    parser.add_argument("--card-json", help="a `hermes kanban show --json` file to read comments from, for tests")
     args = parser.parse_args()
     try:
         status, report = run(args)

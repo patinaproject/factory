@@ -81,7 +81,9 @@ work on the card has started.
 
 ## 3. Run Claude Code
 
-The first run on this card takes no message:
+The first run on this card takes no message file. `claude-session` reads the card's comments itself and
+gives Claude every comment it has not yet been shown, including those written while the card waited in
+`ready`, `blocked`, or `triage`:
 
 ```sh
 "$HERMES_HOME/scripts/claude-session" \
@@ -121,20 +123,16 @@ process output once it exits. It prints one JSON line.
 
 ## 4. Pick up new comments and resume
 
-After every run, call `kanban_show` again. Collect the card comments created
-after the previous run started. Comments carry human replies from Linear and
-GitHub events such as reviews and failed checks.
+After every run, call `kanban_show` again. Comments carry human replies from
+Linear and GitHub events such as reviews and failed checks.
 
-If there are new comments, write them to a temporary file outside the worktree,
-for example `mktemp`, and resume:
+`claude-session` adds every card comment that Claude has not yet seen, except
+your own, to each run's message. Never copy comments into a message file. If a
+comment from someone else arrived after the previous run started, resume with
+the same command as step 3, with no message file. Run it in the background and wait on it
+exactly as in step 3.
 
-```sh
-"$HERMES_HOME/scripts/claude-session" ... --message-file <file>
-```
-
-Run it in the background and wait on it exactly as in step 3.
-
-When the comments include a GitHub review that requested changes, the
+When those comments include a GitHub review that requested changes, the
 repository may require every review thread to be resolved before the pull
 request can merge. After the resumed run pushes its fix, resolve each thread
 that the fix addressed. `gh` acts as the factory's GitHub App, whose Pull

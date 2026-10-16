@@ -117,6 +117,13 @@ class ClaudeSessionTest(GitFixture):
         self.github = FakeGithub(self.tmp, REPO)
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
+        self.card = self.tmp / "card.json"
+        self.set_comments()
+
+    def set_comments(self, *comments: tuple[int, str, str]) -> None:
+        self.card.write_text(json.dumps({"comments": [
+            {"created_at": at, "author": author, "body": body} for at, author, body in comments
+        ]}))
 
     def session_command(self, *extra: str, workspace: Path | None = None, env: dict | None = None):
         base = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
@@ -140,6 +147,7 @@ class ClaudeSessionTest(GitFixture):
             "--issue-url", "https://linear.app/example/issue/ABC-123",
             "--repo", REPO,
             "--settings-json", str(self.settings),
+            "--card-json", str(self.card),
             *extra,
         ], base
 
@@ -217,6 +225,78 @@ class ClaudeSessionTest(GitFixture):
             "--settings", str(self.worktree_git_dir() / "claude-session.settings.json"),
         ])
         self.assertEqual(Path(call["cwd"]).resolve(), self.worktree)
+
+    def prompt(self) -> str:
+        argv = self.claude_call()["argv"]
+        return argv[argv.index("-p") + 1]
+
+    def test_first_run_passes_comments_written_before_it(self) -> None:
+        self.set_comments(
+            (100, "coordinator", "Continue from the head of abc-123-fix."),
+            (101, "default", "Triage: promoted to ready."),
+        )
+
+        self.run_session()
+
+        self.assertEqual(self.prompt(), (
+            f"{DEFAULT_ENTRY}\n\nNew comments on this card since your last run, oldest first. Act on them:\n"
+            "- coordinator: Continue from the head of abc-123-fix.\n"
+            "- default: Triage: promoted to ready."
+        ))
+
+    def test_first_run_without_comments_passes_nothing(self) -> None:
+        self.run_session()
+
+        self.assertEqual(self.prompt(), DEFAULT_ENTRY)
+
+    def test_comments_the_worker_wrote_are_not_passed(self) -> None:
+        self.set_comments((100, "claude-worker", "Feedback is on the card."), (101, "operator", "Use the branch head."))
+
+        self.run_session()
+
+        self.assertIn("- operator: Use the branch head.", self.prompt())
+        self.assertNotIn("Feedback is on the card.", self.prompt())
+
+    def test_only_the_worker_comments_leave_the_prompt_unchanged(self) -> None:
+        self.set_comments((100, "claude-worker", "Feedback is on the card."), (101, "operator", "   "))
+
+        self.run_session()
+
+        self.assertEqual(self.prompt(), DEFAULT_ENTRY)
+
+    def test_a_later_run_gets_each_comment_once_including_those_from_the_gap(self) -> None:
+        self.set_comments((100, "operator", "First."))
+        self.run_session()
+        self.write_transcript()
+        self.set_comments(
+            (100, "operator", "First."),
+            (200, "default", "Posted while the card was blocked."),
+            (200, "coordinator", "Posted in the same second."),
+        )
+
+        self.run_session()
+        resumed = self.prompt()
+        self.run_session()
+
+        self.assertEqual(resumed, (
+            "New comments on this card since your last run, oldest first. Act on them:\n"
+            "- default: Posted while the card was blocked.\n"
+            "- coordinator: Posted in the same second."
+        ))
+        self.assertEqual(self.prompt(), "Continue.")
+
+    def test_comments_follow_the_message_file(self) -> None:
+        self.write_transcript()
+        self.set_comments((100, "operator", "Also rebase."))
+        message = self.tmp / "message.txt"
+        message.write_text("Reviewer asked for a test.")
+
+        self.run_session("--message-file", str(message))
+
+        self.assertEqual(self.prompt(), (
+            "Reviewer asked for a test.\n\nNew comments on this card since your last run, oldest first. "
+            "Act on them:\n- operator: Also rebase."
+        ))
 
     def test_resume_uses_the_message_file_when_a_transcript_exists(self) -> None:
         self.write_transcript()
