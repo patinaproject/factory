@@ -18,11 +18,12 @@ These values move to Infisical:
 | `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | Both homes |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>` |
 | The token variable that `claude_session.auth_token_env` names | `<worker>` |
+| Each `FACTORY_MCP_` credential from [`mcp-identities.md`](mcp-identities.md) | `<worker>` |
 
-The default home loads the whole folder. The worker loads only the three
-values in its rows, `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, and the token
-variable, through `<worker>/scripts/worker-secrets`, and signs in as its own
-machine identity, which can read only those three. A worker never holds a
+The default home loads the whole folder. The worker loads only the values in
+its rows, `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, the token variable, and
+the `FACTORY_MCP_` credentials, through `<worker>/scripts/worker-secrets`, and
+signs in as its own machine identity, which can read only those. A worker never holds a
 webhook secret, a Slack token, or the default home's identity, so nothing it
 runs can print them.
 
@@ -69,7 +70,8 @@ All of these must hold:
   number of values in the folder. When the folder holds
   `OP_SERVICE_ACCOUNT_TOKEN` for [1Password](1password.md), `<n>` is the number
   of values minus one. The worker's command prints `applied 3 secrets`, or
-  `2` when the proxy needs no token.
+  `2` when the proxy needs no token, plus one for each `FACTORY_MCP_`
+  credential.
 - `<home>/bin/factory-secrets` exists, and the `cmp -s` check in
   [Configure both homes](#configure-both-homes) prints `same`, or the operator
   approved the differences there. When the factory uses
@@ -80,7 +82,7 @@ All of these must hold:
 - No moved value remains in a `.env` file: `env_has` prints `0` for each value
   in the first table, in both files.
 - Each machine identity reads one environment and nothing else, and the
-  worker's reads only its three keys, as
+  worker's reads only its own keys, as
   [Check the identity's scope](#check-the-identitys-scope) shows.
 
 If all of them hold, skip to [Verify](#verify).
@@ -89,7 +91,7 @@ If all of them hold, skip to [Verify](#verify).
 
 Each home signs in as its own machine identity through Universal Auth. The
 default home's identity reads the factory's environment. The worker's
-identity reads only the three keys the worker loads. Infisical adds
+identity reads only the keys the worker loads. Infisical adds
 permissions together, so a role such as `Viewer` would widen any narrower
 grant.
 
@@ -123,7 +125,7 @@ tooling can change how it signs in when it sees the Universal Auth names.
 The worker runs its helper in its own process, so its identity has to be in
 `<worker>/.env`. That is why the worker gets an identity of its own: the
 worker's agent can read its own environment, and the processes it starts
-inherit parts of it. A leaked worker identity reads the three keys the worker
+inherit parts of it. A leaked worker identity reads the keys the worker
 already holds and nothing else. The default home's identity is in no
 environment the worker or Claude Code holds. Both homes run as the same user,
 so a file read of `<home>/.env` is not prevented; keep the default home's
@@ -277,8 +279,8 @@ tuned on this machine can hold a secret inline. When the command prints
 The worker's helper is `<worker>/scripts/worker-secrets`, which part 5
 installs with the profile. It runs `<home>/bin/factory-secrets` with the
 worker's own identity and prints only `LINEAR_CLIENT_ID`,
-`LINEAR_CLIENT_SECRET`, and the variable that `claude_session.auth_token_env`
-names in `<worker>/config.yaml`. It refuses arguments and a terminal the same
+`LINEAR_CLIENT_SECRET`, the variable that `claude_session.auth_token_env`
+names in `<worker>/config.yaml`, and each `FACTORY_MCP_` key. It refuses arguments and a terminal the same
 way. `check-install` reports a worker whose `secrets.command` is anything
 else.
 
