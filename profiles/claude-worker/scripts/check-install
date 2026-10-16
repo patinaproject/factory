@@ -16,7 +16,10 @@ tables), that a cron job delivers only to a platform with a home channel in
 its profile, that the root home's check-install-alert wrapper matches the
 repository, that the worker home's secrets.command is the worker helper
 whenever the root home has a secret source, and that each configured
-repository checkout exists and has origin/HEAD set, and that the root home's
+repository checkout exists and has origin/HEAD set, that the worker home passes
+through each FACTORY_MCP_* name a repository's mcp_servers references, that each MCP
+server the installed claude-session reports for a repository connects unless its mcp_left_out
+names it, and that the root home's
 upload broker socket answers a status request and reports a token present. That
 check sends only {"op": "status"}, never uploads, and prints no value. When any difference is
 reported and the source checkout is not at origin/HEAD, the last line names
@@ -683,6 +686,56 @@ def check_model_tiers(settings, worker: Path) -> list:
     )]
 
 
+MCP_STATUS_TIMEOUT = 120
+
+
+def mcp_probe(worker: Path, full_name: str) -> dict | str:
+    """The installed claude-session's --mcp-status report for a repository, or the text of its failure."""
+    script = worker / "scripts" / "claude-session"
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script), "--mcp-status", "--repo", full_name],
+            env={**os.environ, "HERMES_HOME": str(worker)}, capture_output=True, text=True, timeout=MCP_STATUS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return f"printed nothing within {MCP_STATUS_TIMEOUT} s"
+    try:
+        report = json.loads(proc.stdout)
+    except ValueError:
+        return f"exited {proc.returncode} without a report"
+    return report if proc.returncode == 0 else str(report.get("error"))
+
+
+def check_mcp_servers(settings, worker: Path, hermes: str) -> list:
+    # Missing or malformed settings are check_config's to report; a missing script is check_profile's.
+    if not isinstance(settings, dict):
+        return []
+    repositories = [r for r in settings.get("repositories") or [] if Path(r["path"]).is_dir()]
+    passed = config_value(worker, hermes, "terminal.env_passthrough") or []
+    drifts = []
+    for repository in repositories:
+        wanted = set(re.findall(r"\$\{(FACTORY_MCP_[A-Z0-9_]+)", json.dumps(repository.get("mcp_servers") or {})))
+        drifts.extend(
+            Drift("mcp", f"{name} in {worker}", f"is used by {repository['full_name']} but not in terminal.env_passthrough (part 10)")
+            for name in sorted(wanted - set(passed))
+        )
+    if not (worker / "scripts" / "claude-session").is_file():
+        return drifts
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        reports = list(pool.map(lambda r: mcp_probe(worker, r["full_name"]), repositories))
+    for repository, report in zip(repositories, reports):
+        full_name = repository["full_name"]
+        if isinstance(report, str):
+            drifts.append(Drift("mcp", full_name, f"cannot read the MCP server status: {report} (part 10)"))
+            continue
+        drifts.extend(
+            Drift("mcp", f"{server['name']} in {full_name}", f"is {server['status']}, not connected (part 10)")
+            for server in report["servers"]
+            if server["status"] != "connected" and server["name"] not in report["left_out"]
+        )
+    return drifts
+
+
 def homes() -> tuple:
     if not os.environ.get("HERMES_HOME"):
         raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
@@ -753,6 +806,7 @@ def main() -> int:
             *check_owned_refs(root),
             *check_checkouts(config_value(worker, hermes, SETTINGS_KEY)),
             *check_model_tiers(config_value(worker, hermes, SETTINGS_KEY), worker),
+            *check_mcp_servers(config_value(worker, hermes, SETTINGS_KEY), worker, hermes),
         ]
         if sys.platform == "darwin":
             launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))

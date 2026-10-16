@@ -209,6 +209,108 @@ class ClaudeSessionTest(GitFixture):
         ])
         self.assertEqual(Path(call["cwd"]).resolve(), self.worktree)
 
+    def configure_repository(self, **fields) -> None:
+        self.repository.update(fields)
+        self.settings = self.write_settings([self.repository], {"max_turns": 40})
+
+    def mcp_config(self, **servers) -> str:
+        return json.dumps({"mcpServers": {"linear": json.loads(LINEAR_MCP_CONFIG)["mcpServers"]["linear"], **servers}})
+
+    NOTION = {"type": "http", "url": "https://mcp.notion.com/mcp", "headers": {"Authorization": "Bearer ${FACTORY_MCP_NOTION_TOKEN:-none}"}}
+
+    def test_repository_mcp_servers_are_merged_and_their_secret_stays_out_of_argv(self) -> None:
+        self.configure_repository(mcp_servers={"notion": self.NOTION}, mcp_left_out={"sentry": "no service account"})
+
+        status, _ = self.run_session(env={"FACTORY_MCP_NOTION_TOKEN": "notion-secret-value"})
+
+        self.assertEqual(status, 0)
+        call = self.claude_call()
+        self.assertEqual(call["argv"][call["argv"].index("--mcp-config") + 1], self.mcp_config(notion=self.NOTION))
+        self.assertNotIn("notion-secret-value", json.dumps(call["argv"]))
+        self.assertEqual(call["settings"]["content"]["env"]["FACTORY_MCP_NOTION_TOKEN"], "notion-secret-value")
+        self.assertEqual(call["settings"]["content"]["disabledMcpjsonServers"], ["sentry"])
+
+    def test_no_mcp_keys_write_no_left_out_list(self) -> None:
+        self.run_session()
+
+        self.assertNotIn("disabledMcpjsonServers", self.claude_call()["settings"]["content"])
+
+    def test_invalid_mcp_configuration_is_refused_before_claude_starts(self) -> None:
+        cases = {
+            "reference": ({"mcp_servers": {"a": {"env": {"T": "${GH_TOKEN}"}}}}, "mcp_servers references ${GH_TOKEN}; it may reference only FACTORY_MCP_* names"),
+            "unset": ({"mcp_servers": {"a": {"env": {"T": "${FACTORY_MCP_UNSET}"}}}}, "mcp_servers names FACTORY_MCP_UNSET, which is not set"),
+            "linear": ({"mcp_servers": {"linear": {"type": "http"}}}, "mcp_servers must not name linear; the factory owns that server"),
+            "not an object": ({"mcp_servers": ["a"]}, "mcp_servers must map server names to MCP server objects"),
+            "server not an object": ({"mcp_servers": {"a": "x"}}, "mcp_servers must map server names to MCP server objects"),
+            "overlap": ({"mcp_servers": {"a": {}}, "mcp_left_out": {"a": "why"}}, "a is in both mcp_servers and mcp_left_out"),
+            "empty reason": ({"mcp_left_out": {"a": ""}}, "mcp_left_out must map server names to non-empty reasons"),
+            "left out not an object": ({"mcp_left_out": ["a"]}, "mcp_left_out must map server names to non-empty reasons"),
+        }
+        for name, (fields, error) in cases.items():
+            with self.subTest(name):
+                self.configure_repository(mcp_servers=None, mcp_left_out=None)
+                self.configure_repository(**fields)
+
+                self.assertEqual(self.run_session(), (2, {"error": error}))
+                self.assertFalse(self.log.exists())
+
+    def test_mcp_status_prints_each_servers_status_without_a_workspace_issue_or_proxy_token(self) -> None:
+        self.configure_repository(mcp_servers={"notion": self.NOTION}, mcp_left_out={"sentry": "no service account"})
+        self.settings = self.write_settings([self.repository], {"auth_token_env": "UNSET_PROXY_TOKEN"})
+        self.configure_fake_claude(init=[
+            {"name": "linear", "status": "connected", "tools": ["x"]}, {"name": "notion", "status": "needs-auth"},
+        ])
+        command, env = self.session_command("--mcp-status")
+        env.update(FACTORY_MCP_NOTION_TOKEN="notion-secret-value")
+        env.pop("HERMES_KANBAN_WORKSPACE")
+        command = [command[0], "--mcp-status", "--repo", REPO, "--settings-json", str(self.settings)]
+
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+
+        self.assertEqual((proc.returncode, json.loads(proc.stdout)), (0, {
+            "repo": REPO,
+            "servers": [{"name": "linear", "status": "connected"}, {"name": "notion", "status": "needs-auth"}],
+            "left_out": {"sentry": "no service account"},
+        }))
+        call = self.claude_call()
+        self.assertEqual(Path(call["cwd"]).resolve(), self.main.resolve())
+        self.assertEqual(call["argv"][call["argv"].index("--output-format") + 1], "stream-json")
+        self.assertEqual(call["argv"][call["argv"].index("--mcp-config") + 1], self.mcp_config(notion=self.NOTION))
+        self.assertNotIn("notion-secret-value", json.dumps(call["argv"]))
+        content = call["settings"]["content"]
+        self.assertEqual(content["env"]["FACTORY_MCP_NOTION_TOKEN"], "notion-secret-value")
+        self.assertEqual(content["env"]["LINEAR_API_KEY"], "cached-token")
+        self.assertEqual(content["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:9")
+        self.assertEqual(content["env"]["ANTHROPIC_AUTH_TOKEN"], "mcp-status-probe")
+        self.assertEqual(content["disabledMcpjsonServers"], ["sentry"])
+        self.assertFalse(Path(call["argv"][call["argv"].index("--settings") + 1]).exists())
+
+    def test_mcp_status_redacts_the_run_secrets_from_claude_stderr(self) -> None:
+        self.configure_repository(mcp_servers={"notion": self.NOTION})
+        self.configure_fake_claude(stderr_env="FACTORY_MCP_NOTION_TOKEN")
+        command, env = self.session_command()
+        env.update(FACTORY_MCP_NOTION_TOKEN="notion-secret-value")
+        command = [command[0], "--mcp-status", "--repo", REPO, "--settings-json", str(self.settings)]
+
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+
+        self.assertEqual(
+            (proc.returncode, json.loads(proc.stdout)),
+            (1, {"error": "claude exited 0 without an init event: token [redacted]"}),
+        )
+
+    def test_mcp_status_errors_when_claude_prints_no_init_event(self) -> None:
+        self.configure_fake_claude(hold_seconds=600)
+        command, env = self.session_command()
+        command = [command[0], "--mcp-status", "--repo", REPO, "--settings-json", str(self.settings), "--timeout", "2"]
+
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+
+        self.assertEqual(
+            (proc.returncode, json.loads(proc.stdout)),
+            (1, {"error": "TimeoutError: claude printed no init event within 2 s"}),
+        )
+
     def test_resume_uses_the_message_file_when_a_transcript_exists(self) -> None:
         self.write_transcript()
         message = self.tmp / "message.txt"

@@ -643,6 +643,13 @@ host cannot verify. Claude Code gets `JAVA_HOME`, `ANDROID_HOME`,
 ]
 ```
 
+A repository whose `.mcp.json` names third-party MCP servers sets
+`mcp_servers` and `mcp_left_out` on its entry, so each server connects under
+the factory's own identity or is left out with a reason. Follow
+[`references/mcp-identities.md`](references/mcp-identities.md) for each
+server. `check-install` reports each server that a worker run would not
+connect.
+
 `kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
 empty to post no link. Set `github.login` to the App's
@@ -1339,6 +1346,10 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      When the line gives a `git merge --ff-only` command, run it as written,
      then run `check-install` again. Otherwise the checkout is ahead, diverged,
      on another branch, or dirty. Fix that by hand before you deploy.
+   - An `mcp` line: a repository's MCP server would not connect in a worker
+     run, or the worker home does not pass through a `FACTORY_MCP_` name. Give
+     the server the factory's identity, or list it in `mcp_left_out`, as in
+     [`references/mcp-identities.md`](references/mcp-identities.md).
    - A `checkout` line: the checkout is missing or has no `origin/HEAD`. Clone
      it as in part 10, or run `git -C <path> remote set-head origin -a`.
    - A `dashboard sign-in` line: follow step 6 of

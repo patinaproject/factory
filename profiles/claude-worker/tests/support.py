@@ -46,9 +46,15 @@ if "--settings" in argv:
 with open(options["log"] + ".tmp", "w") as log:
     json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings, "pid": os.getpid()}, log)
 os.rename(options["log"] + ".tmp", options["log"])
+if options.get("stderr_env"):
+    print("token " + settings["content"]["env"][options["stderr_env"]], file=sys.stderr, flush=True)
 if options.get("hold_seconds"):
     import time
     time.sleep(options["hold_seconds"])
+if "init" in options:
+    print(json.dumps({"type": "system", "subtype": "init", "mcp_servers": options["init"]}), flush=True)
+    import time
+    time.sleep(600)
 leftover = None
 if options.get("leftover_pid_file"):
     import subprocess

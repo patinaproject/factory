@@ -6,11 +6,16 @@ script relays the line to the board; this process is fenced from board
 mutations, so it never touches Kanban itself.
 
 Claude Code starts with the allowlisted environment in CHILD_ENV_NAMES and
-CHILD_ENV_PREFIXES. Every credential it needs, the Linear token and the proxy
-token, reaches it only through the per-run settings file, mode 0600. Claude Code
+CHILD_ENV_PREFIXES. Every credential it needs, the Linear token, the proxy
+token, and the FACTORY_MCP_* values a repository's mcp_servers name, reaches it
+only through the per-run settings file, mode 0600. Claude Code
 removes that file through a SessionStart hook as soon as it has read it.
 claude-session also removes it before each run and when it ends, whether it
 returns or stops on SIGTERM, SIGINT, or SIGHUP.
+
+--mcp-status --repo <full_name> starts Claude Code once in the repository's main checkout with the
+same environment, settings, and MCP config, reads its init event, and prints each MCP server's status.
+It never reaches the model.
 """
 from __future__ import annotations
 
@@ -96,11 +101,14 @@ CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
-LINEAR_MCP_CONFIG = json.dumps({"mcpServers": {"linear": {
+LINEAR_MCP_SERVER = {
     "type": "http",
     "url": "https://mcp.linear.app/mcp",
     "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
-}}})
+}
+MCP_REFERENCE = re.compile(r"\$\{([^}]*)\}")
+MCP_SECRET_NAME = re.compile(r"^FACTORY_MCP_[A-Z0-9_]+$")
+MCP_STATUS_SECONDS = 90.0
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
@@ -502,10 +510,66 @@ def model_environment(transport: dict, tiers: dict) -> dict:
     return env
 
 
-def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
+class Mcp(NamedTuple):
+    config: str
+    env: dict
+    left_out: dict
+
+
+def mcp_servers(repo: dict) -> dict:
+    servers = repo.get("mcp_servers")
+    if servers is None:
+        return {}
+    if not isinstance(servers, dict) or not all(isinstance(server, dict) for server in servers.values()):
+        raise Refusal("mcp_servers must map server names to MCP server objects")
+    if "linear" in servers:
+        raise Refusal("mcp_servers must not name linear; the factory owns that server")
+    return servers
+
+
+def mcp_secret_names(servers: dict) -> list[str]:
+    names = set()
+    for reference in MCP_REFERENCE.findall(json.dumps(servers)):
+        name = reference.split(":-", 1)[0]
+        if not MCP_SECRET_NAME.match(name):
+            raise Refusal(f"mcp_servers references ${{{name}}}; it may reference only FACTORY_MCP_* names")
+        names.add(name)
+    return sorted(names)
+
+
+def mcp_left_out(repo: dict) -> dict:
+    left_out = repo.get("mcp_left_out")
+    if left_out is None:
+        return {}
+    if not isinstance(left_out, dict) or not all(isinstance(why, str) and why for why in left_out.values()):
+        raise Refusal("mcp_left_out must map server names to non-empty reasons")
+    if "linear" in left_out:
+        raise Refusal("mcp_left_out must not name linear; the factory owns that server")
+    return left_out
+
+
+def mcp_config(servers: dict) -> str:
+    return json.dumps({"mcpServers": {"linear": LINEAR_MCP_SERVER, **servers}})
+
+
+def mcp_for(repo: dict) -> Mcp:
+    servers = mcp_servers(repo)
+    left_out = mcp_left_out(repo)
+    both = sorted(set(servers) & set(left_out))
+    if both:
+        raise Refusal(f"{', '.join(both)} is in both mcp_servers and mcp_left_out")
+    env = {}
+    for name in mcp_secret_names(servers):
+        if not os.environ.get(name):
+            raise Refusal(f"mcp_servers names {name}, which is not set")
+        env[name] = os.environ[name]
+    return Mcp(mcp_config(servers), env, left_out)
+
+
+def claude_settings(transport: dict, api_key: str, path: Path, mcp: Mcp) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
-    env = {"LINEAR_API_KEY": api_key}
+    env = {"LINEAR_API_KEY": api_key, **mcp.env}
     if transport.get("base_url"):
         env["ANTHROPIC_BASE_URL"] = transport["base_url"]
     token_env = transport.get("auth_token_env")
@@ -520,10 +584,13 @@ def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
     # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
     guard = {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(CI_WAIT_GUARD))}"}
-    return {"env": env, "hooks": {
+    settings = {"env": env, "hooks": {
         "SessionStart": [{"hooks": [remove]}],
         "PreToolUse": [{"matcher": "Bash", "hooks": [guard]}],
     }}
+    if mcp.left_out:
+        settings["disabledMcpjsonServers"] = sorted(mcp.left_out)
+    return settings
 
 
 def remove_on_stop(path: Path) -> None:
@@ -702,6 +769,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     repo = find_repository(settings, args.repo)
     transport = settings.get("claude_session") or {}
     turn_limit = max_turns_args(transport)
+    mcp = mcp_for(repo)
     threshold = fresh_after_tokens(transport)
     prefix = worker_entry_prefix(repo)
     worktree = resolve_worktree(workspace, repo["path"])
@@ -738,14 +806,14 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
                 upload_image=Path(__file__).resolve().with_name("github-upload-image"),
                 wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
             ),
-            "--mcp-config", LINEAR_MCP_CONFIG,
+            "--mcp-config", mcp.config,
         ]
         if transport.get("model"):
             command += ["--model", transport["model"]]
         command += ["--settings", str(settings_path)]
         trust_checkout(Path(repo["path"]).resolve())
         try:
-            write_private(settings_path, claude_settings(transport, linear_api_key(), settings_path))
+            write_private(settings_path, claude_settings(transport, linear_api_key(), settings_path, mcp))
             output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
@@ -760,18 +828,92 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     return 0, report
 
 
+def read_init(proc: subprocess.Popen, timeout: float) -> dict | None:
+    """The first system init event claude prints, or None when its output ends without one."""
+    fd = proc.stdout.fileno()
+    deadline = time.monotonic() + timeout
+    buffer = b""
+    while True:
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init":
+                return event
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError(f"claude printed no init event within {timeout:g} s")
+        if not select.select([fd], [], [], min(left, QUIET_SECONDS))[0]:
+            if proc.poll() is not None:
+                return None
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return None
+        buffer += chunk
+
+
+def mcp_status(args: argparse.Namespace) -> tuple[int, dict]:
+    settings = load_settings(args.settings_json)
+    repo = find_repository(settings, args.repo)
+    mcp = mcp_for(repo)
+    main = Path(repo["path"]).resolve()
+    trust_checkout(main)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / SETTINGS_FILE_NAME
+        remove_on_stop(path)
+        api_key = linear_api_key()
+        content = claude_settings({}, api_key, path, mcp)
+        # The probe stops at the init event and needs no transport; an unreachable endpoint guarantees it
+        # never reaches the model.
+        content["env"].update(ANTHROPIC_BASE_URL="http://127.0.0.1:9", ANTHROPIC_AUTH_TOKEN="mcp-status-probe")
+        write_private(path, content)
+        command = [
+            os.environ.get("CLAUDE_BIN", "claude"), "-p", "Report MCP server status.",
+            "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions",
+            "--mcp-config", mcp.config, "--settings", str(path),
+        ]
+        with tempfile.TemporaryFile() as stderr:
+            proc = subprocess.Popen(
+                command, cwd=main, env=child_env(main), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=stderr, start_new_session=True,
+            )
+            with proc:
+                try:
+                    init = read_init(proc, args.timeout)
+                finally:
+                    end_run(proc)
+            stderr.seek(0)
+            detail = stderr.read().decode(errors="replace")
+    for secret in filter(None, [api_key, *mcp.env.values()]):
+        detail = detail.replace(secret, "[redacted]")
+    detail = detail.strip()[-2000:]
+    if init is None:
+        return 1, {"error": f"claude exited {proc.returncode} without an init event: {detail}"}
+    servers = [{"name": each.get("name"), "status": each.get("status")} for each in init.get("mcp_servers") or []]
+    return 0, {"repo": args.repo, "servers": servers, "left_out": mcp.left_out}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--issue-id", required=True)
-    parser.add_argument("--issue-identifier", required=True)
-    parser.add_argument("--issue-url", required=True)
+    parser.add_argument("--issue-id")
+    parser.add_argument("--issue-identifier")
+    parser.add_argument("--issue-url")
+    parser.add_argument("--mcp-status", action="store_true", help="print each MCP server's status and exit")
+    parser.add_argument("--timeout", type=float, default=MCP_STATUS_SECONDS, help="--mcp-status deadline in seconds")
     parser.add_argument("--repo", required=True)
     parser.add_argument("--message-file")
     parser.add_argument("--takeover-pr")
     parser.add_argument("--settings-json")
     args = parser.parse_args()
+    if not args.mcp_status:
+        missing = [flag for flag in ("issue_id", "issue_identifier", "issue_url") if not getattr(args, flag)]
+        if missing:
+            parser.error("the following arguments are required: " + ", ".join(f"--{flag.replace('_', '-')}" for flag in missing))
     try:
-        status, report = run(args)
+        status, report = mcp_status(args) if args.mcp_status else run(args)
     except Stopped as stopped:
         signal.signal(stopped.signum, signal.SIG_DFL)
         os.kill(os.getpid(), stopped.signum)
