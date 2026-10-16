@@ -125,7 +125,6 @@ CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
 HANDOFF_RESULT_CHARS = 2000
 USAGE_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-# The result line's usage keys, after the camelCase keys of claude's `modelUsage`.
 MODEL_USAGE_KEYS = (
     ("input_tokens", "inputTokens"),
     ("cache_read_input_tokens", "cacheReadInputTokens"),
@@ -373,7 +372,6 @@ def session_id_for(issue_id: str, generation: int) -> str:
 
 
 def main_messages(transcript: Path, offset: int = 0) -> Iterator[dict]:
-    """Yield the main session's assistant messages from a byte offset on, without subagents or synthetic replies."""
     with open(transcript, "rb") as lines:
         lines.seek(offset)
         for line in lines:
@@ -405,7 +403,6 @@ def last_assistant(transcript: Path) -> tuple[int | None, str | None]:
 
 
 def first_context(transcript: Path | None, offset: int) -> int | None:
-    """The context size of the run's first call: the first main message the run appended past offset."""
     if transcript is None:
         return None
     return next((context_tokens(message) for message in main_messages(transcript, offset)), None)
