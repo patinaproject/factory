@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import shutil
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import SCRIPTS, FakeGithub
 
@@ -190,6 +192,48 @@ class OwnerTest(unittest.TestCase):
     def test_a_pull_request_of_another_repository_is_refused(self) -> None:
         with self.assertRaises(card_branch.GhFailed):
             card_branch.read_pulls(lambda endpoint: {}, REPO, ["https://github.com/someone/else/pull/1"])
+
+
+class RunGhTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.github = FakeGithub(self.tmp, REPO)
+        self.github.create_branch(X, APP)
+        for patcher in (mock.patch.dict(os.environ, self.github.env()), mock.patch.object(card_branch.time, "sleep")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_server_error_that_clears_returns_the_success(self) -> None:
+        self.github.fail_next("gh: Server Error (HTTP 500)", "gh: HTTP 502")
+
+        self.assertEqual(card_branch.run_gh(f"repos/{REPO}/branches/{X}"), {"name": X})
+        self.assertEqual(len(self.github.calls()), 3)
+
+    def test_a_server_error_that_persists_raises_gh_server_error(self) -> None:
+        self.github.fail_next(*["gh: Server Error (HTTP 500)"] * 3)
+
+        with self.assertRaises(card_branch.GhServerError) as raised:
+            card_branch.run_gh(f"repos/{REPO}/branches/{X}")
+        self.assertIn("HTTP 500", str(raised.exception))
+        self.assertEqual(len(self.github.calls()), 3)
+
+    def test_a_client_error_is_not_retried(self) -> None:
+        self.github.fail_next("gh: Resource not accessible by integration (HTTP 403)", "gh: HTTP 500")
+
+        with self.assertRaises(card_branch.GhFailed) as raised:
+            card_branch.run_gh(f"repos/{REPO}/branches/{X}")
+        self.assertNotIsInstance(raised.exception, card_branch.GhServerError)
+        self.assertEqual(len(self.github.calls()), 1)
+
+    def test_a_write_that_meets_a_server_error_is_not_retried(self) -> None:
+        self.github.add_pull(7, X)
+        self.github.fail_next("gh: Server Error (HTTP 500)")
+
+        with self.assertRaises(card_branch.GhServerError):
+            card_branch.run_gh(f"repos/{REPO}/issues/7/comments", "-X", "POST", "-f", "body=hi")
+        self.assertEqual(len(self.github.calls()), 1)
+        self.assertEqual(self.github.comments(7), [])
 
 
 class CommandTest(unittest.TestCase):

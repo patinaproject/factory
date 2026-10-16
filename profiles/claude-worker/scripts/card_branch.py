@@ -18,12 +18,16 @@ import os
 import re
 import subprocess
 import sys
+import time
 from enum import Enum
 from typing import Any, Callable, Mapping, NamedTuple
 from urllib.parse import quote
 
 TAKEOVER_SUFFIX = "-takeover"
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
+SERVER_ERROR = re.compile(r"\bHTTP 5[0-9][0-9]\b")
+WRITE_OPTIONS = {"-X", "--method", "-f", "--raw-field", "-F", "--field", "--input"}
+RETRY_DELAYS = (1, 2)
 
 
 class Owner(Enum):
@@ -61,6 +65,10 @@ class GhFailed(Exception):
 
 class BranchNotFound(GhFailed):
     pass
+
+
+class GhServerError(GhFailed):
+    """GitHub answered with a 5xx, which clears on its own."""
 
 
 def is_app(login: str, app: str) -> bool:
@@ -131,17 +139,24 @@ def choose(git_branch: str, pulls: list[Pull], owners: Mapping[str, Owner | None
 
 
 def run_gh(*args: str) -> Any:
+    """Call `gh api`, retrying a server error only when the call reads, so a write is never sent twice."""
     gh = os.environ.get("GH_BIN", "gh")
-    try:
-        proc = subprocess.run([gh, "api", *args], capture_output=True, text=True)
-    except OSError as failure:
-        raise GhFailed(f"{gh} could not run: {failure.strerror or failure}") from failure
-    if proc.returncode != 0:
+    delays = () if WRITE_OPTIONS.intersection(args) else RETRY_DELAYS
+    for attempt in range(len(delays) + 1):
+        try:
+            proc = subprocess.run([gh, "api", *args], capture_output=True, text=True)
+        except OSError as failure:
+            raise GhFailed(f"{gh} could not run: {failure.strerror or failure}") from failure
+        if proc.returncode == 0:
+            return json.loads(proc.stdout) if proc.stdout.strip() else None
         detail = proc.stderr.strip().splitlines()[0] if proc.stderr.strip() else "no error output"
         if "Branch not found" in proc.stderr:
             raise BranchNotFound(detail)
-        raise GhFailed(f"gh api {args[0]} failed: {detail}")
-    return json.loads(proc.stdout) if proc.stdout.strip() else None
+        if not SERVER_ERROR.search(proc.stderr):
+            raise GhFailed(f"gh api {args[0]} failed: {detail}")
+        if attempt == len(delays):
+            raise GhServerError(f"gh api {args[0]} failed: {detail}")
+        time.sleep(delays[attempt])
 
 
 def owner(gh: Callable[..., Any], repo: str, branch: str, app: str) -> Owner | None:
