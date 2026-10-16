@@ -1175,8 +1175,8 @@ each check. Report each result.
     comments include `Merged with failing required checks:` with the check
     names, the card is `blocked` with block kind `needs_input`, and the Linear
     agent session gets one `elicitation` that says the pull request merged and
-    asks whether the issue is done. Mark the Linear issue Done, and the card is
-    archived. Repeat with the issue already Done before the merge: the card is
+    asks whether the issue is done. A reply in the session leaves the card
+    `blocked`. Mark the Linear issue Done, and the card is archived. Repeat with the issue already Done before the merge: the card is
     archived with the same comment, and the session gets no post.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The

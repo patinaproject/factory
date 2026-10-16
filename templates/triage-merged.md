@@ -44,9 +44,12 @@ holds the card. When it is accepted, read `linear_agent_session_id` from the
 card body and post a `response` on that session with `linear_agent_activity`,
 saying the pull request merged. Set `external_urls` to one link labeled
 `Pull request` whose URL is the pull request URL. When it is refused, run
-`hermes kanban show <task id> --json` and read the newest event whose `kind` is
-`pr_acceptance`. If its payload's `classification` is `failure`, finish the
-card as "A merge with failing required checks" says. Otherwise comment
+`gh pr view '<pull request URL>' --json headRefOid` and
+`hermes kanban show <task id> --json`, and read the newest event whose `kind`
+is `pr_acceptance`. If its payload's `pr_url` is the pull request URL, its
+`head_sha` is that `headRefOid`, and an entry in its `checks` has a
+`classification` other than `success` or `pending`, finish the card as
+"A merge with failing required checks" says. Otherwise comment
 the refusal with the pull request URL and stop. Never assign the card after
 `specify` succeeded.
 
@@ -54,25 +57,30 @@ the refusal with the pull request URL and stop. Never assign the card after
 
 A merged pull request never runs its checks again, so Hermes would refuse every
 retry. The failing checks are the `name` of each entry in that event's
-`checks` whose `classification` is `failure`.
+`checks` whose `classification` is not `success` or `pending`.
 
 1. Comment on the card `Merged with failing required checks: <names>.`,
    followed by the pull request as repository and number. Linear triage reads
-   this line when the issue is marked done.
+   this line when the issue is marked done, and when a person replies.
 2. Read `linear_issue_id` from the card body and read the issue with
    `linear_issue`. If its `stateType` is `completed`, run
-   `<<archive_card>> <task id>` and stop. If it prints an error, run it again.
+   `<<archive_card>> <task id>` and stop. If it prints an error, run it once
+   more. If that fails too, comment the error on the card and stop.
 3. Otherwise block the card once for a person, with the reason
-   `Pull request <repository>#<number> merged, but required checks failed: <names>. Mark the Linear issue done if the work is finished, and the card is archived.`
+   `Pull request <repository>#<number> merged, but required checks failed: <names>. Is the work done? If it is, mark the Linear issue Done, and the card is archived.`
    Act on the status from the last `hermes kanban show`:
    - `ready`: run `hermes kanban block <task id> '<reason>' --kind needs_input`.
    - `review`: run
-     `hermes kanban reopen-review <task id> --reason 'pull request merged'`,
-     then the `ready` command. Hermes blocks only a `ready` or `running` card.
-   - `blocked`: the card already waits for a person, and Hermes refuses to
-     block it again. Read `linear_agent_session_id` from the card body and
-     post an `elicitation` on that session with `linear_agent_activity`,
-     whose body is the reason.
+     `hermes kanban reopen-review <task id> --reason 'pull request merged' && hermes kanban block <task id> '<reason>' --kind needs_input`
+     as one command. Hermes blocks only a `ready` or `running` card, and the
+     review reopen lets the dispatcher start a worker, so leave it no time.
+   - `blocked`: Hermes refuses to block a blocked card again. If the task's
+     `block_kind` is null, run the `ready` command, which records the kind
+     and posts nothing. Then post the reason as below.
 
-   The block posts the reason on the issue's Linear agent session. Do not post
-   it again.
+   The block posts the reason on the issue's Linear agent session as an
+   `elicitation`. A card blocked for `needs_input` before goes to `triage`
+   instead, and that post carries the reason too. When the card was
+   `blocked`, or the block command failed, read `linear_agent_session_id`
+   from the card body and post an `elicitation` on that session with
+   `linear_agent_activity`, whose body is the reason. Post the reason once.

@@ -180,7 +180,12 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
    `<owner>/<name>#<number>`, so the comment names no pull request URL.
 3. If the card's body names a different `linear_agent_session_id`, update it as
    in "Session created" step 6.
-4. If the card is `blocked`, read the issue with `linear_issue`. If its
+4. If a `body` in the `comments` of `hermes kanban show <task id> --json`
+   starts `Merged with failing required checks:`, the pull request merged and
+   a worker cannot finish the card. Do not unblock, reopen, or resume it. Post
+   one `thought` on this agent session saying that the card ends when the
+   issue is marked Done, and stop.
+   If the card is `blocked`, read the issue with `linear_issue`. If its
    `delegate` is `<<app_user_id>>`, unblock it as "Rules" says. If the card
    is `review`, run
    `hermes kanban reopen-review <task id> --reason 'resumed from Linear; see the card comments'`

@@ -470,9 +470,12 @@ class MergedCardTest(unittest.TestCase):
         positions = self.positions(
             call,
             [
-                "When it is refused, run\n`hermes kanban show <task id> --json`",
+                "When it is refused, run\n`gh pr view '<pull request URL>' --json headRefOid`",
+                "`hermes kanban show <task id> --json`",
                 "`pr_acceptance`",
-                "`classification` is `failure`",
+                "`pr_url` is the pull request URL",
+                "`head_sha` is that `headRefOid`",
+                "`classification` other than `success` or `pending`",
                 '"A merge with failing required checks"',
                 "Otherwise comment",
             ],
@@ -491,15 +494,16 @@ class MergedCardTest(unittest.TestCase):
     def test_failing_checks_block_an_open_issue_once_as_needs_input(self):
         rule = self.failing_checks()
         block = "hermes kanban block <task id> '<reason>' --kind needs_input"
-        self.assertEqual(rule.count("hermes kanban block"), 1)
-        self.assertIn(block, rule)
+        ready = rule[rule.index("   - `ready`") : rule.index("   - `review`")]
+        self.assertIn(block, ready)
         review = rule[rule.index("   - `review`") : rule.index("   - `blocked`")]
-        positions = self.positions(review, ["hermes kanban reopen-review <task id>", "then the `ready` command"])
-        self.assertEqual(positions, sorted(positions))
+        self.assertIn(f"`hermes kanban reopen-review <task id> --reason 'pull request merged' && {block}`", review)
         blocked = rule[rule.index("   - `blocked`") :].split("\n\n")[0]
         self.assertNotIn("hermes kanban", blocked)
-        self.assertIn("`elicitation`", blocked)
-        self.assertIn("`linear_agent_activity`", blocked)
+        self.assertIn("`block_kind` is null, run the `ready` command", blocked)
+        post = rule[rule.index("`blocked`, or the block command failed") :]
+        self.assertIn("`elicitation`", post)
+        self.assertIn("`linear_agent_activity`", post)
 
     def test_failing_checks_never_assign_or_complete_the_card(self):
         rule = self.failing_checks()
@@ -512,6 +516,14 @@ class MergedCardTest(unittest.TestCase):
         change = self.linear[self.linear.index("## Issue change") :]
         step = change[change.index("\n3. ") : change.index("\n4. ")]
         positions = self.positions(step, ["merged", f"`{marker}`", 'archive it as "Rules" says', "Otherwise"])
+        self.assertEqual(positions, sorted(positions))
+
+    def test_a_linear_reply_never_resumes_a_card_merged_with_failing_checks(self):
+        prompt = self.linear[self.linear.index("## Prompt") : self.linear.index("## Stop")]
+        step = prompt[prompt.index("\n4. ") : prompt.index("\n5. ")]
+        positions = self.positions(
+            step, ["`Merged with failing required checks:`", "Do not unblock, reopen, or resume it.", "and stop.", "unblock it as"]
+        )
         self.assertEqual(positions, sorted(positions))
 
     def test_a_rewritten_card_is_never_completed(self):
