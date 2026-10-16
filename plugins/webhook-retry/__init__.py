@@ -21,8 +21,6 @@ logger = logging.getLogger(__name__)
 UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?[A-Za-z_][A-Za-z0-9_]*\}$")
 GITHUB_EVENT_LINE = re.compile(r"^- Event: (\S+), action (\S+)$", re.MULTILINE)
 SUMMARY_LIMIT = 120
-ERROR_LIMIT = 300
-REPORT_VARIABLE = "WEBHOOK_RETRY_REPORT"
 
 _session_store: Any = None
 
@@ -86,9 +84,9 @@ def note_request_error(
     try:
         if reason not in queue_store.USAGE_LIMIT_REASONS:
             return None
-        message = queue_store.truncate((error or {}).get("message", ""), ERROR_LIMIT)
+        message = queue_store.truncate((error or {}).get("message", ""), queue_store.ERROR_LIMIT)
         reset = reset_delay(message)
-        report_path = os.environ.get(REPORT_VARIABLE)
+        report_path = os.environ.get(queue_store.REPORT_VARIABLE)
         if report_path:
             Path(report_path).write_text(json.dumps({"reason": reason, "message": message, "reset_seconds": reset}))
             return None

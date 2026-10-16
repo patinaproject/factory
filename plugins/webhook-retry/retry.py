@@ -24,13 +24,12 @@ Treat {delivered_at} as the current time. Wherever a step compares with the curr
 
 """
 SECRET_PATTERNS = (
-    re.compile(r"lin_api_\w+"),
+    re.compile(r"lin_(?:api|oauth)_\w+"),
     re.compile(r"gh[pousr]_\w+"),
     re.compile(r"github_pat_\w+"),
     re.compile(r"sk-\w+"),
     re.compile(r"Bearer \S+"),
 )
-ERROR_LIMIT = 300
 
 
 def redact(text: str) -> str:
@@ -60,10 +59,9 @@ def route_toolsets(hermes: str, home: Path, route: str) -> str:
 
 
 class Run:
-    def __init__(self, home: Path, directory: Path, hermes_factory=find_hermes) -> None:
+    def __init__(self, home: Path, directory: Path) -> None:
         self.home = home
         self.directory = directory
-        self.hermes_factory = hermes_factory
 
     def say(self, line: str) -> None:
         print(line)
@@ -122,13 +120,15 @@ class Run:
         moment = store.now()
         queued = [(key, entry) for key, entry in self.entries().items() if entry["state"] == "queued"]
         queued.sort(key=lambda pair: pair[1]["delivered_at"])
-        return [
-            key for key, entry in queued
-            if everything or (store.parse_stamp(entry["next_try_at"]) or moment) <= moment
-        ]
+        due = []
+        for key, entry in queued:
+            # A later delivery waits behind an earlier one, such as a Done update behind a "Try again" reply.
+            if not everything and (store.parse_stamp(entry["next_try_at"]) or moment) > moment:
+                break
+            due.append(key)
+        return due
 
-    def replay(self, entry: dict[str, Any]) -> tuple[int, str, Optional[dict]]:
-        hermes = self.hermes_factory()
+    def replay(self, hermes: str, entry: dict[str, Any]) -> tuple[int, str, Optional[dict]]:
         toolsets = route_toolsets(hermes, self.home, entry["route"])
         if not toolsets:
             return 1, f"route {entry['route']} has no toolsets in the config", None
@@ -142,22 +142,27 @@ class Run:
             ]
             proc = subprocess.run(
                 command, capture_output=True, text=True,
-                env={**os.environ, "HERMES_HOME": str(self.home), "WEBHOOK_RETRY_REPORT": str(report)},
+                env={**os.environ, "HERMES_HOME": str(self.home), store.REPORT_VARIABLE: str(report)},
             )
-            usage = json.loads(report.read_text()) if report.is_file() and report.read_text() else None
+            try:
+                usage = json.loads(report.read_text())
+            except (OSError, ValueError):
+                usage = None
         return proc.returncode, proc.stderr, usage
 
     def retry(self, everything: bool) -> None:
         retried = 0
         deadline = store.now() + store.RUN_BUDGET
-        for key in self.due(everything):
+        due = self.due(everything)
+        hermes = find_hermes() if due else ""
+        for key in due:
             if store.now() >= deadline:
                 break
             entry = self.entries().get(key)
             if entry is None or not self.update(key, "retry_started"):
                 continue
             who = f"{entry['route']} {entry['delivery']}"
-            code, stderr, usage = self.replay(entry)
+            code, stderr, usage = self.replay(hermes, entry)
             retried += 1
             if code == 0:
                 self.update(key, "retry_succeeded")
@@ -169,12 +174,12 @@ class Run:
                 next_try = store.stamp(store.now() + dt.timedelta(seconds=delay))
                 self.update(
                     key, "retry_usage_limit", attempts=attempts, next_try_at=next_try,
-                    last_error=store.truncate(usage.get("message", ""), ERROR_LIMIT),
+                    last_error=store.truncate(usage.get("message", ""), store.ERROR_LIMIT),
                 )
                 self.say(f"retried {who}: rate-limited again, next try {next_try}")
                 return
             else:
-                self.update(key, "retry_failed", last_error=redact(stderr)[-ERROR_LIMIT:])
+                self.update(key, "retry_failed", last_error=redact(stderr)[-store.ERROR_LIMIT:])
                 self.say(f"retried {who}: failed ({code})")
         if retried and not any(e["state"] == "queued" for e in self.entries().values()):
             self.say("webhook retry queue drained")

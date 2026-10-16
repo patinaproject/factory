@@ -22,6 +22,8 @@ MAX_ATTEMPTS = 8
 # Hermes stops a cron script after an hour, so a run starts no retry after this much time.
 RUN_BUDGET = dt.timedelta(minutes=40)
 KEY_PREFIX = "webhook:v2:"
+ERROR_LIMIT = 300
+REPORT_VARIABLE = "WEBHOOK_RETRY_REPORT"
 
 REMOVED = "removed"
 TRANSITIONS: dict[tuple[Optional[str], str], str] = {

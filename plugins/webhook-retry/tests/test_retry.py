@@ -32,6 +32,8 @@ FAKE_HERMES = textwrap.dedent(
             break
     else:
         behavior = {"exit": 0}
+    if behavior.get("garble"):
+        open(os.environ["WEBHOOK_RETRY_REPORT"], "w").write("{not json")
     if behavior.get("usage"):
         with open(os.environ["WEBHOOK_RETRY_REPORT"], "w") as report:
             json.dump({"reason": "rate_limit", "message": "limit", "reset_seconds": behavior["usage"]}, report)
@@ -83,6 +85,8 @@ class RetryTest(unittest.TestCase):
     def run_retry(self, *args):
         env = {
             **os.environ, "HERMES_HOME": str(self.home), "HERMES_BIN": str(self.hermes),
+            # Without these, find_hermes could reach a real hermes on PATH or in ~/.local/bin.
+            "PATH": "/usr/bin:/bin", "HOME": str(self.home.parent),
             "FAKE_LOG": str(self.log), "FAKE_BEHAVIOR": str(self.behavior),
         }
         return subprocess.run([sys.executable, str(RETRY), *args], env=env, capture_output=True, text=True)
@@ -133,6 +137,32 @@ class RetryTest(unittest.TestCase):
         self.assertAlmostEqual(seconds, 7200, delta=10)
         self.assertEqual(result.stdout, f"retried linear first: rate-limited again, next try {stored[chat_key('first')]['next_try_at']}\n")
 
+    def test_a_later_delivery_waits_behind_an_earlier_one_that_is_not_due(self):
+        later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.seed(entry("reply", delivered=ago(hours=3), next_try=later), entry("done", delivered=ago(hours=2)))
+
+        result = self.run_retry()
+
+        self.assertEqual((result.stdout, self.chats()), ("", []))
+
+    def test_an_unreadable_usage_report_counts_as_another_failure(self):
+        self.seed(entry("garbled"))
+        self.behave(**{"prompt for garbled": {"exit": 1, "garble": True}})
+
+        result = self.run_retry()
+
+        self.assertEqual(result.stdout, "retried linear garbled: failed (1)\nwebhook retry queue drained\n")
+        self.assertEqual(self.entries()[chat_key("garbled")]["state"], "failed")
+
+    def test_a_missing_hermes_leaves_the_entry_queued(self):
+        self.seed(entry("waiting"))
+        self.hermes.unlink()
+
+        result = self.run_retry()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.entries()[chat_key("waiting")]["state"], "queued")
+
     def test_a_usage_limit_without_a_reset_backs_off(self):
         self.seed(entry("first", attempts=2))
         self.behave(**{"prompt for first": {"exit": 1, "usage": 1}})
@@ -142,14 +172,14 @@ class RetryTest(unittest.TestCase):
 
     def test_another_failure_marks_the_entry_failed_and_redacts_the_error(self):
         self.seed(entry("broken"))
-        self.behave(**{"prompt for broken": {"exit": 3, "stderr": "boom with lin_api_abc123 and Bearer xyz"}})
+        self.behave(**{"prompt for broken": {"exit": 3, "stderr": "boom with lin_api_abc123, lin_oauth_def and Bearer xyz"}})
 
         first = self.run_retry()
         second = self.run_retry("--now")
 
         stored = self.entries()[chat_key("broken")]
         self.assertEqual(first.stdout, "retried linear broken: failed (3)\nwebhook retry queue drained\n")
-        self.assertEqual((stored["state"], stored["last_error"]), ("failed", "boom with [redacted] and [redacted]"))
+        self.assertEqual((stored["state"], stored["last_error"]), ("failed", "boom with [redacted], [redacted] and [redacted]"))
         self.assertEqual((second.stdout, len(self.chats())), ("", 1))
 
     def test_caps_give_up_once_and_expire_old_pending_entries(self):
