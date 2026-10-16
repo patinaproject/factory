@@ -184,6 +184,7 @@ CRON = (
     CronJob(10, "refresh-gh-app-login", 30, equal("local")),
     CronJob(12, "refresh-checkouts", 60, equal("local")),
     CronJob(12, "refresh-owned-refs", 1, equal("local")),
+    CronJob(12, "reopen-conflicts", 5, equal("local")),
     CronJob(
         12, "check-install", 60, declared("the operator's chat platform", besides=("local",)),
         home=ROOT, script=ROOT_ALERT_SCRIPT,
