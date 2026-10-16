@@ -6,9 +6,9 @@ script relays the line to the board; this process is fenced from board
 mutations, so it never touches Kanban itself.
 
 Claude Code starts with the allowlisted environment in CHILD_ENV_NAMES and
-CHILD_ENV_PREFIXES. Every credential it needs, the Linear token and the proxy
-token, the proxy token, and the FACTORY_MCP_* values a repository's mcp_servers name, reaches it only
-through the per-run settings file, mode 0600. Claude Code
+CHILD_ENV_PREFIXES. Every credential it needs, the Linear token, the proxy
+token, and the FACTORY_MCP_* values a repository's mcp_servers name, reaches it
+only through the per-run settings file, mode 0600. Claude Code
 removes that file through a SessionStart hook as soon as it has read it.
 claude-session also removes it before each run and when it ends, whether it
 returns or stops on SIGTERM, SIGINT, or SIGHUP.
@@ -858,15 +858,15 @@ def read_init(proc: subprocess.Popen, timeout: float) -> dict | None:
 def mcp_status(args: argparse.Namespace) -> tuple[int, dict]:
     settings = load_settings(args.settings_json)
     repo = find_repository(settings, args.repo)
-    transport = settings.get("claude_session") or {}
     mcp = mcp_for(repo)
     main = Path(repo["path"]).resolve()
     trust_checkout(main)
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / SETTINGS_FILE_NAME
         remove_on_stop(path)
-        content = claude_settings(transport, linear_api_key(), path, mcp)
-        # The probe stops at the init event; an unreachable endpoint guarantees it never reaches the model.
+        # The probe stops at the init event and needs no transport; an unreachable endpoint guarantees it
+        # never reaches the model.
+        content = claude_settings({}, linear_api_key(), path, mcp)
         content["env"].update(ANTHROPIC_BASE_URL="http://127.0.0.1:9", ANTHROPIC_AUTH_TOKEN="mcp-status-probe")
         write_private(path, content)
         command = [

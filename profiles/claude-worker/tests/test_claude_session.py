@@ -254,8 +254,9 @@ class ClaudeSessionTest(GitFixture):
                 self.assertEqual(self.run_session(), (2, {"error": error}))
                 self.assertFalse(self.log.exists())
 
-    def test_mcp_status_prints_each_servers_status_without_a_workspace_or_issue(self) -> None:
+    def test_mcp_status_prints_each_servers_status_without_a_workspace_issue_or_proxy_token(self) -> None:
         self.configure_repository(mcp_servers={"notion": self.NOTION}, mcp_left_out={"sentry": "no service account"})
+        self.settings = self.write_settings([self.repository], {"auth_token_env": "UNSET_PROXY_TOKEN"})
         self.configure_fake_claude(init=[
             {"name": "linear", "status": "connected", "tools": ["x"]}, {"name": "notion", "status": "needs-auth"},
         ])
@@ -280,6 +281,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(content["env"]["FACTORY_MCP_NOTION_TOKEN"], "notion-secret-value")
         self.assertEqual(content["env"]["LINEAR_API_KEY"], "cached-token")
         self.assertEqual(content["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:9")
+        self.assertEqual(content["env"]["ANTHROPIC_AUTH_TOKEN"], "mcp-status-probe")
         self.assertEqual(content["disabledMcpjsonServers"], ["sentry"])
         self.assertFalse(Path(call["argv"][call["argv"].index("--settings") + 1]).exists())
 
