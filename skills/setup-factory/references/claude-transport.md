@@ -18,6 +18,8 @@ Configure the transport only through these settings in
 | `model` | Passes `--model` and sets `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_OPUS_MODEL`. The main agent runs on it. Any tier without a `tier_models` entry, and the subagent default, also use it |
 | `tier_models` | Optional map from `sonnet`, `haiku`, and `fable` to model ids the endpoint serves. Each sets that `ANTHROPIC_DEFAULT_<TIER>_MODEL`. When `sonnet` is set, `CLAUDE_CODE_SUBAGENT_MODEL` is the alias `sonnet`, so a subagent that names no model runs on the Sonnet model and an explicit `opus` still runs on `model`. Any other key or a non-string value refuses the run |
 | `auth_token_env` | Names a variable in `<worker>/.env`. `claude-session` copies its value into `ANTHROPIC_AUTH_TOKEN` |
+| `sentry_token_env` | Optional. Names the Sentry token variable for the run's read-only `sentry` MCP server. See [Sentry access](sentry.md) |
+| `disabled_mcp_servers` | Optional list of repository MCP server names. Sets `disabledMcpjsonServers` |
 
 `claude-session` writes these into a per-run `0600` file and passes it with
 `--settings`. Claude Code lets an `env` block in the user's

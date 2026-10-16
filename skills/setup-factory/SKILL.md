@@ -118,6 +118,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
 | The token variable that `claude_session.auth_token_env` names | `<worker>/.env`. Never name it `ANTHROPIC_*` |
+| The Sentry token variable that `claude_session.sentry_token_env` names, when workers read Sentry | `<worker>/.env`. See [Sentry access](references/sentry.md) |
 | `FACTORY_INFISICAL_CLIENT_ID` and `FACTORY_INFISICAL_CLIENT_SECRET`, when the factory uses Infisical | `<home>/.env` holds the default home's machine identity and `<worker>/.env` the worker's, which reads only the worker's three keys. Claude Code receives neither: `claude-session` starts it from an allowlist of variable names |
 | Cloudflare tunnel token | The `cloudflared` system service only |
 | `CLOUDFLARE_API_TOKEN` | The SST app's own secret storage or environment |
@@ -596,7 +597,7 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
-  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "max_turns": 0}
+  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "sentry_token_env": "", "disabled_mcp_servers": [], "max_turns": 0}
 }
 ```
 
@@ -613,6 +614,8 @@ it to the prefix. `claude_session.max_turns`
 caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
 one run can finish a whole task. A positive limit pauses a long task, such as
 a dependency upgrade, and the worker resumes it in a second run.
+`claude_session.sentry_token_env` and `disabled_mcp_servers` stay empty unless
+workers read Sentry, as [Sentry access](references/sentry.md) describes.
 
 A card that waits in review leaves its Claude session idle past the 5-minute
 prompt cache, and a resumed large session re-writes its whole context at the
