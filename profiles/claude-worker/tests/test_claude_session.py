@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from tests.support import BOT_LOGIN, SCRIPTS, FakeGithub, GitFixture, git
+from tests.support import BOT_LOGIN, SCRIPTS, FakeBroker, FakeGithub, GitFixture, git, granted
 
 # A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
 ISSUE_ID = str(uuid.uuid4())
@@ -105,9 +105,15 @@ class ClaudeSessionTest(GitFixture):
         self.nvm_dir = self.tmp / "nvm"
         self.hermes_home = self.tmp / "hermes" / "profiles" / "claude-worker"
         self.install_linear_plugin(self.hermes_home)
+        self.broker = self.start_broker(linear_token=[granted("cached-token")], proxy_token=[granted("token-value", None)])
         self.github = FakeGithub(self.tmp, REPO)
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
+
+    def start_broker(self, **answers: list) -> FakeBroker:
+        broker = FakeBroker(self.tmp / "hermes", **answers)
+        self.addCleanup(broker.close)
+        return broker
 
     def session_command(self, *extra: str, workspace: Path | None = None, env: dict | None = None):
         base = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
@@ -118,8 +124,6 @@ class ClaudeSessionTest(GitFixture):
             CLAUDE_CONFIG_DIR=str(self.claude_config),
             NVM_DIR=str(self.nvm_dir),
             GH_CONFIG_DIR=str(self.tmp / "gh"),
-            LINEAR_CLIENT_ID="id1",
-            LINEAR_CLIENT_SECRET="secret1",
             **WORKER_SECRETS,
             **self.github.env(),
         )
@@ -507,7 +511,6 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(call["settings"]["content"]["env"], {
                 "LINEAR_API_KEY": "cached-token",
                 "ANTHROPIC_BASE_URL": "http://127.0.0.1:9999",
-                "ANTHROPIC_AUTH_TOKEN": "token-value",
                 "ANTHROPIC_MODEL": "example-model",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": "example-model",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL": "example-model",
@@ -518,6 +521,27 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual([k for k in call["env"] if k.startswith("ANTHROPIC_")], [])
         self.assertNotIn("EXAMPLE_PROXY_TOKEN", call["env"])
         self.assertFalse(Path(settings_path).exists())
+
+    def test_claude_gets_the_proxy_token_from_its_key_helper_and_never_in_an_environment(self) -> None:
+        self.settings = self.write_settings([self.repository], {
+            "base_url": "http://127.0.0.1:9999", "auth_token_env": "EXAMPLE_PROXY_TOKEN",
+        })
+
+        self.run_session()
+
+        call = self.claude_call()
+        helper = call["settings"]["content"]["apiKeyHelper"]
+        printed = subprocess.run(helper, shell=True, env=call["env"], capture_output=True, text=True)
+        self.assertEqual((printed.returncode, printed.stdout), (0, "token-value\n"))
+        self.assertNotIn("token-value", json.dumps([call["env"], call["settings"]["content"]["env"], call["argv"]]))
+        self.assertEqual(self.broker.requests, ["linear_token", "proxy_token"])
+
+    def test_without_a_token_variable_claude_gets_no_key_helper(self) -> None:
+        self.settings = self.write_settings([self.repository], {"base_url": "http://127.0.0.1:9999"})
+
+        self.run_session()
+
+        self.assertNotIn("apiKeyHelper", self.claude_call()["settings"]["content"])
 
     def model_env(self, claude_session: dict) -> dict:
         self.settings = self.write_settings([self.repository], {"model": "transport-model", **claude_session})
@@ -688,7 +712,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report, {"error": "toolchain_checks 'xcrun simctl help' must be a list of shell commands"})
         self.assertFalse(self.log.exists())
 
-    def test_linear_token_comes_from_the_plugin_cache_in_the_settings_file(self) -> None:
+    def test_linear_token_comes_from_the_gateways_broker_in_the_settings_file(self) -> None:
         self.run_session()
 
         call = self.claude_call()
@@ -696,6 +720,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
         self.assertNotIn("LINEAR_API_KEY", call["env"])
         self.assertFalse(Path(call["argv"][-1]).exists())
+        self.assertEqual(self.broker.requests, ["linear_token"])
         self.assertEqual([r for r in self.linear_requests(self.hermes_home) if "form" in r], [])
 
     def test_the_linear_mcp_server_sends_the_run_token_without_putting_it_in_argv(self) -> None:
@@ -711,16 +736,14 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(header, "Bearer cached-token")
         self.assertFalse(any("cached-token" in arg for arg in argv))
 
-    def test_a_revoked_cached_linear_token_is_replaced_with_the_plugin_scope(self) -> None:
-        (self.hermes_home / "linear-fake.json").write_text(json.dumps({"accepted": []}))
+    def test_a_revoked_brokered_token_is_replaced_by_asking_the_broker_again(self) -> None:
+        self.broker.answers["linear_token"] = [granted("revoked"), granted("cached-token")]
 
         self.run_session()
 
-        self.assertEqual(self.claude_call()["settings"]["content"]["env"], {"LINEAR_API_KEY": "minted-1"})
-        cache = self.hermes_home / "plugin-data" / "linear-agent-session" / "token.json"
-        self.assertEqual(json.loads(cache.read_text())["access_token"], "minted-1")
-        forms = [r["form"] for r in self.linear_requests(self.hermes_home) if "form" in r]
-        self.assertEqual(forms, [{"grant_type": "client_credentials", "scope": "read,write,app:assignable,app:mentionable"}])
+        self.assertEqual(self.claude_call()["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+        self.assertEqual(self.broker.requests, ["linear_token", "linear_token"])
+        self.assertEqual([r for r in self.linear_requests(self.hermes_home) if "form" in r], [])
 
     def test_a_linear_that_rejects_every_token_refuses_before_claude_starts(self) -> None:
         (self.hermes_home / "linear-fake.json").write_text(json.dumps({"accepted": [], "reject_all": True}))
@@ -790,19 +813,37 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(settings["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
         self.assertFalse(self.settings_path().exists())
 
+    def refuse_linear_tokens(self) -> None:
+        refusal = {"ok": False, "state": "unavailable", "message": "The gateway holds no Linear app credentials."}
+        self.broker.answers["linear_token"] = [refusal]
+
     def test_refused_run_still_removes_a_stale_settings_file(self) -> None:
         self.settings_path().write_text('{"env": {"LINEAR_API_KEY": "stale-token"}}')
+        self.refuse_linear_tokens()
 
-        status, _ = self.run_session(env={"LINEAR_CLIENT_SECRET": ""})
+        status, _ = self.run_session()
 
         self.assertEqual(status, 2)
         self.assertFalse(self.settings_path().exists())
 
-    def test_missing_linear_credentials_refuse_before_claude_starts(self) -> None:
-        status, report = self.run_session(env={"LINEAR_CLIENT_SECRET": ""})
+    def test_a_broker_without_a_linear_token_refuses_before_claude_starts(self) -> None:
+        self.refuse_linear_tokens()
+
+        status, report = self.run_session()
 
         self.assertEqual(status, 2)
-        self.assertEqual(report, {"error": "Linear token: set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"})
+        self.assertEqual(report, {
+            "error": "Linear token: the gateway's broker refused linear_token: The gateway holds no Linear app credentials."
+        })
+        self.assertFalse(self.log.exists())
+
+    def test_a_gateway_that_is_down_refuses_before_claude_starts(self) -> None:
+        self.broker.close()
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertRegex(report["error"], r"^Linear token: the gateway's broker at .*/factory-uploads\.sock did not answer")
         self.assertFalse(self.log.exists())
 
     def test_missing_plugin_refuses_before_claude_starts(self) -> None:

@@ -1,12 +1,20 @@
-"""The upload broker: a Unix socket that turns image bytes into attachment URLs.
+"""The gateway's broker: a Unix socket that turns image bytes into attachment URLs
+and hands the worker the two credentials it may hold.
 
 It imports nothing from Hermes, so its tests run without a gateway. The
 adapter owns its lifecycle. The broker never opens a path a caller names,
-never returns the token, and never writes it to a log.
+never returns the upload token, and never writes a token to a log.
+
+The worker home holds no factory secret of its own. It asks here for a Linear
+access token, minted with the gateway's Linear app credentials, which never
+leave the gateway, and for the proxy token that its own agent loop and Claude
+Code send to the model proxy.
 
 Wire protocol, one request per connection:
 
     {"op": "upload", "repo": "owner/repo", "name": "a.png", "size": 123}\\n<size raw bytes>
+    {"op": "linear_token"}\\n
+    {"op": "proxy_token"}\\n
     {"op": "status"}\\n
 
 Every reply is one JSON line.
@@ -24,7 +32,7 @@ import socket
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from . import upload_token
 
@@ -45,6 +53,11 @@ FIXED_MESSAGES = {
     "no-access": "The upload token lacks write on the repository.",
     "error": "The upload failed. The gateway log has the detail.",
 }
+CREDENTIAL_MESSAGES = {
+    "linear_token": "The gateway holds no Linear app credentials.",
+    "proxy_token": "The gateway holds no proxy token.",
+}
+LINEAR_FAILED = "The gateway could not issue a Linear token. The gateway log has the detail."
 BUSY = "The upload broker is busy. Try again in a moment."
 BAD_REQUEST = "The request is not a valid upload request."
 NOT_ALLOWED = "That repository is not on the upload allowlist."
@@ -57,6 +70,26 @@ class Refusal(Exception):
     def __init__(self, state: str, message: str):
         super().__init__(message)
         self.state = state
+
+
+class Credentials(Protocol):
+    def linear_ready(self) -> bool: ...
+
+    def linear_token(self) -> dict | None:
+        """{"access_token", "expires_at"} Linear accepts now, or None without app credentials. May block."""
+
+    def proxy_token(self) -> str | None: ...
+
+
+class NoCredentials:
+    def linear_ready(self) -> bool:
+        return False
+
+    def linear_token(self) -> dict | None:
+        return None
+
+    def proxy_token(self) -> str | None:
+        return None
 
 
 def peer_pid(sock: socket.socket) -> int | None:
@@ -80,6 +113,7 @@ class Broker:
         upload: Callable = upload_token.upload,
         base_url: str = upload_token.UPLOAD_BASE,
         clock: Callable[[], float] = time.time,
+        credentials: Credentials = NoCredentials(),
     ):
         self.home = Path(home)
         self.socket_path = self.home / SOCKET_NAME
@@ -90,6 +124,7 @@ class Broker:
         self._upload = upload
         self._base_url = base_url
         self._clock = clock
+        self._credentials = credentials
         self._repository_ids: dict[str, int] = {}
         self._recent: list[float] = []
         self._server: asyncio.AbstractServer | None = None
@@ -157,14 +192,33 @@ class Broker:
             return self._failure("refused", BAD_REQUEST)
         if op == "status":
             return self._status()
+        pid = peer_pid(writer.get_extra_info("socket"))
+        if op in CREDENTIAL_MESSAGES:
+            return await self._credential_request(op, pid)
         if op != "upload":
             return self._failure("refused", BAD_REQUEST)
-        pid = peer_pid(writer.get_extra_info("socket"))
         return await self._upload_request(request, reader, pid)
+
+    async def _credential_request(self, op: str, pid: int | None) -> dict:
+        if op == "proxy_token":
+            token, expires_at = self._credentials.proxy_token(), None
+        else:
+            try:
+                issued = await asyncio.to_thread(self._credentials.linear_token)
+            except Exception as error:
+                logger.warning("factory-uploads: Linear token for pid %s failed: %s", pid, error)
+                self._audit({"op": op, "pid": pid, "state": "error"})
+                return self._failure("error", LINEAR_FAILED)
+            token, expires_at = (issued["access_token"], issued["expires_at"]) if issued else (None, None)
+        if not token:
+            self._audit({"op": op, "pid": pid, "state": "unavailable"})
+            return self._failure("unavailable", CREDENTIAL_MESSAGES[op])
+        self._audit({"op": op, "pid": pid, "state": "ok"})
+        return {"ok": True, "token": token, "expires_at": expires_at}
 
     async def _upload_request(self, request: dict, reader, pid: int | None) -> dict:
         repo, name, size = request.get("repo"), request.get("name"), request.get("size")
-        entry = {"repo": repo, "name": name, "size": size, "pid": pid}
+        entry = {"op": "upload", "repo": repo, "name": name, "size": size, "pid": pid}
         try:
             self._check_shape(repo, name, size)
             data = await reader.readexactly(size)
@@ -227,6 +281,8 @@ class Broker:
         return {
             "ok": True,
             "token_present": bool(self._get_token()),
+            "linear_ready": self._credentials.linear_ready(),
+            "proxy_token_present": bool(self._credentials.proxy_token()),
             "last_state": record.get("state"),
             "expires_at": record.get("expires_at"),
             "checked_at": record.get("checked_at"),

@@ -40,7 +40,21 @@ class StubSendResult:
         self.success, self.error = success, error
 
 
-def stub_hermes(home: Path, secrets: dict) -> dict:
+FAKE_LINEAR = """
+def token_cache_path(environ):
+    return environ["HERMES_HOME"] + "/plugin-data/linear-agent-session/token.json"
+
+
+class LinearClient:
+    def __init__(self, client_id, client_secret, *, token_cache_path=None):
+        self.args = (client_id, client_secret, token_cache_path)
+
+    def issue_token(self):
+        return {"access_token": "lin_oauth_FAKE " + " ".join(self.args), "expires_at": 1900000000.0}
+"""
+
+
+def stub_hermes(home: Path, secrets: dict, config: dict | None = None) -> dict:
     def module(name, **attrs):
         made = types.ModuleType(name)
         made.__dict__.update(attrs)
@@ -57,7 +71,14 @@ def stub_hermes(home: Path, secrets: dict) -> dict:
             "gateway.platforms.base", BasePlatformAdapter=StubBase, SendResult=StubSendResult
         ),
         "hermes_constants": module("hermes_constants", get_hermes_home=lambda: home),
+        "hermes_cli": module("hermes_cli"),
+        "hermes_cli.config": module("hermes_cli.config", load_config_readonly=lambda: config if config is not None else {}),
     }
+
+
+def factory_settings(auth_token_env: str) -> dict:
+    session = {"claude_session": {"auth_token_env": auth_token_env}}
+    return {"plugins": {"entries": {"linear-agent-session": {"settings": session}}}}
 
 
 class AdapterTest(unittest.IsolatedAsyncioTestCase):
@@ -65,8 +86,15 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
-        self.secrets = {"GITHUB_UPLOAD_TOKEN": TOKEN}
-        patcher = mock.patch.dict(sys.modules, stub_hermes(self.home, self.secrets))
+        self.secrets = {
+            "GITHUB_UPLOAD_TOKEN": TOKEN, "LINEAR_CLIENT_ID": "lin-id", "LINEAR_CLIENT_SECRET": "lin-secret",
+            "EXAMPLE_PROXY_TOKEN": "proxy-FAKE-token",
+        }
+        self.settings = factory_settings("EXAMPLE_PROXY_TOKEN")
+        plugin = self.home / "plugins" / "linear-agent-session"
+        plugin.mkdir(parents=True)
+        (plugin / "linear.py").write_text(FAKE_LINEAR)
+        patcher = mock.patch.dict(sys.modules, stub_hermes(self.home, self.secrets, self.settings))
         patcher.start()
         self.addCleanup(patcher.stop)
         sys.modules.pop("factory_uploads.adapter", None)
@@ -91,6 +119,66 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         reply = json.loads(await reader.readline())
         writer.close()
         return reply
+
+    async def request(self, op: str) -> dict:
+        reader, writer = await asyncio.open_unix_connection(str(self.home / "factory-uploads.sock"))
+        writer.write(json.dumps({"op": op}).encode() + b"\n")
+        await writer.drain()
+        reply = json.loads(await reader.readline())
+        writer.close()
+        return reply
+
+    async def connected(self):
+        adapter = self.make_adapter()
+        await adapter.connect()
+        self.addAsyncCleanup(adapter.disconnect)
+        return adapter
+
+    async def test_a_linear_token_comes_from_the_homes_plugin_client_with_the_gateways_credentials(self):
+        await self.connected()
+
+        reply = await self.request("linear_token")
+
+        cache = f"{self.home}/plugin-data/linear-agent-session/token.json"
+        self.assertEqual(
+            reply, {"ok": True, "token": f"lin_oauth_FAKE lin-id lin-secret {cache}", "expires_at": 1900000000.0}
+        )
+
+    async def test_a_gateway_without_linear_credentials_issues_no_linear_token(self):
+        await self.connected()
+        self.secrets.pop("LINEAR_CLIENT_SECRET")
+
+        reply = await self.request("linear_token")
+
+        self.assertEqual(reply["state"], "unavailable")
+        self.assertFalse((await self.request("status"))["linear_ready"])
+
+    async def test_the_proxy_token_is_the_variable_the_factory_settings_name(self):
+        await self.connected()
+
+        self.assertEqual(await self.request("proxy_token"), {"ok": True, "token": "proxy-FAKE-token", "expires_at": None})
+        self.secrets.pop("EXAMPLE_PROXY_TOKEN")
+        self.assertEqual((await self.request("proxy_token"))["state"], "unavailable")
+
+    async def test_settings_without_a_token_variable_serve_no_secret_as_the_proxy_token(self):
+        self.settings.clear()
+        self.settings.update(factory_settings(""))
+        await self.connected()
+
+        reply = await self.request("proxy_token")
+
+        self.assertEqual(reply["state"], "unavailable")
+        self.assertNotIn("proxy-FAKE-token", json.dumps(reply))
+
+    async def test_status_reports_which_credentials_the_gateway_holds(self):
+        await self.connected()
+
+        status = await self.request("status")
+
+        self.assertEqual(
+            {key: status[key] for key in ("token_present", "linear_ready", "proxy_token_present")},
+            {"token_present": True, "linear_ready": True, "proxy_token_present": True},
+        )
 
     async def test_connect_listens_in_the_hermes_home_and_disconnect_removes_the_socket(self):
         adapter = self.make_adapter()

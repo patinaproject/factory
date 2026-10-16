@@ -30,12 +30,16 @@ def tracked_code_files() -> list[str]:
 
 
 class TokenContainmentTest(unittest.TestCase):
-    def test_only_the_adapter_and_the_upload_module_name_the_token(self):
+    def test_only_the_adapter_the_upload_module_and_the_strip_list_name_the_token(self):
         naming = sorted(name for name in tracked_code_files() if NAME in (REPO / name).read_bytes())
 
         self.assertEqual(
             naming,
-            ["plugins/factory-uploads/adapter.py", "plugins/factory-uploads/upload_token.py"],
+            [
+                "plugins/factory-secret-names/plugin.yaml",
+                "plugins/factory-uploads/adapter.py",
+                "plugins/factory-uploads/upload_token.py",
+            ],
         )
 
     def test_the_scan_sees_the_worker_scripts_it_is_meant_to_cover(self):
