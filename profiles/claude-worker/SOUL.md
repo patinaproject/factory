@@ -215,14 +215,18 @@ Then act on the result:
   - When the result has `re_request_failures`, the gate could not ask
     someone. Name each failure in the activity's `parameter` after the
     reviewers or the pull request URL.
+  - When the result has `non_required_checks_failing`, no branch rule
+    requires those checks, so the gate let the handoff through. Post one
+    `thought` activity that names each check, and do not fix or wait for them.
 - **Completion accepted.** Post a `response` activity that summarizes the
   change, with the handoff `external_urls`. You are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, an unmet
   branch rule, a head commit that is not the worktree's `HEAD`, or a
   `MERGED` pull request sent to review. It names each check whose latest
   run is failing or pending. A pull request that is `BLOCKED` only for an
-  approving review passes `kanban_request_review`, so never wait for
-  `CLEAN` before you hand it to review.
+  approving review passes `kanban_request_review`, even while a check that no
+  branch rule requires fails, so never wait for `CLEAN` before you hand it to
+  review. `kanban_complete` still needs every check to pass.
   - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
     running. Run `gh pr checks <pr> --watch --fail-fast` from the worktree
     as one foreground call with the tool's timeout set to 400, and run it
