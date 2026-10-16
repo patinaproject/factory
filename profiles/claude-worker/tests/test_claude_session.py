@@ -1101,8 +1101,12 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.head(), pull)
 
     def takeover_pair(self, **person) -> str:
-        """A person's pull request #7 and the factory's open pull request #9 on this card's branch."""
+        """A person's pull request #7 and the factory's open pull request #9 on this card's branch.
+
+        The person created their branch before #9 opened, and GitHub compares the two heads as diverged.
+        """
         self.push_upstream_commit("pull", "refs/pull/7/head")
+        self.github.create_branch("person-branch", "person")
         self.github.add_pull(7, "person-branch", **person)
         self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body="Adds the thing.")
         return f"https://github.com/{REPO}/pull/9"
@@ -1132,9 +1136,9 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.github.pull(9)["body"], "Supersedes #7 by Ada.")
         self.assertEqual(self.github.pull(7)["state"], "closed")
 
-    def test_takeover_pull_request_whose_head_the_factory_contains_is_closed(self) -> None:
+    def test_takeover_pull_request_whose_head_the_factory_contains_is_closed_whatever_its_pushes(self) -> None:
         self.takeover_pair()
-        self.github.state["commit_dates"]["7"] = ["2026-10-02T00:00:00Z"]
+        self.github.push("person-branch", "2026-10-02T00:00:00Z")
         self.github.set_compare(9, 7, "behind")
 
         _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
@@ -1142,10 +1146,9 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["superseded"]["action"], "closed")
         self.assertEqual(self.github.pull(7)["state"], "closed")
 
-    def test_takeover_pull_request_with_no_commit_after_the_factory_opened_is_closed_when_the_factory_squashed(self) -> None:
+    def test_takeover_pull_request_with_no_push_after_the_factory_opened_is_closed_when_the_factory_squashed(self) -> None:
         self.takeover_pair()
-        self.github.state["commit_dates"]["7"] = ["2026-09-30T00:00:00Z", "2026-10-01T00:00:00Z"]
-        self.github.set_compare(9, 7, "diverged")
+        self.github.push("person-branch", "2026-09-30T00:00:00Z")
 
         _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
@@ -1161,18 +1164,27 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.github.comments(7), [])
         self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
 
-    def test_person_who_pushed_after_the_takeover_keeps_an_open_pull_request(self) -> None:
+    def test_person_who_pushed_after_the_factory_opened_keeps_an_open_pull_request(self) -> None:
         self.takeover_pair()
-        self.github.state["commit_dates"]["7"] = ["2026-09-30T00:00:00Z", "2026-10-02T00:00:00Z"]
-        self.github.set_compare(9, 7, "diverged")
+        self.github.push("person-branch", "2026-09-30T00:00:00Z")
+        self.github.push("person-branch", "2026-10-02T00:00:00Z")
 
         self.assert_person_pull_request_left_open()
 
-    def test_person_commit_after_the_takeover_beyond_the_first_page_keeps_an_open_pull_request(self) -> None:
+    def test_person_who_built_on_the_factorys_head_keeps_an_open_pull_request(self) -> None:
         self.takeover_pair()
-        self.github.state["commit_dates"]["7"] = ["2026-09-30T00:00:00Z"] * 100 + ["2026-10-02T00:00:00Z"]
-        self.github.state["pulls"]["7"]["commits"] = 101
-        self.github.save()
+        self.github.set_compare(9, 7, "ahead")
+
+        self.assert_person_pull_request_left_open()
+
+    def test_person_pull_request_from_a_fork_stays_open(self) -> None:
+        self.takeover_pair(head_repo="person/factory-fork")
+
+        self.assert_person_pull_request_left_open()
+
+    def test_person_branch_without_activity_records_keeps_an_open_pull_request(self) -> None:
+        self.takeover_pair()
+        self.github.create_branch("person-branch")
 
         self.assert_person_pull_request_left_open()
 
@@ -1243,6 +1255,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["superseded"]["action"], "failed")
         self.assertIn("Resource not accessible", report["superseded"]["error"])
         self.assertEqual(self.github.pull(7)["state"], "open")
+        self.assertEqual(self.github.comments(7), [])
 
     @staticmethod
     def session_module():
@@ -1273,6 +1286,64 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(result["action"], "closed")
         self.assertIn("HTTP 403", result["body_error"])
         self.assertIn((f"repos/{REPO}/pulls/7", ("-X", "PATCH", "-f", "state=closed")), calls)
+
+    def gh_answering(self, **failures):
+        """A gh for #7 and #9 that raises the exception named for a path keyword: compare, activity, or comments."""
+        module = self.session_module()
+        writes = []
+
+        def gh(path, *options):
+            for key, failure in failures.items():
+                if f"/{key}" in path:
+                    raise failure
+            if "-X" in options:
+                writes.append(path)
+                return {}
+            if "head=" in path:
+                return [{"user": {"login": BOT_LOGIN}, "number": 9, "html_url": "https://x/9", "body": "",
+                         "created_at": "2026-10-01T00:00:00Z", "head": {"sha": "f"}}]
+            if "/compare/" in path:
+                return {"status": "diverged"}
+            if "/activity" in path:
+                return [{"activity_type": "push", "timestamp": "2026-09-30T00:00:00Z"}]
+            return {"state": "open", "user": {"login": "person"},
+                    "head": {"ref": "person-branch", "sha": "p", "repo": {"full_name": REPO}}}
+
+        return module, gh, writes
+
+    def test_a_squashed_takeover_with_every_read_answered_is_closed(self) -> None:
+        module, gh, writes = self.gh_answering()
+
+        result = module.supersede_takeover(REPO, "abc-123-fix", TAKEOVER_PR, BOT_LOGIN, gh=gh)
+
+        self.assertEqual(result["action"], "closed")
+        self.assertIn(f"repos/{REPO}/pulls/7", writes)
+
+    def test_a_failed_read_never_closes_the_takeover_pull_request(self) -> None:
+        module = self.session_module()
+        for key, failure in (
+            ("compare", module.card_branch.GhFailed("gh api compare failed: HTTP 502")),
+            ("activity", module.card_branch.GhFailed("gh api activity failed: HTTP 403")),
+            ("compare", json.JSONDecodeError("Expecting value", "<html>", 0)),
+            ("activity", json.JSONDecodeError("Expecting value", "<html>", 0)),
+        ):
+            with self.subTest(key=key, failure=type(failure).__name__):
+                module, gh, writes = self.gh_answering(**{key: failure})
+
+                result = module.supersede_takeover(REPO, "abc-123-fix", TAKEOVER_PR, BOT_LOGIN, gh=gh)
+
+                self.assertEqual(result["action"], "failed")
+                self.assertEqual(writes, [])
+
+    def test_a_failed_comment_after_the_close_is_reported_with_the_close(self) -> None:
+        module = self.session_module()
+        module, gh, writes = self.gh_answering(issues=module.card_branch.GhFailed("gh api failed: HTTP 502"))
+
+        result = module.supersede_takeover(REPO, "abc-123-fix", TAKEOVER_PR, BOT_LOGIN, gh=gh)
+
+        self.assertEqual(result["action"], "closed")
+        self.assertIn("HTTP 502", result["comment_error"])
+        self.assertIn(f"repos/{REPO}/pulls/7", writes)
 
     def test_takeover_pull_request_of_another_repository_is_not_closed(self) -> None:
         calls = []

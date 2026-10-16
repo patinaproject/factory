@@ -29,6 +29,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import quote
 
 import card_branch
 
@@ -204,15 +205,20 @@ def person_pushed_after(gh, repo: str, person: dict, factory: dict) -> bool:
     """True unless the factory's pull request carries all of the person's work.
 
     The work is carried when the person's head is an ancestor of the factory's head. When the factory squashed
-    and the ancestry is gone, it is carried when no commit on the person's pull request is newer than the
-    factory's pull request.
+    and the ancestry is gone, it is carried when the person's branch, in this repository, saw no activity after
+    the factory's pull request opened. Commit dates play no part, because a commit can be pushed long after it
+    was made. A branch in a fork has no activity here, so it is never carried.
     """
     compare = gh(f"repos/{repo}/compare/{factory['head']['sha']}...{person['head']['sha']}?per_page=1")
     if compare["status"] in ("behind", "identical"):
         return False
-    last_page = max(1, -(-person["commits"] // 100))
-    commits = gh(f"repos/{repo}/pulls/{person['number']}/commits?per_page=100&page={last_page}")
-    return any(commit["commit"]["committer"]["date"] > factory["created_at"] for commit in commits)
+    if compare["status"] != "diverged":
+        return True
+    if ((person["head"].get("repo") or {}).get("full_name") or "").lower() != repo.lower():
+        return True
+    ref = quote(person["head"]["ref"], safe="/")
+    records = gh(f"repos/{repo}/activity?ref=refs/heads/{ref}&per_page=1")
+    return not records or records[0]["timestamp"] > factory["created_at"]
 
 
 def supersede_takeover(repo: str, branch: str, takeover_pr: str | None, login: str | None, gh=card_branch.run_gh) -> dict | None:
@@ -251,12 +257,16 @@ def supersede_takeover(repo: str, branch: str, takeover_pr: str | None, login: s
                 gh(f"repos/{repo}/pulls/{factory['number']}", "-X", "PATCH", "-f", f"body={body}\n\n{line}.".strip())
             except card_branch.GhFailed as failure:
                 result["body_error"] = str(failure)
-        gh(f"repos/{repo}/issues/{number}/comments", "-X", "POST", "-f",
-           f"body=The factory opened #{factory['number']} from this pull request's work, so this one is closed "
-           f"and review continues there: {factory['html_url']}")
         gh(f"repos/{repo}/pulls/{number}", "-X", "PATCH", "-f", "state=closed")
-        return {**result, "action": "closed", "replacement": factory["html_url"]}
-    except (card_branch.GhFailed, KeyError, TypeError) as failure:
+        result.update(action="closed", replacement=factory["html_url"])
+        try:
+            gh(f"repos/{repo}/issues/{number}/comments", "-X", "POST", "-f",
+               f"body=The factory opened #{factory['number']} from this pull request's work, so this one is closed "
+               f"and review continues there: {factory['html_url']}")
+        except card_branch.GhFailed as failure:
+            result["comment_error"] = str(failure)
+        return result
+    except (card_branch.GhFailed, json.JSONDecodeError, KeyError, TypeError) as failure:
         return {**result, "action": "failed", "error": str(failure)}
 
 
