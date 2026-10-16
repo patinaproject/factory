@@ -1193,7 +1193,8 @@ each check. Report each result.
     against it, with the card in `review` and its Linear issue In Progress.
     First merge past a check whose newest run failed. The card's comments
     include `Merge refused by Hermes: required checks failed:` with the check
-    names, the card is unassigned and `blocked` with block kind `needs_input`,
+    names, the card is unassigned and `blocked` with block kind `needs_input` (a
+    `review` card stays in `review`, unassigned),
     and the Linear agent session gets one `elicitation` that says the pull
     request merged and asks whether the issue is done. A reply in the session
     leaves the card `blocked`. Mark the Linear issue Done, and the card is

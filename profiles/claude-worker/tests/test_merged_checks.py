@@ -90,6 +90,13 @@ class MergedChecksTest(unittest.TestCase):
         passing = {**failing, "state": "SUCCESS", "startedAt": "2026-10-16T02:00:00Z"}
         self.assertEqual(self.sort([failing, passing], ["Vercel"])[1]["superseded"], ["Vercel"])
 
+    def test_a_failed_run_replaced_by_a_newer_skip_is_superseded(self):
+        rollup = [
+            run("Deploy", "Pull request", "FAILURE", "2026-10-16T04:09:58Z"),
+            run("Deploy", "Pull request", "SKIPPED", "2026-10-16T04:25:56Z"),
+        ]
+        self.assertEqual(self.sort(rollup, ["Deploy"])[1]["superseded"], ["Deploy"])
+
     def test_a_check_the_rollup_does_not_show_is_real(self):
         self.assertEqual(self.sort([], ["Gone"])[1], {"head_sha": "abc", "real": ["Gone"], "superseded": []})
 

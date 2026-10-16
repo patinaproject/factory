@@ -79,14 +79,18 @@ the event's `head_sha`, comment the refusal with the pull request URL and stop.
    runs only, comment
    `Merge refused by Hermes: Hermes counted failed runs that newer passing runs replaced: <names>.`
 2. Read `linear_issue_id` from the card body and read the issue with
-   `linear_issue`. If its `stateType` is `completed`, run
-   `<<archive_card>> <task id>` and stop. If it prints an error, run it once
-   more. If that fails too, comment the error on the card and stop.
+   `linear_issue`. Only a read that returns a `stateType` of `completed`
+   archives the card: run `<<archive_card>> <task id>` and stop. If the read
+   prints an error, returns nothing, or has no `stateType`, run it once more.
+   If that fails too, the issue is not known to be done, so never archive the
+   card. Go to step 3 and block it, and say in the card comment that the issue
+   could not be read.
 3. Otherwise block the card once for a person. Run
-   `hermes kanban assign <task id> none` first, because the dispatcher skips an
-   unassigned card, and a reopen or a block can let it start a worker on a
-   merged pull request. Never assign the card afterward. Then use the reason
-   for the case:
+   `hermes kanban assign <task id> none` first, before any state command,
+   because the dispatcher skips an unassigned card. After it, run only the
+   commands below. Never hand the card off or assign it: a handoff or an
+   assignment writes an event that lifts the `active_pr` hold, and a worker
+   would start on a merged pull request. Use the reason for the case:
    - Real failure:
      `Pull request <repository>#<number> merged, but required checks failed: <names>. Is the work done? If it is, mark the Linear issue Done, and the card is archived.`
    - Superseded runs only:
@@ -94,8 +98,9 @@ the event's `head_sha`, comment the refusal with the pull request URL and stop.
 
    Act on the status from the last `hermes kanban show`:
    - `ready`: run `hermes kanban block <task id> '<reason>' --kind needs_input`.
-   - `review`: run `hermes kanban reopen-review <task id> --reason 'pull request merged'`,
-     then `hermes kanban block <task id> '<reason>' --kind needs_input`.
+   - `review`: leave the card in `review`. The review lane skips an unassigned
+     card, so nothing starts on it. Change nothing else on the card, then
+     post the reason as below.
    - `blocked`: Hermes refuses to block a blocked card again. If the task's
      `block_kind` is null, run the `ready` command, which records the kind
      and posts nothing. Then post the reason as below.
@@ -103,6 +108,7 @@ the event's `head_sha`, comment the refusal with the pull request URL and stop.
    The block posts the reason on the issue's Linear agent session as an
    `elicitation`. A card blocked for `needs_input` before goes to `triage`
    instead, and that post carries the reason too. When the card was
-   `blocked`, or the block command failed, read `linear_agent_session_id`
-   from the card body and post an `elicitation` on that session with
-   `linear_agent_activity`, whose body is the reason. Post the reason once.
+   `review` or `blocked`, or the block command failed, read
+   `linear_agent_session_id` from the card body and post an `elicitation` on
+   that session with `linear_agent_activity`, whose body is the reason. Post
+   the reason once.
