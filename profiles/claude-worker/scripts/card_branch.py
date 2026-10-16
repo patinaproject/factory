@@ -26,7 +26,7 @@ from urllib.parse import quote
 TAKEOVER_SUFFIX = "-takeover"
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 SERVER_ERROR = re.compile(r"\bHTTP 5[0-9][0-9]\b")
-WRITE_OPTIONS = {"-X", "--method", "-f", "--raw-field", "-F", "--field", "--input"}
+WRITE_OPTIONS = ("-X", "--method", "-f", "--raw-field", "-F", "--field", "--input")
 RETRY_DELAYS = (1, 2)
 
 
@@ -68,7 +68,7 @@ class BranchNotFound(GhFailed):
 
 
 class GhServerError(GhFailed):
-    """GitHub answered with a 5xx, which clears on its own."""
+    """GitHub kept answering with a 5xx, so the caller can wait and try again."""
 
 
 def is_app(login: str, app: str) -> bool:
@@ -141,7 +141,7 @@ def choose(git_branch: str, pulls: list[Pull], owners: Mapping[str, Owner | None
 def run_gh(*args: str) -> Any:
     """Call `gh api`, retrying a server error only when the call reads, so a write is never sent twice."""
     gh = os.environ.get("GH_BIN", "gh")
-    delays = () if WRITE_OPTIONS.intersection(args) else RETRY_DELAYS
+    delays = () if any(arg.startswith(WRITE_OPTIONS) for arg in args) else RETRY_DELAYS
     for attempt in range(len(delays) + 1):
         try:
             proc = subprocess.run([gh, "api", *args], capture_output=True, text=True)

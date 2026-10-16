@@ -227,13 +227,15 @@ class RunGhTest(unittest.TestCase):
         self.assertEqual(len(self.github.calls()), 1)
 
     def test_a_write_that_meets_a_server_error_is_not_retried(self) -> None:
-        self.github.add_pull(7, X)
-        self.github.fail_next("gh: Server Error (HTTP 500)")
+        for write in (("-X", "POST", "-f", "body=hi"), ("--method=PATCH",), ("-fstate=closed",)):
+            with self.subTest(write):
+                log = Path(str(self.github.state_path) + ".log")
+                log.unlink(missing_ok=True)
+                self.github.fail_next("gh: Server Error (HTTP 500)", "gh: Server Error (HTTP 500)")
 
-        with self.assertRaises(card_branch.GhServerError):
-            card_branch.run_gh(f"repos/{REPO}/issues/7/comments", "-X", "POST", "-f", "body=hi")
-        self.assertEqual(len(self.github.calls()), 1)
-        self.assertEqual(self.github.comments(7), [])
+                with self.assertRaises(card_branch.GhServerError):
+                    card_branch.run_gh(f"repos/{REPO}/issues/7/comments", *write)
+                self.assertEqual(len(self.github.calls()), 1)
 
 
 class CommandTest(unittest.TestCase):
