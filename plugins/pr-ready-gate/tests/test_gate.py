@@ -110,6 +110,12 @@ REVIEW_STATE = {
 }
 
 
+def requiring(*contexts):
+    """DEFAULT_RULES with the required status checks replaced."""
+    checks = [{"context": context} for context in contexts]
+    return [*DEFAULT_RULES[:-1], {"type": "required_status_checks", "parameters": {"required_status_checks": checks}}]
+
+
 def state_with(**overrides):
     node = json.loads(json.dumps(REVIEW_STATE["data"]["repository"]["pullRequest"]))
     node.update(overrides)
@@ -256,10 +262,15 @@ class HookDecisionTest(unittest.TestCase):
         self.assertEqual(result["action"], "block")
         self.assertIn("mergeStateStatus is 'BLOCKED'", result["message"])
 
-    def test_review_handoff_after_changes_requested_refuses_a_failed_status(self):
-        failed = {**AWAITING_RE_REVIEW, "statusCheckRollup": [*PASSING_CHECKS, {"state": "FAILURE"}]}
-        result = call_hook(FakeShell(pr={**CLEAN, **failed}), tool_name="kanban_request_review")
+    def test_review_handoff_after_changes_requested_refuses_a_failed_required_status(self):
+        failed = {**AWAITING_RE_REVIEW, "statusCheckRollup": [*PASSING_CHECKS[:2], {"__typename": "StatusContext", "context": "Preview", "state": "FAILURE"}]}
+        result = call_hook(FakeShell(pr={**CLEAN, **failed}, rules=requiring("Required checks pass", "Preview")), tool_name="kanban_request_review")
         self.assertEqual(result["action"], "block")
+        self.assertIn("check 'Preview' failed (FAILURE)", result["message"])
+
+    def test_review_handoff_after_changes_requested_allows_a_failed_status_no_rule_requires(self):
+        failed = {**AWAITING_RE_REVIEW, "statusCheckRollup": [*PASSING_CHECKS, {"state": "FAILURE"}]}
+        self.assertIsNone(call_hook(FakeShell(pr={**CLEAN, **failed}), tool_name="kanban_request_review"))
 
     def test_review_handoff_after_changes_requested_waits_for_checks_to_register(self):
         unregistered = {**AWAITING_RE_REVIEW, "statusCheckRollup": []}
@@ -313,9 +324,25 @@ class HookDecisionTest(unittest.TestCase):
         self.assert_blocked(result, "mergeStateStatus is 'BLOCKED'")
         self.assertEqual([call for call in shell.calls if call[0][:2] == ["gh", "api"]], [])
 
-    def test_approval_wait_with_a_failing_check_is_refused(self):
+    def test_approval_wait_with_a_failing_required_check_is_refused_naming_it(self):
         failed = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Test", "status": "COMPLETED", "conclusion": "FAILURE"}]
-        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": failed}), "mergeStateStatus is 'BLOCKED'")
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": failed}, rules=requiring("Required checks pass", "Test"))
+        self.assert_blocked(result, "mergeStateStatus is 'BLOCKED'")
+        self.assertEqual(result["message"].count("check 'Test' failed (FAILURE)"), 1)
+
+    def test_approval_wait_with_a_failing_check_no_rule_requires_is_allowed(self):
+        failed = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Diff infra", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        self.assertIsNone(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": failed}))
+
+    def test_approval_wait_with_no_required_status_rule_allows_every_failing_check(self):
+        rules = [{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]
+        failed = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Diff infra", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        self.assertIsNone(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": failed}, rules=rules))
+
+    def test_completion_is_refused_for_a_failing_check_no_rule_requires(self):
+        failed = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Diff infra", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL, "statusCheckRollup": failed})
+        self.assert_blocked(call_hook(shell, tool_name="kanban_complete"), "check 'Diff infra' failed (FAILURE)")
 
     def test_approval_wait_with_a_pending_check_is_refused(self):
         pending = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Test", "status": "IN_PROGRESS", "conclusion": ""}]
@@ -339,7 +366,7 @@ class HookDecisionTest(unittest.TestCase):
 
     def test_approval_wait_whose_latest_run_failed_is_refused_naming_the_check(self):
         rollup = [*PASSING_CHECKS, self.check_run("FAILURE", "2026-10-14T01:10:14Z"), self.check_run("SUCCESS", "2026-10-14T01:09:23Z")]
-        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup})
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}, rules=requiring("Required checks pass", "Validate pull request"))
         self.assert_blocked(result, "check 'Validate pull request' failed (FAILURE)")
         self.assertNotIn("Required checks pass", result["message"])
 
@@ -350,7 +377,16 @@ class HookDecisionTest(unittest.TestCase):
 
     def test_runs_that_started_together_count_the_one_that_did_not_pass(self):
         rollup = [*PASSING_CHECKS, self.check_run("FAILURE", "2026-10-14T01:09:23Z"), self.check_run("SUCCESS", "2026-10-14T01:09:23Z")]
-        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}), "check 'Validate pull request' failed")
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}, rules=requiring("Required checks pass", "Validate pull request"))
+        self.assert_blocked(result, "check 'Validate pull request' failed")
+
+    def test_a_pending_check_no_rule_requires_still_holds_the_handoff(self):
+        pending = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Vercel", "status": "IN_PROGRESS", "conclusion": ""}]
+        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": pending}), "check 'Vercel' is pending (IN_PROGRESS)")
+
+    def test_a_failed_older_run_of_a_check_no_rule_requires_is_not_the_newest(self):
+        rollup = [*PASSING_CHECKS, self.check_run("FAILURE", "2026-10-14T01:09:23Z"), self.check_run("SUCCESS", "2026-10-14T01:10:14Z")]
+        self.assertEqual(gate._optional_failures({"statusCheckRollup": rollup}, DEFAULT_RULES), [])
 
     def test_a_pending_status_context_is_named(self):
         rollup = [*PASSING_CHECKS, {"__typename": "StatusContext", "context": "Preview deploy", "state": "PENDING"}]
@@ -613,6 +649,50 @@ class ReviewHookTest(unittest.TestCase):
         shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL})
         self.assertIsNone(call_review_hook(shell))
         self.assertEqual(self.posts(shell), [])
+
+    def optional_shell(self, rollup, **fake):
+        return FakeShell(pr={**CLEAN, **AWAITING_APPROVAL, "statusCheckRollup": rollup}, **fake)
+
+    def test_a_failing_check_no_rule_requires_is_named_in_the_handoff_result(self):
+        vercel = {"__typename": "CheckRun", "name": "Vercel \u2013 cms", "status": "COMPLETED", "conclusion": "FAILURE"}
+        infra = {"__typename": "StatusContext", "context": "Diff infra", "state": "FAILURE"}
+        result = json.loads(call_review_hook(self.optional_shell([*PASSING_CHECKS, vercel, infra])))
+        self.assertEqual(result["status"], "review")
+        self.assertEqual(result["non_required_checks_failing"], ["Vercel \u2013 cms (FAILURE)", "Diff infra (FAILURE)"])
+        self.assertIn("No branch rule requires these checks", result["non_required_checks_note"])
+
+    def test_a_required_check_is_never_named_as_one_no_rule_requires(self):
+        failing = {"__typename": "CheckRun", "name": "Required checks pass", "status": "COMPLETED", "conclusion": "FAILURE"}
+        self.assertIsNone(call_review_hook(self.optional_shell([failing])))
+
+    def test_only_the_newest_run_of_a_check_is_named(self):
+        def run(conclusion, started):
+            return {"__typename": "CheckRun", "name": "Vercel", "workflowName": "Deploy", "status": "COMPLETED", "conclusion": conclusion, "startedAt": started}
+        healed = [*PASSING_CHECKS, run("FAILURE", "2026-10-14T01:09:23Z"), run("SUCCESS", "2026-10-14T01:10:14Z")]
+        self.assertIsNone(call_review_hook(self.optional_shell(healed)))
+        broke = [*PASSING_CHECKS, run("SUCCESS", "2026-10-14T01:09:23Z"), run("FAILURE", "2026-10-14T01:10:14Z")]
+        self.assertEqual(json.loads(call_review_hook(self.optional_shell(broke)))["non_required_checks_failing"], ["Vercel (FAILURE)"])
+
+    def test_the_failing_checks_and_the_re_requested_reviewers_share_one_result_and_one_pull_request_read(self):
+        failing = {"__typename": "CheckRun", "name": "Vercel", "status": "COMPLETED", "conclusion": "FAILURE"}
+        shell = self.shell(review_nodes(("reviewer", OTHER)), pr={"statusCheckRollup": [*PASSING_CHECKS, failing]})
+        result = json.loads(call_review_hook(shell))
+        self.assertEqual(result["re_requested_reviewers"], ["reviewer"])
+        self.assertEqual(result["non_required_checks_failing"], ["Vercel (FAILURE)"])
+        views = [call for call in shell.calls if call[0][:3] == ["gh", "pr", "view"]]
+        self.assertEqual(len(views), 1)
+
+    def test_unreadable_rules_are_reported_and_the_handoff_still_stands(self):
+        failing = {"__typename": "CheckRun", "name": "Vercel", "status": "COMPLETED", "conclusion": "FAILURE"}
+        result = json.loads(call_review_hook(self.optional_shell([*PASSING_CHECKS, failing], rules={"message": "Not Found"})))
+        self.assertEqual(result["status"], "review")
+        self.assertIn("could not be read", result["non_required_checks_unread"])
+        self.assertNotIn("non_required_checks_failing", result)
+
+    def test_a_merged_pull_request_names_no_checks(self):
+        failing = {"__typename": "CheckRun", "name": "Vercel", "status": "COMPLETED", "conclusion": "FAILURE"}
+        shell = FakeShell(pr={**CLEAN, "state": "MERGED", "statusCheckRollup": [failing]})
+        self.assertIsNone(call_review_hook(shell))
 
     def test_a_deleted_reviewer_is_never_asked(self):
         reviews = {"pageInfo": {"hasNextPage": False}, "nodes": [{"state": "CHANGES_REQUESTED", "author": None, "commit": {"oid": OTHER}}]}

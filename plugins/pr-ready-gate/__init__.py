@@ -95,16 +95,15 @@ def evaluate(
         remedy = MERGE_STATE_REMEDIES.get(merge_state, "wait until GitHub reports CLEAN")
         failures.append(f"mergeStateStatus is {merge_state!r}, expected 'CLEAN': {remedy}")
     failures += hidden + _head_failures(pr, local_head)
-    return failures + _check_failures(pr) if failures else []
+    return failures + [problem for problem in _check_failures(pr) if problem not in failures] if failures else []
 
 
 def _awaiting_review(pr: dict) -> bool:
-    checks = _latest_runs(pr.get("statusCheckRollup"))
+    # Whether each check passed is judged against the required contexts in _unmet_rules, not here.
     return (
         pr.get("mergeStateStatus") == "BLOCKED"
         and pr.get("reviewDecision") in ("CHANGES_REQUESTED", "REVIEW_REQUIRED")
-        and bool(checks)
-        and all(_check_passed(check) for check in checks)
+        and bool(_latest_runs(pr.get("statusCheckRollup")))
     )
 
 
@@ -129,20 +128,44 @@ def _run_order(check: dict) -> tuple[str, bool]:
 
 
 def _check_failures(pr: dict) -> list[str]:
-    problems = []
-    for check in _latest_runs(pr.get("statusCheckRollup")):
-        if _check_passed(check):
-            continue
-        name = _rollup_name(check) or "unnamed"
-        if not isinstance(check, dict):
-            problems.append(f"a check in the rollup is unreadable: {check!r}")
-        elif check.get("state") in ("PENDING", "EXPECTED") or check.get("status", "COMPLETED") != "COMPLETED":
-            observed = check.get("state") or check.get("status")
-            problems.append(f"check {name!r} is pending ({observed}): wait for it to finish, then call again")
-        else:
-            observed = check.get("state") or check.get("conclusion")
-            problems.append(f"check {name!r} failed ({observed}): fix the cause and push")
-    return problems
+    return [_check_problem(check) for check in _latest_runs(pr.get("statusCheckRollup")) if not _check_passed(check)]
+
+
+def _check_waiting(check) -> bool:
+    """A check that has not finished, or that the rollup gave in a shape the gate cannot read."""
+    if not isinstance(check, dict):
+        return True
+    return check.get("state") in ("PENDING", "EXPECTED") or check.get("status", "COMPLETED") != "COMPLETED"
+
+
+def _check_problem(check) -> str:
+    name = _rollup_name(check) or "unnamed"
+    if not isinstance(check, dict):
+        return f"a check in the rollup is unreadable: {check!r}"
+    if _check_waiting(check):
+        observed = check.get("state") or check.get("status")
+        return f"check {name!r} is pending ({observed}): wait for it to finish, then call again"
+    observed = check.get("state") or check.get("conclusion")
+    return f"check {name!r} failed ({observed}): fix the cause and push"
+
+
+def _required_contexts(rules: list) -> set[str]:
+    return {
+        required.get("context")
+        for rule in rules
+        if isinstance(rule, dict) and rule.get("type") == "required_status_checks"
+        for required in (rule.get("parameters") or {}).get("required_status_checks") or []
+    }
+
+
+def _optional_failures(pr: dict, rules: list) -> list[str]:
+    """Names the newest run of each check that failed and that no branch rule requires."""
+    required = _required_contexts(rules)
+    return [
+        f"{_rollup_name(check) or 'unnamed'} ({check.get('state') or check.get('conclusion')})"
+        for check in _latest_runs(pr.get("statusCheckRollup"))
+        if isinstance(check, dict) and not _check_passed(check) and not _check_waiting(check) and _rollup_name(check) not in required
+    ]
 
 
 def _change_requesters(pr: dict, state: dict, current: bool) -> list[Optional[str]]:
@@ -163,15 +186,15 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
     types = {rule.get("type") for rule in rules if isinstance(rule, dict)}
     for unknown in sorted(str(t) for t in types - REVIEW_HANDOFF_RULES):
         problems.append(f"branch rule {unknown!r} is one this gate cannot verify, so BLOCKED may not be only the review")
-    rollup = pr.get("statusCheckRollup") or []
-    for rule in rules:
-        if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
-            continue
-        for required in (rule.get("parameters") or {}).get("required_status_checks") or []:
-            context = required.get("context")
-            seen = [check for check in rollup if _rollup_name(check) == context]
-            if not seen:
-                problems.append(f"required check {context!r} has not passed: wait for it, or fix and push")
+    # A failing check that no rule requires does not hold the handoff; the handoff result names it instead.
+    required = _required_contexts(rules)
+    runs = _latest_runs(pr.get("statusCheckRollup"))
+    for context in sorted(required):
+        if not any(_rollup_name(check) == context for check in runs):
+            problems.append(f"required check {context!r} has not passed: wait for it, or fix and push")
+    for check in runs:
+        if not _check_passed(check) and (_check_waiting(check) or _rollup_name(check) in required):
+            problems.append(_check_problem(check))
     changes_requested = pr.get("reviewDecision") == "CHANGES_REQUESTED"
     wants_threads = any(
         isinstance(rule, dict)
@@ -247,12 +270,38 @@ def check(tool_name: str, args: Any, env: dict) -> tuple[str, list[str]]:
     return pr["url"], evaluate(pr, local_head, tool_name, _blockers(pr, workspace, deadline))
 
 
-def re_request_reviews(args: Any, env: dict) -> tuple[list[str], list[str]]:
-    """Asks each reviewer whose changes-requested review is on an older head to review again; returns who was asked and what failed."""
+def handoff_notes(args: Any, env: dict) -> dict:
+    """What the review handoff result tells the worker: the reviewers asked again, and the failing checks no rule requires."""
     deadline = time.monotonic() + HOOK_BUDGET_SECONDS
-    workspace, _, pr = _load_pr(args, env, deadline)
+    try:
+        workspace, _, pr = _load_pr(args, env, deadline)
+    except GateError as exc:
+        return {"re_request_failures": [str(exc)]}
+    if pr.get("state") != "OPEN":
+        return {}
+    notes: dict = {}
+    asked, failed = _re_request_reviews(pr, workspace, deadline)
+    if asked:
+        notes["re_requested_reviewers"] = asked
+    if failed:
+        notes["re_request_failures"] = failed
+    try:
+        optional = _optional_failures(pr, _branch_rules(pr, workspace, deadline)) if _names_base_branch(pr) else []
+    except GateError as exc:
+        notes["non_required_checks_unread"] = str(exc)
+    else:
+        if optional:
+            notes["non_required_checks_failing"] = optional
+            notes["non_required_checks_note"] = (
+                "No branch rule requires these checks, so the handoff went through. Report them in your hand-off comment."
+            )
+    return notes
+
+
+def _re_request_reviews(pr: dict, workspace: str, deadline: float) -> tuple[list[str], list[str]]:
+    """Asks each reviewer whose changes-requested review is on an older head to review again; returns who was asked and what failed."""
     match = PR_URL.match(str(pr.get("url")))
-    if pr.get("state") != "OPEN" or pr.get("reviewDecision") != "CHANGES_REQUESTED" or not match:
+    if pr.get("reviewDecision") != "CHANGES_REQUESTED" or not match:
         return [], []
     repo = match.group(1)
     asked, failed = [], []
@@ -332,18 +381,27 @@ def _pr_state(pr: dict, repo: str, workspace: str, deadline: float) -> dict:
         raise GateError(f"the review threads, commit signatures, and reviews of {pr['url']} could not be read")
 
 
-def _blockers(pr: dict, workspace: str, deadline: float) -> Optional[Callable[[], list[str]]]:
-    match = PR_URL.match(str(pr.get("url")))
+def _names_base_branch(pr: dict) -> bool:
     base = pr.get("baseRefName")
-    if not match or not isinstance(base, str) or not base:
+    return bool(PR_URL.match(str(pr.get("url")))) and isinstance(base, str) and bool(base)
+
+
+def _branch_rules(pr: dict, workspace: str, deadline: float) -> list:
+    repo = PR_URL.match(pr["url"]).group(1)
+    base = pr["baseRefName"]
+    rules = _gh_json(["api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100"], workspace, deadline)
+    if not isinstance(rules, list):
+        raise GateError(f"the branch rules of {repo}:{base} could not be read")
+    return rules
+
+
+def _blockers(pr: dict, workspace: str, deadline: float) -> Optional[Callable[[], list[str]]]:
+    if not _names_base_branch(pr):
         return None
-    repo = match.group(1)
+    repo = PR_URL.match(pr["url"]).group(1)
 
     def blockers() -> list[str]:
-        rules = _gh_json(["api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100"], workspace, deadline)
-        if not isinstance(rules, list):
-            raise GateError(f"the branch rules of {repo}:{base} could not be read")
-        return _unmet_rules(pr, rules, lambda: _pr_state(pr, repo, workspace, deadline))
+        return _unmet_rules(pr, _branch_rules(pr, workspace, deadline), lambda: _pr_state(pr, repo, workspace, deadline))
 
     return blockers
 
@@ -389,6 +447,7 @@ def make_hook(ctx: Any):
 
 def make_review_hook(ctx: Any):
     """After a card lands in review, asks stale changes-requested reviewers to look again and names them in the tool result.
+    The result also names each failing check that no branch rule requires, which the gate let through.
 
     transform_tool_result is the one hook that can change what the worker reads, and Hermes bounds it at 30s and fails open.
     """
@@ -402,17 +461,8 @@ def make_review_hook(ctx: Any):
             return None
         if not isinstance(landed, dict) or landed.get("status") != "review":
             return None
-        try:
-            asked, failed = re_request_reviews(args, dict(os.environ))
-        except GateError as exc:
-            asked, failed = [], [str(exc)]
-        if not asked and not failed:
-            return None
-        if asked:
-            landed["re_requested_reviewers"] = asked
-        if failed:
-            landed["re_request_failures"] = failed
-        return json.dumps(landed)
+        notes = handoff_notes(args, dict(os.environ))
+        return json.dumps({**landed, **notes}) if notes else None
 
     return on_tool_result
 
