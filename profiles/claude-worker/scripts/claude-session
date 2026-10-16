@@ -864,9 +864,10 @@ def mcp_status(args: argparse.Namespace) -> tuple[int, dict]:
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / SETTINGS_FILE_NAME
         remove_on_stop(path)
+        api_key = linear_api_key()
+        content = claude_settings({}, api_key, path, mcp)
         # The probe stops at the init event and needs no transport; an unreachable endpoint guarantees it
         # never reaches the model.
-        content = claude_settings({}, linear_api_key(), path, mcp)
         content["env"].update(ANTHROPIC_BASE_URL="http://127.0.0.1:9", ANTHROPIC_AUTH_TOKEN="mcp-status-probe")
         write_private(path, content)
         command = [
@@ -885,7 +886,10 @@ def mcp_status(args: argparse.Namespace) -> tuple[int, dict]:
                 finally:
                     end_run(proc)
             stderr.seek(0)
-            detail = stderr.read().decode(errors="replace").strip()[-2000:]
+            detail = stderr.read().decode(errors="replace")
+    for secret in filter(None, [api_key, *mcp.env.values()]):
+        detail = detail.replace(secret, "[redacted]")
+    detail = detail.strip()[-2000:]
     if init is None:
         return 1, {"error": f"claude exited {proc.returncode} without an init event: {detail}"}
     servers = [{"name": each.get("name"), "status": each.get("status")} for each in init.get("mcp_servers") or []]

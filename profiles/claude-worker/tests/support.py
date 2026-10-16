@@ -46,6 +46,8 @@ if "--settings" in argv:
 with open(options["log"] + ".tmp", "w") as log:
     json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings, "pid": os.getpid()}, log)
 os.rename(options["log"] + ".tmp", options["log"])
+if options.get("stderr_env"):
+    print("token " + settings["content"]["env"][options["stderr_env"]], file=sys.stderr, flush=True)
 if options.get("hold_seconds"):
     import time
     time.sleep(options["hold_seconds"])

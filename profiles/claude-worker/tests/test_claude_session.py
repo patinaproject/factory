@@ -285,6 +285,20 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(content["disabledMcpjsonServers"], ["sentry"])
         self.assertFalse(Path(call["argv"][call["argv"].index("--settings") + 1]).exists())
 
+    def test_mcp_status_redacts_the_run_secrets_from_claude_stderr(self) -> None:
+        self.configure_repository(mcp_servers={"notion": self.NOTION})
+        self.configure_fake_claude(stderr_env="FACTORY_MCP_NOTION_TOKEN")
+        command, env = self.session_command()
+        env.update(FACTORY_MCP_NOTION_TOKEN="notion-secret-value")
+        command = [command[0], "--mcp-status", "--repo", REPO, "--settings-json", str(self.settings)]
+
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+
+        self.assertEqual(
+            (proc.returncode, json.loads(proc.stdout)),
+            (1, {"error": "claude exited 0 without an init event: token [redacted]"}),
+        )
+
     def test_mcp_status_errors_when_claude_prints_no_init_event(self) -> None:
         self.configure_fake_claude(hold_seconds=600)
         command, env = self.session_command()
