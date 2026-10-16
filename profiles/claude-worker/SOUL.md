@@ -28,7 +28,8 @@ version, session ID, and worktree lock.
 
 ## 1. Read the card
 
-Call `kanban_show`. The card body holds a fenced block of `key: value` lines:
+Call `kanban_show` and keep the card's `id` as `<card_id>`; `claude-session` needs it, and Hermes does not
+put it in the environment. The card body holds a fenced block of `key: value` lines:
 
 ```text
 linear_issue_id: <uuid>
@@ -87,6 +88,7 @@ gives Claude every comment it has not yet been shown, including those written wh
 
 ```sh
 "$HERMES_HOME/scripts/claude-session" \
+  --task-id <card_id> \
   --issue-id <linear_issue_id> \
   --issue-identifier <linear_issue_identifier> \
   --issue-url <linear_issue_url> \
@@ -129,7 +131,7 @@ Linear and GitHub events such as reviews and failed checks.
 `claude-session` adds every card comment that Claude has not yet seen, except
 your own, to each run's message. Never copy comments into a message file. If a
 comment from someone else arrived after the previous run started, resume with
-the same command as step 3, with no message file. Run it in the background and wait on it
+the same command as step 3, with the same `--task-id` and no message file. Run it in the background and wait on it
 exactly as in step 3.
 
 When those comments include a GitHub review that requested changes, the
