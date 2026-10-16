@@ -98,7 +98,7 @@ your task notes, not in the repository.
 | Linear workspace, and whether the operator already has an agent app | Linear app |
 | The GitHub organization or account that owns the repositories, and a name for the factory's GitHub App | GitHub App |
 | A path outside every repository for the GitHub App's private key, for example `~/.config/factory/github-app.pem` | GitHub App |
-| Whether secrets live in Infisical, and if so the project ID, environment, folder, and the two machine identities, one per home | Infisical |
+| Whether secrets live in Infisical, and if so the project ID, environment, folder, and the machine identity the default home signs in as | Infisical |
 | Whether the operator keeps operator-only credentials in 1Password, and if so the vault and the service account name | 1Password |
 | Slack workspace and the channels the agent joins | Slack |
 | Where the factory's private configuration record lives, and the credentials on the machine that Hermes agents must never receive | Agent instructions |
@@ -112,19 +112,20 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 
 | Value | Location |
 | --- | --- |
-| `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` and `<worker>/.env` |
+| `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` only. The gateway's broker gives the worker a Linear access token on request, so the worker never holds the app's credentials |
 | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
 | `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
-| The token variable that `claude_session.auth_token_env` names | `<worker>/.env`. Never name it `ANTHROPIC_*` |
-| `FACTORY_INFISICAL_CLIENT_ID` and `FACTORY_INFISICAL_CLIENT_SECRET`, when the factory uses Infisical | `<home>/.env` holds the default home's machine identity and `<worker>/.env` the worker's, which reads only the worker's three keys. Claude Code receives neither: `claude-session` starts it from an allowlist of variable names |
+| `CLAUDE_PROXY_TOKEN`, the proxy's token that `claude_session.auth_token_env` names | `<home>/.env`. The worker's `worker-secrets` asks the gateway's broker for it when a worker process starts, because the worker's own agent loop sends it to the proxy, and Claude Code gets it through `apiKeyHelper`. Never store it in `<worker>/.env`, and never name it `ANTHROPIC_*` |
+| `FACTORY_INFISICAL_CLIENT_ID` and `FACTORY_INFISICAL_CLIENT_SECRET`, when the factory uses Infisical | `<home>/.env` only. The worker has no Infisical identity. Claude Code never receives it: `claude-session` starts it from an allowlist of variable names |
+| The factory's secret names that Hermes strips from every process a home starts | `plugins/factory-secret-names/plugin.yaml`, installed in both homes |
 | Cloudflare tunnel token | The `cloudflared` system service only |
 | `CLOUDFLARE_API_TOKEN` | The SST app's own secret storage or environment |
 | `OP_SERVICE_ACCOUNT_TOKEN`, when the factory uses 1Password | The factory's Infisical folder only, never a Hermes `.env`. It is for the operator only. The helper drops it, so Hermes agents never receive it, and the operator's `op` wrapper reads it |
 | `plugins.entries.linear-agent-session.settings` | `config.yaml` of both homes, same JSON |
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
-| `GITHUB_UPLOAD_TOKEN`, the operator's upload-only token | The factory's Infisical folder only, entered by the operator. The gateway loads it. Neither `.env` holds it, and the worker's `worker-secrets` drops it |
+| `GITHUB_UPLOAD_TOKEN`, the operator's upload-only token | The factory's Infisical folder only, entered by the operator. The gateway loads it. Neither `.env` holds it, and the broker never hands it out |
 | `platforms.factory_uploads.enabled` and `platforms.factory_uploads.extra.repositories` | `<home>/config.yaml` only |
 | `kanban.max_in_progress`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
@@ -361,9 +362,10 @@ hermes config get providers.<proxy provider>.transport  # anthropic_messages
 hermes config get providers.<proxy provider>.key_env    # <token variable>
 ```
 
-When the proxy requires a token, `env_has <home>/.env <token variable>` and
-`env_has <worker>/.env <token variable>` each print `1`, or the Infisical
-folder holds the variable. The name does not start with `ANTHROPIC_`.
+When the proxy requires a token, `<token variable>` is `CLAUDE_PROXY_TOKEN`,
+and `env_has <home>/.env CLAUDE_PROXY_TOKEN` prints `1` or the Infisical folder
+holds it. The worker home reads the same variable, which `worker-secrets` gets
+from the gateway's broker when a worker process starts, as part 5 sets up.
 
 **Configure** whatever the check found missing, in each home:
 
@@ -376,8 +378,7 @@ hermes config set model.default <alias>
 ```
 
 Skip the `key_env` line when the proxy needs no token. Part 3 stores the token
-in the Infisical folder or in `<worker>/.env`. Without Infisical, also store it
-in `<home>/.env` with `env_set`.
+in `<home>/.env` or the Infisical folder, never in `<worker>/.env`.
 
 **Verify** with the same `PONG` chats and `sqlite3` queries as DirectSDK. Each
 latest session names the alias and the billing provider `custom`, with non-zero
@@ -421,8 +422,9 @@ hermes plugins list
 hermes -p claude-worker plugins list
 ```
 
-Both list `linear-agent-session` and `pr-ready-gate`, enabled. The root home
-also lists `factory-uploads`, enabled, and the worker home does not. On a fresh
+Both list `linear-agent-session`, `pr-ready-gate`, and `factory-secret-names`,
+enabled. The root home also lists `factory-uploads`, enabled, and the worker
+home does not. On a fresh
 machine, install both now and skip the content check.
 
 On a re-run, `<worker>` already exists, and a listed plugin can still be
@@ -447,16 +449,29 @@ hermes plugins install "file://<repo>#plugins/linear-agent-session" --enable --y
 hermes plugins install "file://<repo>#plugins/pr-ready-gate" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/linear-agent-session" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/pr-ready-gate" --enable --yes-deps </dev/null
+hermes plugins install "file://<repo>#plugins/factory-secret-names" --enable --yes-deps </dev/null
+hermes -p claude-worker plugins install "file://<repo>#plugins/factory-secret-names" --enable --yes-deps </dev/null
 ```
+
+`factory-secret-names` runs no code. Its manifest declares the factory's
+secret variables, and Hermes strips each one from every process the home
+starts: a terminal command, a background process, a cron script, or a
+`claude-session` run. Without it, any process on the machine could read the
+Linear client secret, the webhook secrets, or the proxy token from such a
+process's environment with `ps eww`. Hermes reads the manifest at each spawn,
+so it takes effect without a restart.
 
 To install from GitHub instead of a local checkout, use
 `<owner>/<repo>#plugins/<name> --ref <40-character commit SHA>`. Add `--force`
 only to reinstall a plugin at a newer commit.
 
-**Gateway uploads, root home only.** The `factory-uploads` plugin runs inside
-the gateway and uploads evidence images with `GITHUB_UPLOAD_TOKEN`, so the
-worker never holds the token. Install it in the root home and never in the
-worker's home. `check-install` reports an install in the worker home.
+**Gateway broker, root home only.** The `factory-uploads` plugin runs inside
+the gateway. Its broker uploads evidence images with `GITHUB_UPLOAD_TOKEN`, and
+it gives the worker the two credentials the worker may use: a Linear access
+token, minted with the gateway's Linear app credentials, and the proxy token.
+The worker home holds no factory secret of its own. Install the plugin in the
+root home and never in the worker's home. `check-install` reports an install
+in the worker home.
 
 1. **Operator, in their own terminal.** Enter `GITHUB_UPLOAD_TOKEN` in the
    factory's Infisical folder, as in [`references/infisical.md`](references/infisical.md).
@@ -484,8 +499,9 @@ worker's home. `check-install` reports an install in the worker home.
 5. **Check.** `<home>/gateway_state.json` lists `factory_uploads` as
    `connected`, and `<home>/factory-uploads.sock` exists with mode `srw-------`.
    `check-install` also checks the platform's config keys and sends the socket
-   `{"op":"status"}`. It reports a socket nobody listens on and a broker with
-   `token_present` false, and it never uploads.
+   `{"op":"status"}`. It reports a socket nobody listens on, and a broker
+   whose `token_present`, `linear_ready`, or, with a proxy token,
+   `proxy_token_present` is false. It never uploads and asks for no token.
    `python3 <home>/plugins/factory-uploads/upload_token.py --probe --repo <owner>/<repo>`
    is for the operator's own terminal: it prints the HTTP status and the
    attachment URL, never the token. The platform is not a chat platform, so
@@ -512,6 +528,23 @@ It stays under the 420 second limit Hermes puts on every tool call:
 ```sh
 hermes -p claude-worker config set terminal.timeout 400 </dev/null
 ```
+
+When the proxy needs a token, point the worker home at the gateway's copy.
+`worker-secrets` asks the broker for the token that `auth_token_env` names and
+prints it to Hermes, so the worker's own agent loop can reach the proxy. It
+reads no Infisical folder and holds no identity. The broker answers in
+milliseconds and the helper gives up after 30 seconds:
+
+```sh
+value="$(python3 -c 'import json, sys; print(json.dumps({"enabled": True, "helper_timeout_seconds": 40, "command": sys.argv[1]}))' "python3 <worker>/scripts/worker-secrets")"
+hermes -p claude-worker config set secrets.command "$value" </dev/null
+```
+
+`check-install` reports a worker with a proxy token and any other
+`secrets.command`, a worker without one that loads secrets, a
+`terminal.env_passthrough` that is not empty, and each factory secret left in
+`<worker>/.env`. A worker set up before it gave up its own identity follows
+[Retire the worker's identity](references/infisical.md#retire-the-workers-identity).
 
 **Verify.**
 
@@ -1339,6 +1372,10 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      When the line gives a `git merge --ff-only` command, run it as written,
      then run `check-install` again. Otherwise the checkout is ahead, diverged,
      on another branch, or dirty. Fix that by hand before you deploy.
+   - A `secret <name> in <worker>/.env` line: the worker holds a secret only
+     the gateway may hold. Follow
+     [Retire the worker's identity](references/infisical.md#retire-the-workers-identity),
+     which also applies to a factory without Infisical.
    - A `checkout` line: the checkout is missing or has no `origin/HEAD`. Clone
      it as in part 10, or run `git -C <path> remote set-head origin -a`.
    - A `dashboard sign-in` line: follow step 6 of

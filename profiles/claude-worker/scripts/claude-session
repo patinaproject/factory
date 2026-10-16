@@ -6,11 +6,12 @@ script relays the line to the board; this process is fenced from board
 mutations, so it never touches Kanban itself.
 
 Claude Code starts with the allowlisted environment in CHILD_ENV_NAMES and
-CHILD_ENV_PREFIXES. Every credential it needs, the Linear token and the proxy
-token, reaches it only through the per-run settings file, mode 0600. Claude Code
-removes that file through a SessionStart hook as soon as it has read it.
-claude-session also removes it before each run and when it ends, whether it
-returns or stops on SIGTERM, SIGINT, or SIGHUP.
+CHILD_ENV_PREFIXES. The run's Linear token reaches it only through the per-run
+settings file, mode 0600. Claude Code removes that file through a SessionStart
+hook as soon as it has read it. claude-session also removes it before each run
+and when it ends, whether it returns or stops on SIGTERM, SIGINT, or SIGHUP.
+The proxy token never enters Claude Code's environment: the settings point
+apiKeyHelper at proxy-token, which asks the gateway's broker for it.
 """
 from __future__ import annotations
 
@@ -93,6 +94,7 @@ FINISH_RULE = (
     "watch`, and any sleep or polling loop that waits longer."
 )
 CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
+PROXY_TOKEN_HELPER = Path(__file__).resolve().with_name("proxy-token")
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
@@ -460,7 +462,7 @@ def check_toolchain(repo: dict, worktree: Path) -> None:
 
 
 def linear_api_key() -> str:
-    """A Linear token from the worker home's linear-agent-session plugin, which shares its token cache."""
+    """A Linear token from the worker home's linear-agent-session plugin, which gets it from the gateway's broker."""
     home = os.environ.get("HERMES_HOME")
     if not home:
         raise Refusal("HERMES_HOME is not set; claude-session reads the Linear token through the worker home's plugin")
@@ -508,11 +510,6 @@ def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
     env = {"LINEAR_API_KEY": api_key}
     if transport.get("base_url"):
         env["ANTHROPIC_BASE_URL"] = transport["base_url"]
-    token_env = transport.get("auth_token_env")
-    if token_env:
-        if not os.environ.get(token_env):
-            raise Refusal(f"auth_token_env names {token_env}, which is not set")
-        env["ANTHROPIC_AUTH_TOKEN"] = os.environ[token_env]
     tiers = tier_models(transport)
     if transport.get("model"):
         env.update(model_environment(transport, tiers))
@@ -520,10 +517,14 @@ def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
     # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
     guard = {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(CI_WAIT_GUARD))}"}
-    return {"env": env, "hooks": {
+    settings = {"env": env, "hooks": {
         "SessionStart": [{"hooks": [remove]}],
         "PreToolUse": [{"matcher": "Bash", "hooks": [guard]}],
     }}
+    if transport.get("auth_token_env"):
+        home = shlex.quote(os.environ["HERMES_HOME"])
+        settings["apiKeyHelper"] = f"HERMES_HOME={home} {shlex.quote(sys.executable)} {shlex.quote(str(PROXY_TOKEN_HELPER))}"
+    return settings
 
 
 def remove_on_stop(path: Path) -> None:

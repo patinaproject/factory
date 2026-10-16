@@ -104,7 +104,10 @@ loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
 check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(check_install)
 
+SECRET_NAMES = "plugin.yaml"
+SECRET_NAMES_MANIFEST = "kind: platform\noptional_env:\n  - name: LINEAR_CLIENT_SECRET\n  - name: CLAUDE_PROXY_TOKEN\n"
 REPO_FILES = {
+    f"plugins/factory-secret-names/{SECRET_NAMES}": SECRET_NAMES_MANIFEST,
     "profiles/claude-worker/SOUL.md": "soul\n",
     "profiles/claude-worker/config.yaml": "model: repo\n",
     "profiles/claude-worker/scripts/x": "#!/bin/sh\n",
@@ -148,7 +151,8 @@ class FakeBroker:
         self.server.close()
 
 
-OK_STATUS = json.dumps({"ok": True, "token_present": True, "last_state": None}).encode() + b"\n"
+STATUS = {"ok": True, "token_present": True, "linear_ready": True, "proxy_token_present": True, "last_state": None}
+OK_STATUS = json.dumps(STATUS).encode() + b"\n"
 
 
 class CheckInstallTest(unittest.TestCase):
@@ -175,6 +179,7 @@ class CheckInstallTest(unittest.TestCase):
         self.worker = self.root / "profiles" / "claude-worker"
         for home in (self.root, self.worker):
             self.install(home, "plugins/p1/__init__.py", "plugin\n")
+            self.install(home, f"plugins/factory-secret-names/{SECRET_NAMES}", SECRET_NAMES_MANIFEST)
         self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
         self.install(self.worker, "SOUL.md", "soul\n")
         self.install(self.worker, "scripts/x", "#!/bin/sh\n")
@@ -450,7 +455,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_a_token(self) -> None:
-        self.uploads.reply = json.dumps({"ok": True, "token_present": False}).encode() + b"\n"
+        self.uploads.reply = json.dumps({**STATUS, "token_present": False}).encode() + b"\n"
 
         self.assertEqual(
             self.check(),
@@ -458,6 +463,33 @@ class CheckInstallTest(unittest.TestCase):
                 1,
                 f"upload broker {self.root}/factory-uploads.sock: "
                 "reports token_present false: the gateway holds no upload token (part 5)\n",
+            ),
+        )
+
+    def test_broker_without_linear_credentials_leaves_every_worker_without_linear(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "linear_ready": False}).encode() + b"\n"
+
+        self.assertEqual(
+            self.check(),
+            (
+                1,
+                f"upload broker {self.root}/factory-uploads.sock: reports linear_ready false: the gateway holds no "
+                "Linear app credentials, so no worker reaches Linear (part 5)\n",
+            ),
+        )
+
+    def test_broker_without_the_proxy_token_matters_only_when_one_is_configured(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "proxy_token_present": False}).encode() + b"\n"
+        self.assertEqual(self.check(), (0, ""))
+
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
+
+        self.assertEqual(
+            self.check(),
+            (
+                1,
+                f"upload broker {self.root}/factory-uploads.sock: reports proxy_token_present false: the gateway "
+                "holds no CLAUDE_PROXY_TOKEN, so no worker reaches the proxy (part 5)\n",
             ),
         )
 
@@ -531,56 +563,91 @@ class CheckInstallTest(unittest.TestCase):
                 "(part 10)\n"),
         )
 
-    def secrets(self, root: dict | None, worker: dict | None) -> None:
-        self.config(self.root, {**ROOT_CONFIG, **({"secrets.command": root} if root else {})})
-        self.config(self.worker, {**WORKER_CONFIG, **({"secrets.command": worker} if worker else {})})
+    def proxy(self, token_env: str, worker_command: dict | None = None) -> None:
+        settings = {**SETTINGS, "claude_session": {"auth_token_env": token_env}}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        worker = {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings}
+        self.config(self.worker, {**worker, **({"secrets.command": worker_command} if worker_command else {})})
 
-    def test_worker_secrets_helper_behind_a_root_secret_source_is_silent(self) -> None:
-        self.secrets(
-            {"enabled": True, "command": f"{self.root}/bin/factory-secrets"},
-            {"enabled": True, "command": f"python3 {self.worker}/scripts/worker-secrets"},
-        )
+    def helper(self) -> dict:
+        return {"enabled": True, "command": f"python3 {self.worker}/scripts/worker-secrets"}
+
+    def test_worker_that_loads_its_proxy_token_through_the_helper_is_silent(self) -> None:
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
 
         self.assertEqual(self.check(), (0, ""))
 
-    def test_worker_secrets_command_that_is_not_the_worker_helper(self) -> None:
+    def test_worker_with_a_proxy_token_and_another_secret_source(self) -> None:
         drift = (
             f"config secrets.command in {self.worker}: "
-            f"is not the worker helper python3 {self.worker}/scripts/worker-secrets (part 14)\n"
+            f"is not the worker helper python3 {self.worker}/scripts/worker-secrets (part 5)\n"
         )
-        root = {"enabled": True, "command": f"{self.root}/bin/factory-secrets"}
         for worker in (
-            root,
+            {"enabled": True, "command": f"{self.root}/bin/factory-secrets"},
             {"enabled": True, "command": "env TOKEN=s3cr3t-value sh -c helper"},
-            {"enabled": False, "command": f"python3 {self.worker}/scripts/worker-secrets"},
+            {**self.helper(), "enabled": False},
             None,
         ):
             with self.subTest(worker=worker):
-                self.secrets(root, worker)
+                self.proxy("CLAUDE_PROXY_TOKEN", worker)
 
                 code, out = self.check()
 
                 self.assertEqual((code, out), (1, drift))
                 self.assertNotIn("s3cr3t-value", out)
 
-    def test_worker_secret_source_without_a_root_secret_source(self) -> None:
-        worker = {"enabled": True, "command": "env TOKEN=s3cr3t-value sh -c helper"}
-        for root in (None, {"enabled": False, "command": f"{self.root}/bin/factory-secrets"}):
-            with self.subTest(root=root):
-                self.secrets(root, worker)
+    def test_worker_without_a_proxy_token_loads_no_secret(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "secrets.command": {"enabled": True, "command": "s3cr3t-value"}})
 
-                code, out = self.check()
+        code, out = self.check()
 
-                self.assertEqual(
-                    (code, out),
-                    (1, f"config secrets.command in {self.worker}: is set while the root home has no secret source (part 14)\n"),
-                )
-                self.assertNotIn("s3cr3t-value", out)
+        self.assertEqual(
+            (code, out),
+            (1, f"config secrets.command in {self.worker}: is set, but a worker without a proxy token loads no secret (part 5)\n"),
+        )
+        self.assertNotIn("s3cr3t-value", out)
 
-    def test_worker_secret_source_disabled_with_the_root_one_is_silent(self) -> None:
-        self.secrets({"enabled": False, "command": "x"}, {"enabled": False, "command": "y"})
+    def test_worker_secret_source_disabled_without_a_proxy_token_is_silent(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "secrets.command": {"enabled": False, "command": "y"}})
 
         self.assertEqual(self.check(), (0, ""))
+
+    def test_secrets_only_the_gateway_holds_are_reported_in_the_worker_env_by_name_only(self) -> None:
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
+        self.install(self.worker, ".env", "\n".join([
+            "GH_CONFIG_DIR=/gh", "LINEAR_CLIENT_ID=s3cr3t-1", "export LINEAR_CLIENT_SECRET='s3cr3t-2'",
+            "FACTORY_INFISICAL_CLIENT_ID=s3cr3t-3", "FACTORY_INFISICAL_CLIENT_SECRET=s3cr3t-4",
+            "CLAUDE_PROXY_TOKEN=s3cr3t-5", "",
+        ]))
+
+        code, out = self.check()
+
+        held = "is set, but the worker holds no factory secret; remove it"
+        self.assertEqual((code, out), (1, "".join([
+            f"secret LINEAR_CLIENT_ID in {self.worker}/.env: {held} (part 8)\n",
+            f"secret LINEAR_CLIENT_SECRET in {self.worker}/.env: {held} (part 8)\n",
+            f"secret FACTORY_INFISICAL_CLIENT_ID in {self.worker}/.env: {held} (part 14)\n",
+            f"secret FACTORY_INFISICAL_CLIENT_SECRET in {self.worker}/.env: {held} (part 14)\n",
+            f"secret CLAUDE_PROXY_TOKEN in {self.worker}/.env: {held} (part 3)\n",
+        ])))
+        self.assertNotIn("s3cr3t", out)
+
+    def test_a_proxy_token_variable_hermes_would_pass_to_every_process(self) -> None:
+        self.proxy("OTHER_PROXY_TOKEN", self.helper())
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config claude_session.auth_token_env in {self.worker}: names OTHER_PROXY_TOKEN, which "
+                "plugins/factory-secret-names/plugin.yaml does not declare, so every process a home starts "
+                "inherits it (part 3)\n"),
+        )
+
+    def test_worker_that_passes_variables_to_its_commands(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "terminal.env_passthrough": ["LINEAR_CLIENT_SECRET"]})
+
+        self.assertEqual(
+            self.check(), (1, f"config terminal.env_passthrough in {self.worker}: is not empty (part 5)\n")
+        )
 
     def test_missing_and_duplicated_cron_jobs(self) -> None:
         self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2]])

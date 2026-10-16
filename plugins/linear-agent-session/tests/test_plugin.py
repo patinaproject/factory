@@ -282,12 +282,15 @@ class RegisterTest(unittest.TestCase):
             output = handler({"agent_session_id": "session-1", "type": "thought", "body": "Working"}, task_id="t")
         self.assertEqual(json.loads(output), {"ok": True, "agent_activity_id": "activity-9"})
 
-    def test_registered_handler_reports_missing_credentials(self):
+    def test_registered_handler_without_credentials_reports_the_unreachable_broker(self):
         ctx = FakeContext()
         plugin.register(ctx)
-        with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": ""}):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"LINEAR_CLIENT_ID": "", "HERMES_HOME": os.path.realpath(tmp)}
+        ):
             output = ctx.tools["linear_issue"]["handler"]({"issue": "ABC-1"})
-        self.assertEqual(json.loads(output), {"error": "set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"})
+        error = json.loads(output)["error"]
+        self.assertRegex(error, r"^the gateway's broker at .*/factory-uploads\.sock did not answer")
 
     def test_registered_hook_uses_configured_route(self):
         fake = FakeLinear([activity_ok()])

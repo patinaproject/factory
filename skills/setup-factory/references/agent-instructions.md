@@ -93,8 +93,8 @@ private record, never to the repository.
   a new secret is needed, ask the operator to enter it in their own
   terminal.
 - Never run `hermes config get` with `--raw`, and never run a secrets
-  helper such as `factory-secrets` or `worker-secrets` by hand. Both print
-  secret values. To check a secret, compare it in memory and print a
+  helper such as `factory-secrets`, `worker-secrets`, or `proxy-token` by
+  hand. Each prints secret values. To check a secret, compare it in memory and print a
   boolean, or list variable names only.
 - These credentials are for the operator only, and Hermes agents never
   receive them: <operator-only credentials>.
