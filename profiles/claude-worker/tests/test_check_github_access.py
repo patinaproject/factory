@@ -15,7 +15,7 @@ REPO = "example-org/example-repo"
 SHA = "a" * 40
 ALL_PERMISSIONS = {
     "contents": "write", "pull_requests": "write", "issues": "write", "checks": "read",
-    "statuses": "read", "actions": "read", "metadata": "read",
+    "statuses": "read", "actions": "write", "metadata": "read",
 }
 
 FAKE_GH = r"""#!/usr/bin/env python3
@@ -59,6 +59,9 @@ elif endpoint == f"repos/{repo}/commits/{state['sha']}/statuses?per_page=1":
 elif endpoint == f"repos/{repo}/activity?activity_type=branch_creation&per_page=1":
     refuse("activity")
     print(json.dumps([]))
+elif endpoint == f"repos/{repo}/actions/runs?head_sha={state['sha']}&per_page=1":
+    refuse("actions")
+    print(json.dumps({"total_count": 0, "workflow_runs": []}))
 else:
     sys.exit("gh: Not Found (HTTP 404)")
 """
@@ -113,6 +116,7 @@ class CheckGithubAccessTest(unittest.TestCase):
             f"repos/{REPO}/commits/{SHA}/check-runs?per_page=1",
             f"repos/{REPO}/commits/{SHA}/statuses?per_page=1",
             f"repos/{REPO}/activity?activity_type=branch_creation&per_page=1",
+            f"repos/{REPO}/actions/runs?head_sha={SHA}&per_page=1",
         ])
 
     def test_missing_commit_statuses_names_the_permission(self) -> None:
@@ -147,6 +151,25 @@ class CheckGithubAccessTest(unittest.TestCase):
             f"{REPO}: reading check runs of aaaaaaa refused (HTTP 403): "
             'grant the App "Checks: Read-only" and accept it on the installation',
         ])
+
+    def test_refused_workflow_runs_names_the_actions_permission(self) -> None:
+        self.state["deny"] = ["actions"]
+
+        status, lines, _ = self.check()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, [
+            f"{REPO}: reading workflow runs of aaaaaaa refused (HTTP 403): "
+            'grant the App "Actions: Read and write" and accept it on the installation',
+        ])
+
+    def test_read_only_actions_cannot_rerun_failed_jobs(self) -> None:
+        self.state["app_permissions"] = {**ALL_PERMISSIONS, "actions": "read"}
+
+        status, lines, _ = self.check()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, ['App example-app: grant "Actions: Read and write", it has read'])
 
     def test_refused_pull_requests_still_checks_the_default_branch(self) -> None:
         self.state["deny"] = ["pull_requests", "statuses"]

@@ -77,10 +77,12 @@ LINEAR_RULE = (
     "set revokes the factory's tokens."
 )
 CHECKS_RULE = (
-    "A finished check never runs again by itself, and the GitHub App cannot re-request a check. When a "
-    "check failed on a head that is behind the base branch, or a person says the cause of a failure is "
-    "fixed, run `gh pr update-branch <number>` so every check runs again on a new head, then wait for "
-    "that run before you judge the ready gate."
+    "A finished check never runs again by itself. When a check failed on a head that is behind the base "
+    "branch, or a person says the cause of a failure is fixed, run `gh pr update-branch <number>` so every "
+    "check runs again on a new head. When a required check failed in a test or step the pull request does "
+    "not change, such as a timeout, run `gh run rerun <run-id> --failed` once for that run. Wait for the "
+    "new run with `wait-for-checks` before you judge the ready gate. When a re-run fails again, block the "
+    "card and name both attempts' URLs."
 )
 EVIDENCE_RULE = (
     "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
