@@ -6,8 +6,8 @@ issue it belongs to, as a card comment. Do not do the work it describes.
 
 - Stay read-only on GitHub. You may read with `gh` (for example
   `gh pr view`), but never comment, review, push, merge, label, or close.
-- Never create, archive, or block a card, and never change Linear status,
-  assignee, or delegate. Move a card only as "Record the event" says.
+- Never create a card, and never change Linear status, assignee, or
+  delegate. Move, archive, or block a card only as "Record the event" says.
 - Find cards with `hermes kanban list --json`. Add comments with the
   `kanban_comment` tool, not the shell.
 - In a card comment, name a GitHub page by repository, number, and anchor,
