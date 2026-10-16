@@ -710,6 +710,53 @@ class CheckInstallTest(unittest.TestCase):
         self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
         self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
 
+    def mcp_repository(self, report: dict | str, code: int = 0, **fields) -> Path:
+        """One repository whose installed claude-session answers --mcp-status with `report`."""
+        checkout = self.checkout()
+        settings = {**SETTINGS, "repositories": [{"full_name": "org/checkout", "path": str(checkout), **fields}]}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.install(self.worker, "scripts/claude-session", (
+            "import json, sys\n"
+            f"assert sys.argv[1:] == ['--mcp-status', '--repo', 'org/checkout'], sys.argv\n"
+            f"print({json.dumps(json.dumps(report))})\nsys.exit({code})\n"
+        ))
+        return checkout
+
+    def test_connected_and_left_out_mcp_servers_are_silent(self) -> None:
+        self.mcp_repository({"repo": "org/checkout", "left_out": {"sentry": "no service account"}, "servers": [
+            {"name": "linear", "status": "connected"}, {"name": "sentry", "status": "needs-auth"},
+        ]})
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_an_mcp_server_that_is_not_connected_is_reported(self) -> None:
+        self.mcp_repository({"repo": "org/checkout", "left_out": {}, "servers": [
+            {"name": "linear", "status": "connected"}, {"name": "notion", "status": "needs-auth"},
+        ]})
+
+        self.assertEqual(self.check(), (1, "mcp notion in org/checkout: is needs-auth, not connected (part 10)\n"))
+
+    def test_a_failed_mcp_probe_is_reported_with_its_error(self) -> None:
+        self.mcp_repository({"error": "mcp_servers names FACTORY_MCP_X, which is not set"}, code=2)
+
+        self.assertEqual(self.check(), (1, (
+            "mcp org/checkout: cannot read the MCP server status: "
+            "mcp_servers names FACTORY_MCP_X, which is not set (part 10)\n"
+        )))
+
+    def test_an_mcp_secret_missing_from_the_env_passthrough_is_reported(self) -> None:
+        server = {"headers": {"Authorization": "Bearer ${FACTORY_MCP_A:-x}", "X": "${FACTORY_MCP_B}"}}
+        self.mcp_repository({"repo": "org/checkout", "left_out": {}, "servers": []}, mcp_servers={"notion": server})
+        self.config(self.worker, {
+            **json.loads((self.worker / "installed-config.json").read_text()),
+            "terminal.env_passthrough": ["FACTORY_MCP_A"],
+        })
+
+        self.assertEqual(self.check(), (1, (
+            f"mcp FACTORY_MCP_B in {self.worker}: is used by org/checkout but not in terminal.env_passthrough (part 10)\n"
+        )))
+
     def claude_session(self, **fields) -> None:
         settings = {**SETTINGS, "claude_session": fields}
         self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})

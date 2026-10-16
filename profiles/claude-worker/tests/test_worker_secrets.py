@@ -24,6 +24,9 @@ CLAUDE_PROXY_TOKEN=t
 OP_SERVICE_ACCOUNT_TOKEN=x
 FACTORY_INFISICAL_CLIENT_SECRET=x
 LINEAR_CLIENT_SECRET=s
+FACTORY_MCP_NOTION_TOKEN=n
+FACTORY_MCP_lower=x
+FACTORY_MCPX_TOKEN=x
 EOF
 """
 
@@ -65,7 +68,7 @@ class WorkerSecretsTest(unittest.TestCase):
     def test_prints_only_the_allowlisted_lines_in_the_helper_order(self) -> None:
         code, out = self.run_script()
 
-        self.assertEqual((code, out), (0, "LINEAR_CLIENT_ID=id\nCLAUDE_PROXY_TOKEN=t\nLINEAR_CLIENT_SECRET=s\n"))
+        self.assertEqual((code, out), (0, "LINEAR_CLIENT_ID=id\nCLAUDE_PROXY_TOKEN=t\nLINEAR_CLIENT_SECRET=s\nFACTORY_MCP_NOTION_TOKEN=n\n"))
         for name in FORBIDDEN:
             self.assertNotIn(name, out)
 
@@ -74,7 +77,7 @@ class WorkerSecretsTest(unittest.TestCase):
             with self.subTest(config=config):
                 (self.worker / "config.yaml").write_text(config)
 
-                self.assertEqual(self.run_script(), (0, "LINEAR_CLIENT_ID=id\nLINEAR_CLIENT_SECRET=s\n"))
+                self.assertEqual(self.run_script(), (0, "LINEAR_CLIENT_ID=id\nLINEAR_CLIENT_SECRET=s\nFACTORY_MCP_NOTION_TOKEN=n\n"))
 
     def test_refuses_any_argument(self) -> None:
         self.assertEqual(self.run_script("--help"), (2, ""))

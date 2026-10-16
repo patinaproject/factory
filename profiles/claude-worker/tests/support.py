@@ -49,6 +49,10 @@ os.rename(options["log"] + ".tmp", options["log"])
 if options.get("hold_seconds"):
     import time
     time.sleep(options["hold_seconds"])
+if "init" in options:
+    print(json.dumps({"type": "system", "subtype": "init", "mcp_servers": options["init"]}), flush=True)
+    import time
+    time.sleep(600)
 leftover = None
 if options.get("leftover_pid_file"):
     import subprocess
