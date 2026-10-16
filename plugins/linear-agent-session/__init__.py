@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, linear, tools
+from . import blocks, linear, missing_secret, tools
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,11 @@ def register(ctx: Any) -> None:
             "linear-agent-session: route %s secret is the unresolved reference ${%s}; its deliveries will be dropped",
             route,
             variable,
+        )
+    empty = missing_secret.worker_empty_key_env(load_config_readonly(), os.environ)
+    if empty is not None:
+        logger.error(
+            "linear-agent-session: %s is empty in this worker; a provider 401 or 403 requeues the card", empty
         )
 
     client: Optional[linear.LinearClient] = None
@@ -77,6 +83,9 @@ def register(ctx: Any) -> None:
         ),
     )
     ctx.register_hook("kanban_task_blocked", blocks.make_blocked_hook(get_client))
+    ctx.register_hook(
+        "transform_api_error_classification", missing_secret.make_classification_hook(load_config_readonly, os.environ)
+    )
 
 
 def unresolved_routes(config: Mapping[str, Any]) -> dict[str, str]:

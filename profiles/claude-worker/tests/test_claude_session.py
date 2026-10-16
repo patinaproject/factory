@@ -25,20 +25,29 @@ HOUR = 3600
 SYSTEM_PROMPT = (
     f"Publish commits only by running {(SCRIPTS / 'push-signed').resolve()} from the worktree, never `git push`. "
     "It creates commits that the GitHub App signs, which repositories requiring verified signatures need. "
-    "To bring in the base branch, run `gh pr update-branch`, never a local merge.\n\n"
+    "To bring in the base branch, run `gh pr update-branch`. When GitHub reports the pull request as "
+    "conflicting (`mergeable: CONFLICTING`) and update-branch refuses, fetch, run `git merge origin/<base>`, "
+    "resolve the conflicts, commit the merge, and publish it with push-signed, which accepts a merge of the "
+    "current base head. Then wait for checks and finish through the ready gate as usual. When you cannot "
+    "resolve a conflict with confidence, for example both sides change the same behavior, do not guess: run "
+    "`hermes kanban block <task id> --kind needs_input '<reason naming each conflicting file>'` once and "
+    "stop.\n\n"
     "Reach Linear only with the token in LINEAR_API_KEY, which the factory's Linear agent app issued for this "
     "run. Never mint a Linear token yourself and never run a secrets helper: a token request with another scope "
     "set revokes the factory's tokens.\n\n"
-    "A finished check never runs again by itself, and the GitHub App cannot re-request a check. When a "
-    "check failed on a head that is behind the base branch, or a person says the cause of a failure is "
-    "fixed, run `gh pr update-branch <number>` so every check runs again on a new head, then wait for "
-    "that run before you judge the ready gate.\n\n"
+    "A finished check never runs again by itself. When a check failed on a head that is behind the base "
+    "branch, or a person says the cause of a failure is fixed, run `gh pr update-branch <number>` so every "
+    "check runs again on a new head. When a required check failed in a test or step the pull request does "
+    "not change, such as a timeout, run `gh run rerun <run-id> --failed` once for that run. Wait for the "
+    "new run with `wait-for-checks` before you judge the ready gate. When a re-run fails again, block the "
+    "card and name both attempts' URLs.\n\n"
     "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
     "shows its observable result, such as rendered command output or a probe. Run "
     f"`python3 {(SCRIPTS / 'github-upload-image').resolve()} <file>...` on the images, then paste each `<img>` tag it "
     "prints into the description under the section it proves, with a one-line caption. A local path is never "
-    "evidence. When the helper exits 3, attach the images to the Linear issue instead and say so in the pull "
-    "request body.\n\n"
+    "evidence. The App's token cannot upload, so this helper replaces `gh pr edit --attach` and browser "
+    "uploads, even where a skill names them. When the helper exits 3, attach the images to the Linear issue "
+    "instead and say so in the pull request body.\n\n"
     "Stop every background command, monitor, and watcher you started before you write your final result. "
     "The run ends when you finish, and anything still running is killed. To wait for CI, run "
     f"`python3 {(SCRIPTS / 'wait-for-checks').resolve()} <number> --repo <owner/repo>` in the foreground. It "
@@ -711,6 +720,84 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(header, "Bearer cached-token")
         self.assertFalse(any("cached-token" in arg for arg in argv))
 
+    def test_a_sentry_token_reaches_a_read_only_sentry_server_only_through_the_settings_file(self) -> None:
+        self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
+
+        self.run_session(env={"EXAMPLE_SENTRY_TOKEN": "sntryu_example"})
+
+        call = self.claude_call()
+        argv = call["argv"]
+        servers = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
+        env = call["settings"]["content"]["env"]
+        self.assertEqual(servers["sentry"], {
+            "type": "http",
+            "url": "https://mcp.sentry.dev/mcp?skills=inspect",
+            "headers": {"Authorization": "Sentry-Bearer ${EXAMPLE_SENTRY_TOKEN}"},
+        })
+        self.assertEqual(sorted(servers), ["linear", "sentry"])
+        self.assertEqual(env, {"LINEAR_API_KEY": "cached-token", "EXAMPLE_SENTRY_TOKEN": "sntryu_example"})
+        self.assertEqual(call["settings"]["mode"], "0o600")
+        self.assertNotIn("EXAMPLE_SENTRY_TOKEN", call["env"])
+        self.assertFalse(any("sntryu_example" in arg for arg in argv))
+
+    def test_a_sentry_token_variable_that_is_unset_or_empty_refuses_before_claude_starts(self) -> None:
+        self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
+        for env in ({}, {"EXAMPLE_SENTRY_TOKEN": ""}):
+            with self.subTest(env=env):
+                status, report = self.run_session(env=env)
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": "sentry_token_env names EXAMPLE_SENTRY_TOKEN, which is not set"})
+                self.assertFalse(self.log.exists())
+
+    def test_a_sentry_token_env_that_could_overwrite_another_setting_is_refused(self) -> None:
+        for name in ("LINEAR_API_KEY", "ANTHROPIC_AUTH_TOKEN", "NOT-A-NAME", 5):
+            with self.subTest(sentry_token_env=name):
+                self.settings = self.write_settings([self.repository], {"sentry_token_env": name})
+
+                status, report = self.run_session(env={"ANTHROPIC_AUTH_TOKEN": "x"})
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": (
+                    f"claude_session.sentry_token_env {name!r} must name an environment variable other than "
+                    "LINEAR_API_KEY and ANTHROPIC_*"
+                )})
+                self.assertFalse(self.log.exists())
+
+    def test_without_sentry_token_env_the_run_has_only_the_linear_server(self) -> None:
+        for claude_session in ({}, {"sentry_token_env": ""}):
+            with self.subTest(claude_session=claude_session):
+                self.settings = self.write_settings([self.repository], claude_session)
+
+                self.run_session(env={"EXAMPLE_SENTRY_TOKEN": "sntryu_example"})
+
+                call = self.claude_call()
+                argv = call["argv"]
+                self.assertEqual(argv[argv.index("--mcp-config") + 1], LINEAR_MCP_CONFIG)
+                self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+                self.assertNotIn("disabledMcpjsonServers", call["settings"]["content"])
+
+    def test_disabled_mcp_servers_reach_the_settings_file(self) -> None:
+        names = ["mongodb-production-reader", "sentry-local"]
+        self.settings = self.write_settings([self.repository], {"disabled_mcp_servers": names})
+
+        self.run_session()
+
+        self.assertEqual(self.claude_call()["settings"]["content"]["disabledMcpjsonServers"], names)
+
+    def test_invalid_disabled_mcp_servers_are_refused(self) -> None:
+        for value in ("mongodb-production-reader", [""], [5]):
+            with self.subTest(disabled_mcp_servers=value):
+                self.settings = self.write_settings([self.repository], {"disabled_mcp_servers": value})
+
+                status, report = self.run_session()
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": (
+                    f"claude_session.disabled_mcp_servers {value!r} must be a list of MCP server names"
+                )})
+                self.assertFalse(self.log.exists())
+
     def test_a_revoked_cached_linear_token_is_replaced_with_the_plugin_scope(self) -> None:
         (self.hermes_home / "linear-fake.json").write_text(json.dumps({"accepted": []}))
 
@@ -1093,8 +1180,12 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.head(), pull)
 
     def takeover_pair(self, **person) -> str:
-        """A person's pull request #7 and the factory's open pull request #9 on this card's branch."""
+        """A person's pull request #7 and the factory's open pull request #9 on this card's branch.
+
+        The person created their branch before #9 opened, and GitHub compares the two heads as diverged.
+        """
         self.push_upstream_commit("pull", "refs/pull/7/head")
+        self.github.create_branch("person-branch", "person")
         self.github.add_pull(7, "person-branch", **person)
         self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body="Adds the thing.")
         return f"https://github.com/{REPO}/pull/9"
@@ -1124,9 +1215,9 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.github.pull(9)["body"], "Supersedes #7 by Ada.")
         self.assertEqual(self.github.pull(7)["state"], "closed")
 
-    def test_takeover_pull_request_whose_head_the_factory_contains_is_closed(self) -> None:
+    def test_takeover_pull_request_whose_head_the_factory_contains_is_closed_whatever_its_pushes(self) -> None:
         self.takeover_pair()
-        self.github.state["commit_dates"]["7"] = ["2026-10-02T00:00:00Z"]
+        self.github.push("person-branch", "2026-10-02T00:00:00Z")
         self.github.set_compare(9, 7, "behind")
 
         _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
@@ -1134,10 +1225,9 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["superseded"]["action"], "closed")
         self.assertEqual(self.github.pull(7)["state"], "closed")
 
-    def test_takeover_pull_request_with_no_commit_after_the_factory_opened_is_closed_when_the_factory_squashed(self) -> None:
+    def test_takeover_pull_request_with_no_push_after_the_factory_opened_is_closed_when_the_factory_squashed(self) -> None:
         self.takeover_pair()
-        self.github.state["commit_dates"]["7"] = ["2026-09-30T00:00:00Z", "2026-10-01T00:00:00Z"]
-        self.github.set_compare(9, 7, "diverged")
+        self.github.push("person-branch", "2026-09-30T00:00:00Z")
 
         _, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
@@ -1153,18 +1243,27 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.github.comments(7), [])
         self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
 
-    def test_person_who_pushed_after_the_takeover_keeps_an_open_pull_request(self) -> None:
+    def test_person_who_pushed_after_the_factory_opened_keeps_an_open_pull_request(self) -> None:
         self.takeover_pair()
-        self.github.state["commit_dates"]["7"] = ["2026-09-30T00:00:00Z", "2026-10-02T00:00:00Z"]
-        self.github.set_compare(9, 7, "diverged")
+        self.github.push("person-branch", "2026-09-30T00:00:00Z")
+        self.github.push("person-branch", "2026-10-02T00:00:00Z")
 
         self.assert_person_pull_request_left_open()
 
-    def test_person_commit_after_the_takeover_beyond_the_first_page_keeps_an_open_pull_request(self) -> None:
+    def test_person_who_built_on_the_factorys_head_keeps_an_open_pull_request(self) -> None:
         self.takeover_pair()
-        self.github.state["commit_dates"]["7"] = ["2026-09-30T00:00:00Z"] * 100 + ["2026-10-02T00:00:00Z"]
-        self.github.state["pulls"]["7"]["commits"] = 101
-        self.github.save()
+        self.github.set_compare(9, 7, "ahead")
+
+        self.assert_person_pull_request_left_open()
+
+    def test_person_pull_request_from_a_fork_stays_open(self) -> None:
+        self.takeover_pair(head_repo="person/factory-fork")
+
+        self.assert_person_pull_request_left_open()
+
+    def test_person_branch_without_activity_records_keeps_an_open_pull_request(self) -> None:
+        self.takeover_pair()
+        self.github.create_branch("person-branch")
 
         self.assert_person_pull_request_left_open()
 
@@ -1235,6 +1334,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["superseded"]["action"], "failed")
         self.assertIn("Resource not accessible", report["superseded"]["error"])
         self.assertEqual(self.github.pull(7)["state"], "open")
+        self.assertEqual(self.github.comments(7), [])
 
     @staticmethod
     def session_module():
@@ -1265,6 +1365,64 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(result["action"], "closed")
         self.assertIn("HTTP 403", result["body_error"])
         self.assertIn((f"repos/{REPO}/pulls/7", ("-X", "PATCH", "-f", "state=closed")), calls)
+
+    def gh_answering(self, **failures):
+        """A gh for #7 and #9 that raises the exception named for a path keyword: compare, activity, or comments."""
+        module = self.session_module()
+        writes = []
+
+        def gh(path, *options):
+            for key, failure in failures.items():
+                if f"/{key}" in path:
+                    raise failure
+            if "-X" in options:
+                writes.append(path)
+                return {}
+            if "head=" in path:
+                return [{"user": {"login": BOT_LOGIN}, "number": 9, "html_url": "https://x/9", "body": "",
+                         "created_at": "2026-10-01T00:00:00Z", "head": {"sha": "f"}}]
+            if "/compare/" in path:
+                return {"status": "diverged"}
+            if "/activity" in path:
+                return [{"activity_type": "push", "timestamp": "2026-09-30T00:00:00Z"}]
+            return {"state": "open", "user": {"login": "person"},
+                    "head": {"ref": "person-branch", "sha": "p", "repo": {"full_name": REPO}}}
+
+        return module, gh, writes
+
+    def test_a_squashed_takeover_with_every_read_answered_is_closed(self) -> None:
+        module, gh, writes = self.gh_answering()
+
+        result = module.supersede_takeover(REPO, "abc-123-fix", TAKEOVER_PR, BOT_LOGIN, gh=gh)
+
+        self.assertEqual(result["action"], "closed")
+        self.assertIn(f"repos/{REPO}/pulls/7", writes)
+
+    def test_a_failed_read_never_closes_the_takeover_pull_request(self) -> None:
+        module = self.session_module()
+        for key, failure in (
+            ("compare", module.card_branch.GhFailed("gh api compare failed: HTTP 502")),
+            ("activity", module.card_branch.GhFailed("gh api activity failed: HTTP 403")),
+            ("compare", json.JSONDecodeError("Expecting value", "<html>", 0)),
+            ("activity", json.JSONDecodeError("Expecting value", "<html>", 0)),
+        ):
+            with self.subTest(key=key, failure=type(failure).__name__):
+                module, gh, writes = self.gh_answering(**{key: failure})
+
+                result = module.supersede_takeover(REPO, "abc-123-fix", TAKEOVER_PR, BOT_LOGIN, gh=gh)
+
+                self.assertEqual(result["action"], "failed")
+                self.assertEqual(writes, [])
+
+    def test_a_failed_comment_after_the_close_is_reported_with_the_close(self) -> None:
+        module = self.session_module()
+        module, gh, writes = self.gh_answering(issues=module.card_branch.GhFailed("gh api failed: HTTP 502"))
+
+        result = module.supersede_takeover(REPO, "abc-123-fix", TAKEOVER_PR, BOT_LOGIN, gh=gh)
+
+        self.assertEqual(result["action"], "closed")
+        self.assertIn("HTTP 502", result["comment_error"])
+        self.assertIn(f"repos/{REPO}/pulls/7", writes)
 
     def test_takeover_pull_request_of_another_repository_is_not_closed(self) -> None:
         calls = []

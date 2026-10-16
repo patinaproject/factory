@@ -13,6 +13,8 @@ DEFAULT_GATED_PROFILES = ["claude-worker"]
 GATED_TOOLS = ("kanban_complete", "kanban_request_review")
 PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"
 PASSING_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
+# gh reports a run that has not started with Go's zero time, so it sorts as the newest run of its check.
+UNSTARTED = "0001-01-01T00:00:00Z"
 PR_URL = re.compile(r"^https://github\.com/([^/\s]+/[^/\s]+)/pull/\d+/?$")
 # Hermes kills a pre_tool_call hook after 30s (plugins.hook_callback_timeout), fails closed, and skips the hook for 60s.
 # One clock starts when the check starts, and every subprocess gets the smaller of its cap and the time left.
@@ -45,9 +47,10 @@ MERGE_STATE_REMEDIES = {
     "BEHIND": "update the branch from the base branch and push",
     "BLOCKED": (
         "a branch rule is not satisfied: required checks, reviews, or verified commit signatures; "
-        "wait for checks, address reviews, and make sure every commit is signed"
+        "wait for checks, address reviews, and make sure every commit is signed. "
+        "kanban_request_review passes a pull request whose only unmet rule is the approving review"
     ),
-    "DIRTY": "resolve the merge conflicts with the base branch and push",
+    "DIRTY": "merge the base branch, resolve the conflicts, and publish the merge with push-signed",
     "UNSTABLE": "a check is pending or failing; wait for checks to finish and fix any failures",
     "UNKNOWN": "GitHub has not computed mergeability yet; wait a minute and retry",
     "HAS_HOOKS": "the base branch has pre-receive hooks; this gate only accepts CLEAN",
@@ -91,41 +94,55 @@ def evaluate(
     if merge_state != "CLEAN":
         remedy = MERGE_STATE_REMEDIES.get(merge_state, "wait until GitHub reports CLEAN")
         failures.append(f"mergeStateStatus is {merge_state!r}, expected 'CLEAN': {remedy}")
-    return failures + hidden + _head_failures(pr, local_head)
+    failures += hidden + _head_failures(pr, local_head)
+    return failures + _check_failures(pr) if failures else []
 
 
 def _awaiting_review(pr: dict) -> bool:
-    checks = pr.get("statusCheckRollup")
+    checks = _latest_runs(pr.get("statusCheckRollup"))
     return (
         pr.get("mergeStateStatus") == "BLOCKED"
         and pr.get("reviewDecision") in ("CHANGES_REQUESTED", "REVIEW_REQUIRED")
-        and isinstance(checks, list)
         and bool(checks)
-        and all(_check_passed(check) for check in _latest_runs(checks))
+        and all(_check_passed(check) for check in checks)
     )
 
 
-def _latest_runs(checks: list) -> list:
-    """The last run of each check: the rollup keeps every run on the head, and branch rules judge only the last.
-
-    An unfinished run always counts as the last, because gh reports a queued run's start as year 1.
-    """
+def _latest_runs(rollup) -> list:
+    """Keeps the newest run of each check, as GitHub's merge state does; a tie keeps the run that did not pass."""
+    if not isinstance(rollup, list):
+        return []
     latest: dict = {}
-    for index, check in enumerate(checks):
-        name = _rollup_name(check)
-        key = (check.get("workflowName"), name) if name is not None else ("unnamed", index)
-        rank = (not _finished(check), (check.get("startedAt") or "") if isinstance(check, dict) else "")
-        if key not in latest or rank >= latest[key][0]:
-            latest[key] = (rank, check)
-    return [check for _, check in latest.values()]
+    for index, check in enumerate(rollup):
+        if not isinstance(check, dict):
+            latest[("unreadable", index)] = check
+            continue
+        key = (check.get("__typename"), check.get("workflowName"), _rollup_name(check))
+        if key not in latest or _run_order(check) >= _run_order(latest[key]):
+            latest[key] = check
+    return list(latest.values())
 
 
-def _finished(check) -> bool:
-    if not isinstance(check, dict):
-        return True
-    if "state" in check:
-        return check["state"] not in ("PENDING", "EXPECTED")
-    return check.get("status") == "COMPLETED"
+def _run_order(check: dict) -> tuple[str, bool]:
+    started = check.get("startedAt") or UNSTARTED
+    return ("~" if started == UNSTARTED else started, not _check_passed(check))
+
+
+def _check_failures(pr: dict) -> list[str]:
+    problems = []
+    for check in _latest_runs(pr.get("statusCheckRollup")):
+        if _check_passed(check):
+            continue
+        name = _rollup_name(check) or "unnamed"
+        if not isinstance(check, dict):
+            problems.append(f"a check in the rollup is unreadable: {check!r}")
+        elif check.get("state") in ("PENDING", "EXPECTED") or check.get("status", "COMPLETED") != "COMPLETED":
+            observed = check.get("state") or check.get("status")
+            problems.append(f"check {name!r} is pending ({observed}): wait for it to finish, then call again")
+        else:
+            observed = check.get("state") or check.get("conclusion")
+            problems.append(f"check {name!r} failed ({observed}): fix the cause and push")
+    return problems
 
 
 def stale_change_requests(pr: dict, state: dict) -> list[Optional[str]]:

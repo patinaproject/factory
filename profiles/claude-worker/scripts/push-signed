@@ -2,7 +2,9 @@
 """Publish the current branch's local commits to GitHub as signed commits.
 
 Replays each commit oldest first through GitHub's Git Data API (blobs, a
-tree, a commit, then a fast-forward of the branch ref). GitHub signs a commit
+tree, a commit, then a fast-forward of the branch ref). A commit has one
+parent, or two when it merges the current head of the default branch into the
+branch, in that parent order. GitHub signs a commit
 created this way when the caller authenticates as a GitHub App installation
 and sets no author or committer. All GitHub calls go through the gh CLI with
 the caller's auth. After publishing, the local branch moves to the signed
@@ -41,6 +43,7 @@ class Commit:
     sha: str
     message: str
     changes: list = field(default_factory=list)
+    second_parent: str | None = None
 
 
 def git(*args: str) -> str:
@@ -89,27 +92,46 @@ def remote_tree(repository: str, oid: str) -> str:
     return gh("api", f"repos/{repository}/git/commits/{oid}")["tree"]["sha"]
 
 
-def read_commit(sha: str) -> Commit:
-    parents = git("rev-list", "--parents", "-n", "1", sha).split()[1:]
-    if len(parents) != 1:
-        raise Refusal(
-            f"commit {sha} has {len(parents)} parents; push-signed replays only single-parent commits. "
-            "Bring the base branch in with gh pr update-branch, whose merges GitHub signs"
-        )
-    commit = Commit(sha, git("log", "-1", "--format=%B", sha))
+def raw_diff(old: str, new: str) -> list:
     # Read raw so stripping cannot eat whitespace at the end of the last path.
     raw = subprocess.run(
-        ["git", "diff-tree", "-r", "--no-renames", "-z", "--raw", parents[0], sha], capture_output=True, text=True
+        ["git", "diff-tree", "-r", "--no-renames", "-z", "--raw", old, new], capture_output=True, text=True
     )
     if raw.returncode != 0:
-        raise Failure(f"git diff-tree {sha} failed: {raw.stderr.strip()}")
+        raise Failure(f"git diff-tree {new} failed: {raw.stderr.strip()}")
     fields = raw.stdout.rstrip("\0").split("\0")
-    for header, path in zip(fields[0::2], fields[1::2]):
-        old_mode, new_mode, _, blob, status = header.lstrip(":").split()
+    return [(header.lstrip(":").split(), path) for header, path in zip(fields[0::2], fields[1::2])]
+
+
+def check_merge(sha: str, parents: list, first: bool, default: str, base_head: str | None) -> None:
+    if len(parents) > 2:
+        why = "an octopus merge"
+    elif first:
+        why = f"its first parent is on {default}"
+    elif parents[1] != base_head:
+        why = f"its second parent is not the current head of {default}"
+    else:
+        return
+    raise Refusal(
+        f"commit {sha} has {len(parents)} parents ({why}); push-signed replays single-parent commits "
+        f"and merges whose parents are the branch head and the current head of {default}, in that order. "
+        f"Merge origin/{default} into the branch again, or use gh pr update-branch"
+    )
+
+
+def read_commit(sha: str, parents: list) -> Commit:
+    commit = Commit(sha, git("log", "-1", "--format=%B", sha), second_parent=parents[1] if len(parents) > 1 else None)
+    # A merge's own work is what differs from its base side too. Every other
+    # path came from the base head, whose blobs the remote already holds.
+    own = {path for _, path in raw_diff(parents[1], sha)} if commit.second_parent else None
+    for (old_mode, new_mode, _, blob, status), path in raw_diff(parents[0], sha):
         if SUBMODULE in (old_mode, new_mode):
             raise Refusal(f"commit {sha} changes submodule {path}; the API cannot write submodules")
         if status == "D":
             commit.changes.append({"path": path, "mode": old_mode, "type": "blob", "sha": None})
+            continue
+        if own is not None and path not in own:
+            commit.changes.append({"path": path, "mode": new_mode, "type": "blob", "sha": blob})
             continue
         if status == "A" and new_mode == EXECUTABLE_FILE:
             raise Refusal(
@@ -126,26 +148,44 @@ def read_commit(sha: str) -> Commit:
     return commit
 
 
-def signed_prefix(base: str, remote: str, local: list) -> int | None:
+def branch_chain(head: str, default: str) -> tuple:
+    """The branch's own commits, oldest first, as rows of [sha, *parents].
+
+    Only the first-parent chain counts, so a merge's second-parent history is
+    never replayed. Also returns the fork point, the first parent of the oldest row.
+    """
+    listing = git("rev-list", "--reverse", "--first-parent", "--parents", head, "--not", f"origin/{default}")
+    rows = [line.split() for line in listing.splitlines()]
+    if rows and len(rows[0]) < 2:
+        raise Refusal(f"commit {rows[0][0]} has no parent; push-signed publishes branches that fork from {default}")
+    return (rows[0][1] if rows else head), rows
+
+
+def signed_prefix(fork: str, remote: str, rows: list, default: str) -> int | None:
     """Count the leading local commits that the remote chain already carries.
 
     A publish that failed partway leaves signed copies on the remote. They are
-    not ancestors of the local branch, but each one has the tree of the local
-    commit at the same position. Returns None when the remote holds anything else.
+    not ancestors of the local branch, but each one has the first parent, the
+    other parents, and the tree of the local commit at the same position.
+    Returns None when the remote holds anything else.
     """
     listing = subprocess.run(
-        ["git", "rev-list", "--reverse", "--topo-order", "--parents", f"{base}..{remote}"],
+        ["git", "rev-list", "--reverse", "--first-parent", "--parents", remote, "--not", f"origin/{default}"],
         capture_output=True, text=True,
     )
-    rows = [line.split() for line in listing.stdout.splitlines()]
-    if listing.returncode != 0 or not rows or len(rows) > len(local):
+    remote_rows = [line.split() for line in listing.stdout.splitlines()]
+    if listing.returncode != 0 or not remote_rows or len(remote_rows) > len(rows):
         return None
-    previous = base
-    for (sha, *parents), mine in zip(rows, local):
-        if parents != [previous] or git("rev-parse", f"{sha}^{{tree}}") != git("rev-parse", f"{mine}^{{tree}}"):
+    previous = fork
+    for (sha, *parents), (mine, *mine_parents) in zip(remote_rows, rows):
+        if (
+            parents[:1] != [previous]
+            or parents[1:] != mine_parents[1:]
+            or git("rev-parse", f"{sha}^{{tree}}") != git("rev-parse", f"{mine}^{{tree}}")
+        ):
             return None
         previous = sha
-    return len(rows)
+    return len(remote_rows)
 
 
 def publish(repository: str, branch: str, parent: str, commit: Commit) -> str:
@@ -161,7 +201,8 @@ def publish(repository: str, branch: str, parent: str, commit: Commit) -> str:
     # The tree request cannot hold a path as both a file and a directory, so a directory replaced by a file needs its deletions first.
     entries.sort(key=lambda entry: entry["sha"] is not None)
     tree = gh_send(f"{git_data}/trees", {"base_tree": remote_tree(repository, parent), "tree": entries})
-    created = gh_send(f"{git_data}/commits", {"message": commit.message, "tree": tree["sha"], "parents": [parent]})
+    parents = [parent, commit.second_parent] if commit.second_parent else [parent]
+    created = gh_send(f"{git_data}/commits", {"message": commit.message, "tree": tree["sha"], "parents": parents})
     gh_send(f"{git_data}/refs/heads/{branch}", {"sha": created["sha"], "force": False}, method="PATCH")
     return created["sha"]
 
@@ -182,7 +223,7 @@ def run() -> dict:
 
     head = git("rev-parse", "HEAD")
     head_tree = git("rev-parse", "HEAD^{tree}")
-    base = git("merge-base", "HEAD", f"origin/{default}")
+    base, rows = branch_chain(head, default)
     remote = remote_head(repository, branch)
     created = remote is None
     start = remote
@@ -193,15 +234,23 @@ def run() -> dict:
     elif git("rev-parse", f"{remote}^{{tree}}") == head_tree:
         start = head
     else:
-        local = git("rev-list", "--reverse", "--topo-order", f"{base}..{head}").split()
-        done = signed_prefix(base, remote, local)
+        done = signed_prefix(base, remote, rows, default)
         if done is None:
             raise Refusal(
                 f"{branch} on {repository} has commits this branch lacks; "
                 "update from the remote (for example git pull --ff-only)"
             )
-        start = local[done - 1]
-    commits = [read_commit(sha) for sha in git("rev-list", "--reverse", "--topo-order", f"{start}..{head}").split()]
+        start = rows[done - 1][0]
+    positions = [base, *(row[0] for row in rows)]
+    if start not in positions:
+        raise Refusal(f"{branch} on {repository} is at {start}, which is not on this branch's own commits; update from the remote")
+    pending = rows[positions.index(start):]
+    base_head = remote_head(repository, default) if any(len(row) > 2 for row in pending) else None
+    commits = []
+    for sha, *parents in pending:
+        if len(parents) > 1:
+            check_merge(sha, parents, sha == rows[0][0], default, base_head)
+        commits.append(read_commit(sha, parents))
 
     if created:
         create_ref(repository, branch, base)

@@ -94,6 +94,7 @@ WORKER_JOBS = [
     cron_job("refresh-gh-app-login", 30),
     cron_job("refresh-checkouts", 60),
     cron_job("refresh-owned-refs", 1),
+    cron_job("reopen-conflicts", 5),
 ]
 ALERT_SCRIPT = "check-install-alert"
 ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}]
@@ -583,7 +584,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (0, ""))
 
     def test_missing_and_duplicated_cron_jobs(self) -> None:
-        self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2]])
+        self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2], WORKER_JOBS[3]])
         self.cron(self.root, [*ROOT_JOBS, *ROOT_JOBS])
 
         self.assertEqual(
@@ -597,6 +598,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("refresh-gh-app-login", 30, enabled=False),
             cron_job("refresh-checkouts", 15, no_agent=False),
             cron_job("refresh-owned-refs", 1),
+            cron_job("reopen-conflicts", 5),
         ])
         self.cron(self.root, [{**cron_job("check-install", 60, "local"), "script": ALERT_SCRIPT}])
 
