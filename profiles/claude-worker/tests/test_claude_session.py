@@ -227,6 +227,8 @@ class ClaudeSessionTest(GitFixture):
             "num_turns": 7,
             "superseded": None,
             "result": "Opened the pull request.",
+            "usage": None,
+            "first_context_tokens": None,
         })
         call = self.claude_call()
         self.assertEqual(call["argv"], [
@@ -1080,6 +1082,51 @@ class ClaudeSessionTest(GitFixture):
                     "error": f"claude_session.max_turns {value!r} must be a positive integer, or 0 for no limit",
                 })
 
+    def test_result_line_reports_token_counts_per_model_including_subagents(self) -> None:
+        recorded = json.loads((Path(__file__).parent / "fixtures" / "claude-result-with-subagent.json").read_text())
+        self.configure_fake_claude(output=recorded)
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["usage"], {
+            "claude-haiku-5-5": {
+                "input_tokens": 8, "cache_read_input_tokens": 67549, "cache_creation_input_tokens": 34541, "output_tokens": 157,
+            },
+            "claude-sonnet-5-5": {
+                "input_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 20115, "output_tokens": 3,
+            },
+        })
+        self.assertEqual((report["subtype"], report["num_turns"]), ("success", 7))
+
+    def test_failed_run_still_reports_its_token_counts(self) -> None:
+        self.configure_fake_claude(subtype="error_during_execution", output={"modelUsage": {"claude-opus-5-5": {
+            "inputTokens": 1, "outputTokens": 2, "cacheReadInputTokens": 3, "cacheCreationInputTokens": 4, "costUSD": 0.5,
+        }}})
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(report["usage"], {"claude-opus-5-5": {
+            "input_tokens": 1, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 4, "output_tokens": 2,
+        }})
+
+    def test_first_context_is_the_first_main_call_this_run_appended(self) -> None:
+        transcript = self.write_transcript(idle=HOUR, context=(10, 50_000, 0))
+        self.configure_fake_claude(transcript=str(transcript), transcript_lines=[
+            {"type": "assistant", "isSidechain": True, "message": {"model": "claude-sonnet-5-5", "usage": {
+                "input_tokens": 1, "cache_read_input_tokens": 1, "cache_creation_input_tokens": 1}}},
+            {"type": "assistant", "message": {"model": "claude-opus-5-5", "usage": {
+                "input_tokens": 5, "cache_read_input_tokens": 50_000, "cache_creation_input_tokens": 700}}},
+            {"type": "assistant", "message": {"model": "claude-opus-5-5", "usage": {
+                "input_tokens": 1, "cache_read_input_tokens": 60_000, "cache_creation_input_tokens": 900}}},
+        ])
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["resumed"]), (0, True))
+        self.assertEqual(report["first_context_tokens"], 50_705)
+
     def test_max_turns_run_is_reported_as_completed(self) -> None:
         self.configure_fake_claude(subtype="error_max_turns")
         status, report = self.run_session()
@@ -1092,7 +1139,8 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session()
 
         self.assertEqual(status, 1)
-        self.assertEqual(report["error"], "claude run ended with error_during_execution (exit 0)")
+        # claude-session ends claude once the result is read, so a fake still exiting reports SIGTERM.
+        self.assertRegex(report["error"], r"^claude run ended with error_during_execution \(exit (0|-15)\)$")
         self.assertEqual(report["session_id"], SESSION_ID)
 
     def leftover_pid(self) -> int:
