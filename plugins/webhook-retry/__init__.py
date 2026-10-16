@@ -1,6 +1,4 @@
-"""webhook-retry: queue a webhook delivery whose agent turn fails on a usage limit, for the retry cron job to rerun.
-
-Hermes fires `on_session_end` only for a turn that finishes through its normal path, and a turn that exhausts its
+"""Hermes fires `on_session_end` only for a turn that finishes through its normal path, and a turn that exhausts its
 retries on a rate limit returns early. So `api_request_error` marks the failure, and `on_session_end` clears an
 entry whose turn finished after all, such as one a fallback provider rescued.
 """
@@ -124,7 +122,6 @@ def clear_finished_turn(session_id: str = "", **_: Any) -> None:
 
 
 def session_key(session_id: str) -> Optional[str]:
-    """The webhook chat id of the delivery that owns `session_id`, or None when it is not a webhook session."""
     if _session_store is None or not session_id:
         return None
     entry = _session_store.lookup_by_session_id(session_id)

@@ -1,8 +1,4 @@
-"""Rerun webhook deliveries whose agent turn failed on a usage limit.
-
-Run it by the retry-failed-webhooks cron wrapper. It prints a line only when something happened, so Hermes delivers
-nothing on a quiet run. It imports nothing from Hermes and runs under plain python3.
-"""
+"""Rerun webhook deliveries whose agent turn failed on a usage limit."""
 
 from __future__ import annotations
 

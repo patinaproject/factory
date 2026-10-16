@@ -1,8 +1,3 @@
-"""The durable queue of webhook deliveries, shared by the gateway hooks and the retry command.
-
-This module imports nothing from Hermes: the retry command runs under plain python3.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -29,7 +24,6 @@ RUN_BUDGET = dt.timedelta(minutes=40)
 KEY_PREFIX = "webhook:v2:"
 
 REMOVED = "removed"
-# (state, event) -> next state. An absent state is None. A pair that is not listed changes nothing.
 TRANSITIONS: dict[tuple[Optional[str], str], str] = {
     (None, "dispatch"): "pending",
     ("pending", "dispatch"): "pending",
@@ -38,7 +32,6 @@ TRANSITIONS: dict[tuple[Optional[str], str], str] = {
     ("pending", "turn_ended"): REMOVED,
     ("queued", "turn_ended"): REMOVED,
     ("pending", "expire"): REMOVED,
-    # A retry holds its entry in `running`, so a retry cut short is never run a second time.
     ("queued", "retry_started"): "running",
     ("running", "retry_succeeded"): REMOVED,
     ("running", "retry_usage_limit"): "queued",
@@ -75,7 +68,6 @@ def queue_dir(home: Path) -> Path:
 
 
 def decode_key(key: str) -> Optional[tuple[str, str, str]]:
-    """The (profile, route, delivery) a webhook adapter chat id encodes, or None for any other chat id."""
     if not isinstance(key, str) or not key.startswith(KEY_PREFIX):
         return None
     body = key[len(KEY_PREFIX):]
@@ -89,7 +81,6 @@ def decode_key(key: str) -> Optional[tuple[str, str, str]]:
 
 
 def reset_delay_seconds(message: str) -> Optional[float]:
-    """Seconds until a usage limit resets, from free text such as "resets in ~14h 46m" or "retry after 90 seconds"."""
     if not message:
         return None
     resets = _RESETS_IN.search(message)
@@ -112,7 +103,6 @@ def ensure_dir(directory: Path) -> None:
 
 @contextlib.contextmanager
 def file_lock(directory: Path, name: str, *, blocking: bool = True) -> Iterator[bool]:
-    """Hold an exclusive flock on `<directory>/<name>`. Yields False when a non-blocking lock is already held."""
     ensure_dir(directory)
     fd = os.open(directory / name, os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -147,7 +137,6 @@ def save(directory: Path, entries: dict[str, dict[str, Any]]) -> None:
 
 
 def mutate(directory: Path, change: Callable[[dict[str, dict[str, Any]]], bool]) -> None:
-    """Read the queue under its lock, let `change` edit it, and write it back when `change` returns True."""
     with file_lock(directory, "queue.lock"):
         entries = load(directory)
         if change(entries):
@@ -155,7 +144,6 @@ def mutate(directory: Path, change: Callable[[dict[str, dict[str, Any]]], bool])
 
 
 def apply(entries: dict[str, dict[str, Any]], key: str, event: str, /, **fields: Any) -> bool:
-    """Move the entry at `key` through `event` if the table allows it. Returns whether anything changed."""
     current = entries.get(key)
     state = current["state"] if current else None
     following = TRANSITIONS.get((state, event))
