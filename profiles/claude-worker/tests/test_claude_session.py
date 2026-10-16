@@ -711,6 +711,84 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(header, "Bearer cached-token")
         self.assertFalse(any("cached-token" in arg for arg in argv))
 
+    def test_a_sentry_token_reaches_a_read_only_sentry_server_only_through_the_settings_file(self) -> None:
+        self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
+
+        self.run_session(env={"EXAMPLE_SENTRY_TOKEN": "sntryu_example"})
+
+        call = self.claude_call()
+        argv = call["argv"]
+        servers = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
+        env = call["settings"]["content"]["env"]
+        self.assertEqual(servers["sentry"], {
+            "type": "http",
+            "url": "https://mcp.sentry.dev/mcp?skills=inspect",
+            "headers": {"Authorization": "Sentry-Bearer ${EXAMPLE_SENTRY_TOKEN}"},
+        })
+        self.assertEqual(sorted(servers), ["linear", "sentry"])
+        self.assertEqual(env, {"LINEAR_API_KEY": "cached-token", "EXAMPLE_SENTRY_TOKEN": "sntryu_example"})
+        self.assertEqual(call["settings"]["mode"], "0o600")
+        self.assertNotIn("EXAMPLE_SENTRY_TOKEN", call["env"])
+        self.assertFalse(any("sntryu_example" in arg for arg in argv))
+
+    def test_a_sentry_token_variable_that_is_unset_or_empty_refuses_before_claude_starts(self) -> None:
+        self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
+        for env in ({}, {"EXAMPLE_SENTRY_TOKEN": ""}):
+            with self.subTest(env=env):
+                status, report = self.run_session(env=env)
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": "sentry_token_env names EXAMPLE_SENTRY_TOKEN, which is not set"})
+                self.assertFalse(self.log.exists())
+
+    def test_a_sentry_token_env_that_could_overwrite_another_setting_is_refused(self) -> None:
+        for name in ("LINEAR_API_KEY", "ANTHROPIC_AUTH_TOKEN", "NOT-A-NAME", 5):
+            with self.subTest(sentry_token_env=name):
+                self.settings = self.write_settings([self.repository], {"sentry_token_env": name})
+
+                status, report = self.run_session(env={"ANTHROPIC_AUTH_TOKEN": "x"})
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": (
+                    f"claude_session.sentry_token_env {name!r} must name an environment variable other than "
+                    "LINEAR_API_KEY and ANTHROPIC_*"
+                )})
+                self.assertFalse(self.log.exists())
+
+    def test_without_sentry_token_env_the_run_has_only_the_linear_server(self) -> None:
+        for claude_session in ({}, {"sentry_token_env": ""}):
+            with self.subTest(claude_session=claude_session):
+                self.settings = self.write_settings([self.repository], claude_session)
+
+                self.run_session(env={"EXAMPLE_SENTRY_TOKEN": "sntryu_example"})
+
+                call = self.claude_call()
+                argv = call["argv"]
+                self.assertEqual(argv[argv.index("--mcp-config") + 1], LINEAR_MCP_CONFIG)
+                self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token"})
+                self.assertNotIn("disabledMcpjsonServers", call["settings"]["content"])
+
+    def test_disabled_mcp_servers_reach_the_settings_file(self) -> None:
+        names = ["mongodb-production-reader", "sentry-local"]
+        self.settings = self.write_settings([self.repository], {"disabled_mcp_servers": names})
+
+        self.run_session()
+
+        self.assertEqual(self.claude_call()["settings"]["content"]["disabledMcpjsonServers"], names)
+
+    def test_invalid_disabled_mcp_servers_are_refused(self) -> None:
+        for value in ("mongodb-production-reader", [""], [5]):
+            with self.subTest(disabled_mcp_servers=value):
+                self.settings = self.write_settings([self.repository], {"disabled_mcp_servers": value})
+
+                status, report = self.run_session()
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": (
+                    f"claude_session.disabled_mcp_servers {value!r} must be a list of MCP server names"
+                )})
+                self.assertFalse(self.log.exists())
+
     def test_a_revoked_cached_linear_token_is_replaced_with_the_plugin_scope(self) -> None:
         (self.hermes_home / "linear-fake.json").write_text(json.dumps({"accepted": []}))
 

@@ -96,11 +96,15 @@ CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
-LINEAR_MCP_CONFIG = json.dumps({"mcpServers": {"linear": {
+LINEAR_MCP_SERVER = {
     "type": "http",
     "url": "https://mcp.linear.app/mcp",
     "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
-}}})
+}
+# Replaces a repository's `sentry` server, whose OAuth sign-in needs a browser. `Sentry-Bearer` sends a
+# static Sentry token, and the `inspect` skill exposes only Sentry's read-only tools.
+SENTRY_MCP_URL = "https://mcp.sentry.dev/mcp?skills=inspect"
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
@@ -502,10 +506,47 @@ def model_environment(transport: dict, tiers: dict) -> dict:
     return env
 
 
+def sentry_token_env(transport: dict) -> str | None:
+    name = transport.get("sentry_token_env")
+    if not name:
+        return None
+    # The settings env also carries LINEAR_API_KEY and ANTHROPIC_*, which would overwrite the token.
+    if not isinstance(name, str) or not ENV_NAME.match(name) or name == "LINEAR_API_KEY" or name.startswith("ANTHROPIC_"):
+        raise Refusal(
+            f"claude_session.sentry_token_env {name!r} must name an environment variable other than "
+            "LINEAR_API_KEY and ANTHROPIC_*"
+        )
+    if not os.environ.get(name):
+        raise Refusal(f"sentry_token_env names {name}, which is not set")
+    return name
+
+
+def mcp_config(transport: dict) -> str:
+    servers = {"linear": LINEAR_MCP_SERVER}
+    sentry = sentry_token_env(transport)
+    if sentry:
+        servers["sentry"] = {
+            "type": "http",
+            "url": SENTRY_MCP_URL,
+            "headers": {"Authorization": f"Sentry-Bearer ${{{sentry}}}"},
+        }
+    return json.dumps({"mcpServers": servers})
+
+
+def disabled_mcp_servers(transport: dict) -> list[str]:
+    value = transport.get("disabled_mcp_servers") or []
+    if not isinstance(value, list) or not all(isinstance(name, str) and name for name in value):
+        raise Refusal(f"claude_session.disabled_mcp_servers {value!r} must be a list of MCP server names")
+    return value
+
+
 def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
     env = {"LINEAR_API_KEY": api_key}
+    sentry = sentry_token_env(transport)
+    if sentry:
+        env[sentry] = os.environ[sentry]
     if transport.get("base_url"):
         env["ANTHROPIC_BASE_URL"] = transport["base_url"]
     token_env = transport.get("auth_token_env")
@@ -520,10 +561,14 @@ def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
     # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
     guard = {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(CI_WAIT_GUARD))}"}
-    return {"env": env, "hooks": {
+    settings = {"env": env, "hooks": {
         "SessionStart": [{"hooks": [remove]}],
         "PreToolUse": [{"matcher": "Bash", "hooks": [guard]}],
     }}
+    disabled = disabled_mcp_servers(transport)
+    if disabled:
+        settings["disabledMcpjsonServers"] = disabled
+    return settings
 
 
 def remove_on_stop(path: Path) -> None:
@@ -702,6 +747,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     repo = find_repository(settings, args.repo)
     transport = settings.get("claude_session") or {}
     turn_limit = max_turns_args(transport)
+    mcp = mcp_config(transport)
     threshold = fresh_after_tokens(transport)
     prefix = worker_entry_prefix(repo)
     worktree = resolve_worktree(workspace, repo["path"])
@@ -738,7 +784,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
                 upload_image=Path(__file__).resolve().with_name("github-upload-image"),
                 wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
             ),
-            "--mcp-config", LINEAR_MCP_CONFIG,
+            "--mcp-config", mcp,
         ]
         if transport.get("model"):
             command += ["--model", transport["model"]]
