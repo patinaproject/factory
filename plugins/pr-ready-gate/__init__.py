@@ -46,7 +46,7 @@ MERGE_STATE_REMEDIES = {
         "a branch rule is not satisfied: required checks, reviews, or verified commit signatures; "
         "wait for checks, address reviews, and make sure every commit is signed"
     ),
-    "DIRTY": "resolve the merge conflicts with the base branch and push",
+    "DIRTY": "merge the base branch, resolve the conflicts, and publish the merge with push-signed",
     "UNSTABLE": "a check is pending or failing; wait for checks to finish and fix any failures",
     "UNKNOWN": "GitHub has not computed mergeability yet; wait a minute and retry",
     "HAS_HOOKS": "the base branch has pre-receive hooks; this gate only accepts CLEAN",
