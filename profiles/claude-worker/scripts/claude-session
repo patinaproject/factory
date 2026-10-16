@@ -566,7 +566,9 @@ def disabled_mcp_servers(transport: dict) -> list[str]:
 def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
-    env = {"LINEAR_API_KEY": api_key}
+    # Claude Code sends every MCP schema inline when ANTHROPIC_BASE_URL is not Anthropic's,
+    # unless tool search is forced on; deferred schemas keep the worker's fixed prefix small.
+    env = {"LINEAR_API_KEY": api_key, "ENABLE_TOOL_SEARCH": "true"}
     sentry = sentry_token_env(transport)
     if sentry:
         env[sentry] = os.environ[sentry]
