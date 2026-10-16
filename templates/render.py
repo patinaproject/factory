@@ -244,6 +244,10 @@ def archive_card_command(home: Path) -> str:
     return f"python3 {shlex.quote(str(home / 'profiles' / 'claude-worker' / 'scripts' / 'archive_card.py'))}"
 
 
+def merged_checks_command(home: Path) -> str:
+    return f"python3 {shlex.quote(str(home / 'profiles' / 'claude-worker' / 'scripts' / 'merged_checks.py'))}"
+
+
 def _or_list(items: list) -> str:
     if len(items) <= 2:
         return " or ".join(items)
@@ -285,7 +289,9 @@ def triage_resume_section() -> str:
 
 
 def triage_merged_section() -> str:
-    return _read_template("triage-merged.md").rstrip("\n")
+    home = hermes_home()
+    values = {"archive_card": archive_card_command(home), "merged_checks": merged_checks_command(home)}
+    return render_prompt(_read_template("triage-merged.md"), values).rstrip("\n")
 
 
 def triage_unblock_section() -> str:

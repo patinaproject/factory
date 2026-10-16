@@ -436,8 +436,14 @@ class MergedCardTest(unittest.TestCase):
             "hermes kanban assign <task id> claude-worker", rule[rule.index("Make the completion call.") :]
         )
 
+    def completion_call(self) -> str:
+        return self.section[self.section.index("The completion call is") :].split("\n\n")[0]
+
+    def failing_checks(self) -> str:
+        return self.section[self.section.index("### A refused merge") :]
+
     def test_the_completion_call_names_the_tool_and_its_arguments(self):
-        call = self.section[self.section.index("The completion call is") :]
+        call = self.completion_call()
         for needle in ("kanban_complete", "`task_id`", "`summary`", "`published_pr`", "linear_agent_activity", "`Pull request`"):
             self.assertIn(needle, call)
         self.assertNotIn("claude-worker", call)
@@ -455,9 +461,115 @@ class MergedCardTest(unittest.TestCase):
         promote = rule[rule.index("  5. ") : rule.index("  6. ")]
         self.assertIn("comment the refusal with the pull request URL and stop. Leave the card\n     unassigned", promote)
         self.assertNotIn("claude-worker", promote)
-        call = self.section[self.section.index("The completion call is") :]
-        self.assertIn("When it is refused, comment\nthe refusal with the pull request URL and stop.", call)
+        call = self.completion_call()
+        self.assertIn("Otherwise comment\nthe refusal with the pull request URL and stop.", call)
         self.assertIn("Never assign the card after\n`specify` succeeded.", call)
+
+    def test_only_a_failed_acceptance_routes_to_the_failing_checks_rule(self):
+        call = self.completion_call()
+        positions = self.positions(
+            call,
+            [
+                "When it is refused, run\n`gh pr view '<pull request URL>' --json headRefOid`",
+                "`hermes kanban show <task id> --json`",
+                "`pr_acceptance`",
+                "`pr_url` is the pull request URL",
+                "`head_sha` is that `headRefOid`",
+                "`classification` other than `success` or `pending`",
+                '"A refused merge"',
+                "Otherwise comment",
+            ],
+        )
+        self.assertEqual(positions, sorted(positions))
+
+    def test_the_rule_sorts_the_refused_checks_before_it_writes_anything(self):
+        rule = self.failing_checks()
+        merged = render.merged_checks_command(render.hermes_home())
+        positions = self.positions(
+            rule,
+            [f"{merged} '<pull request URL>' '<name>'", "When `real` is not empty", "When `real` is empty", "1. Comment on the card"],
+        )
+        self.assertEqual(positions, sorted(positions))
+
+    def test_the_comment_and_reason_say_which_case_it_is(self):
+        rule = self.failing_checks()
+        self.assertIn("`Merge refused by Hermes: required checks failed: <names>.`", rule)
+        self.assertIn("Hermes counted failed runs that newer passing runs replaced: <names>.`", rule)
+        self.assertIn("merged, but required checks failed: <names>.", rule)
+        self.assertIn("passed on their newest runs", rule)
+        self.assertIn("If `head_sha` is not\nthe event's `head_sha`, comment the refusal", rule)
+
+    def test_failing_checks_archive_a_completed_issue_after_the_marker_comment(self):
+        rule = self.failing_checks()
+        archive = f"{render.archive_card_command(render.hermes_home())} <task id>"
+        positions = self.positions(
+            rule, ["Merge refused by Hermes:", "`linear_issue`", "`stateType` of `completed`", archive]
+        )
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("hermes kanban archive", rule)
+
+    def test_a_refused_merge_never_hands_off_or_assigns_the_card(self):
+        rule = self.failing_checks()
+        for needle in ("reopen-review", "request-review", "unblock", "assign claude-worker", "kanban_complete"):
+            self.assertNotIn(needle, rule)
+        assigns = re.findall(r"hermes kanban assign <task id> (\w+)", rule)
+        self.assertEqual(assigns, ["none"])
+
+    def test_a_refused_merge_unassigns_the_card_before_any_state_command(self):
+        rule = self.failing_checks()
+        unassign = "hermes kanban assign <task id> none"
+        self.assertEqual(rule.count(unassign), 1)
+        state_commands = re.findall(r"hermes kanban (?!assign|show)[a-z-]+", rule)
+        self.assertEqual(set(state_commands), {"hermes kanban block"})
+        self.assertLess(rule.index(unassign), rule.index("hermes kanban block"))
+        self.assertLess(rule.index(unassign), rule.index("`linear_agent_activity`"))
+
+    def test_a_review_card_stays_in_review_and_gets_the_elicitation_directly(self):
+        rule = self.failing_checks()
+        review = rule[rule.index("   - `review`") : rule.index("   - `blocked`")]
+        self.assertNotIn("hermes kanban", review)
+        self.assertIn("leave the card in `review`", review)
+        post = rule[rule.index("`review` or `blocked`, or the block command failed") :]
+        self.assertIn("`elicitation`", post)
+        self.assertIn("`linear_agent_activity`", post)
+
+    def test_failing_checks_block_a_ready_card_once_as_needs_input(self):
+        rule = self.failing_checks()
+        block = "hermes kanban block <task id> '<reason>' --kind needs_input"
+        ready = rule[rule.index("   - `ready`") : rule.index("   - `review`")]
+        self.assertIn(block, ready)
+        self.assertEqual(rule.count(block), 1)
+        blocked = rule[rule.index("   - `blocked`") :].split("\n\n")[0]
+        self.assertNotIn("hermes kanban", blocked.replace("`block_kind` is null, run the `ready` command", ""))
+        self.assertIn("`block_kind` is null, run the `ready` command", blocked)
+
+    def test_an_unreadable_issue_blocks_the_card_and_never_archives_it(self):
+        rule = self.failing_checks()
+        step = rule[rule.index("\n2. ") : rule.index("\n3. ")]
+        archive = f"{render.archive_card_command(render.hermes_home())} <task id>"
+        self.assertEqual(step.count(archive), 1)
+        positions = self.positions(
+            step,
+            ["Only a read that returns a `stateType` of `completed`", archive, "returns nothing", "never archive the\n   card", "Go to step 3 and block it"],
+        )
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("comment the error on the card and stop", step)
+
+    def test_linear_triage_archives_on_the_marker_the_github_route_writes(self):
+        marker = "Merge refused by Hermes:"
+        self.assertIn(f"`{marker} required checks failed: <names>.`", self.failing_checks())
+        change = self.linear[self.linear.index("## Issue change") :]
+        step = change[change.index("\n3. ") : change.index("\n4. ")]
+        positions = self.positions(step, ["merged", f"`{marker}`", 'archive it as "Rules" says', "Otherwise"])
+        self.assertEqual(positions, sorted(positions))
+
+    def test_a_linear_reply_never_resumes_a_card_merged_with_failing_checks(self):
+        prompt = self.linear[self.linear.index("## Prompt") : self.linear.index("## Stop")]
+        step = prompt[prompt.index("\n4. ") : prompt.index("\n5. ")]
+        positions = self.positions(
+            step, ["`Merge refused by Hermes:`", "Do not unblock, reopen, or resume it.", "and stop.", "unblock it as"]
+        )
+        self.assertEqual(positions, sorted(positions))
 
     def test_a_rewritten_card_is_never_completed(self):
         rule = self.bullet("triage")
