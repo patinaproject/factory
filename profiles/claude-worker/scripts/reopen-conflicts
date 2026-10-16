@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Send a factory pull request that conflicts with its base back to its worker.
+
+GitHub sends no webhook when a pull request starts to conflict because its base
+branch moved, so a card in `review` or `blocked` waits forever. A Hermes cron
+job runs this script every few minutes. It lists the App's open pull requests
+that belong to a `review` or `blocked` card and, for each one GitHub reports as
+`CONFLICTING`, comments on the card and hands it back to its worker. A card is
+sent back once per pull request head: the comment ends with the line
+`conflict_head: <sha>`, and a `blocked` card whose comments already hold that
+line for the current head is skipped. A worker that blocks on the same head is
+not unblocked in a loop, and a worker that pushes a new head that still
+conflicts is told again. A `review` card that holds the line is a handback that
+failed partway, because the ready gate refuses a conflicting head, so the
+review reopen runs again. `UNKNOWN` mergeability changes nothing, because GitHub resolves it on a
+later run. Prints one line per card sent back, `<task id> <pull request url>`.
+A failure for one repository or card goes to stderr and the others still run.
+Exits 1 when any failed, or 2 when HERMES_HOME is not a profile home or the
+factory settings cannot be read.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import card_branch
+
+SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
+REPO_LINE = re.compile(r"^repo:\s*(\S+)\s*$", re.MULTILINE)
+MARKER = "conflict_head: "
+HANDBACK_REASON = "merge conflict with the base branch; see the card comments"
+PR_FIELDS = "number,url,headRefName,headRefOid,baseRefName,author,mergeable"
+
+
+class Refusal(Exception):
+    def __init__(self, message: str, code: int = 2) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class Failed(Exception):
+    pass
+
+
+def find_hermes() -> str:
+    # A cron job's PATH can lack the installer's bin directory, so fall back to where it puts hermes.
+    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
+    for candidate in filter(None, candidates):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
+
+
+def check_profile_home() -> None:
+    if not os.environ.get("HERMES_HOME"):
+        raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
+    worker = Path(os.environ["HERMES_HOME"]).resolve()
+    if worker.parent.name != "profiles":
+        raise Refusal(f"HERMES_HOME {worker} is not a profile home under <root>/profiles/")
+
+
+def run(*command: str) -> str:
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True)
+    except OSError as failure:
+        raise Failed(f"{command[0]} could not run: {failure.strerror or failure}") from failure
+    if proc.returncode != 0:
+        detail = proc.stderr.strip().splitlines()[0] if proc.stderr.strip() else "no error output"
+        raise Failed(f"{Path(command[0]).name} {' '.join(command[1:3])} failed: {detail}")
+    return proc.stdout
+
+
+def app_login(hermes: str) -> str:
+    proc = subprocess.run([hermes, "config", "get", SETTINGS_KEY, "--json", "--raw"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refusal(f"hermes config get {SETTINGS_KEY} failed")
+    try:
+        login = json.loads(proc.stdout)["github"]["login"]
+    except (ValueError, KeyError, TypeError):
+        login = None
+    if not isinstance(login, str) or not login:
+        raise Refusal("github.login is not set in the factory settings")
+    return login
+
+
+def candidates(tasks: list) -> dict:
+    """Cards that may hold a conflicting pull request, grouped by repository."""
+    by_repo: dict = {}
+    for task in tasks:
+        repo = REPO_LINE.search(task.get("body") or "")
+        if task.get("status") in ("review", "blocked") and task.get("branch_name") and repo:
+            by_repo.setdefault(repo.group(1), []).append(task)
+    return by_repo
+
+
+def open_pulls(repo: str) -> list:
+    out = run(os.environ.get("GH_BIN", "gh"), "pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", PR_FIELDS)
+    return json.loads(out)
+
+
+def already_sent(hermes: str, task_id: str, head: str) -> bool:
+    shown = json.loads(run(hermes, "kanban", "show", task_id, "--json"))
+    marker = f"{MARKER}{head}"
+    return any(
+        line.strip() == marker for comment in shown.get("comments") or [] for line in (comment.get("body") or "").splitlines()
+    )
+
+
+def comment_text(pull: dict) -> str:
+    base = pull["baseRefName"]
+    return (
+        f"Pull request {pull['url']} conflicts with {base}. Merge origin/{base} into the branch, resolve the "
+        "conflicts, and publish the merge with push-signed. When you cannot resolve a conflict with confidence, "
+        "block this card as needs_input and name each conflicting file.\n\n"
+        f"{MARKER}{pull['headRefOid']}"
+    )
+
+
+def send_back(hermes: str, task: dict, pull: dict, sent: bool) -> None:
+    """Every step either moves the card or leaves it where the next run repeats the step."""
+    task_id = task["id"]
+    if task["status"] == "blocked":
+        run(hermes, "kanban", "unblock", task_id)
+        run(hermes, "kanban", "request-review", task_id)
+    if not sent:
+        run(hermes, "kanban", "comment", task_id, comment_text(pull))
+    run(hermes, "kanban", "reopen-review", task_id, "--reason", HANDBACK_REASON)
+
+
+def main() -> int:
+    argparse.ArgumentParser(description=__doc__.splitlines()[0]).parse_args()
+    failed = False
+    try:
+        check_profile_home()
+        hermes = find_hermes()
+        login = app_login(hermes)
+        try:
+            by_repo = candidates(json.loads(run(hermes, "kanban", "list", "--json")))
+        except (Failed, ValueError) as failure:
+            raise Refusal(f"listing cards failed: {failure}", 1)
+    except Refusal as exc:
+        print(f"reopen-conflicts: {exc}", file=sys.stderr)
+        return exc.code
+    for repo, tasks in sorted(by_repo.items()):
+        try:
+            pulls = open_pulls(repo)
+        except (Failed, ValueError) as failure:
+            print(f"reopen-conflicts: {repo}: {failure}", file=sys.stderr)
+            failed = True
+            continue
+        for task in tasks:
+            pull = next(
+                (p for p in pulls if p["headRefName"] == task["branch_name"] and card_branch.is_app((p.get("author") or {}).get("login", ""), login)),
+                None,
+            )
+            if pull is None or pull["mergeable"] != "CONFLICTING":
+                continue
+            try:
+                sent = already_sent(hermes, task["id"], pull["headRefOid"])
+                if sent and task["status"] == "blocked":
+                    continue
+                send_back(hermes, task, pull, sent)
+            except (Failed, ValueError) as failure:
+                print(f"reopen-conflicts: {task['id']}: {failure}", file=sys.stderr)
+                failed = True
+                continue
+            print(f"{task['id']} {pull['url']}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

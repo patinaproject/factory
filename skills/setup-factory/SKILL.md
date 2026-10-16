@@ -854,7 +854,8 @@ belongs to the worker profile.
 `refresh-checkouts`. `cron create` does not remove duplicates. If more than one
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
-jobs: `refresh-checkouts`, `refresh-owned-refs`, and `refresh-gh-app-login`.
+jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`, and
+`refresh-gh-app-login`.
 A copy there runs without the worker's scripts and settings, so remove it the
 same way. The default home holds exactly one job, `check-install`, described
 below. A second setup session runs this check before it
@@ -887,6 +888,19 @@ is missing or older than 5 minutes. Create the job when `cron list` has no
 
 ```sh
 hermes -p claude-worker cron create "every 1m" --name refresh-owned-refs --no-agent --script refresh-owned-refs </dev/null
+```
+
+**Conflict job.** GitHub sends no webhook when a pull request starts to
+conflict because its base branch moved. `reopen-conflicts` lists the App's
+open pull requests for every `review` or `blocked` card every 5 minutes. For
+each one GitHub reports as `CONFLICTING`, it comments on the card and hands
+the card back to its worker. The worker merges the base branch, resolves the
+conflicts, and publishes the merge with `push-signed`. A card is sent back
+once per pull request head, so a worker that blocks on the same head stays
+blocked. Create the job when `cron list` has no `reopen-conflicts` job:
+
+```sh
+hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null
 ```
 
 **Install drift job.** `check-install` compares the live worker profile, the
