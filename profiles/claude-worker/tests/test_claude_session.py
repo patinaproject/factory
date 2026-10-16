@@ -1131,7 +1131,8 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session()
 
         self.assertEqual(status, 1)
-        self.assertEqual(report["error"], "claude run ended with error_during_execution (exit 0)")
+        # claude-session ends claude once the result is read, so a fake still exiting reports SIGTERM.
+        self.assertRegex(report["error"], r"^claude run ended with error_during_execution \(exit (0|-15)\)$")
         self.assertEqual(report["session_id"], SESSION_ID)
 
     def leftover_pid(self) -> int:
