@@ -1251,10 +1251,12 @@ each check. Report each result.
 25. Create an issue in the team's Triage status. Within a minute the
     `triage` board has one card for it, with no assignee until
     `dispatch-triage` assigns it, and Linear shows a "Queued for triage"
-    activity on an agent session the factory opened. Edit the issue's title:
-    no second card appears. Move a second issue into Triage from Backlog: it
-    gets its own card. Move the first issue out of Triage: its triage card is
-    archived.
+    activity on an agent session the factory opened, and no other activity on
+    that session. Edit the issue's title: no second card appears. Move a
+    second issue into Triage from Backlog: it gets its own card. Move the
+    first issue out of Triage: its triage card is archived. Label the second
+    issue `ready-for-agent` and delegate it to the agent while it is still in
+    Triage: it gets an implementation card and moves to Todo.
 26. Delegate an issue without `ready-for-agent`. No implementation card
     appears, and the session gets a `thought` that the work starts once the
     issue passes the readiness check. Delegate an issue with

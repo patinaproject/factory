@@ -291,9 +291,9 @@ class IssueTest(unittest.TestCase):
                 "agentSessions": {
                     "nodes": [
                         {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z",
-                         "appUser": {"id": "app-user-1"}},
+                         "appUser": {"id": "app-user-1"}, "creator": {"id": "user-1"}},
                         {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z",
-                         "appUser": {"id": "app-user-1"}},
+                         "appUser": {"id": "app-user-1"}, "creator": None},
                     ]
                 },
             }
@@ -322,8 +322,10 @@ class IssueTest(unittest.TestCase):
                     {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
                 ],
                 "agentSessions": [
-                    {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1"},
-                    {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z", "appUserId": "app-user-1"},
+                    {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1",
+                     "creatorId": None},
+                    {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z", "appUserId": "app-user-1",
+                     "creatorId": "user-1"},
                 ],
             },
         )
