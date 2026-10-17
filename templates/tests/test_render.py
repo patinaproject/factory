@@ -367,6 +367,24 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertIn("A thanks, an approval, or a bare question is not actionable", comment_rule)
         self.assertNotIn("hermes kanban unblock", rules)
 
+    def test_the_github_prompt_resumes_a_parked_card_on_a_persons_approval(self):
+        prompt = self.prompts["github"]
+        rules = prompt.split("## Record the event", 1)[1].split("## Unblock a card", 1)[0]
+        flat = " ".join(rules.split())
+        approval = re.search(r"\d+\. For a `pull_request_review` action `submitted` with review state `approved`.*?(?=\d+\. If the card)", flat)
+        self.assertIsNotNone(approval, "no rule for an approving review")
+        rule = approval.group(0)
+        self.assertIn("when the sender is a person (not a bot)", rule)
+        self.assertIn("after step 1 has commented on the card", rule)
+        triage = re.search(r"- `triage`: (.*?)(?= - Any other status|$)", rule)
+        self.assertIsNotNone(triage)
+        self.assertIn("`OPEN`", triage.group(1))
+        self.assertIn('resume it as "Resume a parked card" says', triage.group(1))
+        self.assertNotIn("hermes kanban", rule)
+        self.assertIn(render.triage_resume_section().splitlines()[0], prompt)
+        for status in ("blocked", "review", "ready"):
+            self.assertNotIn(f"`{status}`", rule)
+
     def test_the_linear_prompt_unblocks_through_the_shared_section_with_its_own_reason(self):
         prompt = self.prompts["linear"]
         self.assertIn("resumed from Linear; see the card comments", prompt)

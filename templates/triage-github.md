@@ -99,7 +99,15 @@ If no card matches, stop. The event belongs to work the factory does not own.
 
    A thanks, an approval, or a bare question is not actionable: the comment
    from step 1 is enough.
-5. If the card's status was already `done` when the event arrived, the Kanban
+5. For a `pull_request_review` action `submitted` with review state `approved`,
+   when the sender is a person (not a bot), act on the card's status, after
+   step 1 has commented on the card:
+   - `triage`: when `gh pr view <pull request URL> --json state` says `OPEN`,
+     resume it as "Resume a parked card" says, so the worker finds the
+     approval on the card and hands the approved pull request off. Hermes
+     parked the card there after a block repeated, and no other event moves it.
+   - Any other status: the comment from step 1 is enough.
+6. If the card's status was already `done` when the event arrived, the Kanban
    CLI has no command that moves it back to `ready`. Read `linear_agent_session_id` from the card body and post
    a `thought` on that Linear agent session with `linear_agent_activity`,
    saying the event arrived after the card finished and that the card must be
