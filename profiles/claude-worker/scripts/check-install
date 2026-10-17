@@ -56,6 +56,7 @@ PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
 OWNED_REFS = "owned-refs.json"
 TRIAGE_REFS = "triage-refs.json"
 TRIAGE_BOARD = "triage"
+TRIAGE_PLAYBOOK = Path(".claude/skills/patina-mode/playbooks/triage.md")
 LINEAR_ISSUE_FIELD = "data.id"
 LINEAR_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Deliver values that name no platform, so no home channel is needed.
@@ -648,6 +649,12 @@ def check_triage_board(root: Path, hermes: str, settings) -> list:
     default = next((r["path"] for r in repositories or [] if r.get("routing") == "default"), None)
     if default and board.get("default_workdir") != default:
         return [Drift("kanban board", TRIAGE_BOARD, f"default_workdir is not {default} (part 10)")]
+    if default and Path(default).is_dir() and not (Path(default) / TRIAGE_PLAYBOOK).is_file():
+        return [Drift(
+            "engineering plugin", default,
+            f"has no {TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage playbook; "
+            "update its vendored Engineering skills to a release that ships it (part 10)",
+        )]
     return []
 
 

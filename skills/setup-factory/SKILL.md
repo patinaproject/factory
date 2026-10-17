@@ -787,6 +787,12 @@ is, so when the board exists, run
 instead. An implementation card starts only when its Linear issue carries
 `ready-for-agent`, which triage applies.
 
+A triage card follows patina-mode's triage playbook, so the default
+repository's vendored Engineering skills must include
+`.claude/skills/patina-mode/playbooks/triage.md`. When the file is missing,
+update that repository's vendored skills to an Engineering release that ships
+the playbook, through a pull request in that repository.
+
 A worker hands a card with a merge-ready pull request to the `review` lane.
 With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,
 so the card waits there for a person. GitHub triage moves it to `done` when the
@@ -813,8 +819,8 @@ and a default assignee would route the unassigned card to a worker first.
 `hermes kanban boards list --json` lists the `default` and `triage` boards,
 each with the default repository's path as its `default_workdir`.
 `check-install` reports a missing `triage` board, another `default_workdir`,
-and a `triage.max_running` that is not a positive integer or differs between
-the homes.
+a default repository without the triage playbook, and a `triage.max_running`
+that is not a positive integer or differs between the homes.
 
 ## 11. Webhook routes
 

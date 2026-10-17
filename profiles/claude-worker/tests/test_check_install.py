@@ -745,8 +745,30 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (1, f"kanban board triage: default_workdir is not {checkout} (part 10)\n"))
         self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
+        playbook = checkout / ".claude/skills/patina-mode/playbooks/triage.md"
+        playbook.parent.mkdir(parents=True)
+        playbook.write_text("")
 
         self.assertEqual(self.check(), (0, ""))
+
+    def test_default_repository_without_the_triage_playbook(self) -> None:
+        checkout = self.tmp / "app"
+        git(self.tmp, "init", "-q", str(checkout))
+        git(checkout, "commit", "-q", "--allow-empty", "-m", "init")
+        git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        (checkout / ".claude/skills/patina-mode/playbooks").mkdir(parents=True)
+        settings = {**SETTINGS, "repositories": [{"full_name": "org/app", "path": str(checkout), "routing": "default"}]}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
+
+        self.assertEqual(self.check(), (
+            1,
+            f"engineering plugin {checkout}: has no .claude/skills/patina-mode/playbooks/triage.md, so triage cards "
+            "cannot follow the triage playbook; update its vendored Engineering skills to a release that ships it "
+            "(part 10)\n",
+        ))
 
     def test_triage_cap_that_is_unset_or_not_positive(self) -> None:
         for value in (None, 0, -1, "2", True):
