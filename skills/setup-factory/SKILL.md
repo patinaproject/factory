@@ -662,16 +662,19 @@ empty to post no link. Set `github.login` to the App's
 in `[bot]`, and `claude-session` refuses a run that checks a branch for
 adoption without one.
 
-**Check**, for each home:
+**Check** both homes:
 
 ```sh
-diff <(hermes config get plugins.entries.linear-agent-session.settings --json --raw | python3 -m json.tool --sort-keys) \
-     <(python3 -m json.tool --sort-keys <settings.json>)
-diff <(hermes -p claude-worker config get plugins.entries.linear-agent-session.settings --json --raw | python3 -m json.tool --sort-keys) \
-     <(python3 -m json.tool --sort-keys <settings.json>)
+python3 <repo>/skills/setup-factory/scripts/check-settings <settings.json>
 ```
 
-**Set** the settings in both homes when a diff is not empty:
+It exits `0` and prints nothing when both homes match. Otherwise it prints one
+line per home and differing key, such as
+`claude-worker: claude_session.model differs`, and never a value. The installed
+settings can hold `${...}` references, so do not compare them by printing
+them.
+
+**Set** the settings in both homes when the check prints a line:
 
 ```sh
 hermes config set plugins.entries.linear-agent-session.settings "$(cat <settings.json>)"
