@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Restart the Hermes gateway only when no Kanban card is running.
+
+`hermes gateway restart` stops the gateway's launchd job, and the Kanban
+workers its dispatcher spawned die with it, because the restart drain waits
+for chat work and cron jobs only. This script waits, up to `--timeout`
+seconds, until no board has a `running` card. It then engages `hermes pause`
+so the dispatcher spawns no new card, confirms the board is still empty,
+restarts the gateway, and lifts the pause it engaged. When the wait expires,
+it names the running cards and exits 1 without restarting.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+# A dispatcher tick checks the pause before it spawns, so a tick already past
+# that check can still claim a card just after `hermes pause` returns.
+SETTLE_SECONDS = 10.0
+
+Run = Callable[[list[str]], subprocess.CompletedProcess]
+
+
+@dataclass(frozen=True)
+class Card:
+    board: str
+    id: str
+    title: str
+
+
+def run_hermes(hermes: str) -> Run:
+    def run(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run([hermes, *args], capture_output=True, text=True)
+
+    return run
+
+
+def checked(run: Run, args: list[str]) -> str:
+    proc = run(args)
+    if proc.returncode != 0:
+        raise RuntimeError(f"hermes {' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def running_cards(run: Run) -> list[Card]:
+    boards = json.loads(checked(run, ["kanban", "boards", "list", "--json"]))
+    cards = []
+    for board in boards:
+        if board.get("archived"):
+            continue
+        slug = board["slug"]
+        tasks = json.loads(checked(run, ["kanban", "--board", slug, "list", "--status", "running", "--json"]))
+        cards.extend(Card(slug, task["id"], task["title"]) for task in tasks)
+    return cards
+
+
+def describe(cards: list[Card]) -> str:
+    return "\n".join(f"  {card.board}/{card.id} {card.title}" for card in cards)
+
+
+def restart(
+    run: Run,
+    paused: Callable[[], bool],
+    timeout: float,
+    poll: float,
+    settle: float = SETTLE_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    out=sys.stdout,
+) -> int:
+    deadline = clock() + timeout
+    last: list[Card] | None = None
+    while True:
+        cards = running_cards(run)
+        if not cards:
+            engaged = not paused()
+            if engaged:
+                checked(run, ["pause", "--reason", "restart-gateway: restarting the gateway"])
+            try:
+                sleep(settle)
+                cards = running_cards(run)
+                if not cards:
+                    print("restart-gateway: no Kanban card is running; restarting the gateway", file=out, flush=True)
+                    return run(["gateway", "restart"]).returncode
+            finally:
+                if engaged:
+                    checked(run, ["resume"])
+        if clock() >= deadline:
+            print(
+                f"restart-gateway: {len(cards)} Kanban card(s) still running after {timeout:g}s; "
+                f"not restarting\n{describe(cards)}",
+                file=out,
+                flush=True,
+            )
+            return 1
+        if cards != last:
+            print(f"restart-gateway: waiting for {len(cards)} running Kanban card(s)\n{describe(cards)}", file=out, flush=True)
+            last = cards
+        sleep(min(poll, max(deadline - clock(), 0)))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--timeout", type=float, default=3600, help="seconds to wait for running cards (default 3600)")
+    parser.add_argument("--poll", type=float, default=30, help="seconds between board checks (default 30)")
+    parser.add_argument("--hermes", default="hermes", help="the Hermes CLI to run (default: hermes on PATH)")
+    args = parser.parse_args(argv)
+    if args.timeout < 0 or args.poll <= 0:
+        parser.error("--timeout must be at least 0 and --poll above 0")
+    sentinel = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "ESTOP"
+    try:
+        return restart(run_hermes(args.hermes), sentinel.exists, args.timeout, args.poll)
+    except (RuntimeError, OSError, json.JSONDecodeError) as exc:
+        print(f"restart-gateway: {exc}; not restarting", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
