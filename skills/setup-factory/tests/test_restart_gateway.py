@@ -6,6 +6,7 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -136,6 +137,26 @@ class RestartGatewayTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "database is locked"):
             restart_gateway.restart(failing, lambda: False, timeout=0, poll=30, settle=0, sleep=lambda _: None)
         self.assertEqual(hermes.actions(), ["pause", "resume"])
+
+
+class OperatorPausedTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.home = self.root / "profiles" / "claude-worker"
+        self.home.mkdir(parents=True)
+
+    def test_reads_a_pause_in_the_fleet_root_from_a_profile_home(self) -> None:
+        (self.root / "ESTOP").write_text("{}")
+        self.assertTrue(restart_gateway.operator_paused(self.home, self.root))
+
+    def test_reads_a_pause_in_the_profile_home(self) -> None:
+        (self.home / "ESTOP").write_text("{}")
+        self.assertTrue(restart_gateway.operator_paused(self.home, self.root))
+
+    def test_is_false_without_a_sentinel(self) -> None:
+        self.assertFalse(restart_gateway.operator_paused(self.home, self.root))
 
 
 if __name__ == "__main__":

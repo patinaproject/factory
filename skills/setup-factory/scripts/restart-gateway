@@ -61,6 +61,11 @@ def running_cards(run: Run) -> list[Card]:
     return cards
 
 
+def operator_paused(home: Path, root: Path) -> bool:
+    """Hermes honours the pause sentinel in the process home and in the fleet root."""
+    return (home / "ESTOP").exists() or (root / "ESTOP").exists()
+
+
 def describe(cards: list[Card]) -> str:
     return "\n".join(f"  {card.board}/{card.id} {card.title}" for card in cards)
 
@@ -80,8 +85,8 @@ def restart(
     while True:
         cards = running_cards(run)
         if not cards:
-            engaged = not paused()
-            if engaged:
+            ours = not paused()
+            if ours:
                 checked(run, ["pause", "--reason", "restart-gateway: restarting the gateway"])
             try:
                 sleep(settle)
@@ -90,7 +95,7 @@ def restart(
                     print("restart-gateway: no Kanban card is running; restarting the gateway", file=out, flush=True)
                     return run(["gateway", "restart"]).returncode
             finally:
-                if engaged:
+                if ours:
                     checked(run, ["resume"])
         if clock() >= deadline:
             print(
@@ -114,9 +119,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.timeout < 0 or args.poll <= 0:
         parser.error("--timeout must be at least 0 and --poll above 0")
-    sentinel = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "ESTOP"
+    root = Path.home() / ".hermes"
+    home = Path(os.environ.get("HERMES_HOME") or root)
     try:
-        return restart(run_hermes(args.hermes), sentinel.exists, args.timeout, args.poll)
+        return restart(run_hermes(args.hermes), lambda: operator_paused(home, root), args.timeout, args.poll)
     except (RuntimeError, OSError, json.JSONDecodeError) as exc:
         print(f"restart-gateway: {exc}; not restarting", file=sys.stderr)
         return 1
