@@ -185,6 +185,7 @@ CONFIG = (
         5, "platforms.factory_uploads.extra.repositories", (ROOT,),
         non_empty_list("a non-empty list of <owner>/<repo> names"),
     ),
+    ConfigKey(5, "plugins.entries.team.settings.skills_dir", (ROOT,), declared("set to the team skills directory")),
     ConfigKey(13, "streaming.enabled", (ROOT,), equal(True)),
     ConfigKey(13, "platforms.slack.extra.native_task_cards", (ROOT,), equal(True)),
 )
@@ -264,7 +265,7 @@ def check_profile(commit: Commit, worker: Path) -> list:
 
 
 # Plugins that run in the gateway only. Their code lives in the root home and never in the worker's.
-ROOT_ONLY_PLUGINS = frozenset({"factory-uploads"})
+ROOT_ONLY_PLUGINS = frozenset({"factory-uploads", "team"})
 
 
 def check_plugins(commit: Commit, homes: list) -> list:
@@ -705,6 +706,31 @@ def check_checkouts(settings) -> list:
     return drifts
 
 
+# The team plugin skips any other directory name, since Hermes refuses it as a skill name.
+TEAM_SKILL_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def check_team_skills(skills_dir, allow) -> list:
+    # An unset directory is check_config's to report.
+    if not skills_dir:
+        return []
+    root = Path(skills_dir)
+    if not root.is_dir():
+        return [Drift("team skills", str(root), "does not exist (part 5)")]
+    if allow is not None and not isinstance(allow, list):
+        return [Drift("team skills", "plugins.entries.team.settings.allow", "is not a list of skill names (part 5)")]
+    names = {
+        child.name for child in root.iterdir()
+        if TEAM_SKILL_NAME.match(child.name) and (child / "SKILL.md").is_file()
+    }
+    if not names:
+        return [Drift("team skills", str(root), "holds no <name>/SKILL.md (part 5)")]
+    return [
+        Drift("team skills", str(root), f"lacks the allowed skill {name} (part 5)")
+        for name in sorted(set(allow or []) - names)
+    ]
+
+
 def check_model_tiers(settings, worker: Path) -> list:
     # Missing or malformed settings are check_config's to report.
     session = settings.get("claude_session") if isinstance(settings, dict) else None
@@ -789,6 +815,10 @@ def main() -> int:
             *check_owned_refs(root),
             *check_triage_board(root, hermes, config_value(worker, hermes, SETTINGS_KEY)),
             *check_checkouts(config_value(worker, hermes, SETTINGS_KEY)),
+            *check_team_skills(
+                config_value(root, hermes, "plugins.entries.team.settings.skills_dir"),
+                config_value(root, hermes, "plugins.entries.team.settings.allow"),
+            ),
             *check_model_tiers(config_value(worker, hermes, SETTINGS_KEY), worker),
         ]
         if sys.platform == "darwin":
