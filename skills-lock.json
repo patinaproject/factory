@@ -5,25 +5,25 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/architect/SKILL.md",
-      "computedHash": "4fb4727a210d82f8362331db2f01aea35bf2929e6101e42401e2f961365bb489"
+      "computedHash": "5892444544884597e70886bbeb4b3150f032620d784188d449d31891be67ceeb"
     },
     "arena": {
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/arena/SKILL.md",
-      "computedHash": "b90cef769826bb6608bd2af1b66229c687209a029eacff9e60f0a94aebe55652"
+      "computedHash": "6d6f072c718937bfbef0bba4892fbbcbb1bc9659d45400514fafbf1d70972abd"
     },
     "automate-me": {
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/automate-me/SKILL.md",
-      "computedHash": "9ee2a7e0d8d4aeb6f2f07f27c4a2143a24564fa750c271ca17abd044627d9d54"
+      "computedHash": "4e7336f1afc34cfed9549d9408c1b9dc53267998d0ea80141223c006ef74b3b0"
     },
     "babysit": {
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/babysit/SKILL.md",
-      "computedHash": "fd9c63f0328c6ff43158af37e80221951e46a93d87796f42f73e66aca69b5241"
+      "computedHash": "d1b1cbec86eee42fe3c259ac4de55aef26714a52e53a96d2e8fad6c9903930d2"
     },
     "benchmark-checklist": {
       "source": "patinaproject/skills",
@@ -35,7 +35,7 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/blast-radius/SKILL.md",
-      "computedHash": "2034045ca5a722b5f80b02bf0a773e28a7a80af33bbd673b96f6b5f914167254"
+      "computedHash": "5a8dc5910b93aaec832a52f5f8060eaea73edc481f02c82992be8eddab8876b2"
     },
     "bro": {
       "source": "patinaproject/skills",
@@ -59,7 +59,7 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/create-verification-skill/SKILL.md",
-      "computedHash": "874a468b760a3da69438fcfa0c3724b75d37218dacf2d6232b34c4aa325c3880"
+      "computedHash": "e08a70fb12002490df0ce20c7be22fb222d17a68e91d4c24f43744f7c7f91c20"
     },
     "deslop": {
       "source": "patinaproject/skills",
@@ -101,19 +101,19 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/how/SKILL.md",
-      "computedHash": "42bfc6d004c0fd7f5cd854cb2fbec10ba751dd808a0f05c1749f369527b1da18"
+      "computedHash": "522178821acec9046fdfc7a0c4f05b76c85f89c638c76ac303e060a5c0ce2924"
     },
     "interrogate": {
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/interrogate/SKILL.md",
-      "computedHash": "f69326b741827ebb672969fdd95f3cb03b65a196be4a3535ad6a1f6b39ccff22"
+      "computedHash": "db7a48594fd38344f5cc8f1bcb3f42f361b23bcd323a6a7cc6cf713a1ff4f60e"
     },
     "maintain-verification-skill": {
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/maintain-verification-skill/SKILL.md",
-      "computedHash": "a22a0b7710c601c284d69a0bb7e814ff383573496219aff622a6c9858cd3c4b2"
+      "computedHash": "d937c14226674cf5ecd317ba1d1fd4a4c0b2d40b8007e07d53a4284606484783"
     },
     "make-pr-easy-to-review": {
       "source": "patinaproject/skills",
@@ -137,13 +137,13 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/no-comments/SKILL.md",
-      "computedHash": "480cce649c9799b8f7994ec1ea08e81a766824d0590a9d67154d1faa8470bc6d"
+      "computedHash": "d0d7b56be31988c423023d03816acf50433768ba9860d4e862a55be962bd6681"
     },
     "patina-mode": {
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/patina-mode/SKILL.md",
-      "computedHash": "dd2851714aaac8734df986fc6e1a1badb390879d92542c66ca7a0698bacae2bf"
+      "computedHash": "2d1520eedad81e18670a34ffc9f05e5c0307a7271f23228bc466c7bce445d159"
     },
     "pr": {
       "source": "patinaproject/skills",
@@ -161,7 +161,7 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/principle-attack-the-premise/SKILL.md",
-      "computedHash": "85835809f0f17e4b6995634775dfa44192a98f0e35cfec3392d1f6e4d3c18d31"
+      "computedHash": "0baadc198a07f2a03b3334e208483844db341014c320aded76f410f7866c273c"
     },
     "principle-boundary-discipline": {
       "source": "patinaproject/skills",
@@ -269,7 +269,7 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/principle-prove-it-works/SKILL.md",
-      "computedHash": "5f952f4ae2aa0157bc26e333f02847ca389613cf7aa71c6394f25c5036411961"
+      "computedHash": "5501398fe67cfd5db0356314f6b2e80030725904725522e9aa55c9eb16bba0f0"
     },
     "principle-redesign-from-first-principles": {
       "source": "patinaproject/skills",
@@ -287,7 +287,7 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/principle-sequence-verifiable-units/SKILL.md",
-      "computedHash": "89598aeded9c9a367f409d23cba6954c77d022435b4c9defaf9d4afe33a06d49"
+      "computedHash": "ada83ceba490dce65a923db7f67f677a13de696d17038383935b851989013c83"
     },
     "principle-subtract-before-you-add": {
       "source": "patinaproject/skills",
@@ -299,7 +299,7 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/principle-test-behavior-not-implementation/SKILL.md",
-      "computedHash": "fca8888a563d1fbde684d39de8dace08bfc499d5ad25863e1c06a1d17484176a"
+      "computedHash": "aea3beecbf1ab0e8be66bd382c4419a76bca6c2b178eb23dbe3157c56055e1a8"
     },
     "principle-type-system-discipline": {
       "source": "patinaproject/skills",
@@ -311,18 +311,18 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/recall/SKILL.md",
-      "computedHash": "fd326cd2b5cc41410cc2e2eb9534b9c54c48e6f1a82676490440c4144cd27fd7"
+      "computedHash": "51f2744c6d552bbaec72d5d702a81c267f909f3090eceb37a72871eb1954cb84"
     },
     "reflect": {
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/reflect/SKILL.md",
-      "computedHash": "a4cf6b0ccb17168b356fca53f9c97b69ddb8b7bff28e282edab5ff57b9f9ad10"
+      "computedHash": "c128dffce2c8c651049c30716a48061b3e1940ade29bf2f711fbed867ebc0f12"
     },
     "retro": {
       "source": "patinaproject/skills",
       "sourceType": "github",
-      "skillPath": "plugins/engineering/skills/retro/SKILL.md",
+      "skillPath": "plugins/team/skills/retro/SKILL.md",
       "computedHash": "b8d55851a2909e26c2dbb2e8563719c87b3b700559f604e4df344f8c27e21047"
     },
     "running-mobile-simulators": {
@@ -335,25 +335,25 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/setup-engineering/SKILL.md",
-      "computedHash": "cbde3415301920b50701b51a419201d0cd0017aa5e86eaf6ed86f418c5d23062"
+      "computedHash": "aed06f65011246c8ede53476c9be36735106d5c30dbea6766bfae5f5e7d9b6ec"
     },
     "setup-pstack": {
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/setup-pstack/SKILL.md",
-      "computedHash": "21946bd878a8f6b96b42cfd40be07f000110638c332b6a797d5e15c658d383f2"
+      "computedHash": "d40f1f78369220f937f829a322f16fec712f237ddce62234a5586160c4f04159"
     },
     "show-me-your-work": {
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/show-me-your-work/SKILL.md",
-      "computedHash": "a775b46a68aafe26625f90960b5655b20b07a08f833a651a57abf993b14d5843"
+      "computedHash": "a5e5a2fc47c1673ac2fc2c305a625d43d6af82fdc187ed8c44116b05683518a0"
     },
     "swarm": {
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/swarm/SKILL.md",
-      "computedHash": "6e19f2811469d432f30211f410cd7f7513304bc5749e92c03c00b94e31044e83"
+      "computedHash": "8646da277025932bc66bf0820f3f78a33815c4ae99daa7fc47f2c9e2a32a10a0"
     },
     "tdd": {
       "source": "patinaproject/skills",
@@ -365,7 +365,7 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/teach/SKILL.md",
-      "computedHash": "0095e2360bc72c248f58b6bb69fb6f3a5ee839d6127f2994b0a9ade6caff3dee"
+      "computedHash": "e049f3716a73b42cee9e8a367be78bc1e0ab6e35e2c170d4a8c32a03fa5d8287"
     },
     "technical-writing": {
       "source": "patinaproject/skills",
@@ -382,20 +382,20 @@
     "to-spec": {
       "source": "patinaproject/skills",
       "sourceType": "github",
-      "skillPath": "plugins/engineering/skills/to-spec/SKILL.md",
+      "skillPath": "plugins/team/skills/to-spec/SKILL.md",
       "computedHash": "3fa1a0695d4ea242fae9e569e4d22aa1788623197abb33bfadafae7315789bbf"
     },
     "to-tickets": {
       "source": "patinaproject/skills",
       "sourceType": "github",
-      "skillPath": "plugins/engineering/skills/to-tickets/SKILL.md",
+      "skillPath": "plugins/team/skills/to-tickets/SKILL.md",
       "computedHash": "bf5e6ebcb4f1272de0c188d5b3901f265a03d1fa9935a21a7a56938e21e2e761"
     },
     "triage": {
       "source": "patinaproject/skills",
       "sourceType": "github",
-      "skillPath": "plugins/engineering/skills/triage/SKILL.md",
-      "computedHash": "a683e69163e23630f39c05a50fb9d83a3795a6a6fbd317357669e082cd43a158"
+      "skillPath": "plugins/team/skills/triage/SKILL.md",
+      "computedHash": "c14141e60f28443283c0f556015f43fb9b9ad80b833b7bcc3e96724ca2bb82f5"
     },
     "typescript-best-practices": {
       "source": "patinaproject/skills",
@@ -419,7 +419,7 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/why/SKILL.md",
-      "computedHash": "4cd28c54945e8b08aa28526bd5e89455263eaeadefcca1ae8e6a5ac1569e9819"
+      "computedHash": "70c47ef083612d042cb3d8add138af4a56ff7910d7c1b719297871fd4c5810b5"
     },
     "working-on-issues": {
       "source": "patinaproject/skills",
