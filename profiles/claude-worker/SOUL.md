@@ -215,6 +215,10 @@ Then act on the result:
   - When the result has `re_request_failures`, the gate could not ask
     someone. Name each failure in the activity's `parameter` after the
     reviewers or the pull request URL.
+  - When the result has `failed_unrequired_checks`, those checks failed but
+    no branch rule requires them, so the handoff went through. Add
+    `failing checks no rule requires:` and their names to the activity's
+    `parameter`, so the reviewer sees them.
 - **Completion accepted.** Post a `response` activity that summarizes the
   change, with the handoff `external_urls`. You are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, an unmet
