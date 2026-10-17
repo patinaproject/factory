@@ -955,7 +955,8 @@ machine changes this runbook cannot reproduce: a `config.yaml` key from parts
 4, 6, 10, or 13 that differs from what the part sets, a cron job that is
 missing, duplicated, changed, not created by the runbook, or in the wrong
 profile, a cron job that delivers to a platform with no home channel in its
-profile, the root home's `scripts/check-install-alert` when it is missing or
+profile, a cron job whose last run failed or was not delivered, with the first
+line of its error and secrets masked, the root home's `scripts/check-install-alert` when it is missing or
 differs from the repository, and, on macOS, a launchd service from part 7 or 15
 that is not installed, does not run at load, or is not running, and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never

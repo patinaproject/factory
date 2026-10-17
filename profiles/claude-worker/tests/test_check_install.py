@@ -636,6 +636,51 @@ class CheckInstallTest(unittest.TestCase):
                 f"cron job nightly-cleanup in {self.worker}: is not a job the setup runbook creates\n"),
         )
 
+    def test_failed_last_run_names_its_error_until_a_run_succeeds(self) -> None:
+        error = (
+            "Script exited with code 1\nstderr:\nrefresh-owned-refs: hermes kanban --board triage list failed: "
+            "kanban: board 'triage' does not exist.\nsecond line"
+        )
+        failed = cron_job("refresh-owned-refs", 1, last_status="error", last_error=error)
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-owned-refs in {self.worker}: last run failed: Script exited with code 1: "
+                "refresh-owned-refs: hermes kanban --board triage list failed: kanban: board 'triage' does not "
+                "exist. (part 12)\n"),
+        )
+
+        recovered = {**failed, "last_status": "ok", "last_error": None,
+                     "last_failure": {"at": "2026-10-17T22:31:26+07:00", "detail": error}}
+        self.cron(self.worker, [recovered if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_failed_last_run_masks_secrets_in_its_error(self) -> None:
+        self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C1\nSLACK_BOT_TOKEN=xoxb-short\n")
+        error = "Script exited with code 1\nstdout:\nrejected xoxb-short and ghs_16C7e42F292c6912E7710c838347Ae178B4a"
+        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}])
+
+        code, out = self.check()
+
+        self.assertEqual(
+            (code, out),
+            (1, f"cron job check-install in {self.root}: last run failed: Script exited with code 1: "
+                "rejected [redacted] and [redacted] (part 12)\n"),
+        )
+
+    def test_undelivered_last_run_names_its_delivery_error(self) -> None:
+        undelivered = {**ROOT_JOBS[0], "last_status": "delivery_failed", "last_error": None,
+                       "last_delivery_error": "slack: channel_not_found\nmore"}
+        self.cron(self.root, [undelivered])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job check-install in {self.root}: last run's output was not delivered: "
+                "slack: channel_not_found (part 12)\n"),
+        )
+
     def test_check_install_job_left_in_the_worker_profile(self) -> None:
         self.cron(self.worker, [*WORKER_JOBS, cron_job("check-install", 60, "slack")])
 

@@ -13,7 +13,8 @@ run.
 It also checks that the config keys, cron jobs, and launchd services the setup
 runbook creates still match what it creates (the CONFIG, CRON, and SERVICES
 tables), that a cron job delivers only to a platform with a home channel in
-its profile, that the root home's check-install-alert wrapper matches the
+its profile and that its last run did not fail, naming the error with secrets
+masked, that the root home's check-install-alert wrapper matches the
 repository, that the worker home's secrets.command is the worker helper
 whenever the root home has a secret source, and that each configured
 repository checkout exists and has origin/HEAD set, and that the root home's
@@ -60,6 +61,11 @@ LINEAR_ISSUE_FIELD = "data.id"
 LINEAR_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Deliver values that name no platform, so no home channel is needed.
 NON_PLATFORM_TARGETS = ("local", "origin", "all")
+# Statuses of a job's last run that are not a failure; None means the job has not run yet.
+HEALTHY_RUNS = (None, "ok", "delivery_queued")
+RUN_ERROR_LIMIT = 200
+SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE)
+TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
 ROOT_ALERT_SCRIPT = "check-install-alert"
 ROOT_ALERT_SOURCE = f"skills/setup-factory/scripts/{ROOT_ALERT_SCRIPT}"
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
@@ -510,16 +516,59 @@ def cron_differences(job: CronJob, live: dict) -> list:
     return details
 
 
-def env_has(home: Path, name: str) -> bool:
-    """Whether `<home>/.env` sets `name` to a non-empty value. Values are never returned."""
+def env_file(home: Path) -> dict:
+    """The non-empty variables `<home>/.env` sets. Callers never print a value."""
     path = home / ".env"
-    if not path.is_file():
-        return False
-    for line in path.read_text().splitlines():
+    values = {}
+    for line in path.read_text().splitlines() if path.is_file() else ():
         key, sep, value = line.strip().removeprefix("export ").partition("=")
-        if sep and key.strip() == name and value.strip().strip("'\""):
-            return True
-    return False
+        if sep and value.strip().strip("'\""):
+            values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def env_has(home: Path, name: str) -> bool:
+    return name in env_file(home)
+
+
+def known_secrets(homes) -> list:
+    """Every value the homes' .env files set and every secret-named variable this process holds, longest first."""
+    values = {value for home in homes for value in env_file(home).values()}
+    values |= {value for name, value in os.environ.items() if SECRET_NAME.search(name)}
+    return sorted((value for value in values if len(value) >= 8), key=len, reverse=True)
+
+
+def redact(text: str, secrets: list) -> str:
+    for value in secrets:
+        text = text.replace(value, "[redacted]")
+    # A credential the process never held, such as a minted token, is masked by its shape.
+    return TOKEN_SHAPED.sub(
+        lambda m: "[redacted]" if re.search(r"\d", m[0]) and re.search(r"[A-Za-z]", m[0]) else m[0], text
+    )
+
+
+def error_summary(error: str) -> str:
+    """The error's first line, joined to the first output line when Hermes heads the script's output with
+    `stderr:` or `stdout:` under its `Script exited with code N` line."""
+    lines = [line.strip() for line in error.splitlines() if line.strip()]
+    if len(lines) > 2 and lines[1] in ("stderr:", "stdout:"):
+        return f"{lines[0]}: {lines[2]}"
+    return lines[0] if lines else ""
+
+
+def last_run_failure(live: dict, secrets: list) -> list:
+    status = live.get("last_status")
+    if status in HEALTHY_RUNS:
+        return []
+    if status == "delivery_failed":
+        what, error = "last run's output was not delivered", live.get("last_delivery_error")
+    else:
+        what, error = "last run failed", live.get("last_error")
+    # Redacted before it is clipped, so a clip never leaves part of a secret unmasked.
+    summary = redact(error_summary(error or "") or str(status), secrets)
+    if len(summary) > RUN_ERROR_LIMIT:
+        summary = summary[:RUN_ERROR_LIMIT - 3] + "..."
+    return [f"{what}: {summary}"]
 
 
 def unresolved_deliveries(home: Path, live: dict, hermes: str) -> list:
@@ -557,6 +606,7 @@ def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
     homes = {ROOT: root, WORKER: worker}
     live_jobs = {name: cron_jobs(home) for name, home in homes.items()}
     drifts = check_root_alert_script(commit, root)
+    secrets = known_secrets(homes.values())
     for job in CRON:
         home = homes[job.home]
         where = f"{job.name} in {home}"
@@ -566,7 +616,9 @@ def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
         elif len(found) > 1:
             drifts.append(Drift("cron job", where, f"exists {len(found)} times (part {job.part})"))
         for live in found:
-            details = [*cron_differences(job, live), *unresolved_deliveries(home, live, hermes)]
+            details = [
+                *cron_differences(job, live), *unresolved_deliveries(home, live, hermes), *last_run_failure(live, secrets)
+            ]
             drifts.extend(Drift("cron job", where, f"{d} (part {job.part})") for d in details)
     owners = {job.name: job for job in CRON}
     for name, jobs in live_jobs.items():
