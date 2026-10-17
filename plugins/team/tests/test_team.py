@@ -101,6 +101,18 @@ class TeamSkillsTest(unittest.TestCase):
         self.assertIn("gone, nope", str(raised.exception))
         self.assertEqual(ctx.skills, [])
 
+    def test_allow_that_is_not_a_list_raises_and_registers_nothing(self):
+        self.skill("a")
+        ctx = FakeCtx(skills_dir=self.dir, allow="a")
+
+        with self.assertRaises(ValueError) as raised:
+            team.register(ctx)
+
+        self.assertEqual(
+            str(raised.exception), "team: plugins.entries.team.settings.allow must be a list of skill names"
+        )
+        self.assertEqual(ctx.skills, [])
+
     def test_unset_skills_dir_registers_nothing_and_logs_one_line(self):
         with self.assertLogs("team", logging.WARNING) as logs:
             ctx = self.run_register()

@@ -7,7 +7,7 @@ from typing import Any, List, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Hermes rejects any other skill name, so skip it here and say why.
+# Hermes register_skill rejects any other skill name.
 NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -41,6 +41,8 @@ def register(ctx: Any) -> None:
 
     skills = discover(skills_dir)
     allow = ctx.get_config("allow", []) or []
+    if not isinstance(allow, list):
+        raise ValueError("team: plugins.entries.team.settings.allow must be a list of skill names")
     if allow:
         missing = sorted(set(allow) - {name for name, _ in skills})
         if missing:

@@ -813,6 +813,22 @@ class CheckInstallTest(unittest.TestCase):
                 f"team skills {TEAM_SKILLS}: lacks the allowed skill ghost (part 5)\n"),
         )
 
+    def test_team_skills_allow_that_is_not_a_list(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: "example-skill"})
+
+        self.assertEqual(
+            self.check(),
+            (1, "team skills plugins.entries.team.settings.allow: is not a list of skill names (part 5)\n"),
+        )
+
+    def test_team_skills_directory_holding_only_an_invalid_name(self) -> None:
+        skills = self.tmp / "skills"
+        (skills / "bad.name").mkdir(parents=True)
+        (skills / "bad.name" / "SKILL.md").write_text("---\nname: bad.name\n---\n")
+        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(skills)})
+
+        self.assertEqual(self.check(), (1, f"team skills {skills}: holds no <name>/SKILL.md (part 5)\n"))
+
     def test_team_skills_with_a_matching_allow_is_silent(self) -> None:
         self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: ["example-skill"]})
 

@@ -671,6 +671,10 @@ def check_checkouts(settings) -> list:
     return drifts
 
 
+# The team plugin skips any other directory name, since Hermes refuses it as a skill name.
+TEAM_SKILL_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
 def check_team_skills(skills_dir, allow) -> list:
     # An unset directory is check_config's to report.
     if not skills_dir:
@@ -678,7 +682,12 @@ def check_team_skills(skills_dir, allow) -> list:
     root = Path(skills_dir)
     if not root.is_dir():
         return [Drift("team skills", str(root), "does not exist (part 5)")]
-    names = {child.name for child in root.iterdir() if (child / "SKILL.md").is_file()}
+    if allow is not None and not isinstance(allow, list):
+        return [Drift("team skills", "plugins.entries.team.settings.allow", "is not a list of skill names (part 5)")]
+    names = {
+        child.name for child in root.iterdir()
+        if TEAM_SKILL_NAME.match(child.name) and (child / "SKILL.md").is_file()
+    }
     if not names:
         return [Drift("team skills", str(root), "holds no <name>/SKILL.md (part 5)")]
     return [
