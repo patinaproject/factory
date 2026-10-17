@@ -79,7 +79,7 @@ def linear_filters(app_user_id: str) -> list:
                     "all": [
                         {"field": "updatedFrom.labelIds", "exists": True},
                         {"field": "data.delegateId", "equals": app_user_id},
-                        {"field": "data.labels", "regex": f'"name": "{READY_LABEL}"'},
+                        {"field": "data.labels", "regex": f'"name": *"{READY_LABEL}"'},
                         {"not": owned("data.id")},
                     ]
                 },

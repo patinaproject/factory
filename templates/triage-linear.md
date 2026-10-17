@@ -289,15 +289,19 @@ Type `Issue`. The issue is the data change issue.
    session on an issue's first delegation, but a re-delegation can arrive
    with no "Session created" event, and triage can mark a delegated issue
    `ready-for-agent` long after its delegation.
+   - When the previous labels above are not a dotted name in braces and the
+     issue has no card, the labels changed, and triage may have just passed
+     the issue. Apply "Delegation gate". It can stop here. Then use the
+     issue's newest `agentSessions` entry whose `appUserId` is
+     `<<app_user_id>>` and whose `status` is not `complete` as this agent
+     session, or open one with `linear_agent_session_create` when there is
+     none, and follow "Session created" from step 3 with the issue you read.
+     Stop.
    - Compare the issue's newest `agentSessions` entry whose `appUserId` is
      `<<app_user_id>>` with the time from `date -u +%Y-%m-%dT%H:%M:%SZ`. If it
      was created in the last five minutes, its "Session created" event
      handles this delegation. Stop.
    - Apply "Delegation gate". It can stop here.
-   - When the issue has no card, the previous labels above are not a dotted
-     name in braces, and that newest entry's `status` is not `complete`,
-     triage just passed the issue. Use that entry as this agent session and
-     follow "Session created" from step 3 with the issue you read.
    - Otherwise open a session with `linear_agent_session_create` for the
      issue. Then follow "Session created" from step 3, using the issue you
      read and the returned `agent_session_id` as this agent session. That

@@ -161,6 +161,22 @@ class RefreshOwnedRefsTest(unittest.TestCase):
         self.assertEqual(self.output.read_text(), '["stale"]\n')
         self.assertEqual(os.listdir(self.output.parent), ["owned-refs.json"])
 
+    def test_a_missing_triage_board_still_refreshes_the_owned_refs(self) -> None:
+        hermes = self.fake_hermes(f"""#!/usr/bin/env python3
+import json, sys
+if sys.argv[1:4] == ["kanban", "--board", "triage"]:
+    sys.exit("kanban: no board named triage")
+print(json.dumps({TASKS!r}))
+""")
+        env = {**os.environ, "HERMES_HOME": str(self.worker), "HERMES_BIN": str(hermes)}
+
+        proc = self.run_script(env=env)
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("hermes kanban --board triage list failed: kanban: no board named triage", proc.stderr)
+        self.assertEqual(json.loads((self.tmp / "hermes" / "owned-refs.json").read_text()), EXPECTED)
+        self.assertFalse((self.tmp / "hermes" / "triage-refs.json").exists())
+
     def test_unset_hermes_home_is_refused(self) -> None:
         env = {key: value for key, value in os.environ.items() if key != "HERMES_HOME"}
 

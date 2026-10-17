@@ -266,9 +266,12 @@ After each run, read the first line of the result line's `result`:
 - `Triage outcome: ready-for-agent`: post a `thought` with the rest of the
   `result`, then call `kanban_complete` with it as the summary. When the issue
   is delegated, its implementation card starts on the same agent session.
-- `Triage outcome: ready-for-human` or `Triage outcome: wontfix`: post a
-  `response` with the rest of the `result`, which tells the delegator, then
-  call `kanban_complete` with it as the summary.
+- `Triage outcome: ready-for-human` or `Triage outcome: wontfix`: read the
+  issue with `linear_issue` and post a `response` with the rest of the
+  `result` on its newest `agentSessions` entry. When a person delegated the
+  issue after the card was created, that is the delegation's session, so the
+  response reaches the delegator. Then call `kanban_complete` with it as the
+  summary.
 - Anything else: resume Claude once with a message file asking it to end
   with one of those first lines. When the next result still has none, follow
   step 6.

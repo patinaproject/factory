@@ -155,7 +155,7 @@ LINEAR_FILTERS = [
                 "all": [
                     {"field": "updatedFrom.labelIds", "exists": True},
                     {"field": "data.delegateId", "equals": "00000000-0000-4000-8000-000000000001"},
-                    {"field": "data.labels", "regex": '"name": "ready-for-agent"'},
+                    {"field": "data.labels", "regex": '"name": *"ready-for-agent"'},
                     {"not": {"field": "data.id", "in_file": "owned-refs.json"}},
                 ]
             },
@@ -400,6 +400,10 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertLess(created.index('apply "Delegation gate"'), created.index("hermes kanban create"))
         change = prompt[prompt.index("## Issue change") :]
         self.assertLess(change.index('Apply "Delegation gate"'), change.index('follow "Session created" from step 3'))
+
+    def test_a_label_change_is_handled_before_the_five_minute_session_check(self):
+        change = self.prompts["linear"][self.prompts["linear"].index("## Issue change") :]
+        self.assertLess(change.index("the previous labels above"), change.index("in the last five minutes"))
 
     def test_the_gate_answers_ready_for_human_and_unready_issues_without_a_card(self):
         gate = render.delegation_gate_section()

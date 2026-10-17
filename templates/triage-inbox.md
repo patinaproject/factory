@@ -11,12 +11,17 @@ right after `kanban`, and pass `board: triage` to `kanban_comment`.
 1. Find the issue's triage card with
    `hermes kanban --board triage list --json`: the task whose `body`
    contains the line `linear_issue_id: <Linear issue UUID>`.
-2. If the issue's `stateType` is not `triage`, a person moved it out of
-   Triage or closed it. Archive the triage card, whatever its status, with
-   `<<archive_card>> --board triage <task id>` when one exists. Then go on
-   with the next step of the section that sent you here.
-3. If a triage card exists, the issue already has one. Go on with the next
-   step of the section that sent you here.
+2. If the issue's `stateType` is not `triage`, it left Triage: a person
+   moved it or closed it, or its own triage card passed it and moved it to
+   Todo. When a triage card exists and its status is not `running`, archive
+   it with `<<archive_card>> --board triage <task id>`. Leave a `running`
+   card to its worker, which ends it. Then go on with the next step of the
+   section that sent you here.
+3. If a triage card exists and its status is `done`, the issue is back in
+   Triage after an earlier triage. Archive that card as step 2 says and
+   continue at step 4. If a triage card exists with any other status, the
+   issue already has one. Go on with the next step of the section that sent
+   you here.
 4. Create a triage card only when this event created the issue (action
    `create`) or changed its status (the previous status above is not a
    dotted name in braces). Otherwise go on with the next step of the section

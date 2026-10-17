@@ -13,8 +13,9 @@ every card on the Triage board to `<root>/triage-refs.json`, which the `linear`
 route reads to keep a status change of an issue that has a triage card. A
 Hermes cron job runs this script every minute. It rewrites each file in one
 atomic step on every run, so the file's mtime proves the job ran. Silent on
-success. Exits 1 and leaves both files untouched when `hermes kanban list`
-fails, or 2 when HERMES_HOME is not a profile home.
+success. Exits 1 when `hermes kanban list` fails, leaving untouched the file
+it could not refresh, so a missing Triage board never stops the owned refs.
+Exits 2 when HERMES_HOME is not a profile home.
 """
 from __future__ import annotations
 
@@ -107,12 +108,11 @@ def main() -> int:
     try:
         target = args.output or root_home() / OWNED_REFS
         triage_target = args.triage_output or root_home() / TRIAGE_REFS
-        refs = owned_refs(list_tasks(args.tasks_json))
+        write_atomically(target, json.dumps(owned_refs(list_tasks(args.tasks_json)), indent=2) + "\n")
         triage = triage_refs(list_tasks(args.triage_tasks_json, TRIAGE_BOARD))
     except Refusal as exc:
         print(f"refresh-owned-refs: {exc}", file=sys.stderr)
         return exc.code
-    write_atomically(target, json.dumps(refs, indent=2) + "\n")
     write_atomically(triage_target, json.dumps(triage, indent=2) + "\n")
     return 0
 
