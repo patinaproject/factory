@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import atexit
 import json
 import os
 import plistlib
@@ -58,6 +59,13 @@ if target not in states:
 print("ai.example = {\\n\\tactive count = 1\\n\\tstate = " + states[target] + "\\n}")
 """
 
+TEAM_SKILLS = Path(tempfile.mkdtemp()).resolve()
+atexit.register(shutil.rmtree, TEAM_SKILLS, ignore_errors=True)
+(TEAM_SKILLS / "example-skill").mkdir()
+(TEAM_SKILLS / "example-skill" / "SKILL.md").write_text("---\nname: example-skill\n---\n")
+TEAM_KEY = "plugins.entries.team.settings.skills_dir"
+TEAM_ALLOW_KEY = "plugins.entries.team.settings.allow"
+
 SETTINGS = {"app_user_id": "u1", "repositories": []}
 ROOT_CONFIG = {
     "model.provider": "claude-subscription-directsdk-experimental",
@@ -73,6 +81,7 @@ ROOT_CONFIG = {
     "platforms.slack.extra.native_task_cards": True,
     "platforms.factory_uploads.enabled": True,
     "platforms.factory_uploads.extra.repositories": ["example-org/example-repo"],
+    TEAM_KEY: str(TEAM_SKILLS),
 }
 WORKER_CONFIG = {
     **{key: ROOT_CONFIG[key] for key in (
@@ -112,6 +121,7 @@ REPO_FILES = {
     "plugins/p1/__init__.py": "plugin\n",
     "plugins/p1/tests/test_a.py": "test\n",
     "plugins/factory-uploads/__init__.py": "uploads\n",
+    "plugins/team/__init__.py": "team\n",
     "templates/render.py": RENDER,
     ALERT_SOURCE: "#!/usr/bin/env python3\nalert\n",
 }
@@ -177,6 +187,7 @@ class CheckInstallTest(unittest.TestCase):
         for home in (self.root, self.worker):
             self.install(home, "plugins/p1/__init__.py", "plugin\n")
         self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
+        self.install(self.root, "plugins/team/__init__.py", "team\n")
         self.install(self.worker, "SOUL.md", "soul\n")
         self.install(self.worker, "scripts/x", "#!/bin/sh\n")
         self.install(self.worker, "config.yaml", "model: local\n")
@@ -261,6 +272,16 @@ class CheckInstallTest(unittest.TestCase):
         )
         shutil.rmtree(self.root / "plugins" / "factory-uploads")
         self.assertEqual(self.check(), (1, f"plugin factory-uploads in {self.root}: not installed\n"))
+
+    def test_the_team_plugin_is_root_only(self) -> None:
+        shutil.rmtree(self.root / "plugins" / "team")
+        self.assertEqual(self.check(), (1, f"plugin team in {self.root}: not installed\n"))
+
+        self.install(self.root, "plugins/team/__init__.py", "team\n")
+        self.install(self.worker, "plugins/team/__init__.py", "team\n")
+        self.assertEqual(
+            self.check(), (1, f"plugin team in {self.worker}: installed, but it runs only in the root home\n")
+        )
 
     def test_a_root_only_plugin_installed_in_the_worker_home_is_reported(self) -> None:
         self.install(self.worker, "plugins/factory-uploads/__init__.py", "uploads\n")
@@ -770,6 +791,42 @@ class CheckInstallTest(unittest.TestCase):
         self.repositories(self.checkout(), missing)
 
         self.assertEqual(self.check(), (1, f"checkout {missing}: does not exist (part 10)\n"))
+
+    def test_team_skills_directory_that_does_not_exist(self) -> None:
+        missing = self.tmp / "missing"
+        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(missing)})
+
+        self.assertEqual(self.check(), (1, f"team skills {missing}: does not exist (part 5)\n"))
+
+    def test_team_skills_directory_with_no_skill(self) -> None:
+        (self.tmp / "skills" / "not-a-skill").mkdir(parents=True)
+        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(self.tmp / "skills")})
+
+        self.assertEqual(self.check(), (1, f"team skills {self.tmp}/skills: holds no <name>/SKILL.md (part 5)\n"))
+
+    def test_team_skills_allow_naming_a_skill_the_directory_lacks(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: ["example-skill", "ghost", "alpha"]})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"team skills {TEAM_SKILLS}: lacks the allowed skill alpha (part 5)\n"
+                f"team skills {TEAM_SKILLS}: lacks the allowed skill ghost (part 5)\n"),
+        )
+
+    def test_team_skills_with_a_matching_allow_is_silent(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: ["example-skill"]})
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_unset_team_skills_directory_is_reported_once_by_the_config_row(self) -> None:
+        config = dict(ROOT_CONFIG)
+        del config[TEAM_KEY]
+        self.config(self.root, config)
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config {TEAM_KEY} in {self.root}: is not set to the team skills directory (part 5)\n"),
+        )
 
     def test_a_merge_after_the_last_fetch_is_seen(self) -> None:
         seed = self.tmp / "seed"
