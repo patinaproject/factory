@@ -478,9 +478,9 @@ worker's home. `check-install` reports an install in the worker home.
    hermes config set platforms.factory_uploads.extra.repositories '["<owner>/<repo>"]'
    ```
 
-4. > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
-   > from a shell outside Hermes. Hermes loads platform plugins only when the
-   > gateway starts.
+4. > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
+   > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes. Hermes loads
+   > platform plugins only when the gateway starts.
 
 5. **Check.** `<home>/gateway_state.json` lists `factory_uploads` as
    `connected`, and `<home>/factory-uploads.sock` exists with mode `srw-------`.
@@ -999,12 +999,20 @@ factory, do these before the restart:
   factory's cards, set `kanban.dispatch_profiles` to `[claude-worker]`. Confirm
   with `hermes kanban dispatch --dry-run --json`: `spawned` lists only
   `claude-worker` cards.
-- `hermes gateway restart` waits for running work, including in-process cron
-  jobs, before it restarts, and the gateway refuses webhooks while it waits.
-  Restart when no long cron job is running.
+- `hermes gateway restart` waits for chat work and in-process cron jobs, and
+  the gateway refuses webhooks while it waits. It does not wait for Kanban
+  workers. They run inside the gateway's launchd job, so a bare restart kills
+  every running card. Restart only with `restart-gateway`, which waits until
+  no board has a `running` card, then holds new cards with `hermes pause`
+  while it restarts, and lifts the pause afterwards. When the wait expires, it
+  names the running cards, exits 1, and does not restart. `--timeout` sets
+  the wait in seconds, 3600 by default. An operator's own `hermes pause` stays
+  in place. Restart when no long cron job is running.
 
-> **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart` from
-> a shell outside Hermes, not from a Hermes session or tool.
+> **HUMAN CHECKPOINT.** Ask the operator to run
+> `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, not from a Hermes session or tool.
+> When it exits 1, wait for the named cards or ask the operator whether to
+> run it again with a longer `--timeout`.
 
 If the gateway does not run as a service yet, install it as one with the
 Hermes CLI's gateway service command (see `hermes gateway --help`), so it
@@ -1394,8 +1402,9 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
 4. Run `check-install` again. It prints nothing.
 5. If step 3 changed a plugin or a webhook config key:
 
-   > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
-   > from a shell outside Hermes. Then confirm that
+   > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
+   > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes. Then confirm
+   > that
    > `~/.hermes/logs/gateway.log` shows a startup after the install.
 
 6. Record the deployed commit in the private configuration record.
