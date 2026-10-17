@@ -216,6 +216,13 @@ class LinearClient:
                 return issues
             after = page["pageInfo"]["endCursor"]
 
+    def delegated_to_self(self, id_or_identifier: str) -> bool:
+        data = self._graphql(ISSUE_DELEGATE_QUERY, {"id": id_or_identifier})
+        if data["issue"] is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        delegate = data["issue"]["delegate"]
+        return delegate is not None and delegate["id"] == data["viewer"]["id"]
+
     def undelegate_self(self, id_or_identifier: str) -> dict:
         data = self._graphql(ISSUE_DELEGATE_QUERY, {"id": id_or_identifier})
         issue = data["issue"]

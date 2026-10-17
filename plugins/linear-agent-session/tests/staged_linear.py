@@ -4,7 +4,8 @@ A test links this file as linear.py in a staged home's plugins/linear-agent-sess
 $HERMES_HOME/linear-fake.json lists the tokens Linear accepts. Each request is
 appended to $HERMES_HOME/linear-fake.log as one JSON line, and every token
 request issues minted-<n>, which Linear then accepts unless reject_all is set.
-An issue's labels come from its `labels` list, `["ready-for-agent"]` when unset.
+An issue's labels come from its `labels` list, `["ready-for-agent"]` when unset, and its delegate
+from `delegate`, none when unset; `hidden` makes Linear return no issue. The viewer is always `app-user`.
 """
 from __future__ import annotations
 
@@ -43,6 +44,10 @@ def _fake_urlopen(request, timeout=None):
         if "IssueLabels" in query:
             labels = [{"name": name} for name in state.get("labels", ["ready-for-agent"])]
             response = _Response(200, {"data": {"issue": {"labels": {"nodes": labels}}}})
+        elif "IssueDelegate" in query:
+            delegate = {"id": state["delegate"]} if state.get("delegate") else None
+            issue = None if state.get("hidden") else {"id": "issue-uuid", "identifier": "ABC-123", "delegate": delegate}
+            response = _Response(200, {"data": {"viewer": {"id": "app-user"}, "issue": issue}})
         else:
             response = _Response(200, {"data": {"viewer": {"id": "app-user"}}})
     else:

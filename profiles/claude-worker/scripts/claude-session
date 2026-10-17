@@ -63,6 +63,8 @@ TAKEOVER_RULES = (
 )
 TRIAGE_BOARD = "triage"
 READY_LABEL = "ready-for-agent"
+TRIAGE_OUTCOME = "Triage outcome:"
+TRIAGE_ROLES = {READY_LABEL, "ready-for-human", "wontfix"}
 TRIAGE_ENTRY = (
     "Triage Linear issue {issue_identifier} ({issue_url}) for {repo}. Work out what it asks, check that its claim "
     "holds, and settle what you can before you ask people. Do not implement it."
@@ -611,6 +613,26 @@ def require_ready(client, issue_id: str, identifier: str) -> None:
         )
 
 
+def triage_activity(client, issue_id: str, result: str | None) -> str | None:
+    """The Linear activity that reports a triage outcome. Only a delegated issue that passes keeps its
+    session open, because its implementation card continues on it; every other outcome ends the session."""
+    first = (result or "").partition("\n")[0]
+    if not first.startswith(TRIAGE_OUTCOME):
+        return None
+    role = first.removeprefix(TRIAGE_OUTCOME).strip(" `*.").lower()
+    if role not in TRIAGE_ROLES:
+        return None
+    if role != READY_LABEL:
+        return "response"
+    import linear
+
+    try:
+        return "thought" if client.delegated_to_self(issue_id) else "response"
+    except (linear.LinearError, OSError):
+        # Ending a delegated issue's session under its implementation card is worse than leaving one open.
+        return "thought"
+
+
 def tier_models(transport: dict) -> dict:
     value = transport.get("tier_models")
     if value is None:
@@ -1008,6 +1030,8 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     report.update(usage=model_usage(output), first_context_tokens=first)
     if report["subtype"] not in COMPLETED_SUBTYPES:
         return 1, {"error": f"claude run ended with {report['subtype']} (exit {exit_code})", **report}
+    if triage:
+        report["activity"] = triage_activity(client, args.issue_id, report["result"])
     return 0, report
 
 
