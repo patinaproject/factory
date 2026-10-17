@@ -20,7 +20,8 @@
 ├── plugins/
 │   ├── factory-uploads/       # Gateway platform plugin: Unix-socket broker that uploads evidence images, upload_token.py
 │   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, block and triage-park report hook, activity, issue, and session tools, cli.py
-│   └── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
+│   ├── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
+│   └── webhook-retry/         # Hooks that queue a delivery whose turn failed on a usage limit, and retry.py, which reruns it
 ├── profiles/
 │   └── claude-worker/         # Kanban worker profile distribution
 │       ├── SOUL.md            # Worker instructions
@@ -33,7 +34,7 @@
 ├── skills/
 │   └── setup-factory/         # Agent runbook that sets up a factory on a machine
 │       ├── SKILL.md
-│       ├── scripts/           # check-host-exposure, check-settings, linear-mcp-headers, pstack-include, and the factory-secrets template
+│       ├── scripts/           # check-host-exposure, check-settings, linear-mcp-headers, pstack-include, retry-failed-webhooks, and the factory-secrets template
 │       └── references/        # Cloudflare and SST, Linear, GitHub, Slack, Claude transport, Infisical, 1Password, agent instructions, pstack model sheet template
 ├── templates/
 │   ├── render.py              # Builds the webhook routes and rate limit from settings
