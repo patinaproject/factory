@@ -1397,7 +1397,7 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      home with `--force`.
    - A `team skills` line: the team skills directory is missing, empty, or
      lacks a skill that `allow` names. Fix the directory or the part 5
-     setting. Adding or renaming a skill needs the gateway restart in step 5.
+     setting.
    - A `webhook config <key>` line: run the part 11 install for that key.
    - A `webhook route <name>: <n> rejected with HTTP 429` line: the gateway
      dropped deliveries in the last hour. Check that
@@ -1427,7 +1427,7 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      If the machine is right, change the part and its row in `check-install`
      in one pull request, as the replicability rule in `AGENTS.md` requires.
 4. Run `check-install` again. It prints nothing.
-5. If step 3 changed a plugin or a webhook config key:
+5. If step 3 changed a plugin, a webhook config key, or a team skills setting:
 
    > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
    > from a shell outside Hermes. Then confirm that
