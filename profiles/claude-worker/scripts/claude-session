@@ -38,6 +38,7 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 import card_branch
+import factory_source
 
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_WORKER_ENTRY = (
@@ -133,15 +134,15 @@ TRIAGE_RULE = (
     "branch, commit, or pull request, and never run push-signed, `git push`, or `gh pr create`. This run's "
     "settings refuse them. Read the repository and run its tests freely to reproduce a bug or check existing "
     "behavior.\n\n"
-    "Run the `triage` skill first, then the `grilling` skill only for the gaps that triage leaves. Keep the "
-    "issue's triage state in its `Triage notes` and `Agent brief` Documents, written through the tracker "
-    "adapter's issue-artifact operation, and start every Document with the AI-generated disclaimer that the "
-    "triage skill names. For a public repository synced to Linear, the Documents stay on the Linear issue and "
+    "Follow patina-mode's triage playbook at `{triage_playbook}`. It belongs to the factory, so read it there "
+    "and not in this repository's skills. Keep the issue's "
+    "triage state in its `Triage notes` and `Agent brief` Documents, written through the tracker adapter's "
+    "issue-artifact operation, and start every Document with an AI-generated disclaimer. For a public repository synced to Linear, the Documents stay on the Linear issue and "
     "the roles are written as GitHub labels, because GitHub is canonical.\n\n"
     "Apply only category and state roles. Never change the issue's status, assignee, or delegate, with one "
     "exception: when the issue is delegated to the factory's agent app and passes as `ready-for-agent`, move "
     "it to `Todo`. Recommend `wontfix` in `Triage notes` and never apply it.\n\n"
-    "When a skill waits for people, update `Triage notes` under \"still needed\", then end your turn. Make "
+    "When the playbook waits for people, update `Triage notes` under \"still needed\", then end your turn. Make "
     "the first line of your final message `Needs input:` and put that round's questions after it, one per "
     "line. Mention a person by writing their Linear profile URL alone, with no `@` before it, because Linear "
     "renders the URL as the mention. Mention the issue's creator on each question only the reporter can "
@@ -585,6 +586,17 @@ def linear_access() -> tuple:
         raise Refusal(f"Linear token: {error}") from None
 
 
+def triage_playbook() -> Path:
+    """The playbook that the worker home's factory checkout vendors, whatever the triaged repository vendors."""
+    try:
+        playbook = factory_source.checkout(Path(os.environ["HERMES_HOME"])) / factory_source.TRIAGE_PLAYBOOK
+    except factory_source.SourceError as error:
+        raise Refusal(f"the factory checkout: {error}") from None
+    if not playbook.is_file():
+        raise Refusal(f"{playbook} does not exist, so a triage card cannot follow the triage playbook")
+    return playbook
+
+
 def require_ready(client, issue_id: str, identifier: str) -> None:
     import linear
 
@@ -936,8 +948,15 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         settings_path.unlink(missing_ok=True)
         remove_on_stop(settings_path)
         client, api_key = linear_access()
-        if not triage:
+        if triage:
+            system_prompt = TRIAGE_SYSTEM_PROMPT.format(triage_playbook=triage_playbook())
+        else:
             require_ready(client, args.issue_id, args.issue_identifier)
+            system_prompt = SYSTEM_PROMPT.format(
+                push_signed=Path(__file__).resolve().with_name("push-signed"),
+                upload_image=Path(__file__).resolve().with_name("github-upload-image"),
+                wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
+            )
         plan = plan_session(session_key(args.issue_id, triage), worktree, threshold, time.time())
         session_id = plan.session_id
         for running_id in filter(None, [plan.previous_id, session_id]):
@@ -962,11 +981,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             *turn_limit,
             "--permission-mode", "bypassPermissions",
             "--resume" if plan.resumed else "--session-id", session_id,
-            "--append-system-prompt", TRIAGE_SYSTEM_PROMPT if triage else SYSTEM_PROMPT.format(
-                push_signed=Path(__file__).resolve().with_name("push-signed"),
-                upload_image=Path(__file__).resolve().with_name("github-upload-image"),
-                wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
-            ),
+            "--append-system-prompt", system_prompt,
             "--mcp-config", mcp,
         ]
         if transport.get("model"):

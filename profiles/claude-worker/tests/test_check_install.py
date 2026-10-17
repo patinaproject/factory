@@ -109,11 +109,15 @@ ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}]
 ALERT_SOURCE = f"skills/setup-factory/scripts/{ALERT_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
 check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(check_install)
 
+TRIAGE_PLAYBOOK = ".agents/skills/patina-mode/playbooks/triage.md"
 REPO_FILES = {
+    TRIAGE_PLAYBOOK: "playbook\n",
     "profiles/claude-worker/SOUL.md": "soul\n",
     "profiles/claude-worker/config.yaml": "model: repo\n",
     "profiles/claude-worker/scripts/x": "#!/bin/sh\n",
@@ -778,7 +782,7 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (1, f"kanban board triage: is missing in {self.root} (part 10)\n"))
 
-    def test_triage_board_must_anchor_worktrees_at_the_default_repository(self) -> None:
+    def default_repository(self) -> Path:
         checkout = self.tmp / "app"
         git(self.tmp, "init", "-q", str(checkout))
         git(checkout, "commit", "-q", "--allow-empty", "-m", "init")
@@ -787,11 +791,24 @@ class CheckInstallTest(unittest.TestCase):
         settings = {**SETTINGS, "repositories": [{"full_name": "org/app", "path": str(checkout), "routing": "default"}]}
         self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
         self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        return checkout
+
+    def test_triage_board_must_anchor_worktrees_at_the_default_repository(self) -> None:
+        checkout = self.default_repository()
 
         self.assertEqual(self.check(), (1, f"kanban board triage: default_workdir is not {checkout} (part 10)\n"))
         self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
 
         self.assertEqual(self.check(), (0, ""))
+
+    def test_factory_checkout_without_the_triage_playbook(self) -> None:
+        (self.repo / TRIAGE_PLAYBOOK).unlink()
+
+        self.assertEqual(self.check("--no-fetch"), (
+            1,
+            f"triage playbook {self.repo}: has no {TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage "
+            "playbook; update the checkout to a commit that vendors it (part 10)\n",
+        ))
 
     def test_triage_cap_that_is_unset_or_not_positive(self) -> None:
         for value in (None, 0, -1, "2", True):

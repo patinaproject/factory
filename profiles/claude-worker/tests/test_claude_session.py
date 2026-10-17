@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from tests.support import BOT_LOGIN, SCRIPTS, FakeGithub, GitFixture, git
+from tests.support import BOT_LOGIN, REPO as FACTORY, SCRIPTS, FakeGithub, GitFixture, git
 
 # A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
 ISSUE_ID = str(uuid.uuid4())
@@ -129,11 +129,17 @@ class ClaudeSessionTest(GitFixture):
         self.nvm_dir = self.tmp / "nvm"
         self.hermes_home = self.tmp / "hermes" / "profiles" / "claude-worker"
         self.install_linear_plugin(self.hermes_home)
+        self.install_from(FACTORY)
         self.github = FakeGithub(self.tmp, REPO)
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
         self.card = self.tmp / "card.json"
         self.set_comments()
+
+    def install_from(self, checkout: Path) -> None:
+        (self.hermes_home / "distribution.yaml").write_text(
+            f"name: claude-worker\nsource: {checkout}/profiles/claude-worker\n"
+        )
 
     def set_comments(self, *comments: tuple[int, str, str]) -> None:
         self.card.write_text(json.dumps({"comments": [
@@ -292,12 +298,28 @@ class ClaudeSessionTest(GitFixture):
         for implementation_rule in ("Publish commits only", "A finished check never runs again",
                                     "Every pull request description shows its proof", "To wait for CI"):
             self.assertNotIn(implementation_rule, system)
-        for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token"):
+        playbook = FACTORY / ".agents/skills/patina-mode/playbooks/triage.md"
+        for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token",
+                                f"patina-mode's triage playbook at `{playbook}`"):
             self.assertIn(triage_contract, system)
+        self.assertTrue(playbook.is_absolute() and playbook.is_file())
+        for retired_skill in ("`triage` skill", "`grilling`"):
+            self.assertNotIn(retired_skill, system)
         self.assertTrue(self.prompt().startswith(
             "Triage Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) for example-org/example-repo."
         ))
         self.assertNotIn("pull request", self.prompt())
+
+    def test_a_triage_card_refuses_when_the_factory_checkout_has_no_playbook(self) -> None:
+        self.install_from(self.main)
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        playbook = self.main / ".agents/skills/patina-mode/playbooks/triage.md"
+        self.assertEqual((status, report), (2, {
+            "error": f"{playbook} does not exist, so a triage card cannot follow the triage playbook"
+        }))
+        self.assertFalse(self.log.exists())
 
     def test_a_triage_card_settings_forbid_publishing(self) -> None:
         self.run_session(env=TRIAGE_ENV)
