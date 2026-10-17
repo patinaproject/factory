@@ -101,10 +101,12 @@ elif parts[3] == "activity":
     records.sort(key=lambda record: record["timestamp"], reverse=True)
     print(json.dumps([{**record, "ref": "refs/heads/" + ref} for record in records][:int(params.get("per_page", ["30"])[0])]))
 elif parts[3] == "pulls" and len(parts) == 4:
-    head = parse_qs(query)["head"][0].partition(":")[2]
-    print(json.dumps([
+    params = parse_qs(query)
+    head = params["head"][0].partition(":")[2] if "head" in params else None
+    page = int(params.get("page", ["1"])[0])
+    print(json.dumps([] if page > 1 else [
         {**pull, "number": int(number)} for number, pull in state["pulls"].items()
-        if pull["state"] == "open" and pull["head"]["ref"] == head
+        if pull["state"] == "open" and head in (None, pull["head"]["ref"])
     ]))
 elif parts[3] == "compare":
     base, _, head = parts[4].partition("...")
@@ -118,6 +120,8 @@ elif parts[3] == "pulls":
         pull.update(fields)
         json.dump(state, open(state_path, "w"))
     print(json.dumps({**pull, "number": int(parts[4])}))
+elif parts[3] == "issues" and parts[5:] == ["comments"] and "-X" not in args:
+    print(json.dumps(state.get("issue_comments", {}).get(parts[4], [])))
 elif parts[3] == "issues" and "-X" in args:
     if state.get("fail_writes"):
         sys.exit("gh: Resource not accessible by integration (HTTP 403)")
@@ -160,6 +164,11 @@ class FakeGithub:
             "created_at": created_at,
             "head": {"ref": head, "sha": f"sha{number}", "repo": {"full_name": head_repo or self.state["repo"]}},
         }
+        self.save()
+
+    def comment_on_issue(self, number: int, author: str, body: str) -> None:
+        self.state.setdefault("issue_comments", {}).setdefault(str(number), []).append(
+            {"user": {"login": author}, "body": body})
         self.save()
 
     def push(self, branch: str, at: str) -> None:
