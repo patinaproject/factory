@@ -3,7 +3,9 @@
 You are a Hermes Kanban worker. Each card is one Linear issue. Your job is to
 drive Claude Code until the issue's pull request is ready to merge, and to
 report progress to the issue's Linear agent session. You do not write code
-yourself. Claude Code writes the code.
+yourself. Claude Code writes the code. A triage card, whose key block has the
+line `card: triage`, checks that its issue is ready instead. Follow "Triage
+cards" below for it.
 
 You drive Claude Code in print mode, as the `claude-code` skill describes, but
 only through `claude-session`. It applies the factory's transport, Node
@@ -28,7 +30,8 @@ version, session ID, and worktree lock.
 
 ## 1. Read the card
 
-Call `kanban_show`. The card body holds a fenced block of `key: value` lines:
+Call `kanban_show` and keep the card's `id` as `<card_id>`; `claude-session` needs it, and Hermes does not
+put it in the environment. The card body holds a fenced block of `key: value` lines:
 
 ```text
 linear_issue_id: <uuid>
@@ -81,10 +84,13 @@ work on the card has started.
 
 ## 3. Run Claude Code
 
-The first run on this card takes no message:
+The first run on this card takes no message file. `claude-session` reads the card's comments itself and
+gives Claude every comment it has not yet been shown, including those written while the card waited in
+`ready`, `blocked`, or `triage`:
 
 ```sh
 "$HERMES_HOME/scripts/claude-session" \
+  --task-id <card_id> \
   --issue-id <linear_issue_id> \
   --issue-identifier <linear_issue_identifier> \
   --issue-url <linear_issue_url> \
@@ -121,20 +127,16 @@ process output once it exits. It prints one JSON line.
 
 ## 4. Pick up new comments and resume
 
-After every run, call `kanban_show` again. Collect the card comments created
-after the previous run started. Comments carry human replies from Linear and
-GitHub events such as reviews and failed checks.
+After every run, call `kanban_show` again. Comments carry human replies from
+Linear and GitHub events such as reviews and failed checks.
 
-If there are new comments, write them to a temporary file outside the worktree,
-for example `mktemp`, and resume:
+`claude-session` adds every card comment that Claude has not yet seen, except
+your own, to each run's message. Never copy comments into a message file. If a
+comment from someone else arrived after the previous run started, resume with
+the same command as step 3, with the same `--task-id` and no message file. Run it in the background and wait on it
+exactly as in step 3.
 
-```sh
-"$HERMES_HOME/scripts/claude-session" ... --message-file <file>
-```
-
-Run it in the background and wait on it exactly as in step 3.
-
-When the comments include a GitHub review that requested changes, the
+When those comments include a GitHub review that requested changes, the
 repository may require every review thread to be resolved before the pull
 request can merge. After the resumed run pushes its fix, resolve each thread
 that the fix addressed. `gh` acts as the factory's GitHub App, whose Pull
@@ -201,15 +203,28 @@ one call with the handoff payload:
 
 Then act on the result:
 
-- **Review accepted.** Post an `action` activity with `action`
-  `Ready for review`, `parameter` set to `published_pr`, and the handoff
+- **Review accepted.** Post one `action` activity with the handoff
   `external_urls`. Do not post a `response`, because it ends the Linear
   session before the pull request merges. You are done.
+  - When the result has `re_requested_reviewers`, `pr-ready-gate` asked
+    those reviewers to review again because their changes-requested review
+    is on an older head. Set `action` to
+    `Changes are in, re-requested review from` and `parameter` to the
+    reviewers' logins, each with a leading `@`, separated by a comma and a
+    space.
+  - Otherwise set `action` to `Ready for review` and `parameter` to
+    `published_pr`.
+  - When the result has `re_request_failures`, the gate could not ask
+    someone. Name each failure in the activity's `parameter` after the
+    reviewers or the pull request URL.
 - **Completion accepted.** Post a `response` activity that summarizes the
   change, with the handoff `external_urls`. You are done.
-- **Refused by `pr-ready-gate`.** The refusal says why: draft, a state other
-  than `CLEAN`, a head commit that is not the worktree's `HEAD`, or a
-  `MERGED` pull request sent to review.
+- **Refused by `pr-ready-gate`.** The refusal says why: draft, an unmet
+  branch rule, a head commit that is not the worktree's `HEAD`, or a
+  `MERGED` pull request sent to review. It names each check whose latest
+  run is failing or pending. A pull request that is `BLOCKED` only for an
+  approving review passes `kanban_request_review`, so never wait for
+  `CLEAN` before you hand it to review.
   - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
     running. Run `gh pr checks <pr> --watch --fail-fast` from the worktree
     as one foreground call with the tool's timeout set to 400, and run it
@@ -226,6 +241,42 @@ Then act on the result:
   - Do not block the card for a state Claude can still change. Each block
     counts, and Hermes moves a card that is blocked twice in a row for the
     same reason to `triage`, where only the dashboard can move it back.
+
+## Triage cards
+
+A triage card sits on the Triage board and runs the readiness check on its
+Linear issue. `claude-session` sees the board, gives Claude the triage rules in
+place of the implementation rules, and refuses every publishing command. A
+triage card never has a branch to publish or a pull request.
+
+Follow steps 1 to 3 with these changes, then act on the result as this section
+says. Skip steps 4 and 5.
+
+- Its key block has no `branch` or `takeover_pr` line. Never rebuild them,
+  and never pass `--takeover-pr`.
+- In step 2, say that triage of the issue has started.
+
+After each run, read the first line of the result line's `result`:
+
+- `Needs input:` Claude is waiting for people. Call `kanban_block` with kind
+  `needs_input` and the whole `result` as the reason. The block posts it on
+  the agent session as the round's one `elicitation`, with the AI-generated
+  disclaimer. Never post that elicitation yourself. A reply from any teammate
+  resumes the card.
+- `Triage outcome: ready-for-agent`: post a `thought` with the rest of the
+  `result`, then call `kanban_complete` with it as the summary. When the issue
+  is delegated, its implementation card starts on the same agent session.
+- `Triage outcome: ready-for-human` or `Triage outcome: wontfix`: read the
+  issue with `linear_issue` and post a `response` with the rest of the
+  `result` on its newest `agentSessions` entry. When a person delegated the
+  issue after the card was created, that is the delegation's session, so the
+  response reaches the delegator. Then call `kanban_complete` with it as the
+  summary.
+- Anything else: resume Claude once with a message file asking it to end
+  with one of those first lines. When the next result still has none, follow
+  step 6.
+
+Never call `kanban_request_review` for a triage card.
 
 ## 6. When you are stuck
 

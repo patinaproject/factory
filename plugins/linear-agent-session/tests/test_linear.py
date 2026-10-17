@@ -236,6 +236,7 @@ class IssueArgumentTest(unittest.TestCase):
         "linear_issue": lambda fake, args: tools.run_issue(lambda: make_client(fake), args),
         "linear_agent_session_create": lambda fake, args: tools.run_session_create(lambda: make_client(fake), args),
         "linear_issue_undelegate": lambda fake, args: tools.run_undelegate(lambda: make_client(fake), args),
+        "linear_issue_to_todo": lambda fake, args: tools.run_to_todo(lambda: make_client(fake), args),
     }
 
     def test_issue_tools_take_the_names_models_guess(self):
@@ -256,7 +257,7 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_hermes_lets_every_guessed_name_reach_the_handler(self):
         # Hermes refuses a deferred tool_call that lacks a name in the schema's "required" list.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA):
             for name in ("issue", "id", "issue_id"):
                 with self.subTest(tool=schema["name"], name=name):
                     missing = [r for r in schema["parameters"].get("required", []) if r not in {name: "ABC-9"}]
@@ -264,7 +265,7 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_the_deferred_catalog_line_names_the_argument(self):
         # Hermes lists a deferred tool by the first 60 characters of its description.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA):
             with self.subTest(tool=schema["name"]):
                 self.assertIn("`issue`", schema["description"][:60])
 
@@ -281,6 +282,7 @@ class IssueTest(unittest.TestCase):
                 "priority": 2.0,
                 "state": {"name": "Todo", "type": "unstarted"},
                 "delegate": {"id": "app-user-1"},
+                "labels": {"nodes": [{"name": "ready-for-agent"}, {"name": "bug"}]},
                 "attachments": {
                     "nodes": [
                         {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
@@ -289,9 +291,9 @@ class IssueTest(unittest.TestCase):
                 "agentSessions": {
                     "nodes": [
                         {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z",
-                         "appUser": {"id": "app-user-1"}},
+                         "appUser": {"id": "app-user-1"}, "creator": {"id": "user-1"}},
                         {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z",
-                         "appUser": {"id": "app-user-1"}},
+                         "appUser": {"id": "app-user-1"}, "creator": None},
                     ]
                 },
             }
@@ -315,12 +317,15 @@ class IssueTest(unittest.TestCase):
                 "state": "Todo",
                 "stateType": "unstarted",
                 "delegate": "app-user-1",
+                "labels": ["bug", "ready-for-agent"],
                 "attachments": [
                     {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
                 ],
                 "agentSessions": [
-                    {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1"},
-                    {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z", "appUserId": "app-user-1"},
+                    {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1",
+                     "creatorId": None},
+                    {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z", "appUserId": "app-user-1",
+                     "creatorId": "user-1"},
                 ],
             },
         )
@@ -340,6 +345,55 @@ class IssueTest(unittest.TestCase):
         response["data"]["issue"]["delegate"] = None
         fake = FakeLinear([(200, response)])
         self.assertIsNone(make_client(fake).get_issue("ABC-123")["delegate"])
+
+
+class IssueLabelsTest(unittest.TestCase):
+    def test_returns_the_label_names(self):
+        labels = {"nodes": [{"name": "ready-for-agent"}, {"name": "bug"}]}
+        fake = FakeLinear([(200, {"data": {"issue": {"labels": labels}}})])
+        self.assertEqual(make_client(fake).issue_labels("issue-uuid"), ["bug", "ready-for-agent"])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "issue-uuid"})
+
+
+def issue_states(state_type, states):
+    team = {"states": {"nodes": [
+        {"id": f"state-{name}", "name": name, "type": kind, "position": position} for name, kind, position in states
+    ]}}
+    issue = {"id": "issue-uuid", "identifier": "ABC-1", "state": {"name": "Now", "type": state_type}, "team": team}
+    return 200, {"data": {"issue": issue}}
+
+
+TEAM_STATES = [("Triage", "triage", 0), ("Backlog", "backlog", 1), ("Later", "unstarted", 3), ("Todo", "unstarted", 2)]
+UPDATE_OK = (200, {"data": {"issueUpdate": {"success": True}}})
+
+
+class ToTodoTest(unittest.TestCase):
+    def run_to_todo(self, responses):
+        fake = FakeLinear(responses)
+        return fake, json.loads(tools.run_to_todo(lambda: make_client(fake), {"issue": "ABC-1"}))
+
+    def test_moves_a_triage_issue_to_the_todo_status(self):
+        fake, output = self.run_to_todo([issue_states("triage", TEAM_STATES), UPDATE_OK])
+        self.assertEqual(output, {"identifier": "ABC-1", "moved": True, "state": "Todo"})
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "issue-uuid", "input": {"stateId": "state-Todo"}})
+
+    def test_without_a_todo_status_takes_the_first_unstarted_one(self):
+        states = [("Triage", "triage", 0), ("Ready", "unstarted", 5), ("Queued", "unstarted", 4)]
+        fake, output = self.run_to_todo([issue_states("triage", states), UPDATE_OK])
+        self.assertEqual(output, {"identifier": "ABC-1", "moved": True, "state": "Queued"})
+        self.assertEqual(fake.graphql_requests[1]["variables"]["input"], {"stateId": "state-Queued"})
+
+    def test_leaves_an_issue_outside_triage_alone(self):
+        for state_type in ("backlog", "unstarted", "started", "completed", "canceled"):
+            with self.subTest(state_type=state_type):
+                fake, output = self.run_to_todo([issue_states(state_type, TEAM_STATES)])
+                self.assertEqual(output, {"identifier": "ABC-1", "moved": False, "state": "Now"})
+                self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_a_team_without_an_unstarted_status_is_an_error(self):
+        fake, output = self.run_to_todo([issue_states("triage", [("Triage", "triage", 0)])])
+        self.assertEqual(output, {"error": "ABC-1's team has no unstarted status to move it to"})
+        self.assertEqual(len(fake.graphql_requests), 1)
 
 
 def issue_node(identifier, attachments=()):

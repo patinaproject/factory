@@ -95,7 +95,8 @@ class RetryTest(unittest.TestCase):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def test_due_entries_run_oldest_first_one_at_a_time(self):
-        self.seed(entry("newer", delivered=ago(hours=2)), entry("older", delivered="2026-10-15T01:00:00Z"))
+        older = ago(hours=3)
+        self.seed(entry("newer", delivered=ago(hours=2)), entry("older", delivered=older))
 
         result = self.run_retry()
 
@@ -104,7 +105,7 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(chats[0]["argv"][:5], ["chat", "-Q", "--oneshot", "--query-file", chats[0]["argv"][4]])
         self.assertEqual(chats[0]["argv"][5:], ["-t", "terminal,linear_agent_session", "--source", "webhook-retry"])
         self.assertEqual(chats[0]["home"], str(self.home))
-        self.assertIn("2026-10-15T01:00:00Z", chats[0]["query"].split("prompt for")[0])
+        self.assertIn(older, chats[0]["query"].split("prompt for")[0])
         self.assertIn("not `date -u`", chats[0]["query"])
         self.assertEqual(
             result.stdout,

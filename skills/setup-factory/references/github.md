@@ -103,7 +103,7 @@ folder already exists, the secret lives there. In the lines below, replace
 >
 > - **Repository permissions:** Contents read and write, Pull requests read
 >   and write, Issues read and write, Checks read-only, Commit statuses
->   read-only, Actions read-only, and Metadata read-only.
+>   read-only, Actions read and write, and Metadata read-only.
 > - **Subscribe to events:** Issues, Issue comment, Pull request, Pull request
 >   review, Pull request review comment, Workflow run, and Check run. Not
 >   Check suite.
@@ -129,7 +129,9 @@ An App created before a permission joined the list above lacks it. Without
 Issues read and write, it cannot label, comment on, or edit issues, and the
 [live test](#live-test) fails. Without Checks or Commit statuses, the
 completion gate cannot read the pull request's checks, and refuses the first
-ready pull request only after the worker has finished.
+ready pull request only after the worker has finished. Without Actions read
+and write, a worker cannot re-run a job that failed outside its change, so it
+blocks the card for a person to re-run it.
 [Check the App's access](#check-the-apps-access) names each missing
 permission.
 
@@ -345,8 +347,11 @@ not use it as the check.
 request, its base branch rules, its check runs, and its commit statuses as the
 worker's `gh` login. A missing permission shows up only when the worker tries
 to complete a card. `check-github-access` makes the same reads now, for every
-configured repository, and compares the App's permissions with the
-[permission table](#use-gh-on-a-factory-machine):
+configured repository, along with a read of the head's workflow runs. It also
+compares the App's permissions with the
+[permission table](#use-gh-on-a-factory-machine). Actions must be read and
+write, because a worker re-runs a job that failed outside its change with
+`gh run rerun --failed`:
 
 ```sh
 GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/check-github-access
@@ -505,7 +510,7 @@ The App can do what its repository permissions allow:
 | Issues | Read and write | Open, edit, label, and comment on issues |
 | Checks | Read-only | Read check runs, which the completion gate needs |
 | Commit statuses | Read-only | Read commit statuses, which the completion gate needs |
-| Actions | Read-only | Read workflow runs and logs |
+| Actions | Read and write | Read workflow runs and logs, and re-run failed jobs with `gh run rerun --failed` |
 | Metadata | Read-only | Read repository names, settings, and collaborators |
 
 When a command fails:

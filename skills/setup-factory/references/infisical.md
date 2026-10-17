@@ -18,6 +18,7 @@ These values move to Infisical:
 | `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | Both homes |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>` |
 | The token variable that `claude_session.auth_token_env` names | `<worker>` |
+| The Sentry token variable that `claude_session.sentry_token_env` names, when set | `<worker>` |
 
 The default home loads the whole folder. The worker loads only the three
 values in its rows, `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, and the token
@@ -107,7 +108,8 @@ grant.
 > privilege also has the conditions `secretPath` equals `<folder>` and
 > `secretName` in `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, and
 > `<token variable>`. Leave out `<token variable>` when the proxy needs no
-> token.
+> token. Add the Sentry token variable when workers read
+> [Sentry](sentry.md).
 >
 > Then ask the operator to create a Universal Auth client secret for each
 > identity, and store each client ID and client secret with the `read -rs`
@@ -278,7 +280,8 @@ The worker's helper is `<worker>/scripts/worker-secrets`, which part 5
 installs with the profile. It runs `<home>/bin/factory-secrets` with the
 worker's own identity and prints only `LINEAR_CLIENT_ID`,
 `LINEAR_CLIENT_SECRET`, and the variable that `claude_session.auth_token_env`
-names in `<worker>/config.yaml`. It refuses arguments and a terminal the same
+names in `<worker>/config.yaml`, plus the variable that
+`claude_session.sentry_token_env` names when it is set. It refuses arguments and a terminal the same
 way. `check-install` reports a worker whose `secrets.command` is anything
 else.
 

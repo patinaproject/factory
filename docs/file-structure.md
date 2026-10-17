@@ -34,7 +34,7 @@
 ├── skills/
 │   └── setup-factory/         # Agent runbook that sets up a factory on a machine
 │       ├── SKILL.md
-│       ├── scripts/           # check-host-exposure, linear-mcp-headers, pstack-include, retry-failed-webhooks, and the factory-secrets template
+│       ├── scripts/           # check-host-exposure, check-settings, linear-mcp-headers, pstack-include, retry-failed-webhooks, and the factory-secrets template
 │       └── references/        # Cloudflare and SST, Linear, GitHub, Slack, Claude transport, Infisical, 1Password, agent instructions, pstack model sheet template
 ├── templates/
 │   ├── render.py              # Builds the webhook routes and rate limit from settings
