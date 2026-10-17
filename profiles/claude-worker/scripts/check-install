@@ -649,13 +649,20 @@ def check_triage_board(root: Path, hermes: str, settings) -> list:
     default = next((r["path"] for r in repositories or [] if r.get("routing") == "default"), None)
     if default and board.get("default_workdir") != default:
         return [Drift("kanban board", TRIAGE_BOARD, f"default_workdir is not {default} (part 10)")]
-    if default and Path(default).is_dir() and not (Path(default) / TRIAGE_PLAYBOOK).is_file():
-        return [Drift(
-            "engineering plugin", default,
-            f"has no {TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage playbook; "
-            "update its vendored Engineering skills to a release that ships it (part 10)",
-        )]
     return []
+
+
+def check_triage_playbook(settings) -> list:
+    # Missing settings are check_config's to report, and a missing checkout is check_checkouts'.
+    repositories = settings.get("repositories") if isinstance(settings, dict) else None
+    default = next((r["path"] for r in repositories or [] if r.get("routing") == "default"), None)
+    if not default or not Path(default).is_dir() or (Path(default) / TRIAGE_PLAYBOOK).is_file():
+        return []
+    return [Drift(
+        "engineering plugin", default,
+        f"has no {TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage playbook; "
+        "update its vendored Engineering skills to a release that ships it (part 10)",
+    )]
 
 
 def check_source_checkout(commit: Commit) -> list:
@@ -795,6 +802,7 @@ def main() -> int:
             *check_rejected_deliveries(root),
             *check_owned_refs(root),
             *check_triage_board(root, hermes, config_value(worker, hermes, SETTINGS_KEY)),
+            *check_triage_playbook(config_value(worker, hermes, SETTINGS_KEY)),
             *check_checkouts(config_value(worker, hermes, SETTINGS_KEY)),
             *check_model_tiers(config_value(worker, hermes, SETTINGS_KEY), worker),
         ]

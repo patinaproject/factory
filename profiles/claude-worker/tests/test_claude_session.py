@@ -295,7 +295,7 @@ class ClaudeSessionTest(GitFixture):
         for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token",
                                 "patina-mode's triage playbook, `playbooks/triage.md`"):
             self.assertIn(triage_contract, system)
-        for retired_skill in ("`triage` skill", "`grilling` skill"):
+        for retired_skill in ("`triage` skill", "`grilling`"):
             self.assertNotIn(retired_skill, system)
         self.assertTrue(self.prompt().startswith(
             "Triage Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) for example-org/example-repo."

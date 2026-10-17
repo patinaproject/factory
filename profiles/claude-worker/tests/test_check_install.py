@@ -733,34 +733,31 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (1, f"kanban board triage: is missing in {self.root} (part 10)\n"))
 
-    def test_triage_board_must_anchor_worktrees_at_the_default_repository(self) -> None:
+    def default_repository(self) -> Path:
         checkout = self.tmp / "app"
         git(self.tmp, "init", "-q", str(checkout))
         git(checkout, "commit", "-q", "--allow-empty", "-m", "init")
         git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
         git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
-        settings = {**SETTINGS, "repositories": [{"full_name": "org/app", "path": str(checkout), "routing": "default"}]}
-        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
-        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
-
-        self.assertEqual(self.check(), (1, f"kanban board triage: default_workdir is not {checkout} (part 10)\n"))
-        self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
         playbook = checkout / ".claude/skills/patina-mode/playbooks/triage.md"
         playbook.parent.mkdir(parents=True)
         playbook.write_text("")
+        settings = {**SETTINGS, "repositories": [{"full_name": "org/app", "path": str(checkout), "routing": "default"}]}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        return checkout
+
+    def test_triage_board_must_anchor_worktrees_at_the_default_repository(self) -> None:
+        checkout = self.default_repository()
+
+        self.assertEqual(self.check(), (1, f"kanban board triage: default_workdir is not {checkout} (part 10)\n"))
+        self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
 
         self.assertEqual(self.check(), (0, ""))
 
     def test_default_repository_without_the_triage_playbook(self) -> None:
-        checkout = self.tmp / "app"
-        git(self.tmp, "init", "-q", str(checkout))
-        git(checkout, "commit", "-q", "--allow-empty", "-m", "init")
-        git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
-        git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
-        (checkout / ".claude/skills/patina-mode/playbooks").mkdir(parents=True)
-        settings = {**SETTINGS, "repositories": [{"full_name": "org/app", "path": str(checkout), "routing": "default"}]}
-        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
-        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        checkout = self.default_repository()
+        (checkout / ".claude/skills/patina-mode/playbooks/triage.md").unlink()
         self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
 
         self.assertEqual(self.check(), (
