@@ -44,7 +44,7 @@ ISSUE_QUERY = """query Issue($id: String!) {
     delegate { id }
     labels { nodes { name } }
     attachments { nodes { url sourceType } }
-    agentSessions(first: 20) { nodes { id status createdAt appUser { id } } }
+    agentSessions(first: 20) { nodes { id status createdAt appUser { id } creator { id } } }
   }
 }"""
 
@@ -169,7 +169,13 @@ class LinearClient:
             "labels": _label_names(issue),
             "agentSessions": sorted(
                 (
-                    {"id": n["id"], "status": n["status"], "createdAt": n["createdAt"], "appUserId": n["appUser"]["id"]}
+                    {
+                        "id": n["id"],
+                        "status": n["status"],
+                        "createdAt": n["createdAt"],
+                        "appUserId": n["appUser"]["id"],
+                        "creatorId": n["creator"]["id"] if n["creator"] else None,
+                    }
                     for n in issue["agentSessions"]["nodes"]
                 ),
                 key=lambda n: n["createdAt"],

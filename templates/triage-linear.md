@@ -67,6 +67,7 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 - Type: {type}
 - Action: {action}
 - Agent session: {agentSession.id}
+- Agent session creator: {agentSession.creatorId}
 - Agent session issue: {agentSession.issue.id} ({agentSession.issue.identifier})
 - Data change issue: {data.id} ({data.identifier})
 - Activity signal: {agentActivity.signal}
@@ -89,11 +90,16 @@ The full payload, truncated to 4000 characters:
 Type `AgentSessionEvent`, action `created`. The issue is the agent session issue.
 
 1. Read the issue with `linear_issue`.
-2. If its `delegate` (a user ID) is null or is not
-   `<<app_user_id>>`, the agent was mentioned. Answer the request in one
-   `response` activity on this agent session, from the prompt context and the
-   issue. Create no card and stop. Otherwise apply "Delegation gate", which
-   can stop here.
+2. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`:
+   - When the agent session creator above is `None` or still a dotted name in
+     braces, no person opened this session. The factory opened it, as
+     "Triage inbox" does for a triage card. Post no activity, create no card,
+     and stop.
+   - Otherwise the agent was mentioned. Answer the request in one `response`
+     activity on this agent session, from the prompt context and the issue.
+     Create no card and stop.
+
+   Otherwise apply "Delegation gate", which can stop here.
 3. Pick the repository. Check the issue's `attachments` for a URL of the form
    `https://github.com/<owner>/<name>/issues/<number>`. If `<owner>/<name>`
    matches, ignoring case, a repository with routing `synced_github`, use that
@@ -298,9 +304,12 @@ Type `Issue`. The issue is the data change issue.
      none, and follow "Session created" from step 3 with the issue you read.
      Stop.
    - Compare the issue's newest `agentSessions` entry whose `appUserId` is
-     `<<app_user_id>>` with the time from `date -u +%Y-%m-%dT%H:%M:%SZ`. If it
-     was created in the last five minutes, its "Session created" event
-     handles this delegation. Stop.
+     `<<app_user_id>>` and whose `creatorId` is not null with the time from
+     `date -u +%Y-%m-%dT%H:%M:%SZ`. If it was created in the last five
+     minutes, its "Session created" event handles this delegation. Stop. A
+     session with a null `creatorId` was opened by the factory, such as the
+     one "Triage inbox" opens for a triage card, and its "Session created"
+     event never handles a delegation.
    - Apply "Delegation gate". It can stop here.
    - Otherwise open a session with `linear_agent_session_create` for the
      issue. Then follow "Session created" from step 3, using the issue you

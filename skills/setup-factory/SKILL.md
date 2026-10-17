@@ -662,16 +662,19 @@ empty to post no link. Set `github.login` to the App's
 in `[bot]`, and `claude-session` refuses a run that checks a branch for
 adoption without one.
 
-**Check**, for each home:
+**Check** both homes:
 
 ```sh
-diff <(hermes config get plugins.entries.linear-agent-session.settings --json --raw | python3 -m json.tool --sort-keys) \
-     <(python3 -m json.tool --sort-keys <settings.json>)
-diff <(hermes -p claude-worker config get plugins.entries.linear-agent-session.settings --json --raw | python3 -m json.tool --sort-keys) \
-     <(python3 -m json.tool --sort-keys <settings.json>)
+python3 <repo>/skills/setup-factory/scripts/check-settings <settings.json>
 ```
 
-**Set** the settings in both homes when a diff is not empty:
+It exits `0` and prints nothing when both homes match. Otherwise it prints one
+line per home and differing key, such as
+`claude-worker: claude_session.model differs`, and never a value. The installed
+settings can hold `${...}` references, so do not compare them by printing
+them.
+
+**Set** the settings in both homes when the check prints a line:
 
 ```sh
 hermes config set plugins.entries.linear-agent-session.settings "$(cat <settings.json>)"
@@ -961,7 +964,8 @@ machine changes this runbook cannot reproduce: a `config.yaml` key from parts
 4, 6, 10, or 13 that differs from what the part sets, a cron job that is
 missing, duplicated, changed, not created by the runbook, or in the wrong
 profile, a cron job that delivers to a platform with no home channel in its
-profile, the root home's `scripts/check-install-alert` when it is missing or
+profile, a cron job whose last run failed or was not delivered, with the first
+line of its error and secrets masked, the root home's `scripts/check-install-alert` when it is missing or
 differs from the repository, and, on macOS, a launchd service from part 7 or 15
 that is not installed, does not run at load, or is not running, and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never
@@ -1257,10 +1261,12 @@ each check. Report each result.
 25. Create an issue in the team's Triage status. Within a minute the
     `triage` board has one card for it, with no assignee until
     `dispatch-triage` assigns it, and Linear shows a "Queued for triage"
-    activity on an agent session the factory opened. Edit the issue's title:
-    no second card appears. Move a second issue into Triage from Backlog: it
-    gets its own card. Move the first issue out of Triage: its triage card is
-    archived.
+    activity on an agent session the factory opened, and no other activity on
+    that session. Edit the issue's title: no second card appears. Move a
+    second issue into Triage from Backlog: it gets its own card. Move the
+    first issue out of Triage: its triage card is archived. Label the second
+    issue `ready-for-agent` and delegate it to the agent while it is still in
+    Triage: it gets an implementation card and moves to Todo.
 26. Delegate an issue without `ready-for-agent`. No implementation card
     appears, and the session gets a `thought` that the work starts once the
     issue passes the readiness check. Delegate an issue with
@@ -1417,14 +1423,22 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    branch with no uncommitted changes. Never touch the worker-owned
    checkouts, which are the configured repository checkouts the worker profile
    uses. They change only through a Kanban card or `refresh-checkouts`.
-2. List what is out of date:
+2. List what is out of date. Run the copy in the source checkout, not the
+   installed one. The installed copy predates the change, so it cannot report
+   a board, config key, or cron job that the change adds:
 
    ```sh
-   HERMES_HOME=<worker> python3 <worker>/scripts/check-install
+   HERMES_HOME=<worker> python3 <source checkout>/profiles/claude-worker/scripts/check-install
    ```
 
-3. Install each item it names, with the profile first and the route last. The
-   `linear` route drops a completed or canceled `Issue` update unless its
+3. Install each item it names in this order: the part 10 `kanban board` and
+   `config` lines, then the profile, then the part 12 `cron job` lines, and
+   the route last. The new profile's cron jobs read the boards and settings on
+   their first run, one minute after the profile update. `refresh-owned-refs`
+   lists the `triage` board and fails on each run until the board exists.
+   `dispatch-triage` reads `triage.max_running`. A cron job runs a profile
+   script, so create a missing job only after the profile update installs its
+   script. The `linear` route drops a completed or canceled `Issue` update unless its
    issue id is in `<root>/owned-refs.json`. Update the profile, run
    `refresh-owned-refs` once, confirm the file holds issue UUIDs, and only then
    re-render the route. Find the job id with `hermes -p claude-worker cron list`
@@ -1433,6 +1447,14 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    cards to close. The reverse order drops every closure until the next
    cron run. `check-install` reports a route that filters on issue ids while
    the file holds none.
+   - A `kanban board <name>` line: run the part 10 Kanban commands before the
+     profile update. For a missing `triage` board, run
+     `hermes kanban boards create triage --name Triage --default-workdir <path of the default repository>`.
+     When the line names another `default_workdir`, run
+     `hermes kanban boards set-default-workdir <name> <path of the default repository>`.
+   - A `config plugins.entries.linear-agent-session.settings.triage.max_running`
+     line: add `"triage": {"max_running": <n>}` to the factory settings and set
+     them in both homes as in part 10, before the profile update.
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.
@@ -1456,6 +1478,8 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      the line names the issuer. Then restart the dashboard service.
    - A `script <root>/scripts/check-install-alert` line: install the wrapper
      again with the part 12 `install` commands, which create `<root>/scripts` first.
+   - A `cron job dispatch-triage` line: after the profile update, create the
+     job with the part 12 `cron create` command.
    - A `cron job check-install` line: the job is missing, in the wrong
      profile, or delivers to a platform with no home channel. Create it in the
      root profile as in part 12, and remove a leftover copy in the worker
