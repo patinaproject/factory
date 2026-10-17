@@ -790,11 +790,14 @@ is, so when the board exists, run
 instead. An implementation card starts only when its Linear issue carries
 `ready-for-agent`, which triage applies.
 
-A triage card follows patina-mode's triage playbook, so the default
-repository's vendored Engineering skills must include
-`.claude/skills/patina-mode/playbooks/triage.md`. When the file is missing,
-update that repository's vendored skills to an Engineering release that ships
-the playbook, through a pull request in that repository.
+A triage card follows patina-mode's triage playbook from the factory checkout
+that the worker home was installed from, the checkout that
+`check-install --print-source` prints. That checkout vendors it as
+`.agents/skills/patina-mode/playbooks/triage.md`, so a triage card follows the
+same playbook in every repository, whatever that repository vendors.
+`claude-session` refuses a triage card when the file is missing, and
+`check-install` reports it. Update the checkout to the factory's default
+branch to restore it.
 
 A worker hands a card with a merge-ready pull request to the `review` lane.
 With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,

@@ -109,11 +109,15 @@ ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}]
 ALERT_SOURCE = f"skills/setup-factory/scripts/{ALERT_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
 check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(check_install)
 
+TRIAGE_PLAYBOOK = ".agents/skills/patina-mode/playbooks/triage.md"
 REPO_FILES = {
+    TRIAGE_PLAYBOOK: "playbook\n",
     "profiles/claude-worker/SOUL.md": "soul\n",
     "profiles/claude-worker/config.yaml": "model: repo\n",
     "profiles/claude-worker/scripts/x": "#!/bin/sh\n",
@@ -784,9 +788,6 @@ class CheckInstallTest(unittest.TestCase):
         git(checkout, "commit", "-q", "--allow-empty", "-m", "init")
         git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
         git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
-        playbook = checkout / ".claude/skills/patina-mode/playbooks/triage.md"
-        playbook.parent.mkdir(parents=True)
-        playbook.write_text("")
         settings = {**SETTINGS, "repositories": [{"full_name": "org/app", "path": str(checkout), "routing": "default"}]}
         self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
         self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
@@ -800,16 +801,13 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (0, ""))
 
-    def test_default_repository_without_the_triage_playbook(self) -> None:
-        checkout = self.default_repository()
-        (checkout / ".claude/skills/patina-mode/playbooks/triage.md").unlink()
-        self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
+    def test_factory_checkout_without_the_triage_playbook(self) -> None:
+        (self.repo / TRIAGE_PLAYBOOK).unlink()
 
-        self.assertEqual(self.check(), (
+        self.assertEqual(self.check("--no-fetch"), (
             1,
-            f"engineering plugin {checkout}: has no .claude/skills/patina-mode/playbooks/triage.md, so triage cards "
-            "cannot follow the triage playbook; update its vendored Engineering skills to a release that ships it "
-            "(part 10)\n",
+            f"triage playbook {self.repo}: has no {TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage "
+            "playbook; update the checkout to a commit that vendors it (part 10)\n",
         ))
 
     def test_triage_cap_that_is_unset_or_not_positive(self) -> None:
