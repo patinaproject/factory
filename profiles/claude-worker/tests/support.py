@@ -81,6 +81,10 @@ state = json.load(open(state_path))
 args = sys.argv[1:]
 with open(state_path + ".log", "a") as log:
     log.write(json.dumps(args) + "\\n")
+if state.get("errors"):
+    error = state["errors"].pop(0)
+    json.dump(state, open(state_path, "w"))
+    sys.exit(error)
 path, _, query = args[1].partition("?")
 parts = [unquote(part) for part in path.split("/")]
 prefix = "/".join(parts[:3])
@@ -180,6 +184,11 @@ class FakeGithub:
 
     def fail_writes(self) -> None:
         self.state["fail_writes"] = True
+        self.save()
+
+    def fail_next(self, *errors: str) -> None:
+        """Answer the next calls, one each, with these error lines and exit 1."""
+        self.state["errors"] = list(errors)
         self.save()
 
     def env(self) -> dict:

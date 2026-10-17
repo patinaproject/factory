@@ -1344,6 +1344,30 @@ class ClaudeSessionTest(GitFixture):
             status, report, f"gh api repos/{REPO}/branches/abc-123-fix failed: gh: Not Found (HTTP 404)", start
         )
 
+    def test_a_github_server_error_that_persists_is_refused_as_transient(self) -> None:
+        self.publish_branch(BOT_LOGIN)
+        self.github.fail_next(*["gh: Server Error (HTTP 500)"] * 3)
+        start = self.head()
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {
+            "error": f"gh api repos/{REPO}/branches/abc-123-fix failed: gh: Server Error (HTTP 500)",
+            "transient": True,
+        })
+        self.assertEqual(self.head(), start)
+        self.assertFalse(self.log.exists())
+
+    def test_a_github_server_error_that_clears_adopts_the_branch(self) -> None:
+        remote = self.publish_branch(BOT_LOGIN)
+        self.github.fail_next("gh: Server Error (HTTP 500)")
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": remote})
+
     def test_a_missing_gh_is_refused_and_never_adopts(self) -> None:
         self.publish_branch(BOT_LOGIN)
         start = self.head()
