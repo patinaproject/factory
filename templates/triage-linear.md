@@ -98,10 +98,14 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    Choose the branch with one command. Add `--pull '<url>'` once for each
    URL in the issue's `attachments` of the form
    `https://github.com/<owner>/<name>/pull/<number>` whose `<owner>/<name>`
-   matches the chosen repository, ignoring case:
+   matches the chosen repository, ignoring case. Add `--closes '<identifier>'`
+   once, and `--closes '<url>'` once for each attachment URL of the form
+   `https://github.com/<owner>/<name>/issues/<number>` whose `<owner>/<name>`
+   matches the chosen repository. The command then also finds the App's open
+   pull requests whose body closes the issue, whatever their branch is called:
 
    ```sh
-   <<card_branch>> --repo '<repository full_name>' --git-branch '<gitBranchName>' --pull '<url>'
+   <<card_branch>> --repo '<repository full_name>' --git-branch '<gitBranchName>' --closes '<identifier>' --closes '<issue url>' --pull '<url>'
    ```
 
    It prints one JSON line. Use its `branch`, and write `takeover_pr: <url>`
