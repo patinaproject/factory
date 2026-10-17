@@ -12,7 +12,7 @@ Every item must hold:
 4. **Acceptance criteria and scope boundaries.** Concrete, independently verifiable acceptance criteria are written, and so is what is out of scope.
 5. **No open questions.** The triage notes list nothing still needed.
 6. **Reason it can't be delegated.** For `ready-for-human` only: the notes say why an agent can't do it.
-7. **Decisions approved.** Every design or naming decision the brief depends on that meets all three [ADR criteria](../domain-modeling/ADR-FORMAT.md) is listed in the triage notes, with the person who approved it:
+7. **Decisions approved.** Every design or naming decision the brief depends on that meets all three ADR criteria is listed in the triage notes, with the person who approved it:
    - **Hard to reverse:** changing your mind later costs something meaningful.
    - **Surprising without context:** a future reader would wonder why it was done this way.
    - **The result of a real trade-off:** there were genuine alternatives.
@@ -48,6 +48,6 @@ Write the triage notes and the agent brief through the issue-tracker config's is
 
 ## Outcome
 
-- **Every item holds:** write the agent brief ([AGENT-BRIEF.md](AGENT-BRIEF.md)) from what the checklist established, then apply the role.
+- **Every item holds:** write the agent brief from what the checklist established, then apply the role.
 - **An item fails:** do not apply the role. Close each gap you can yourself: reproduce the bug, search the codebase, read `.out-of-scope/`. Grill only about the gaps that remain, in the grilling skill's usual format. Ask nothing the checklist already settled. Record the remaining questions under "still needed" in the triage notes. If only the reporter can answer them, apply `needs-info`; otherwise leave `needs-triage`.
 - **"Decisions approved" fails:** follow the bullet above, but never close this gap yourself. Ask each unapproved decision as a grilling question with your recommended answer. The item fails until a person answers it.

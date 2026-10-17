@@ -143,7 +143,7 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/engineering/skills/patina-mode/SKILL.md",
-      "computedHash": "2d1520eedad81e18670a34ffc9f05e5c0307a7271f23228bc466c7bce445d159"
+      "computedHash": "0099e13358835544a136682309009a7ec17179ea4d64afbf071c6904907296f4"
     },
     "pr": {
       "source": "patinaproject/skills",
@@ -395,7 +395,7 @@
       "source": "patinaproject/skills",
       "sourceType": "github",
       "skillPath": "plugins/team/skills/triage/SKILL.md",
-      "computedHash": "c14141e60f28443283c0f556015f43fb9b9ad80b833b7bcc3e96724ca2bb82f5"
+      "computedHash": "c5676cf00ee980bf68999e474ea33cd431887d7103acf4c96b58aede09cd37af"
     },
     "typescript-best-practices": {
       "source": "patinaproject/skills",
