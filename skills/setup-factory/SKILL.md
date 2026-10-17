@@ -1417,14 +1417,22 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    branch with no uncommitted changes. Never touch the worker-owned
    checkouts, which are the configured repository checkouts the worker profile
    uses. They change only through a Kanban card or `refresh-checkouts`.
-2. List what is out of date:
+2. List what is out of date. Run the copy in the source checkout, not the
+   installed one. The installed copy predates the change, so it cannot report
+   a board, config key, or cron job that the change adds:
 
    ```sh
-   HERMES_HOME=<worker> python3 <worker>/scripts/check-install
+   HERMES_HOME=<worker> python3 <source checkout>/profiles/claude-worker/scripts/check-install
    ```
 
-3. Install each item it names, with the profile first and the route last. The
-   `linear` route drops a completed or canceled `Issue` update unless its
+3. Install each item it names in this order: the part 10 `kanban board` and
+   `config` lines, then the profile, then the part 12 `cron job` lines, and
+   the route last. The new profile's cron jobs read the boards and settings on
+   their first run, one minute after the profile update. `refresh-owned-refs`
+   lists the `triage` board and fails on each run until the board exists.
+   `dispatch-triage` reads `triage.max_running`. A cron job runs a profile
+   script, so create a missing job only after the profile update installs its
+   script. The `linear` route drops a completed or canceled `Issue` update unless its
    issue id is in `<root>/owned-refs.json`. Update the profile, run
    `refresh-owned-refs` once, confirm the file holds issue UUIDs, and only then
    re-render the route. Find the job id with `hermes -p claude-worker cron list`
@@ -1433,6 +1441,14 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    cards to close. The reverse order drops every closure until the next
    cron run. `check-install` reports a route that filters on issue ids while
    the file holds none.
+   - A `kanban board <name>` line: run the part 10 Kanban commands before the
+     profile update. For a missing `triage` board, run
+     `hermes kanban boards create triage --name Triage --default-workdir <path of the default repository>`.
+     When the line names another `default_workdir`, run
+     `hermes kanban boards set-default-workdir <name> <path of the default repository>`.
+   - A `config plugins.entries.linear-agent-session.settings.triage.max_running`
+     line: add `"triage": {"max_running": <n>}` to the factory settings and set
+     them in both homes as in part 10, before the profile update.
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.
@@ -1456,6 +1472,8 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      the line names the issuer. Then restart the dashboard service.
    - A `script <root>/scripts/check-install-alert` line: install the wrapper
      again with the part 12 `install` commands, which create `<root>/scripts` first.
+   - A `cron job dispatch-triage` line: after the profile update, create the
+     job with the part 12 `cron create` command.
    - A `cron job check-install` line: the job is missing, in the wrong
      profile, or delivers to a platform with no home channel. Create it in the
      root profile as in part 12, and remove a leftover copy in the worker
