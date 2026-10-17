@@ -1155,7 +1155,10 @@ each check. Report each result.
     `hermes kanban show <task id> --json`, the events after the review are the
     same as in check 19: `assigned` with no assignee, `specified`, `edited`,
     and `assigned` to `claude-worker`, with the title and body unchanged. A
-    card in `review` still gets `review_reopened`.
+    card in `review` still gets `review_reopened`. Repeat with an `approved`
+    review from a person: the events are the same, and the worker hands the
+    approved pull request off. An approval from a bot, or on a card in any
+    other status, adds only the card comment.
 21. Merge a card's pull request while the card is in `triage`, with no worker
     running it. In `hermes kanban show <task id> --json`, the events after the
     merge include, in this order, `assigned` with no assignee, `specified`,
