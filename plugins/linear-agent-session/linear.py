@@ -42,6 +42,7 @@ ISSUE_QUERY = """query Issue($id: String!) {
     id identifier title url branchName priority
     state { name type }
     delegate { id }
+    labels { nodes { name } }
     attachments { nodes { url sourceType } }
     agentSessions(first: 20) { nodes { id status createdAt appUser { id } } }
   }
@@ -63,11 +64,24 @@ ISSUE_DELEGATE_QUERY = """query IssueDelegate($id: String!) {
   issue(id: $id) { id identifier delegate { id } }
 }"""
 
+ISSUE_LABELS_QUERY = """query IssueLabels($id: String!) {
+  issue(id: $id) { labels { nodes { name } } }
+}"""
+
+ISSUE_STATES_QUERY = """query IssueStates($id: String!) {
+  issue(id: $id) {
+    id identifier
+    state { name type }
+    team { states { nodes { id name type position } } }
+  }
+}"""
+
 ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
 }"""
 
 CLOSED_STATE_TYPES = ("completed", "canceled")
+READY_STATE_NAME = "Todo"
 
 UrlOpen = Callable[..., Any]
 
@@ -152,6 +166,7 @@ class LinearClient:
             "priorityName": priority_name,
             "cardPriority": card_priority,
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
+            "labels": _label_names(issue),
             "agentSessions": sorted(
                 (
                     {"id": n["id"], "status": n["status"], "createdAt": n["createdAt"], "appUserId": n["appUser"]["id"]}
@@ -161,6 +176,26 @@ class LinearClient:
                 reverse=True,
             ),
         }
+
+    def issue_labels(self, id_or_identifier: str) -> list:
+        return _label_names(self._graphql(ISSUE_LABELS_QUERY, {"id": id_or_identifier})["issue"])
+
+    def move_to_todo(self, id_or_identifier: str) -> dict:
+        """Move an issue from the Triage status to its team's Todo status, and leave any other issue as it is."""
+        issue = self._graphql(ISSUE_STATES_QUERY, {"id": id_or_identifier})["issue"]
+        result = {"identifier": issue["identifier"], "moved": False, "state": issue["state"]["name"]}
+        if issue["state"]["type"] != "triage":
+            return result
+        unstarted = sorted(
+            (s for s in issue["team"]["states"]["nodes"] if s["type"] == "unstarted"), key=lambda s: s["position"]
+        )
+        if not unstarted:
+            raise LinearError(f"{issue['identifier']}'s team has no unstarted status to move it to")
+        target = next((s for s in unstarted if s["name"] == READY_STATE_NAME), unstarted[0])
+        payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": {"stateId": target["id"]}})
+        if not payload["issueUpdate"]["success"]:
+            raise LinearError("issueUpdate reported success: false")
+        return {**result, "moved": True, "state": target["name"]}
 
     def list_delegated_issues(self, *, include_closed: bool = False) -> list:
         issue_filter: dict = {"delegate": {"isMe": {"eq": True}}}
@@ -310,6 +345,10 @@ def _issue_summary(issue: dict) -> dict:
         "stateType": issue["state"]["type"],
         "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]],
     }
+
+
+def _label_names(issue: dict) -> list:
+    return sorted(label["name"] for label in issue["labels"]["nodes"])
 
 
 def _parse_json(body: bytes, status: int) -> dict:

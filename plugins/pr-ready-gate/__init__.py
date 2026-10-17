@@ -9,6 +9,7 @@ import urllib.parse
 from typing import Any, Callable, Optional
 
 DEFAULT_GATED_PROFILES = ["claude-worker"]
+TRIAGE_BOARD = "triage"
 # Hermes runs its completion contract inside complete_task only, so a review handoff needs this gate too.
 GATED_TOOLS = ("kanban_complete", "kanban_request_review")
 PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"
@@ -359,6 +360,8 @@ def _blockers(pr: dict, workspace: str, deadline: float) -> Optional[Callable[[]
 
 
 def _gated(ctx: Any) -> bool:
+    if os.environ.get("HERMES_KANBAN_BOARD") == TRIAGE_BOARD:
+        return False
     profile = ctx.profile_name or os.environ.get("HERMES_PROFILE", "")
     return profile in ctx.get_config("gated_profiles", default=DEFAULT_GATED_PROFILES)
 
