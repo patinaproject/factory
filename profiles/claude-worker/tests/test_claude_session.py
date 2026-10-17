@@ -21,6 +21,8 @@ ISSUE_ID = str(uuid.uuid4())
 SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}"))
 NEXT_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}:1"))
 THIRD_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}:2"))
+TRIAGE_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-triage:{ISSUE_ID}"))
+TRIAGE_ENV = {"HERMES_KANBAN_BOARD": "triage"}
 HOUR = 3600
 SYSTEM_PROMPT = (
     f"Publish commits only by running {(SCRIPTS / 'push-signed').resolve()} from the worktree, never `git push`. "
@@ -246,6 +248,76 @@ class ClaudeSessionTest(GitFixture):
     def prompt(self) -> str:
         argv = self.claude_call()["argv"]
         return argv[argv.index("-p") + 1]
+
+    def set_issue_labels(self, *labels: str) -> None:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, "labels": list(labels)}))
+
+    def test_an_implementation_card_without_ready_for_agent_is_refused_before_claude_starts(self) -> None:
+        for labels in ((), ("bug", "needs-triage"), ("ready-for-human",)):
+            with self.subTest(labels=labels):
+                self.set_issue_labels(*labels)
+                status, report = self.run_session(env={"HERMES_KANBAN_BOARD": "default"})
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": (
+                    "Linear issue ABC-123 does not carry ready-for-agent, so its implementation card does not start; "
+                    "it starts once the issue passes the readiness check"
+                )})
+                self.assertFalse(self.log.exists())
+                self.assertEqual(git(self.worktree, "rev-parse", "--abbrev-ref", "HEAD"), "abc-123-fix")
+
+    def test_an_implementation_card_with_ready_for_agent_starts(self) -> None:
+        self.set_issue_labels("bug", "ready-for-agent")
+
+        status, _ = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertTrue(self.log.exists())
+
+    def test_a_triage_card_gets_the_triage_rules_and_none_of_the_implementation_rules(self) -> None:
+        self.set_issue_labels("needs-triage")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["session_id"], report["adopted"], report["superseded"]),
+                         (0, TRIAGE_SESSION_ID, None, None))
+        argv = self.claude_call()["argv"]
+        system = argv[argv.index("--append-system-prompt") + 1]
+        for implementation_rule in ("Publish commits only", "A finished check never runs again",
+                                    "Every pull request description shows its proof", "To wait for CI"):
+            self.assertNotIn(implementation_rule, system)
+        for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token"):
+            self.assertIn(triage_contract, system)
+        self.assertTrue(self.prompt().startswith(
+            "Triage Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) for example-org/example-repo."
+        ))
+        self.assertNotIn("pull request", self.prompt())
+
+    def test_a_triage_card_settings_forbid_publishing(self) -> None:
+        self.run_session(env=TRIAGE_ENV)
+
+        push_signed = (SCRIPTS / "push-signed").resolve()
+        self.assertEqual(self.claude_call()["settings"]["content"]["permissions"], {"deny": [
+            "Bash(git push:*)", f"Bash(python3 {push_signed}:*)", f"Bash({push_signed}:*)", "Bash(gh pr create:*)",
+        ]})
+
+    def test_an_implementation_card_settings_deny_nothing(self) -> None:
+        self.run_session()
+
+        self.assertNotIn("permissions", self.claude_call()["settings"]["content"])
+
+    def test_a_triage_card_never_adopts_a_branch_or_closes_a_pull_request(self) -> None:
+        self.github.add_pull(7, "abc-123-fix", author="person")
+        self.github.add_pull(8, "abc-123-fix", author=BOT_LOGIN)
+        head = git(self.worktree, "rev-parse", "HEAD")
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR, env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["adopted"], report["superseded"]), (0, None, None))
+        self.assertEqual(self.github.calls(), [])
+        self.assertEqual(self.github.pull(7)["state"], "open")
+        self.assertEqual(git(self.worktree, "rev-parse", "HEAD"), head)
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(

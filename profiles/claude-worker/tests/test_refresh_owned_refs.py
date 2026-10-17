@@ -25,9 +25,15 @@ TASKS = [
 ]
 EXPECTED = ["7-docs", "goodyear/abc-1-fix", "https://github.com/example-org/site/issues/7"]
 
+TRIAGE_TASKS = [
+    {"id": "t9", "title": "ABC-9: inbox", "body": "```text\nlinear_issue_id: 00000000-0000-4000-8000-0000000000d9\n```\n",
+     "branch_name": "wt/t9", "status": "blocked"},
+    {"id": "t10", "title": "ABC-10: passed", "body": "linear_issue_id: 00000000-0000-4000-8000-0000000000da\n",
+     "branch_name": "wt/t10", "status": "done"},
+]
 FAKE_HERMES_OK = f"""#!/usr/bin/env python3
-import json
-print(json.dumps({TASKS!r}))
+import json, sys
+print(json.dumps({TRIAGE_TASKS!r} if sys.argv[1:4] == ["kanban", "--board", "triage"] else {TASKS!r}))
 """
 FAKE_HERMES_FAILS = """#!/usr/bin/env python3
 import sys
@@ -56,6 +62,10 @@ class RefreshOwnedRefsTest(unittest.TestCase):
     def run_script(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
         if env is None:
             env = {**os.environ, "HERMES_HOME": str(self.worker)}
+        if "--tasks-json" in args and "--triage-tasks-json" not in args:
+            empty = self.tmp / "no-triage-cards.json"
+            empty.write_text("[]")
+            args = (*args, "--triage-tasks-json", str(empty), "--triage-output", str(self.tmp / "triage-refs.json"))
         return subprocess.run(
             [sys.executable, str(SCRIPTS / "refresh-owned-refs"), *args], env=env, capture_output=True, text=True
         )
@@ -119,6 +129,25 @@ class RefreshOwnedRefsTest(unittest.TestCase):
 
         self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
         self.assertEqual(json.loads((self.tmp / "hermes" / "owned-refs.json").read_text()), EXPECTED)
+        self.assertEqual(
+            json.loads((self.tmp / "hermes" / "triage-refs.json").read_text()),
+            ["00000000-0000-4000-8000-0000000000d9", "00000000-0000-4000-8000-0000000000da"],
+        )
+
+    def test_triage_refs_hold_only_the_triage_board_issue_ids(self) -> None:
+        triage = self.tmp / "triage.json"
+        triage.write_text(json.dumps(TRIAGE_TASKS))
+        triage_output = self.tmp / "out" / "triage-refs.json"
+
+        proc = self.run_script("--tasks-json", str(self.tasks), "--output", str(self.output),
+                               "--triage-tasks-json", str(triage), "--triage-output", str(triage_output))
+
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(json.loads(self.output.read_text()), EXPECTED)
+        self.assertEqual(
+            json.loads(triage_output.read_text()),
+            ["00000000-0000-4000-8000-0000000000d9", "00000000-0000-4000-8000-0000000000da"],
+        )
 
     def test_a_failing_kanban_list_leaves_the_file_untouched(self) -> None:
         self.output.write_text('["stale"]\n')

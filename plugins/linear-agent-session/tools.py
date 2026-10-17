@@ -56,7 +56,7 @@ ISSUE_SCHEMA = {
         "Read the Linear issue named by `issue` (UUID or ABC-123). Reads as the agent app and returns "
         "id, identifier, title, url, gitBranchName, priority, priorityName, "
         "cardPriority (the Kanban card priority for this issue), "
-        "state, stateType, delegate (the delegate's user ID, or null), attachments, and agentSessions "
+        "state, stateType, delegate (the delegate's user ID, or null), labels (names), attachments, and agentSessions "
         "(id, status, createdAt, appUserId; newest first)."
     ),
     "parameters": ISSUE_PARAMETERS,
@@ -93,6 +93,16 @@ UNDELEGATE_SCHEMA = {
     "description": (
         "Undelegate the agent app from `issue` (UUID or ABC-123). Refuses an issue delegated to a "
         "different agent. Returns removed: false when the issue had no delegate."
+    ),
+    "parameters": ISSUE_PARAMETERS,
+}
+
+
+TO_TODO_SCHEMA = {
+    "name": "linear_issue_to_todo",
+    "description": (
+        "Move `issue` (UUID or ABC-123) from the Triage status to its team's Todo status. Leaves an issue in "
+        "any other status as it is. Returns identifier, moved, and the issue's state."
     ),
     "parameters": ISSUE_PARAMETERS,
 }
@@ -137,6 +147,10 @@ def run_delegated_issues(client_factory: ClientFactory, args: dict) -> str:
 
 def run_undelegate(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(lambda: client_factory().undelegate_self(_issue_argument(args)))
+
+
+def run_to_todo(client_factory: ClientFactory, args: dict) -> str:
+    return _tool_result_or_error(lambda: client_factory().move_to_todo(_issue_argument(args)))
 
 
 def _issue_argument(args: dict) -> str:

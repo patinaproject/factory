@@ -8,10 +8,13 @@ reaches triage. The route's `in_file` clauses keep a pull request, review,
 or an `issue_comment` on an issue only when its issue URL, is listed in
 `<root>/owned-refs.json`. The `linear` route keeps a completed or canceled `Issue`
 update only when its issue id is listed, so the file also holds each card's
-`linear_issue_id` body line. A Hermes cron job runs this script every minute. It
-rewrites the file in one atomic step on every run, so the file's mtime proves
-the job ran. Silent on success. Exits 1 and leaves the file untouched when
-`hermes kanban list` fails, or 2 when HERMES_HOME is not a profile home.
+`linear_issue_id` body line. The script also writes the `linear_issue_id` of
+every card on the Triage board to `<root>/triage-refs.json`, which the `linear`
+route reads to keep a status change of an issue that has a triage card. A
+Hermes cron job runs this script every minute. It rewrites each file in one
+atomic step on every run, so the file's mtime proves the job ran. Silent on
+success. Exits 1 and leaves both files untouched when `hermes kanban list`
+fails, or 2 when HERMES_HOME is not a profile home.
 """
 from __future__ import annotations
 
@@ -26,6 +29,8 @@ import tempfile
 from pathlib import Path
 
 OWNED_REFS = "owned-refs.json"
+TRIAGE_REFS = "triage-refs.json"
+TRIAGE_BOARD = "triage"
 GITHUB_ISSUE_URL = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
 LINEAR_ISSUE_ID = re.compile(r"^linear_issue_id:\s*(\S+)\s*$", re.MULTILINE)
 
@@ -54,12 +59,13 @@ def find_hermes() -> str:
     raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
 
 
-def list_tasks(tasks_json: str | None) -> list:
+def list_tasks(tasks_json: str | None, board: str | None = None) -> list:
     if tasks_json:
         return json.loads(Path(tasks_json).read_text(encoding="utf-8"))
-    proc = subprocess.run([find_hermes(), "kanban", "list", "--json"], capture_output=True, text=True)
+    pinned = ["--board", board] if board else []
+    proc = subprocess.run([find_hermes(), "kanban", *pinned, "list", "--json"], capture_output=True, text=True)
     if proc.returncode != 0:
-        raise Refusal(f"hermes kanban list failed: {proc.stderr.strip()}", 1)
+        raise Refusal(f"hermes kanban {' '.join(pinned + ['list'])} failed: {proc.stderr.strip()}", 1)
     return json.loads(proc.stdout)
 
 
@@ -72,6 +78,10 @@ def owned_refs(tasks: list) -> list:
         refs.update(GITHUB_ISSUE_URL.findall(body))
         refs.update(LINEAR_ISSUE_ID.findall(body))
     return sorted(refs)
+
+
+def triage_refs(tasks: list) -> list:
+    return sorted({ref for task in tasks for ref in LINEAR_ISSUE_ID.findall(task.get("body") or "")})
 
 
 def write_atomically(target: Path, text: str) -> None:
@@ -91,14 +101,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--tasks-json", help="read the task list from this file instead of `hermes kanban list --json`")
     parser.add_argument("--output", type=Path, help=f"write here instead of <root>/{OWNED_REFS}")
+    parser.add_argument("--triage-tasks-json", help="read the Triage board's task list from this file")
+    parser.add_argument("--triage-output", type=Path, help=f"write here instead of <root>/{TRIAGE_REFS}")
     args = parser.parse_args()
     try:
         target = args.output or root_home() / OWNED_REFS
+        triage_target = args.triage_output or root_home() / TRIAGE_REFS
         refs = owned_refs(list_tasks(args.tasks_json))
+        triage = triage_refs(list_tasks(args.triage_tasks_json, TRIAGE_BOARD))
     except Refusal as exc:
         print(f"refresh-owned-refs: {exc}", file=sys.stderr)
         return exc.code
     write_atomically(target, json.dumps(refs, indent=2) + "\n")
+    write_atomically(triage_target, json.dumps(triage, indent=2) + "\n")
     return 0
 
 

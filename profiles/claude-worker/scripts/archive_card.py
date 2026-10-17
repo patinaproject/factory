@@ -9,7 +9,8 @@ and the uncommitted files all stay where they are.
 
 It prints one JSON line and exits 0 with `{"archived", "freed_worktree"}`, or exits 1
 with `{"error": reason}`. Run it again after a failure: it skips a card that is
-already archived and still frees the worktree.
+already archived and still frees the worktree. `--board` names the card's board, such
+as `triage`, when it is not the current one.
 """
 from __future__ import annotations
 
@@ -36,8 +37,8 @@ def run(*command: str) -> str:
     return proc.stdout
 
 
-def read_task(hermes: str, task_id: str) -> dict:
-    return json.loads(run(hermes, "kanban", "show", task_id, "--json"))["task"]
+def read_task(kanban: list[str], task_id: str) -> dict:
+    return json.loads(run(*kanban, "show", task_id, "--json"))["task"]
 
 
 def is_linked_worktree(path: Path) -> bool:
@@ -59,13 +60,14 @@ def free_worktree(task: dict) -> str | None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("task_id")
+    parser.add_argument("--board", help="the card's board, when it is not the current one")
     args = parser.parse_args(argv)
-    hermes = os.environ.get("HERMES_BIN", "hermes")
+    kanban = [os.environ.get("HERMES_BIN", "hermes"), "kanban", *(["--board", args.board] if args.board else [])]
     try:
-        task = read_task(hermes, args.task_id)
+        task = read_task(kanban, args.task_id)
         if task["status"] != "archived":
-            run(hermes, "kanban", "archive", args.task_id)
-            task = read_task(hermes, args.task_id)
+            run(*kanban, "archive", args.task_id)
+            task = read_task(kanban, args.task_id)
         freed = free_worktree(task)
     except (Failed, KeyError, ValueError) as failure:
         print(json.dumps({"error": str(failure)}))
