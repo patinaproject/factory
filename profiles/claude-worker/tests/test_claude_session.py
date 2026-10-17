@@ -67,6 +67,11 @@ DEFAULT_ENTRY = (
     "on branch abc-123-fix. First start the issue through this repository's own issue-start workflow, "
     "which moves it to In Progress. Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
+TRIAGE_ENTRY = (
+    "Triage Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) for example-org/example-repo. "
+    "Work out what it asks, check that its claim holds, and settle what you can before you ask people. "
+    "Do not implement it."
+)
 TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
 # What Hermes leaves in a dispatcher worker's subprocess: it scrubs HERMES_KANBAN_TASK, RUN_ID and CLAIM_LOCK.
 HERMES_CHILD_ENV = {"HERMES_DELEGATED_CHILD_CONTEXT": "1", "HERMES_KANBAN_DB": "/nonexistent/kanban.db"}
@@ -598,6 +603,29 @@ class ClaudeSessionTest(GitFixture):
         self.run_session()
 
         self.assertEqual(self.claude_call()["argv"][1], f"/patina-mode {DEFAULT_ENTRY}")
+
+    def test_worker_entry_prefixes_the_triage_entry(self) -> None:
+        self.repository["worker_entry"] = "/patina-mode"
+        self.settings = self.write_settings([self.repository])
+
+        self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual(self.prompt(), f"/patina-mode {TRIAGE_ENTRY}")
+
+    def test_triage_entry_without_worker_entry_is_unchanged(self) -> None:
+        self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual(self.prompt(), TRIAGE_ENTRY)
+
+    def test_a_resumed_triage_session_gets_no_worker_entry(self) -> None:
+        self.repository["worker_entry"] = "/patina-mode"
+        self.settings = self.write_settings([self.repository])
+        self.write_transcript(session_id=TRIAGE_SESSION_ID, idle=HOUR, context=(10, 60_000, 39_989))
+
+        _, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((report["session_id"], report["resumed"]), (TRIAGE_SESSION_ID, True))
+        self.assertEqual(self.prompt(), "Continue.")
 
     def test_worker_entry_with_fields_is_refused_before_claude_starts(self) -> None:
         entry = "/patina-mode Work Linear issue {issue_identifier} on branch {branch}."
