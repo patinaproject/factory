@@ -18,7 +18,9 @@ repository, that the worker home's secrets.command is the worker helper
 whenever the root home has a secret source, and that each configured
 repository checkout exists and has origin/HEAD set, and that the root home's
 upload broker socket answers a status request and reports a token present. That
-check sends only {"op": "status"}, never uploads, and prints no value. When any difference is
+check sends only {"op": "status"}, never uploads, and prints no value. It also checks
+that the Triage board exists and anchors its worktrees at the default
+repository, and that the triage refs file is as fresh as the owned refs. When any difference is
 reported and the source checkout is not at origin/HEAD, the last line names
 that checkout. It gives the fast-forward command only when the checkout is
 behind, on the default branch, and clean. --ref turns the line off, because
@@ -52,6 +54,8 @@ from typing import Callable, NamedTuple
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
 OWNED_REFS = "owned-refs.json"
+TRIAGE_REFS = "triage-refs.json"
+TRIAGE_BOARD = "triage"
 LINEAR_ISSUE_FIELD = "data.id"
 LINEAR_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Deliver values that name no platform, so no home channel is needed.
@@ -104,6 +108,10 @@ def unset() -> Want:
 def declared(what: str, *, besides: tuple = ()) -> Want:
     """A per-factory value from the runbook's inputs: any value counts, except an empty one or `besides`."""
     return Want(lambda live: live not in (None, "", *besides), what)
+
+
+def positive_int(what: str) -> Want:
+    return Want(lambda live: isinstance(live, int) and not isinstance(live, bool) and live > 0, what)
 
 
 def non_empty_list(what: str) -> Want:
@@ -163,6 +171,10 @@ CONFIG = (
         10, SETTINGS_KEY, BOTH, declared("set to the factory settings"),
         same_in_homes=True,
     ),
+    ConfigKey(
+        10, f"{SETTINGS_KEY}.triage.max_running", BOTH, positive_int("a positive limit on running triage cards"),
+        same_in_homes=True,
+    ),
     ConfigKey(10, "kanban.max_in_progress", (ROOT,), declared("set to the operator's card limit")),
     ConfigKey(10, "kanban.review_dispatch", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.auto_decompose", (ROOT,), equal(False)),
@@ -186,6 +198,7 @@ CRON = (
     CronJob(12, "refresh-checkouts", 60, equal("local")),
     CronJob(12, "refresh-owned-refs", 1, equal("local")),
     CronJob(12, "reopen-conflicts", 5, equal("local")),
+    CronJob(12, "dispatch-triage", 1, equal("local")),
     CronJob(
         12, "check-install", 60, declared("the operator's chat platform", besides=("local",)),
         home=ROOT, script=ROOT_ALERT_SCRIPT,
@@ -605,15 +618,37 @@ def check_services(launchd_root: Path, launchctl: str) -> list:
 
 
 def check_owned_refs(root: Path) -> list:
-    path = root / OWNED_REFS
-    if not path.is_file():
-        return [Drift("owned refs", str(path), "is missing; create or run the refresh-owned-refs cron job (part 12)")]
-    age = time.time() - path.stat().st_mtime
-    if age > OWNED_REFS_MAX_AGE:
-        return [Drift(
-            "owned refs", str(path),
-            f"is {int(age // 60)} minutes old; the refresh-owned-refs cron job is not running (part 12)",
-        )]
+    drifts = []
+    for name in (OWNED_REFS, TRIAGE_REFS):
+        path = root / name
+        if not path.is_file():
+            drifts.append(Drift(
+                "owned refs", str(path), "is missing; create or run the refresh-owned-refs cron job (part 12)"
+            ))
+            continue
+        age = time.time() - path.stat().st_mtime
+        if age > OWNED_REFS_MAX_AGE:
+            drifts.append(Drift(
+                "owned refs", str(path),
+                f"is {int(age // 60)} minutes old; the refresh-owned-refs cron job is not running (part 12)",
+            ))
+    return drifts
+
+
+def check_triage_board(root: Path, hermes: str, settings) -> list:
+    proc = subprocess.run(
+        [hermes, "kanban", "boards", "list", "--json"], env={**os.environ, "HERMES_HOME": str(root)},
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise Refusal(f"hermes kanban boards list failed in {root}: {proc.stderr.strip()}")
+    board = next((b for b in json.loads(proc.stdout) if b.get("slug") == TRIAGE_BOARD), None)
+    if board is None:
+        return [Drift("kanban board", TRIAGE_BOARD, f"is missing in {root} (part 10)")]
+    repositories = settings.get("repositories") if isinstance(settings, dict) else None
+    default = next((r["path"] for r in repositories or [] if r.get("routing") == "default"), None)
+    if default and board.get("default_workdir") != default:
+        return [Drift("kanban board", TRIAGE_BOARD, f"default_workdir is not {default} (part 10)")]
     return []
 
 
@@ -778,6 +813,7 @@ def main() -> int:
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
             *check_owned_refs(root),
+            *check_triage_board(root, hermes, config_value(worker, hermes, SETTINGS_KEY)),
             *check_checkouts(config_value(worker, hermes, SETTINGS_KEY)),
             *check_team_skills(
                 config_value(root, hermes, "plugins.entries.team.settings.skills_dir"),

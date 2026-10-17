@@ -89,6 +89,7 @@ your task notes, not in the repository.
 | Model alias for Hermes' own agent loop, for example `sonnet` | Model provider |
 | Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
 | `kanban.max_in_progress` | Kanban |
+| `triage.max_running`, how many triage cards may run at once | Kanban |
 | Factory hostname, Cloudflare account, and zone | Ingress |
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
 | Whether people SSH into the machine through Access, and if so the SSH hostname and each person's email | Ingress, host exposure |
@@ -130,7 +131,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `plugins.entries.team.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
 | `kanban.max_in_progress`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
-| The `default` board's `default_workdir` | Kanban board metadata, not `config.yaml` |
+| The `default` and `triage` boards' `default_workdir` | Kanban board metadata, not `config.yaml` |
 
 When the factory uses Infisical, part 14 moves the Linear credentials, both
 webhook secrets, and the proxy token from `.env` into one Infisical folder. On
@@ -629,6 +630,7 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
+  "triage": {"max_running": <n>},
   "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "sentry_token_env": "", "disabled_mcp_servers": [], "max_turns": 0}
 }
 ```
@@ -677,6 +679,13 @@ host cannot verify. Claude Code gets `JAVA_HOME`, `ANDROID_HOME`,
   "test -d \"$ANDROID_HOME/build-tools\""
 ]
 ```
+
+`triage.max_running` caps how many triage cards run at once. It is a positive
+integer from the operator's input, and its value belongs in the private
+record. Hermes caps workers per host and per profile, but has no per-board
+cap, so the factory applies this one itself: triage creates each triage card
+with no assignee, and the `dispatch-triage` cron job from part 12 assigns
+waiting cards only while fewer than `max_running` run or wait assigned.
 
 `kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
@@ -797,7 +806,18 @@ hermes config set kanban.max_in_progress <n>
 hermes config set kanban.review_dispatch false
 hermes config set kanban.auto_decompose false
 hermes kanban boards set-default-workdir default <path of the default repository>
+hermes kanban boards create triage --name Triage --default-workdir <path of the default repository>
 ```
+
+The `triage` board holds only triage cards. Every issue that lands in the
+Linear Triage inbox gets one there, delegated or not, and its worker runs the
+readiness check. The gateway's dispatcher serves every board that is not
+archived on each tick, so the board needs no restart. Its worktrees anchor at
+the same default repository. `boards create` leaves an existing board as it
+is, so when the board exists, run
+`hermes kanban boards set-default-workdir triage <path of the default repository>`
+instead. An implementation card starts only when its Linear issue carries
+`ready-for-agent`, which triage applies.
 
 A worker hands a card with a merge-ready pull request to the `review` lane.
 With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,
@@ -822,8 +842,11 @@ and a default assignee would route the unassigned card to a worker first.
 `hermes config get kanban.default_assignee` prints nothing or an empty string.
 
 `default_workdir` is board metadata, so `hermes config get` does not show it.
-Read the board metadata with `hermes kanban boards --help` to find the listing
-command, and confirm the path.
+`hermes kanban boards list --json` lists the `default` and `triage` boards,
+each with the default repository's path as its `default_workdir`.
+`check-install` reports a missing `triage` board, another `default_workdir`,
+and a `triage.max_running` that is not a positive integer or differs between
+the homes.
 
 ## 11. Webhook routes
 
@@ -890,7 +913,7 @@ belongs to the worker profile.
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
 jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`, and
-`refresh-gh-app-login`.
+`refresh-gh-app-login`, and `dispatch-triage`.
 A copy there runs without the worker's scripts and settings, so remove it the
 same way. The default home holds exactly one job, `check-install`, described
 below. A second setup session runs this check before it
@@ -923,6 +946,24 @@ is missing or older than 5 minutes. Create the job when `cron list` has no
 
 ```sh
 hermes -p claude-worker cron create "every 1m" --name refresh-owned-refs --no-agent --script refresh-owned-refs </dev/null
+```
+
+The same job writes `<home>/triage-refs.json` with the `linear_issue_id` of
+every card on the `triage` board. The `linear` route keeps a status change of
+an issue listed there, so a triage card is archived when a person moves its
+issue out of Triage or closes it. `check-install` reports this file the same
+way.
+
+**Triage dispatch job.** Triage creates triage cards with no assignee, so the
+dispatcher skips them. `dispatch-triage` runs every minute. It assigns
+`claude-worker` to waiting triage cards, highest priority and then oldest
+first, while fewer than `triage.max_running` cards on the `triage` board run or
+wait assigned. A reply that resumes a blocked triage card also leaves it
+unassigned, so this job is the only one that starts triage work. Create the
+job when `cron list` has no `dispatch-triage` job:
+
+```sh
+hermes -p claude-worker cron create "every 1m" --name dispatch-triage --no-agent --script dispatch-triage </dev/null
 ```
 
 **Conflict job.** GitHub sends no webhook when a pull request starts to
@@ -1110,10 +1151,11 @@ shell outside Hermes, and run the forged lines again.
 **End-to-end checks.** Use a test issue in the operator's Linear workspace for
 each check. Report each result.
 
-1. Delegate an issue that routes to the `default` repository. Linear shows the
-   acknowledgement within 10 seconds, then the "queued" activity. The new card
-   has that repository as its `completion_contract`.
-2. Delegate an issue synced from a `synced_github` repository. Its card has that
+1. Delegate an issue that routes to the `default` repository and carries
+   `ready-for-agent`. Linear shows the acknowledgement within 10 seconds, then
+   the "queued" activity. The new card has that repository as its
+   `completion_contract`. When the issue was in Triage, it moves to Todo.
+2. Delegate a `ready-for-agent` issue synced from a `synced_github` repository. Its card has that
    repository's contract, and its worktree starts from that repository's
    default branch.
 3. The worker moves the issue to In Progress through the repository's own
@@ -1237,6 +1279,31 @@ each check. Report each result.
     either case with the issue already Done before the merge: the card is
     archived with the same comment, and the session gets no post. In every case
     the card stays unassigned.
+
+25. Create an issue in the team's Triage status. Within a minute the
+    `triage` board has one card for it, with no assignee until
+    `dispatch-triage` assigns it, and Linear shows a "Queued for triage"
+    activity on an agent session the factory opened. Edit the issue's title:
+    no second card appears. Move a second issue into Triage from Backlog: it
+    gets its own card. Move the first issue out of Triage: its triage card is
+    archived.
+26. Delegate an issue without `ready-for-agent`. No implementation card
+    appears, and the session gets a `thought` that the work starts once the
+    issue passes the readiness check. Delegate an issue with
+    `ready-for-human`: no card appears, and the session gets a `response`.
+    Mark the first issue `ready-for-agent`: the `Issue` webhook creates its
+    implementation card on the same session and moves the issue to Todo when
+    it is in Triage. Start a card by hand on an issue without the label:
+    `claude-session` refuses it before Claude starts.
+27. Let a triage card block on a question. Its session gets one
+    `elicitation` that starts with the AI-generated disclaimer, and each
+    person it @-mentions gets a Linear notification. A reply from a teammate
+    who did not delegate the issue raises `prompted` on the session the
+    factory created, unblocks the card, and `dispatch-triage` assigns it
+    again.
+28. No more than `triage.max_running` cards on the `triage` board run at
+    once, and the triage card's run never pushes a branch or opens a pull
+    request.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate

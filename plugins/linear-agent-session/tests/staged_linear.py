@@ -4,6 +4,7 @@ A test links this file as linear.py in a staged home's plugins/linear-agent-sess
 $HERMES_HOME/linear-fake.json lists the tokens Linear accepts. Each request is
 appended to $HERMES_HOME/linear-fake.log as one JSON line, and every token
 request issues minted-<n>, which Linear then accepts unless reject_all is set.
+An issue's labels come from its `labels` list, `["ready-for-agent"]` when unset.
 """
 from __future__ import annotations
 
@@ -38,7 +39,12 @@ def _fake_urlopen(request, timeout=None):
             state_path.write_text(json.dumps(state))
         response = _Response(200, {"access_token": token, "token_type": "Bearer", "expires_in": 2591999})
     elif request.get_header("Authorization", "").removeprefix("Bearer ") in state["accepted"]:
-        response = _Response(200, {"data": {"viewer": {"id": "app-user"}}})
+        query = json.loads(request.data.decode())["query"]
+        if "IssueLabels" in query:
+            labels = [{"name": name} for name in state.get("labels", ["ready-for-agent"])]
+            response = _Response(200, {"data": {"issue": {"labels": {"nodes": labels}}}})
+        else:
+            response = _Response(200, {"data": {"viewer": {"id": "app-user"}}})
     else:
         response = None
     with open(_HOME / "linear-fake.log", "a") as log:

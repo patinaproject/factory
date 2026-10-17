@@ -5,6 +5,11 @@ Prints exactly one JSON line on stdout. The Hermes worker that calls this
 script relays the line to the board; this process is fenced from board
 mutations, so it never touches Kanban itself.
 
+A card on the Triage board triages its issue: Claude gets the triage rules in
+place of the implementation rules, and its settings refuse every publishing
+command. Any other card starts only when its Linear issue carries
+`ready-for-agent`.
+
 Claude Code starts with the allowlisted environment in CHILD_ENV_NAMES and
 CHILD_ENV_PREFIXES. Every credential it needs, the Linear token and the proxy
 token, reaches it only through the per-run settings file, mode 0600. Claude Code
@@ -55,6 +60,12 @@ TAKEOVER_RULES = (
     "resolve conflicts once, and commit. Credit the original author with a "
     "Co-authored-by trailer on the commits you publish."
 )
+TRIAGE_BOARD = "triage"
+READY_LABEL = "ready-for-agent"
+TRIAGE_ENTRY = (
+    "Triage Linear issue {issue_identifier} ({issue_url}) for {repo}. Work out what it asks, check that its claim "
+    "holds, and settle what you can before you ask people. Do not implement it."
+)
 RESUME_PROMPT = "Continue."
 COMMENTS_SEEN_NAME = "claude-comments-seen.json"
 COMMENTS_INTRO = (
@@ -67,6 +78,12 @@ HANDOFF = (
     "request's live state, review threads, and checks on that branch with `gh pr view` and `gh pr checks` "
     "before you act. The previous session's transcript is {transcript}; read it only for a decision you "
     "cannot find on GitHub or in the code. {result}"
+)
+TRIAGE_HANDOFF = (
+    "This card continues an earlier triage. Its previous Claude session sat idle past the prompt cache and had "
+    "grown large, so this session starts fresh. Read the issue, its comments, and its `Triage notes` Document "
+    "before you act. The previous session's transcript is {transcript}; read it only for a decision you cannot "
+    "find on the issue. {result}"
 )
 PUBLISH_RULE = (
     "Publish commits only by running {push_signed} from the worktree, never `git push`. It creates "
@@ -99,16 +116,43 @@ EVIDENCE_RULE = (
     "this helper replaces `gh pr edit --attach` and browser uploads, even where a skill names them. When the "
     "helper exits 3, attach the images to the Linear issue instead and say so in the pull request body."
 )
-FINISH_RULE = (
+STOP_RULE = (
     "Stop every background command, monitor, and watcher you started before you write your final result. "
-    "The run ends when you finish, and anything still running is killed. To wait for CI, run `python3 "
+    "The run ends when you finish, and anything still running is killed."
+)
+FINISH_RULE = STOP_RULE + (
+    " To wait for CI, run `python3 "
     "{wait_for_checks} <number> --repo <owner/repo>` in the foreground. It returns within 4 minutes, "
     "inside the 5-minute prompt cache: exit 0 means every check passed, 1 means a check failed, and 3 "
     "means checks are still running, so run it again. A hook refuses `gh pr checks --watch`, `gh run "
     "watch`, and any sleep or polling loop that waits longer."
 )
 CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
+TRIAGE_RULE = (
+    "This run triages one issue on the factory's Triage board. It changes no code for the issue: create no "
+    "branch, commit, or pull request, and never run push-signed, `git push`, or `gh pr create`. This run's "
+    "settings refuse them. Read the repository and run its tests freely to reproduce a bug or check existing "
+    "behavior.\n\n"
+    "Run the `triage` skill first, then the `grilling` skill only for the gaps that triage leaves. Keep the "
+    "issue's triage state in its `Triage notes` and `Agent brief` Documents, written through the tracker "
+    "adapter's issue-artifact operation, and start every Document with the AI-generated disclaimer that the "
+    "triage skill names. For a public repository synced to Linear, the Documents stay on the Linear issue and "
+    "the roles are written as GitHub labels, because GitHub is canonical.\n\n"
+    "Apply only category and state roles. Never change the issue's status, assignee, or delegate, with one "
+    "exception: when the issue is delegated to the factory's agent app and passes as `ready-for-agent`, move "
+    "it to `Todo`. Recommend `wontfix` in `Triage notes` and never apply it.\n\n"
+    "When a skill waits for people, update `Triage notes` under \"still needed\", then end your turn. Make "
+    "the first line of your final message `Needs input:` and put that round's questions after it, one per "
+    "line. Mention the issue's creator, by their Linear profile URL, on each question only the reporter can "
+    "answer, such as steps to reproduce or their environment. Mention the team's triage-responsibility person "
+    "on each scope or design question, and on every question when the creator is an integration, not a "
+    "person. Do not post the questions yourself: the worker posts them on the issue's agent session with the "
+    "disclaimer.\n\n"
+    "When triage ends, make the first line of your final message `Triage outcome: <role>`, where <role> is "
+    "`ready-for-agent`, `ready-for-human`, or `wontfix` for a recommendation, and add a short summary."
+)
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
+TRIAGE_SYSTEM_PROMPT = f"{TRIAGE_RULE}\n\n{LINEAR_RULE}\n\n{STOP_RULE}"
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
 LINEAR_MCP_SERVER = {
@@ -365,10 +409,13 @@ def find_transcript(session_id: str, worktree: Path) -> Path | None:
     return next((t for t in transcripts if transcript_cwd(t) == str(worktree)), None)
 
 
-def session_id_for(issue_id: str, generation: int) -> str:
+def session_key(issue_id: str, triage: bool) -> str:
+    return f"linear-triage:{issue_id}" if triage else f"linear-issue:{issue_id}"
+
+
+def session_id_for(key: str, generation: int) -> str:
     # A fresh start takes the next generation, because `--session-id` refuses an ID whose transcript exists.
-    key = f"linear-issue:{issue_id}" if generation == 0 else f"linear-issue:{issue_id}:{generation}"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key if generation == 0 else f"{key}:{generation}"))
 
 
 def main_messages(transcript: Path, offset: int = 0) -> Iterator[dict]:
@@ -426,20 +473,20 @@ def fresh_after_tokens(transport: dict) -> int:
     return value
 
 
-def plan_session(issue_id: str, worktree: Path, threshold: int, now: float) -> SessionPlan:
+def plan_session(key: str, worktree: Path, threshold: int, now: float) -> SessionPlan:
     generation, latest = 0, None
-    while found := find_transcript(session_id_for(issue_id, generation), worktree):
+    while found := find_transcript(session_id_for(key, generation), worktree):
         latest, generation = found, generation + 1
     if latest is None:
-        return SessionPlan(session_id_for(issue_id, 0), False, "new", None, None, None)
-    previous_id = session_id_for(issue_id, generation - 1)
+        return SessionPlan(session_id_for(key, 0), False, "new", None, None, None)
+    previous_id = session_id_for(key, generation - 1)
     if now - latest.stat().st_mtime <= CACHE_TTL_SECONDS:
         return SessionPlan(previous_id, True, "warm", previous_id, latest, None)
     tokens, text = last_assistant(latest)
     if tokens is not None and tokens < threshold:
         return SessionPlan(previous_id, True, "small", previous_id, latest, None)
     reason = "fresh-unreadable" if tokens is None else "fresh-large-idle"
-    return SessionPlan(session_id_for(issue_id, generation), False, reason, previous_id, latest, text)
+    return SessionPlan(session_id_for(key, generation), False, reason, previous_id, latest, text)
 
 
 def session_process_running(session_id: str) -> bool:
@@ -519,8 +566,8 @@ def check_toolchain(repo: dict, worktree: Path) -> None:
             )
 
 
-def linear_api_key() -> str:
-    """A Linear token from the worker home's linear-agent-session plugin, which shares its token cache."""
+def linear_access() -> tuple:
+    """A client and a token from the worker home's linear-agent-session plugin, which shares its token cache."""
     home = os.environ.get("HERMES_HOME")
     if not home:
         raise Refusal("HERMES_HOME is not set; claude-session reads the Linear token through the worker home's plugin")
@@ -531,9 +578,24 @@ def linear_api_key() -> str:
     import linear
 
     try:
-        return linear.client_from_env().access_token()
+        client = linear.client_from_env()
+        return client, client.access_token()
     except linear.LinearError as error:
         raise Refusal(f"Linear token: {error}") from None
+
+
+def require_ready(client, issue_id: str, identifier: str) -> None:
+    import linear
+
+    try:
+        labels = client.issue_labels(issue_id)
+    except linear.LinearError as error:
+        raise Refusal(f"reading the labels of Linear issue {identifier} failed: {error}") from None
+    if READY_LABEL not in labels:
+        raise Refusal(
+            f"Linear issue {identifier} does not carry {READY_LABEL}, so its implementation card does not start; "
+            "it starts once the issue passes the readiness check"
+        )
 
 
 def tier_models(transport: dict) -> dict:
@@ -596,7 +658,17 @@ def disabled_mcp_servers(transport: dict) -> list[str]:
     return value
 
 
-def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
+def publish_denials() -> list[str]:
+    push_signed = Path(__file__).resolve().with_name("push-signed")
+    return [
+        "Bash(git push:*)",
+        f"Bash(python3 {push_signed}:*)",
+        f"Bash({push_signed}:*)",
+        "Bash(gh pr create:*)",
+    ]
+
+
+def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = False) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
     # Claude Code sends every MCP schema inline when ANTHROPIC_BASE_URL is not Anthropic's,
@@ -626,6 +698,9 @@ def claude_settings(transport: dict, api_key: str, path: Path) -> dict:
     disabled = disabled_mcp_servers(transport)
     if disabled:
         settings["disabledMcpjsonServers"] = disabled
+    if triage:
+        # Deny rules hold under --permission-mode bypassPermissions.
+        settings["permissions"] = {"deny": publish_denials()}
     return settings
 
 
@@ -666,7 +741,7 @@ def worker_entry_prefix(repo: dict) -> str:
     return prefix
 
 
-def handoff_text(plan: SessionPlan, branch: str, head: str) -> str | None:
+def handoff_text(plan: SessionPlan, branch: str, head: str, triage: bool = False) -> str | None:
     if plan.previous is None or plan.resumed:
         return None
     last = plan.last_result
@@ -674,6 +749,8 @@ def handoff_text(plan: SessionPlan, branch: str, head: str) -> str | None:
         f"The previous session ended with this message:\n\n{last[-HANDOFF_RESULT_CHARS:]}"
         if last else "The previous session left no final message."
     )
+    if triage:
+        return TRIAGE_HANDOFF.format(transcript=plan.previous, result=result)
     return HANDOFF.format(branch=branch, head=head, transcript=plan.previous, result=result)
 
 
@@ -709,11 +786,14 @@ def unseen_comments(comments: list[dict], seen: list[list], own: str) -> str:
 
 def build_prompt(
     args: argparse.Namespace, prefix: str, branch: str, resumed: bool, adopted: Adoption | None, handoff: str | None,
-    comments: str,
+    comments: str, triage: bool = False,
 ) -> str:
     message = "\n\n".join(filter(None, [Path(args.message_file).read_text() if args.message_file else "", comments]))
     if resumed:
         return message or RESUME_PROMPT
+    if triage:
+        entry = TRIAGE_ENTRY.format(issue_identifier=args.issue_identifier, issue_url=args.issue_url, repo=args.repo)
+        return "\n\n".join(filter(None, [entry, handoff, message]))
     entry = DEFAULT_WORKER_ENTRY.format(
         issue_id=args.issue_id,
         issue_identifier=args.issue_identifier,
@@ -832,6 +912,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
         raise Refusal("HERMES_KANBAN_WORKSPACE is not set; claude-session runs only inside a Kanban worker")
+    triage = os.environ.get("HERMES_KANBAN_BOARD") == TRIAGE_BOARD
     settings = load_settings(args.settings_json)
     repo = find_repository(settings, args.repo)
     transport = settings.get("claude_session") or {}
@@ -851,7 +932,10 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         # A killed run leaves its file behind; os.open would also keep that file's mode.
         settings_path.unlink(missing_ok=True)
         remove_on_stop(settings_path)
-        plan = plan_session(args.issue_id, worktree, threshold, time.time())
+        client, api_key = linear_access()
+        if not triage:
+            require_ready(client, args.issue_id, args.issue_identifier)
+        plan = plan_session(session_key(args.issue_id, triage), worktree, threshold, time.time())
         session_id = plan.session_id
         for running_id in filter(None, [plan.previous_id, session_id]):
             if session_process_running(running_id):
@@ -859,8 +943,8 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
 
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         login = (settings.get("github") or {}).get("login")
-        adopted = adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
-        handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"))
+        adopted = None if triage else adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
+        handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"), triage)
         # A successful run marks this snapshot as seen, so a comment that lands mid-run goes to the next run.
         comments = card_comments(args.card_json, args.task_id)
         seen_path = lock_path.with_name(COMMENTS_SEEN_NAME)
@@ -868,12 +952,14 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         own = os.environ.get("HERMES_PROFILE") or Path(os.environ.get("HERMES_HOME", "")).name
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),
-            "-p", build_prompt(args, prefix, branch, plan.resumed, adopted, handoff, unseen_comments(comments, seen, own)),
+            "-p", build_prompt(
+                args, prefix, branch, plan.resumed, adopted, handoff, unseen_comments(comments, seen, own), triage
+            ),
             "--output-format", "json",
             *turn_limit,
             "--permission-mode", "bypassPermissions",
             "--resume" if plan.resumed else "--session-id", session_id,
-            "--append-system-prompt", SYSTEM_PROMPT.format(
+            "--append-system-prompt", TRIAGE_SYSTEM_PROMPT if triage else SYSTEM_PROMPT.format(
                 push_signed=Path(__file__).resolve().with_name("push-signed"),
                 upload_image=Path(__file__).resolve().with_name("github-upload-image"),
                 wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
@@ -886,13 +972,15 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         trust_checkout(Path(repo["path"]).resolve())
         offset = plan.previous.stat().st_size if plan.resumed else 0
         try:
-            write_private(settings_path, claude_settings(transport, linear_api_key(), settings_path))
+            write_private(settings_path, claude_settings(transport, api_key, settings_path, triage))
             output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
         if output is not None:
             seen_path.write_text(json.dumps([*seen, *map(comment_key, comments)]))
-        superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login) if output is not None else None
+        superseded = None
+        if output is not None and not triage:
+            superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login)
         first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
 
     report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None, "superseded": superseded}
