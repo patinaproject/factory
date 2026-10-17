@@ -239,6 +239,7 @@ class ClaudeSessionTest(GitFixture):
             "subtype": "success",
             "num_turns": 7,
             "superseded": None,
+            "triage_documents": None,
             "result": "Opened the pull request.",
             "usage": None,
             "first_context_tokens": None,
@@ -345,6 +346,62 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.github.calls(), [])
         self.assertEqual(self.github.pull(7)["state"], "open")
         self.assertEqual(git(self.worktree, "rev-parse", "HEAD"), head)
+
+    def set_documents(self, *documents: tuple[str, str, str], error: str | None = None, timeout: bool = False) -> None:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        state["documents"] = [{"id": id, "title": title, "creator": creator} for id, title, creator in documents]
+        state.update(documents_error=error, documents_timeout=timeout)
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps(state))
+
+    def document_titles(self) -> dict:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        return {document["id"]: document["title"] for document in state["documents"]}
+
+    def test_a_triage_run_gives_its_prefixed_documents_their_exact_titles(self) -> None:
+        self.set_documents(("d1", "ABC-123 Triage notes", "app-user"), ("d2", "ABC-123 Agent brief", "app-user"))
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {
+            "renamed": ["ABC-123 Triage notes", "ABC-123 Agent brief"], "missing": [],
+        }))
+        self.assertEqual(self.document_titles(), {"d1": "Triage notes", "d2": "Agent brief"})
+
+    def test_a_triage_run_leaves_a_persons_document_and_one_beside_an_exact_title(self) -> None:
+        self.set_documents(
+            ("d1", "ABC-123 Triage notes", "person"),
+            ("d2", "Agent brief", "app-user"),
+            ("d3", "ABC-123 Agent brief", "app-user"),
+        )
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {"renamed": [], "missing": []}))
+        self.assertEqual(self.document_titles(), {
+            "d1": "ABC-123 Triage notes", "d2": "Agent brief", "d3": "ABC-123 Agent brief",
+        })
+
+    def test_a_triage_run_reports_missing_documents(self) -> None:
+        self.set_documents()
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {
+            "renamed": [], "missing": ["Triage notes", "Agent brief"],
+        }))
+
+    def test_a_triage_run_reports_a_failed_document_check_without_failing(self) -> None:
+        for options, reason in (({"error": "Entity not found"}, "Entity not found"),
+                                ({"timeout": True}, "The read operation timed out")):
+            with self.subTest(reason=reason):
+                self.set_documents(**options)
+
+                status, report = self.run_session(env=TRIAGE_ENV)
+
+                self.assertEqual((status, report["triage_documents"]), (0, {
+                    "error": f"checking the triage Documents failed: {reason}",
+                }))
+                self.assertEqual(report["result"], "Opened the pull request.")
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(
