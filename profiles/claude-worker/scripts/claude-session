@@ -793,6 +793,8 @@ def build_prompt(
         return message or RESUME_PROMPT
     if triage:
         entry = TRIAGE_ENTRY.format(issue_identifier=args.issue_identifier, issue_url=args.issue_url, repo=args.repo)
+        if prefix:
+            entry = f"{prefix} {entry}"
         return "\n\n".join(filter(None, [entry, handoff, message]))
     entry = DEFAULT_WORKER_ENTRY.format(
         issue_id=args.issue_id,
