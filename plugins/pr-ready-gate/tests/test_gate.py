@@ -192,6 +192,16 @@ class HookScopeTest(unittest.TestCase):
         result = call_hook(shell, ctx=FakeCtx(profile="other-worker", gated=["other-worker"]))
         self.assertEqual(result["action"], "block")
 
+    def test_a_triage_board_card_is_not_gated(self):
+        shell = FakeShell(pr={**CLEAN, "isDraft": True})
+        self.assertIsNone(call_hook(shell, env={**WORKER_ENV, "HERMES_KANBAN_BOARD": "triage"}))
+        self.assertEqual(shell.calls, [])
+
+    def test_an_implementation_board_card_is_gated(self):
+        shell = FakeShell(pr={**CLEAN, "isDraft": True})
+        result = call_hook(shell, env={**WORKER_ENV, "HERMES_KANBAN_BOARD": "default"})
+        self.assertEqual(result["action"], "block")
+
     def test_profile_falls_back_to_hermes_profile_env(self):
         shell = FakeShell(pr={**CLEAN, "isDraft": True})
         result = call_hook(shell, env={**WORKER_ENV, "HERMES_PROFILE": "claude-worker"}, ctx=FakeCtx(profile=""))

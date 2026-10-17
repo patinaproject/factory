@@ -35,6 +35,10 @@ print(json.dumps({{{RATE_LIMIT_KEY!r}: 600, {ROUTE_KEY!r}: {ROUTE!r}}}))
 
 FAKE_HERMES = """#!/usr/bin/env python3
 import json, os, sys
+if sys.argv[1:4] == ["kanban", "boards", "list"]:
+    boards = os.path.join(os.environ["HERMES_HOME"], "installed-boards.json")
+    print(open(boards).read() if os.path.exists(boards) else "[]")
+    sys.exit()
 key = sys.argv[3]
 config = os.path.join(os.environ["HERMES_HOME"], "installed-config.json")
 if os.path.exists(config) and key in json.load(open(config)):
@@ -58,7 +62,9 @@ if target not in states:
 print("ai.example = {\\n\\tactive count = 1\\n\\tstate = " + states[target] + "\\n}")
 """
 
-SETTINGS = {"app_user_id": "u1", "repositories": []}
+SETTINGS = {"app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}}
+MAX_RUNNING_KEY = "plugins.entries.linear-agent-session.settings.triage.max_running"
+BOARDS = [{"slug": "default", "default_workdir": None}, {"slug": "triage", "default_workdir": None}]
 ROOT_CONFIG = {
     "model.provider": "claude-subscription-directsdk-experimental",
     "model.default": "opus",
@@ -66,6 +72,7 @@ ROOT_CONFIG = {
     "platforms.webhook.extra.host": "127.0.0.1",
     "platforms.webhook.extra.port": 8644,
     "plugins.entries.linear-agent-session.settings": SETTINGS,
+    MAX_RUNNING_KEY: 2,
     "kanban.max_in_progress": 4,
     "kanban.review_dispatch": False,
     "kanban.auto_decompose": False,
@@ -76,7 +83,7 @@ ROOT_CONFIG = {
 }
 WORKER_CONFIG = {
     **{key: ROOT_CONFIG[key] for key in (
-        "model.provider", "model.default", "plugins.entries.linear-agent-session.settings",
+        "model.provider", "model.default", "plugins.entries.linear-agent-session.settings", MAX_RUNNING_KEY,
     )},
     "terminal.timeout": 400,
 }
@@ -95,6 +102,7 @@ WORKER_JOBS = [
     cron_job("refresh-checkouts", 60),
     cron_job("refresh-owned-refs", 1),
     cron_job("reopen-conflicts", 5),
+    cron_job("dispatch-triage", 1),
 ]
 ALERT_SCRIPT = "check-install-alert"
 ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}]
@@ -190,6 +198,8 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C0123\n")
         self.owned_refs = self.root / "owned-refs.json"
         self.install(self.root, "owned-refs.json", f'["goodyear/abc-1-fix", "{LINEAR_ID}"]\n')
+        self.install(self.root, "triage-refs.json", "[]\n")
+        self.boards(BOARDS)
 
         self.issuer = self.tmp / "issuer"
         self.discovery(["authorization_code_with_pkce", "refresh_tokens"])
@@ -209,6 +219,9 @@ class CheckInstallTest(unittest.TestCase):
     def install(self, home: Path, path: str, text: str) -> None:
         (home / path).parent.mkdir(parents=True, exist_ok=True)
         (home / path).write_text(text)
+
+    def boards(self, boards: list) -> None:
+        self.install(self.root, "installed-boards.json", json.dumps(boards))
 
     def config(self, home: Path, config: dict) -> None:
         self.install(home, "installed-config.json", json.dumps(config))
@@ -584,7 +597,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (0, ""))
 
     def test_missing_and_duplicated_cron_jobs(self) -> None:
-        self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2], WORKER_JOBS[3]])
+        self.cron(self.worker, [job for job in WORKER_JOBS if job["name"] != "refresh-checkouts"])
         self.cron(self.root, [*ROOT_JOBS, *ROOT_JOBS])
 
         self.assertEqual(
@@ -599,6 +612,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("refresh-checkouts", 15, no_agent=False),
             cron_job("refresh-owned-refs", 1),
             cron_job("reopen-conflicts", 5),
+            cron_job("dispatch-triage", 1),
         ])
         self.cron(self.root, [{**cron_job("check-install", 60, "local"), "script": ALERT_SCRIPT}])
 
@@ -697,6 +711,64 @@ class CheckInstallTest(unittest.TestCase):
         self.owned_refs.write_text("[]\n")
 
         self.assertEqual(self.check(), (0, ""))
+
+    def test_missing_or_stale_triage_refs_file(self) -> None:
+        triage_refs = self.root / "triage-refs.json"
+        stale = time.time() - 600
+        os.utime(triage_refs, (stale, stale))
+
+        self.assertEqual(
+            self.check(),
+            (1, f"owned refs {triage_refs}: is 10 minutes old; the refresh-owned-refs cron job is not running (part 12)\n"),
+        )
+        triage_refs.unlink()
+
+        self.assertEqual(
+            self.check(),
+            (1, f"owned refs {triage_refs}: is missing; create or run the refresh-owned-refs cron job (part 12)\n"),
+        )
+
+    def test_missing_triage_board(self) -> None:
+        self.boards(BOARDS[:1])
+
+        self.assertEqual(self.check(), (1, f"kanban board triage: is missing in {self.root} (part 10)\n"))
+
+    def test_triage_board_must_anchor_worktrees_at_the_default_repository(self) -> None:
+        checkout = self.tmp / "app"
+        git(self.tmp, "init", "-q", str(checkout))
+        git(checkout, "commit", "-q", "--allow-empty", "-m", "init")
+        git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        settings = {**SETTINGS, "repositories": [{"full_name": "org/app", "path": str(checkout), "routing": "default"}]}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+
+        self.assertEqual(self.check(), (1, f"kanban board triage: default_workdir is not {checkout} (part 10)\n"))
+        self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_triage_cap_that_is_unset_or_not_positive(self) -> None:
+        for value in (None, 0, -1, "2", True):
+            with self.subTest(value=value):
+                root = {k: v for k, v in ROOT_CONFIG.items() if k != MAX_RUNNING_KEY}
+                worker = {k: v for k, v in WORKER_CONFIG.items() if k != MAX_RUNNING_KEY}
+                if value is not None:
+                    root[MAX_RUNNING_KEY] = worker[MAX_RUNNING_KEY] = value
+                self.config(self.root, root)
+                self.config(self.worker, worker)
+
+                self.assertEqual(self.check(), (1, "".join(
+                    f"config {MAX_RUNNING_KEY} in {home}: is not a positive limit on running triage cards (part 10)\n"
+                    for home in (self.root, self.worker)
+                )))
+
+    def test_triage_cap_that_differs_between_homes(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, MAX_RUNNING_KEY: 3})
+
+        self.assertEqual(self.check(), (1, (
+            f"config {MAX_RUNNING_KEY}: differs between {self.root} and {self.worker} (part 10)\n"
+        )))
 
     def test_stale_owned_refs_file(self) -> None:
         stale = time.time() - 600
