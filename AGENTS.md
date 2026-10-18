@@ -28,7 +28,9 @@ templates and examples.
 GitHub Issues are the canonical tracker for this public repository. Linear
 receives issues through one-way GitHub-to-Linear intake for team visibility
 and is not authoritative. Synced property updates are bidirectional, so do not
-edit or close public-repository issues in Linear. Do not add committed design
+edit or close public-repository issues in Linear. The one exception is the
+delegate: delegating the Linear copy to the factory's agent starts a card (see
+`docs/agents/issue-tracker.md`). Do not add committed design
 or plan artifacts for routine issue work; put durable context on the GitHub
 issue or in normal docs when it is broadly useful beyond one issue.
 
@@ -164,6 +166,10 @@ rule that only docs enforce is a candidate for a script, check, or test.
   `.claude/skills/**` overlays.
 - `pnpm clean`: remove generated dependencies and temporary install files
   (`node_modules`, `.skills-install.lock*`); never prunes committed skill overlays.
+- `pnpm test`: run every component's Python tests from the repository root.
+  `scripts/test.sh` runs `python3 -m unittest discover` in each `tests`
+  directory under `plugins/`, `profiles/`, `skills/`, and `templates/`, with
+  the component as the top-level directory.
 - `pnpm lint:md`: lint all Markdown.
 - `pnpm exec commitlint --edit <file>`: check a commit message.
 

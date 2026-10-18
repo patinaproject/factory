@@ -1170,6 +1170,22 @@ shell outside Hermes, and run the forged lines again.
 **External checks.** Run the checks at the end of
 [`references/cloudflare-sst.md`](references/cloudflare-sst.md).
 
+**Confirm a delegation became a card.** Cards live in the worker home, so
+list them with that home as `HERMES_HOME`. Replace `PAT-123` with the issue's
+identifier:
+
+```sh
+HERMES_HOME=<worker> hermes kanban list --json 2>/dev/null \
+  | python3 -c 'import json, sys; [print(t["id"], t["status"], t["title"]) for t in json.load(sys.stdin) if t["title"].startswith(sys.argv[1] + ":")]' PAT-123
+```
+
+Each line is one card: its ID, its status, such as `ready`, `running`,
+`review`, or `blocked`, and its title. No line means no card exists yet. Wait
+a minute and run it again, then read the gateway log for the delivery. An
+archived card appears only with `--archived`. The command's secret helper
+writes a status line to standard error, so the command discards it to keep
+the JSON clean.
+
 **End-to-end checks.** Use a test issue in the operator's Linear workspace for
 each check. Report each result.
 
