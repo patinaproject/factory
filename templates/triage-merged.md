@@ -47,8 +47,9 @@ saying the pull request merged. Set `external_urls` to one link labeled
 `gh pr view '<pull request URL>' --json headRefOid` and
 `hermes kanban show <task id> --json`, and read the newest event whose `kind`
 is `pr_acceptance`. If its payload's `pr_url` is the pull request URL, its
-`head_sha` is that `headRefOid`, and an entry in its `checks` has a
-`classification` other than `success` or `pending`, finish the card as
+`head_sha` is that `headRefOid`, and either an entry in its `checks` has a
+`classification` other than `success` or `pending`, or its own
+`classification` is `missing` and its `checks` is empty, finish the card as
 "A refused merge" says. Otherwise comment
 the refusal with the pull request URL and stop. Never assign the card after
 `specify` succeeded.
@@ -60,7 +61,11 @@ retry. Hermes keeps the latest run of each check suite, not of each check name,
 so it can count a failed run that a newer passing run of the same check
 replaced. Find out which case this is before you write anything.
 
-The refused checks are the `name` of each entry in that event's `checks` whose
+When the event's own `classification` is `missing` and its `checks` is empty,
+the base branch has no required checks for Hermes to evaluate. This is the
+no-required-checks case. Skip the check lookup below and go to step 1.
+
+Otherwise the refused checks are the `name` of each entry in that event's `checks` whose
 `classification` is not `success` or `pending`. Run
 `<<merged_checks>> '<pull request URL>' '<name>' ...` with each distinct refused
 name, quoted. It reads the pull request's newest run of each check and prints
@@ -78,6 +83,8 @@ the event's `head_sha`, comment the refusal with the pull request URL and stop.
    `Merge refused by Hermes: required checks failed: <names>.`. For superseded
    runs only, comment
    `Merge refused by Hermes: Hermes counted failed runs that newer passing runs replaced: <names>.`
+   For no required checks, comment
+   `Merge refused by Hermes: the base branch has no required checks.`
 2. Read `linear_issue_id` from the card body and read the issue with
    `linear_issue`. Only a read that returns a `stateType` of `completed`
    archives the card: run `<<archive_card>> <task id>` and stop. If the read
@@ -95,6 +102,8 @@ the event's `head_sha`, comment the refusal with the pull request URL and stop.
      `Pull request <repository>#<number> merged, but required checks failed: <names>. Is the work done? If it is, mark the Linear issue Done, and the card is archived.`
    - Superseded runs only:
      `Pull request <repository>#<number> merged and its required checks passed on their newest runs. Hermes counted failed runs that newer passing runs replaced: <names>, so it cannot finish the card. Mark the Linear issue Done, and the card is archived.`
+   - No required checks:
+     `Pull request <repository>#<number> merged, but its base branch has no required checks, so Hermes cannot finish the card. Is the work done? If it is, mark the Linear issue Done, and the card is archived.`
 
    Act on the status from the last `hermes kanban show`:
    - `ready`: run `hermes kanban block <task id> '<reason>' --kind needs_input`.

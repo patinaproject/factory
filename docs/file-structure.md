@@ -20,20 +20,21 @@
 ├── plugins/
 │   ├── factory-uploads/       # Gateway platform plugin: Unix-socket broker that uploads evidence images, upload_token.py
 │   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, block and triage-park report hook, activity, issue, and session tools, cli.py
-│   └── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
+│   ├── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
+│   └── team/                  # Registers the skills in a configured directory as team:<name> skills
 ├── profiles/
 │   └── claude-worker/         # Kanban worker profile distribution
 │       ├── SOUL.md            # Worker instructions
 │       ├── config.yaml        # Toolsets, skills, plugins, and placeholder settings
 │       ├── distribution.yaml  # Profile distribution manifest
-│       └── scripts/           # claude-session, card_branch.py, archive_card.py, github-upload-image, guard-ci-wait, wait-for-checks, push-signed, worker-secrets, check-install, and the refresh cron scripts
+│       └── scripts/           # claude-session, card_branch.py, factory_source.py, archive_card.py, github-upload-image, guard-ci-wait, wait-for-checks, push-signed, worker-secrets, check-install, and the refresh cron scripts
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
 │   └── ...                    # Repository maintenance scripts
 ├── skills/
 │   └── setup-factory/         # Agent runbook that sets up a factory on a machine
 │       ├── SKILL.md
-│       ├── scripts/           # check-host-exposure, linear-mcp-headers, pstack-include, and the factory-secrets template
+│       ├── scripts/           # check-host-exposure, check-settings, linear-mcp-headers, pstack-include, and the factory-secrets template
 │       └── references/        # Cloudflare and SST, Linear, GitHub, Slack, Claude transport, Infisical, 1Password, agent instructions, pstack model sheet template
 ├── templates/
 │   ├── render.py              # Builds the webhook routes and rate limit from settings

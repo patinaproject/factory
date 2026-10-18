@@ -20,7 +20,7 @@ The machinery install is non-interactive and idempotent.
 idempotency and no-clobber contract. Run it rather than editing the target files
 by hand. It copies managed hook and agent files on every run, upserts one
 Engineering `SessionStart` entry while preserving unrelated hooks, and removes
-the old Claude mandate block. Re-running refreshes managed files without
+the legacy mandate blocks. Re-running refreshes managed files without
 duplicating configuration.
 
 The installer first checks that the sibling `setup-pstack` skill and the
@@ -52,27 +52,32 @@ choose the legacy instructions file whose managed block should be removed.
 
 ### Codex
 
-Codex has no `SessionStart` hook and no subagent registry. There the default-on
-trigger is the same mandate block in the repo's `AGENTS.md`, which Codex reads
-per project, and delegates route through the spawn-prompt convention in the
-patina-mode `references/codex-tools.md` (dispatch a `spawn_agent` told to read
-the `patina-mode` skill, or `agents/comment-sicko.md`, first). Subagent dispatch
-also needs the `multi_agent` feature. Add `--codex` to install both:
+The Engineering plugin's Codex `SessionStart` hook, registered in
+`.codex-plugin/plugin.json`, delivers the mandate on Codex. Codex asks the user
+to trust plugin hooks through `/hooks` before it runs them. This installer
+writes no mandate block to `AGENTS.md`, so Codex never receives the mandate
+twice. A skills-only Codex install carries no plugin hook, so there the user
+requests `patina-mode` explicitly. Codex has no subagent registry, so delegates
+route through the spawn-prompt convention in the patina-mode
+`references/codex-tools.md` (dispatch a `spawn_agent` told to read the
+`patina-mode` skill, or `agents/comment-sicko.md`, first). Subagent dispatch
+also needs the `multi_agent` feature. Add `--codex` to enable it:
 
 ```bash
 bash "<this-skill>/scripts/install-machinery.sh" --codex
 ```
 
-That upserts the mandate block into `<repo>/AGENTS.md` and enables `multi_agent`
-under `[features]` in `<repo>/.codex/config.toml`, both idempotently. When
-`CLAUDE.md` is a symlink to `AGENTS.md`, Claude sees the existing managed block
-through the link and the installed hook suppresses duplicate output; Codex
-still reads the same block. Writing the repo-scoped config rather than the
-user's global `~/.codex/config.toml` keeps the machinery committed and shared
-across contributors. Codex honors a repo-scoped
-`.codex/config.toml` only for a project the user has marked trusted, so the flag
-takes effect after Codex's one-time trust prompt. Override the paths with
-`--codex-agents <file>` and `--codex-config <file>`.
+That enables `multi_agent` under `[features]` in `<repo>/.codex/config.toml`,
+idempotently. Writing the repo-scoped config rather than the user's global
+`~/.codex/config.toml` keeps the machinery committed and shared across
+contributors. Codex honors a repo-scoped `.codex/config.toml` only for a project
+the user has marked trusted, so the flag takes effect after Codex's one-time
+trust prompt. Override the path with `--codex-config <file>`.
+
+Every run, with or without `--codex`, removes the managed mandate block that an
+earlier install wrote to `CLAUDE.md` or `AGENTS.md`, and leaves all other
+content in those files untouched. `--codex-agents <file>` names a different
+`AGENTS.md` to clean. A block without its closing marker stays in place.
 
 Skills load natively by name on Codex. The `/command` stubs under
 `.codex-plugin/prompts/*` come from the pstack-claude base; the installer does
@@ -86,8 +91,9 @@ confirmation, and writes.
 
 ## Confirm
 
-Tell the user what the machinery install wrote: the mandate block, the
-Engineering agents, and on Codex the `multi_agent` flag. Relay `setup-pstack`'s
+Tell the user what the machinery install wrote: the session hook, the
+Engineering agents, any legacy mandate block it removed, and on Codex the
+`multi_agent` flag. Relay `setup-pstack`'s
 final report. Report setup-engineering complete only when `setup-pstack`
 succeeds. Otherwise, report it incomplete and include the reason
 `setup-pstack` reported when it stopped.

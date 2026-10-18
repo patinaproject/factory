@@ -14,13 +14,15 @@ import time
 import uuid
 from pathlib import Path
 
-from tests.support import BOT_LOGIN, SCRIPTS, FakeGithub, GitFixture, git
+from tests.support import BOT_LOGIN, REPO as FACTORY, SCRIPTS, FakeGithub, GitFixture, git
 
 # A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
 ISSUE_ID = str(uuid.uuid4())
 SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}"))
 NEXT_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}:1"))
 THIRD_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}:2"))
+TRIAGE_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-triage:{ISSUE_ID}"))
+TRIAGE_ENV = {"HERMES_KANBAN_BOARD": "triage"}
 HOUR = 3600
 SYSTEM_PROMPT = (
     f"Publish commits only by running {(SCRIPTS / 'push-signed').resolve()} from the worktree, never `git push`. "
@@ -65,7 +67,16 @@ DEFAULT_ENTRY = (
     "on branch abc-123-fix. First start the issue through this repository's own issue-start workflow, "
     "which moves it to In Progress. Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
+TRIAGE_ENTRY = (
+    "Triage Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) for example-org/example-repo. "
+    "Work out what it asks, check that its claim holds, and settle what you can before you ask people. "
+    "Do not implement it."
+)
 TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
+LINEAR_URL = "https://linear.app/example/issue/ABC-123"
+CARD_BODY = f"```text\nlinear_issue_identifier: ABC-123\n```\ngithub_issue_url: https://github.com/{REPO}/issues/12"
+CLOSING_LINE = f"Closes #12, closes {LINEAR_URL}"
+TAKEOVER_BODY = f"Adds the thing.\n\n{CLOSING_LINE}"
 # What Hermes leaves in a dispatcher worker's subprocess: it scrubs HERMES_KANBAN_TASK, RUN_ID and CLAIM_LOCK.
 HERMES_CHILD_ENV = {"HERMES_DELEGATED_CHILD_CONTEXT": "1", "HERMES_KANBAN_DB": "/nonexistent/kanban.db"}
 SCRUBBED_BY_HERMES = {"HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_CLAIM_LOCK"}
@@ -122,14 +133,20 @@ class ClaudeSessionTest(GitFixture):
         self.nvm_dir = self.tmp / "nvm"
         self.hermes_home = self.tmp / "hermes" / "profiles" / "claude-worker"
         self.install_linear_plugin(self.hermes_home)
+        self.install_from(FACTORY)
         self.github = FakeGithub(self.tmp, REPO)
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
         self.card = self.tmp / "card.json"
         self.set_comments()
 
-    def set_comments(self, *comments: tuple[int, str, str]) -> None:
-        self.card.write_text(json.dumps({"comments": [
+    def install_from(self, checkout: Path) -> None:
+        (self.hermes_home / "distribution.yaml").write_text(
+            f"name: claude-worker\nsource: {checkout}/profiles/claude-worker\n"
+        )
+
+    def set_comments(self, *comments: tuple[int, str, str], body: str = CARD_BODY) -> None:
+        self.card.write_text(json.dumps({"task": {"body": body}, "comments": [
             {"created_at": at, "author": author, "body": body} for at, author, body in comments
         ]}))
 
@@ -159,7 +176,7 @@ class ClaudeSessionTest(GitFixture):
             *([] if omit_task_id else ["--task-id", TASK_ID]),
             "--issue-id", ISSUE_ID,
             "--issue-identifier", "ABC-123",
-            "--issue-url", "https://linear.app/example/issue/ABC-123",
+            "--issue-url", LINEAR_URL,
             "--repo", REPO,
             "--settings-json", str(self.settings),
             "--card-json", str(self.card),
@@ -226,6 +243,8 @@ class ClaudeSessionTest(GitFixture):
             "subtype": "success",
             "num_turns": 7,
             "superseded": None,
+            "issue_links": {"action": "waiting", "reason": f"no open pull request by {BOT_LOGIN} on abc-123-fix"},
+            "triage_documents": None,
             "result": "Opened the pull request.",
             "usage": None,
             "first_context_tokens": None,
@@ -246,6 +265,187 @@ class ClaudeSessionTest(GitFixture):
     def prompt(self) -> str:
         argv = self.claude_call()["argv"]
         return argv[argv.index("-p") + 1]
+
+    def set_issue_labels(self, *labels: str) -> None:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, "labels": list(labels)}))
+
+    def test_an_implementation_card_without_ready_for_agent_is_refused_before_claude_starts(self) -> None:
+        for labels in ((), ("bug", "needs-triage"), ("ready-for-human",)):
+            with self.subTest(labels=labels):
+                self.set_issue_labels(*labels)
+                status, report = self.run_session(env={"HERMES_KANBAN_BOARD": "default"})
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": (
+                    "Linear issue ABC-123 does not carry ready-for-agent, so its implementation card does not start; "
+                    "it starts once the issue passes the readiness check"
+                )})
+                self.assertFalse(self.log.exists())
+                self.assertEqual(git(self.worktree, "rev-parse", "--abbrev-ref", "HEAD"), "abc-123-fix")
+
+    def test_an_implementation_card_with_ready_for_agent_starts(self) -> None:
+        self.set_issue_labels("bug", "ready-for-agent")
+
+        status, _ = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertTrue(self.log.exists())
+
+    def test_a_triage_card_gets_the_triage_rules_and_none_of_the_implementation_rules(self) -> None:
+        self.set_issue_labels("needs-triage")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["session_id"], report["adopted"], report["superseded"]),
+                         (0, TRIAGE_SESSION_ID, None, None))
+        argv = self.claude_call()["argv"]
+        system = argv[argv.index("--append-system-prompt") + 1]
+        for implementation_rule in ("Publish commits only", "A finished check never runs again",
+                                    "Every pull request description shows its proof", "To wait for CI"):
+            self.assertNotIn(implementation_rule, system)
+        playbook = FACTORY / ".agents/skills/patina-mode/playbooks/triage.md"
+        for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token",
+                                f"patina-mode's triage playbook at `{playbook}`"):
+            self.assertIn(triage_contract, system)
+        self.assertTrue(playbook.is_absolute() and playbook.is_file())
+        for retired_skill in ("`triage` skill", "`grilling`"):
+            self.assertNotIn(retired_skill, system)
+        self.assertTrue(self.prompt().startswith(
+            "Triage Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) for example-org/example-repo."
+        ))
+        self.assertNotIn("pull request", self.prompt())
+
+    def test_a_triage_outcome_names_the_activity_that_reports_it(self) -> None:
+        cases = (
+            ("Triage outcome: ready-for-agent\nReproduced.", "app-user", "thought"),
+            ("Triage outcome: ready-for-agent\nReproduced.", None, "response"),
+            ("Triage outcome: ready-for-agent", "another-agent", "response"),
+            ("Triage outcome: ready-for-human\nNeeds a design call.", "app-user", "response"),
+            ("Triage outcome: `Ready-for-agent`.", "app-user", "thought"),
+            ("Triage outcome: `ready-for-agent`", None, "response"),
+            ("Triage outcome: wontfix", None, "response"),
+            ("Triage outcome: done", "app-user", None),
+            ("Needs input:\nWhich version?", "app-user", None),
+        )
+        for result, delegate, activity in cases:
+            with self.subTest(result=result, delegate=delegate):
+                self.set_linear_issue(delegate=delegate)
+                self.configure_fake_claude(result=result)
+
+                status, report = self.run_session(env=TRIAGE_ENV)
+
+                self.assertEqual((status, report["result"], report["activity"]), (0, result, activity))
+
+    def test_a_triage_outcome_keeps_the_session_open_when_linear_cannot_say_who_is_delegated(self) -> None:
+        self.set_linear_issue(hidden=True)
+        self.configure_fake_claude(result="Triage outcome: ready-for-agent")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["result"], report["activity"]), (0, "Triage outcome: ready-for-agent", "thought"))
+
+    def set_linear_issue(self, **fields) -> None:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, **fields}))
+
+    def test_an_implementation_run_names_no_activity(self) -> None:
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertNotIn("activity", report)
+
+    def test_a_triage_card_refuses_when_the_factory_checkout_has_no_playbook(self) -> None:
+        self.install_from(self.main)
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        playbook = self.main / ".agents/skills/patina-mode/playbooks/triage.md"
+        self.assertEqual((status, report), (2, {
+            "error": f"{playbook} does not exist, so a triage card cannot follow the triage playbook"
+        }))
+        self.assertFalse(self.log.exists())
+
+    def test_a_triage_card_settings_forbid_publishing(self) -> None:
+        self.run_session(env=TRIAGE_ENV)
+
+        push_signed = (SCRIPTS / "push-signed").resolve()
+        self.assertEqual(self.claude_call()["settings"]["content"]["permissions"], {"deny": [
+            "Bash(git push:*)", f"Bash(python3 {push_signed}:*)", f"Bash({push_signed}:*)", "Bash(gh pr create:*)",
+        ]})
+
+    def test_an_implementation_card_settings_deny_nothing(self) -> None:
+        self.run_session()
+
+        self.assertNotIn("permissions", self.claude_call()["settings"]["content"])
+
+    def test_a_triage_card_never_adopts_a_branch_or_closes_a_pull_request(self) -> None:
+        self.github.add_pull(7, "abc-123-fix", author="person")
+        self.github.add_pull(8, "abc-123-fix", author=BOT_LOGIN)
+        head = git(self.worktree, "rev-parse", "HEAD")
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR, env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["adopted"], report["superseded"]), (0, None, None))
+        self.assertEqual(self.github.calls(), [])
+        self.assertEqual(self.github.pull(7)["state"], "open")
+        self.assertEqual(git(self.worktree, "rev-parse", "HEAD"), head)
+
+    def set_documents(self, *documents: tuple[str, str, str], error: str | None = None, timeout: bool = False) -> None:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        state["documents"] = [{"id": id, "title": title, "creator": creator} for id, title, creator in documents]
+        state.update(documents_error=error, documents_timeout=timeout)
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps(state))
+
+    def document_titles(self) -> dict:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        return {document["id"]: document["title"] for document in state["documents"]}
+
+    def test_a_triage_run_gives_its_prefixed_documents_their_exact_titles(self) -> None:
+        self.set_documents(("d1", "ABC-123 Triage notes", "app-user"), ("d2", "ABC-123 Agent brief", "app-user"))
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {
+            "renamed": ["ABC-123 Triage notes", "ABC-123 Agent brief"], "missing": [],
+        }))
+        self.assertEqual(self.document_titles(), {"d1": "Triage notes", "d2": "Agent brief"})
+
+    def test_a_triage_run_leaves_a_persons_document_and_one_beside_an_exact_title(self) -> None:
+        self.set_documents(
+            ("d1", "ABC-123 Triage notes", "person"),
+            ("d2", "Agent brief", "app-user"),
+            ("d3", "ABC-123 Agent brief", "app-user"),
+        )
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {"renamed": [], "missing": []}))
+        self.assertEqual(self.document_titles(), {
+            "d1": "ABC-123 Triage notes", "d2": "Agent brief", "d3": "ABC-123 Agent brief",
+        })
+
+    def test_a_triage_run_reports_missing_documents(self) -> None:
+        self.set_documents()
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {
+            "renamed": [], "missing": ["Triage notes", "Agent brief"],
+        }))
+
+    def test_a_triage_run_reports_a_failed_document_check_without_failing(self) -> None:
+        for options, reason in (({"error": "Entity not found"}, "Entity not found"),
+                                ({"timeout": True}, "The read operation timed out")):
+            with self.subTest(reason=reason):
+                self.set_documents(**options)
+
+                status, report = self.run_session(env=TRIAGE_ENV)
+
+                self.assertEqual((status, report["triage_documents"]), (0, {
+                    "error": f"checking the triage Documents failed: {reason}",
+                }))
+                self.assertEqual(report["result"], "Opened the pull request.")
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(
@@ -324,7 +524,7 @@ class ClaudeSessionTest(GitFixture):
         hermes = bin_dir / "hermes"
         hermes.write_text(
             f"#!/bin/sh\necho \"$@\" > {argv_log}\n"
-            "echo '{\"comments\": [{\"created_at\": 1, \"author\": \"operator\", \"body\": \"From the card.\"}]}'\n"
+            "echo '{\"task\": {\"body\": \"\"}, \"comments\": [{\"created_at\": 1, \"author\": \"operator\", \"body\": \"From the card.\"}]}'\n"
         )
         hermes.chmod(0o755)
         command, env = self.session_command()
@@ -526,6 +726,29 @@ class ClaudeSessionTest(GitFixture):
         self.run_session()
 
         self.assertEqual(self.claude_call()["argv"][1], f"/patina-mode {DEFAULT_ENTRY}")
+
+    def test_worker_entry_prefixes_the_triage_entry(self) -> None:
+        self.repository["worker_entry"] = "/patina-mode"
+        self.settings = self.write_settings([self.repository])
+
+        self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual(self.prompt(), f"/patina-mode {TRIAGE_ENTRY}")
+
+    def test_triage_entry_without_worker_entry_is_unchanged(self) -> None:
+        self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual(self.prompt(), TRIAGE_ENTRY)
+
+    def test_a_resumed_triage_session_gets_no_worker_entry(self) -> None:
+        self.repository["worker_entry"] = "/patina-mode"
+        self.settings = self.write_settings([self.repository])
+        self.write_transcript(session_id=TRIAGE_SESSION_ID, idle=HOUR, context=(10, 60_000, 39_989))
+
+        _, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((report["session_id"], report["resumed"]), (TRIAGE_SESSION_ID, True))
+        self.assertEqual(self.prompt(), "Continue.")
 
     def test_worker_entry_with_fields_is_refused_before_claude_starts(self) -> None:
         entry = "/patina-mode Work Linear issue {issue_identifier} on branch {branch}."
@@ -1272,6 +1495,30 @@ class ClaudeSessionTest(GitFixture):
             status, report, f"gh api repos/{REPO}/branches/abc-123-fix failed: gh: Not Found (HTTP 404)", start
         )
 
+    def test_a_github_server_error_that_persists_is_refused_as_transient(self) -> None:
+        self.publish_branch(BOT_LOGIN)
+        self.github.fail_next(*["gh: Server Error (HTTP 500)"] * 3)
+        start = self.head()
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {
+            "error": f"gh api repos/{REPO}/branches/abc-123-fix failed: gh: Server Error (HTTP 500)",
+            "transient": True,
+        })
+        self.assertEqual(self.head(), start)
+        self.assertFalse(self.log.exists())
+
+    def test_a_github_server_error_that_clears_adopts_the_branch(self) -> None:
+        remote = self.publish_branch(BOT_LOGIN)
+        self.github.fail_next("gh: Server Error (HTTP 500)")
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(report["adopted"], {"source": "remote_branch", "ref": "abc-123-fix", "head": remote})
+
     def test_a_missing_gh_is_refused_and_never_adopts(self) -> None:
         self.publish_branch(BOT_LOGIN)
         start = self.head()
@@ -1380,7 +1627,7 @@ class ClaudeSessionTest(GitFixture):
         self.push_upstream_commit("pull", "refs/pull/7/head")
         self.github.create_branch("person-branch", "person")
         self.github.add_pull(7, "person-branch", **person)
-        self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body="Adds the thing.")
+        self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body=TAKEOVER_BODY)
         return f"https://github.com/{REPO}/pull/9"
 
     def test_takeover_pull_request_is_commented_on_and_closed_once_and_the_replacement_names_it(self) -> None:
@@ -1395,17 +1642,17 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.github.pull(7)["state"], "closed")
         self.assertEqual(len(self.github.comments(7)), 1)
         self.assertIn(replacement, self.github.comments(7)[0])
-        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.\n\nSupersedes #7.")
+        self.assertEqual(self.github.pull(9)["body"], f"{TAKEOVER_BODY}\n\nSupersedes #7.")
         self.assertEqual(self.github.pull(9)["state"], "open")
 
     def test_supersedes_line_the_worker_already_wrote_is_not_repeated(self) -> None:
         self.takeover_pair()
-        self.github.state["pulls"]["9"]["body"] = "Supersedes #7 by Ada."
+        self.github.state["pulls"]["9"]["body"] = f"Supersedes #7 by Ada.\n\n{CLOSING_LINE}"
         self.github.save()
 
         self.run_session("--takeover-pr", TAKEOVER_PR)
 
-        self.assertEqual(self.github.pull(9)["body"], "Supersedes #7 by Ada.")
+        self.assertEqual(self.github.pull(9)["body"], f"Supersedes #7 by Ada.\n\n{CLOSING_LINE}")
         self.assertEqual(self.github.pull(7)["state"], "closed")
 
     def test_takeover_pull_request_whose_head_the_factory_contains_is_closed_whatever_its_pushes(self) -> None:
@@ -1434,7 +1681,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["superseded"]["reason"], "person pushed after takeover")
         self.assertEqual(self.github.pull(7)["state"], "open")
         self.assertEqual(self.github.comments(7), [])
-        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+        self.assertEqual(self.github.pull(9)["body"], TAKEOVER_BODY)
 
     def test_person_who_pushed_after_the_factory_opened_keeps_an_open_pull_request(self) -> None:
         self.takeover_pair()
@@ -1468,7 +1715,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["superseded"]["action"], "left")
         self.assertEqual(self.github.pull(7)["state"], "open")
         self.assertEqual(self.github.comments(7), [])
-        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+        self.assertEqual(self.github.pull(9)["body"], TAKEOVER_BODY)
 
     def test_pull_request_the_app_authored_as_app_slash_form_is_never_closed(self) -> None:
         self.takeover_pair(author="app/" + BOT_LOGIN.removesuffix("[bot]"))
@@ -1484,7 +1731,7 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(report["superseded"]["action"], "left")
         self.assertEqual(self.github.comments(7), [])
-        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+        self.assertEqual(self.github.pull(9)["body"], TAKEOVER_BODY)
 
     def test_takeover_pull_request_stays_open_until_the_factory_pull_request_is_open(self) -> None:
         self.takeover_pair()
@@ -1514,7 +1761,7 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertIsNone(report["superseded"])
         self.assertEqual(self.github.pull(7)["state"], "open")
-        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+        self.assertEqual(self.github.pull(9)["body"], TAKEOVER_BODY)
 
     def test_a_failed_close_is_reported_and_does_not_fail_the_run(self) -> None:
         self.takeover_pair()
@@ -1528,6 +1775,79 @@ class ClaudeSessionTest(GitFixture):
         self.assertIn("Resource not accessible", report["superseded"]["error"])
         self.assertEqual(self.github.pull(7)["state"], "open")
         self.assertEqual(self.github.comments(7), [])
+
+    def linked_body(self, body: str, card_body: str = CARD_BODY) -> tuple[dict, str]:
+        """Run a turn with the factory's pull request #9 holding `body`; return the report's links and the new body."""
+        self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body=body)
+        self.set_comments(body=card_body)
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        return report["issue_links"], self.github.pull(9)["body"]
+
+    def test_a_pull_request_with_no_issue_reference_gains_one_closing_line_for_both_issues(self) -> None:
+        links, body = self.linked_body("Adds the thing.")
+
+        self.assertEqual(links, {"pr": f"https://github.com/{REPO}/pull/9", "action": "linked"})
+        self.assertEqual(body, f"Adds the thing.\n\n{CLOSING_LINE}")
+
+    def test_a_bare_linear_identifier_becomes_its_url_without_a_second_closing_line(self) -> None:
+        _, body = self.linked_body("Adds the thing.\n\nCloses #12\nCloses ABC-123")
+
+        self.assertEqual(body, f"Adds the thing.\n\nCloses #12\nCloses {LINEAR_URL}")
+
+    def test_a_pull_request_that_already_links_both_issues_is_unchanged(self) -> None:
+        for body in (
+            f"Adds the thing.\n\n{CLOSING_LINE}",
+            f"Fixes {REPO}#12 and resolves [ABC-123]({LINEAR_URL}/the-title-slug).",
+            f"Closes [#12](https://github.com/{REPO}/issues/12), closes {LINEAR_URL}",
+        ):
+            with self.subTest(body=body):
+                links, after = self.linked_body(body)
+
+                self.assertEqual((links["action"], after), ("unchanged", body))
+
+    def test_a_card_without_a_github_issue_gets_only_the_linear_closing_line(self) -> None:
+        _, body = self.linked_body("", card_body="linear_issue_identifier: ABC-123")
+
+        self.assertEqual(body, f"Closes {LINEAR_URL}")
+
+    def test_another_issue_number_or_identifier_does_not_count_as_linked(self) -> None:
+        _, body = self.linked_body(f"Closes #123, closes ABC-1234 and {LINEAR_URL}4")
+
+        self.assertEqual(body, f"Closes #123, closes ABC-1234 and {LINEAR_URL}4\n\n{CLOSING_LINE}")
+
+    def test_a_reference_inside_an_html_comment_does_not_count(self) -> None:
+        _, body = self.linked_body(f"Adds the thing.\n<!-- {CLOSING_LINE} -->")
+
+        self.assertEqual(body, f"Adds the thing.\n<!-- {CLOSING_LINE} -->\n\n{CLOSING_LINE}")
+
+    def test_a_takeover_body_gets_both_the_supersedes_line_and_the_closing_line(self) -> None:
+        self.takeover_pair()
+        self.github.state["pulls"]["9"]["body"] = "Adds the thing."
+        self.github.save()
+
+        self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(self.github.pull(9)["body"], f"Adds the thing.\n\nSupersedes #7.\n\n{CLOSING_LINE}")
+
+    def test_a_failed_body_edit_is_reported_and_does_not_fail_the_run(self) -> None:
+        self.github.fail_writes()
+
+        links, body = self.linked_body("Adds the thing.")
+
+        self.assertEqual(links["action"], "failed")
+        self.assertIn("Resource not accessible", links["error"])
+        self.assertEqual(body, "Adds the thing.")
+
+    def test_a_triage_card_links_nothing(self) -> None:
+        self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body="Adds the thing.")
+
+        _, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertIsNone(report["issue_links"])
+        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
 
     @staticmethod
     def session_module():

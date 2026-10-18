@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import atexit
 import json
 import os
 import plistlib
@@ -35,6 +36,10 @@ print(json.dumps({{{RATE_LIMIT_KEY!r}: 600, {ROUTE_KEY!r}: {ROUTE!r}}}))
 
 FAKE_HERMES = """#!/usr/bin/env python3
 import json, os, sys
+if sys.argv[1:4] == ["kanban", "boards", "list"]:
+    boards = os.path.join(os.environ["HERMES_HOME"], "installed-boards.json")
+    print(open(boards).read() if os.path.exists(boards) else "[]")
+    sys.exit()
 key = sys.argv[3]
 config = os.path.join(os.environ["HERMES_HOME"], "installed-config.json")
 if os.path.exists(config) and key in json.load(open(config)):
@@ -58,7 +63,16 @@ if target not in states:
 print("ai.example = {\\n\\tactive count = 1\\n\\tstate = " + states[target] + "\\n}")
 """
 
-SETTINGS = {"app_user_id": "u1", "repositories": []}
+TEAM_SKILLS = Path(tempfile.mkdtemp()).resolve()
+atexit.register(shutil.rmtree, TEAM_SKILLS, ignore_errors=True)
+(TEAM_SKILLS / "example-skill").mkdir()
+(TEAM_SKILLS / "example-skill" / "SKILL.md").write_text("---\nname: example-skill\n---\n")
+TEAM_KEY = "plugins.entries.team.settings.skills_dir"
+TEAM_ALLOW_KEY = "plugins.entries.team.settings.allow"
+
+SETTINGS = {"app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}}
+MAX_RUNNING_KEY = "plugins.entries.linear-agent-session.settings.triage.max_running"
+BOARDS = [{"slug": "default", "default_workdir": None}, {"slug": "triage", "default_workdir": None}]
 ROOT_CONFIG = {
     "model.provider": "claude-subscription-directsdk-experimental",
     "model.default": "opus",
@@ -66,6 +80,7 @@ ROOT_CONFIG = {
     "platforms.webhook.extra.host": "127.0.0.1",
     "platforms.webhook.extra.port": 8644,
     "plugins.entries.linear-agent-session.settings": SETTINGS,
+    MAX_RUNNING_KEY: 2,
     "kanban.max_in_progress": 4,
     "kanban.review_dispatch": False,
     "kanban.auto_decompose": False,
@@ -73,10 +88,11 @@ ROOT_CONFIG = {
     "platforms.slack.extra.native_task_cards": True,
     "platforms.factory_uploads.enabled": True,
     "platforms.factory_uploads.extra.repositories": ["example-org/example-repo"],
+    TEAM_KEY: str(TEAM_SKILLS),
 }
 WORKER_CONFIG = {
     **{key: ROOT_CONFIG[key] for key in (
-        "model.provider", "model.default", "plugins.entries.linear-agent-session.settings",
+        "model.provider", "model.default", "plugins.entries.linear-agent-session.settings", MAX_RUNNING_KEY,
     )},
     "terminal.timeout": 400,
 }
@@ -95,23 +111,29 @@ WORKER_JOBS = [
     cron_job("refresh-checkouts", 60),
     cron_job("refresh-owned-refs", 1),
     cron_job("reopen-conflicts", 5),
+    cron_job("dispatch-triage", 1),
 ]
 ALERT_SCRIPT = "check-install-alert"
 ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}]
 ALERT_SOURCE = f"skills/setup-factory/scripts/{ALERT_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
 check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(check_install)
 
+TRIAGE_PLAYBOOK = ".agents/skills/patina-mode/playbooks/triage.md"
 REPO_FILES = {
+    TRIAGE_PLAYBOOK: "playbook\n",
     "profiles/claude-worker/SOUL.md": "soul\n",
     "profiles/claude-worker/config.yaml": "model: repo\n",
     "profiles/claude-worker/scripts/x": "#!/bin/sh\n",
     "plugins/p1/__init__.py": "plugin\n",
     "plugins/p1/tests/test_a.py": "test\n",
     "plugins/factory-uploads/__init__.py": "uploads\n",
+    "plugins/team/__init__.py": "team\n",
     "templates/render.py": RENDER,
     ALERT_SOURCE: "#!/usr/bin/env python3\nalert\n",
 }
@@ -177,6 +199,7 @@ class CheckInstallTest(unittest.TestCase):
         for home in (self.root, self.worker):
             self.install(home, "plugins/p1/__init__.py", "plugin\n")
         self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
+        self.install(self.root, "plugins/team/__init__.py", "team\n")
         self.install(self.worker, "SOUL.md", "soul\n")
         self.install(self.worker, "scripts/x", "#!/bin/sh\n")
         self.install(self.worker, "config.yaml", "model: local\n")
@@ -190,6 +213,8 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C0123\n")
         self.owned_refs = self.root / "owned-refs.json"
         self.install(self.root, "owned-refs.json", f'["goodyear/abc-1-fix", "{LINEAR_ID}"]\n')
+        self.install(self.root, "triage-refs.json", "[]\n")
+        self.boards(BOARDS)
 
         self.issuer = self.tmp / "issuer"
         self.discovery(["authorization_code_with_pkce", "refresh_tokens"])
@@ -209,6 +234,9 @@ class CheckInstallTest(unittest.TestCase):
     def install(self, home: Path, path: str, text: str) -> None:
         (home / path).parent.mkdir(parents=True, exist_ok=True)
         (home / path).write_text(text)
+
+    def boards(self, boards: list) -> None:
+        self.install(self.root, "installed-boards.json", json.dumps(boards))
 
     def config(self, home: Path, config: dict) -> None:
         self.install(home, "installed-config.json", json.dumps(config))
@@ -261,6 +289,16 @@ class CheckInstallTest(unittest.TestCase):
         )
         shutil.rmtree(self.root / "plugins" / "factory-uploads")
         self.assertEqual(self.check(), (1, f"plugin factory-uploads in {self.root}: not installed\n"))
+
+    def test_the_team_plugin_is_root_only(self) -> None:
+        shutil.rmtree(self.root / "plugins" / "team")
+        self.assertEqual(self.check(), (1, f"plugin team in {self.root}: not installed\n"))
+
+        self.install(self.root, "plugins/team/__init__.py", "team\n")
+        self.install(self.worker, "plugins/team/__init__.py", "team\n")
+        self.assertEqual(
+            self.check(), (1, f"plugin team in {self.worker}: installed, but it runs only in the root home\n")
+        )
 
     def test_a_root_only_plugin_installed_in_the_worker_home_is_reported(self) -> None:
         self.install(self.worker, "plugins/factory-uploads/__init__.py", "uploads\n")
@@ -584,7 +622,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (0, ""))
 
     def test_missing_and_duplicated_cron_jobs(self) -> None:
-        self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2], WORKER_JOBS[3]])
+        self.cron(self.worker, [job for job in WORKER_JOBS if job["name"] != "refresh-checkouts"])
         self.cron(self.root, [*ROOT_JOBS, *ROOT_JOBS])
 
         self.assertEqual(
@@ -599,6 +637,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("refresh-checkouts", 15, no_agent=False),
             cron_job("refresh-owned-refs", 1),
             cron_job("reopen-conflicts", 5),
+            cron_job("dispatch-triage", 1),
         ])
         self.cron(self.root, [{**cron_job("check-install", 60, "local"), "script": ALERT_SCRIPT}])
 
@@ -620,6 +659,70 @@ class CheckInstallTest(unittest.TestCase):
             self.check(),
             (1, f"cron job refresh-checkouts in {self.root}: belongs to the worker profile (part 12)\n"
                 f"cron job nightly-cleanup in {self.worker}: is not a job the setup runbook creates\n"),
+        )
+
+    def test_failed_last_run_names_its_error_until_a_run_succeeds(self) -> None:
+        error = (
+            "Script exited with code 1\nstderr:\nrefresh-owned-refs: hermes kanban --board triage list failed: "
+            "kanban: board 'triage' does not exist.\nsecond line"
+        )
+        failed = cron_job("refresh-owned-refs", 1, last_status="error", last_error=error)
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-owned-refs in {self.worker}: last run failed: Script exited with code 1: "
+                "refresh-owned-refs: hermes kanban --board triage list failed: kanban: board 'triage' does not "
+                "exist. (part 12)\n"),
+        )
+
+        recovered = {**failed, "last_status": "ok", "last_error": None,
+                     "last_failure": {"at": "2026-10-17T22:31:26+07:00", "detail": error}}
+        self.cron(self.worker, [recovered if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_failed_last_run_masks_secrets_in_its_error(self) -> None:
+        self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C1\nSLACK_BOT_TOKEN=xoxb-short\n")
+        error = "Script exited with code 1\nstdout:\nrejected xoxb-short and ghs_16C7e42F292c6912E7710c838347Ae178B4a"
+        failed = cron_job("reopen-conflicts", 5, last_status="error", last_error=error)
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        code, out = self.check()
+
+        self.assertEqual(
+            (code, out),
+            (1, f"cron job reopen-conflicts in {self.worker}: last run failed: Script exited with code 1: "
+                "rejected [redacted] and [redacted] (part 12)\n"),
+        )
+
+    def test_failed_check_install_run_does_not_fail_a_clean_machine(self) -> None:
+        error = (
+            "Script exited with code 1\nstderr:\nprofile claude-worker: scripts/claude-session differs from main "
+            "at c02dda9 (part 12)"
+        )
+        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}])
+
+        self.assertEqual(self.check(), (0, ""))
+
+        failed = cron_job("refresh-checkouts", 60, last_status="error", last_error="Script exited with code 1")
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-checkouts in {self.worker}: last run failed: Script exited with code 1 "
+                "(part 12)\n"),
+        )
+
+    def test_undelivered_last_run_names_its_delivery_error(self) -> None:
+        undelivered = {**ROOT_JOBS[0], "last_status": "delivery_failed", "last_error": None,
+                       "last_delivery_error": "slack: channel_not_found\nmore"}
+        self.cron(self.root, [undelivered])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job check-install in {self.root}: last run's output was not delivered: "
+                "slack: channel_not_found (part 12)\n"),
         )
 
     def test_check_install_job_left_in_the_worker_profile(self) -> None:
@@ -698,6 +801,77 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (0, ""))
 
+    def test_missing_or_stale_triage_refs_file(self) -> None:
+        triage_refs = self.root / "triage-refs.json"
+        stale = time.time() - 600
+        os.utime(triage_refs, (stale, stale))
+
+        self.assertEqual(
+            self.check(),
+            (1, f"owned refs {triage_refs}: is 10 minutes old; the refresh-owned-refs cron job is not running (part 12)\n"),
+        )
+        triage_refs.unlink()
+
+        self.assertEqual(
+            self.check(),
+            (1, f"owned refs {triage_refs}: is missing; create or run the refresh-owned-refs cron job (part 12)\n"),
+        )
+
+    def test_missing_triage_board(self) -> None:
+        self.boards(BOARDS[:1])
+
+        self.assertEqual(self.check(), (1, f"kanban board triage: is missing in {self.root} (part 10)\n"))
+
+    def default_repository(self) -> Path:
+        checkout = self.tmp / "app"
+        git(self.tmp, "init", "-q", str(checkout))
+        git(checkout, "commit", "-q", "--allow-empty", "-m", "init")
+        git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        settings = {**SETTINGS, "repositories": [{"full_name": "org/app", "path": str(checkout), "routing": "default"}]}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        return checkout
+
+    def test_triage_board_must_anchor_worktrees_at_the_default_repository(self) -> None:
+        checkout = self.default_repository()
+
+        self.assertEqual(self.check(), (1, f"kanban board triage: default_workdir is not {checkout} (part 10)\n"))
+        self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_factory_checkout_without_the_triage_playbook(self) -> None:
+        (self.repo / TRIAGE_PLAYBOOK).unlink()
+
+        self.assertEqual(self.check("--no-fetch"), (
+            1,
+            f"triage playbook {self.repo}: has no {TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage "
+            "playbook; update the checkout to a commit that vendors it (part 10)\n",
+        ))
+
+    def test_triage_cap_that_is_unset_or_not_positive(self) -> None:
+        for value in (None, 0, -1, "2", True):
+            with self.subTest(value=value):
+                root = {k: v for k, v in ROOT_CONFIG.items() if k != MAX_RUNNING_KEY}
+                worker = {k: v for k, v in WORKER_CONFIG.items() if k != MAX_RUNNING_KEY}
+                if value is not None:
+                    root[MAX_RUNNING_KEY] = worker[MAX_RUNNING_KEY] = value
+                self.config(self.root, root)
+                self.config(self.worker, worker)
+
+                self.assertEqual(self.check(), (1, "".join(
+                    f"config {MAX_RUNNING_KEY} in {home}: is not a positive limit on running triage cards (part 10)\n"
+                    for home in (self.root, self.worker)
+                )))
+
+    def test_triage_cap_that_differs_between_homes(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, MAX_RUNNING_KEY: 3})
+
+        self.assertEqual(self.check(), (1, (
+            f"config {MAX_RUNNING_KEY}: differs between {self.root} and {self.worker} (part 10)\n"
+        )))
+
     def test_stale_owned_refs_file(self) -> None:
         stale = time.time() - 600
         os.utime(self.owned_refs, (stale, stale))
@@ -770,6 +944,58 @@ class CheckInstallTest(unittest.TestCase):
         self.repositories(self.checkout(), missing)
 
         self.assertEqual(self.check(), (1, f"checkout {missing}: does not exist (part 10)\n"))
+
+    def test_team_skills_directory_that_does_not_exist(self) -> None:
+        missing = self.tmp / "missing"
+        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(missing)})
+
+        self.assertEqual(self.check(), (1, f"team skills {missing}: does not exist (part 5)\n"))
+
+    def test_team_skills_directory_with_no_skill(self) -> None:
+        (self.tmp / "skills" / "not-a-skill").mkdir(parents=True)
+        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(self.tmp / "skills")})
+
+        self.assertEqual(self.check(), (1, f"team skills {self.tmp}/skills: holds no <name>/SKILL.md (part 5)\n"))
+
+    def test_team_skills_allow_naming_a_skill_the_directory_lacks(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: ["example-skill", "ghost", "alpha"]})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"team skills {TEAM_SKILLS}: lacks the allowed skill alpha (part 5)\n"
+                f"team skills {TEAM_SKILLS}: lacks the allowed skill ghost (part 5)\n"),
+        )
+
+    def test_team_skills_allow_that_is_not_a_list(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: "example-skill"})
+
+        self.assertEqual(
+            self.check(),
+            (1, "team skills plugins.entries.team.settings.allow: is not a list of skill names (part 5)\n"),
+        )
+
+    def test_team_skills_directory_holding_only_an_invalid_name(self) -> None:
+        skills = self.tmp / "skills"
+        (skills / "bad.name").mkdir(parents=True)
+        (skills / "bad.name" / "SKILL.md").write_text("---\nname: bad.name\n---\n")
+        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(skills)})
+
+        self.assertEqual(self.check(), (1, f"team skills {skills}: holds no <name>/SKILL.md (part 5)\n"))
+
+    def test_team_skills_with_a_matching_allow_is_silent(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: ["example-skill"]})
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_unset_team_skills_directory_is_reported_once_by_the_config_row(self) -> None:
+        config = dict(ROOT_CONFIG)
+        del config[TEAM_KEY]
+        self.config(self.root, config)
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config {TEAM_KEY} in {self.root}: is not set to the team skills directory (part 5)\n"),
+        )
 
     def test_a_merge_after_the_last_fetch_is_seen(self) -> None:
         seed = self.tmp / "seed"
