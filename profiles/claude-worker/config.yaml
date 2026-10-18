@@ -29,6 +29,8 @@ plugins:
             path: /abs/path/to/example-repo
             routing: default
             worker_entry: ""
+        triage:
+          max_running: 2
         github:
           login: ""
           app_id: ""
@@ -39,6 +41,8 @@ plugins:
           model: ""
           tier_models: {}
           auth_token_env: ""
+          sentry_token_env: ""
+          disabled_mcp_servers: []
           max_turns: 0
     pr-ready-gate:
       settings:

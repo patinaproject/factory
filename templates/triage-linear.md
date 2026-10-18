@@ -6,16 +6,22 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 ## Rules
 
 - Act only on issues delegated to the agent app user `<<app_user_id>>`. A
-  mention without delegation gets a direct answer and nothing else.
-- Never change a Linear issue's status, assignee, or delegate. Never create
-  Linear issues or comments. Write to Linear only through
-  `linear_agent_activity`.
+  mention without delegation gets a direct answer and nothing else. Triage
+  cards are the exception: "Triage inbox" creates one for every issue in the
+  Triage status, and "Prompt" and "Stop" act on a triage card for any
+  teammate, delegated or not.
+- Never change a Linear issue's status, assignee, or delegate, except the
+  move to Todo that "Delegation gate" makes. Never create Linear issues or
+  comments. Write to Linear only through `linear_agent_activity`.
 - Read Linear issues only with the `linear_issue` tool. It reads as the agent
   app, which is the reader the worker uses, so `gitBranchName` matches.
 - Stay read-only on GitHub. Read pull requests only with `gh pr view` or the `card_branch` command in
   "Session created". Do not
   run git, edit files, or write code.
-- An issue has one live card at a time. Find it with
+- An issue has one live implementation card at a time, on the default board,
+  and at most one live triage card, on the Triage board. "Triage inbox" says
+  how to find the triage card. "The issue's card" always means the
+  implementation card. Find it with
   `hermes kanban list --json` after reading the issue with `linear_issue`. The
   list leaves out archived cards, so an archived card is never found, reused, or
   unblocked, and delegating the issue again creates a new card. Try
@@ -48,6 +54,10 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 
 <<triage_resume>>
 
+<<triage_inbox>>
+
+<<delegation_gate>>
+
 ## Repositories
 
 <<repositories>>
@@ -57,10 +67,14 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 - Type: {type}
 - Action: {action}
 - Agent session: {agentSession.id}
+- Agent session creator: {agentSession.creatorId}
 - Agent session issue: {agentSession.issue.id} ({agentSession.issue.identifier})
 - Data change issue: {data.id} ({data.identifier})
 - Activity signal: {agentActivity.signal}
 - Activity body: {agentActivity.content.body}
+- Issue event action: {action}
+- Previous status: {updatedFrom.stateId}
+- Previous labels: {updatedFrom.labelIds}
 
 A field still shown as a dotted name in braces is absent from this payload. The
 session's prompt context is:
@@ -76,10 +90,16 @@ The full payload, truncated to 4000 characters:
 Type `AgentSessionEvent`, action `created`. The issue is the agent session issue.
 
 1. Read the issue with `linear_issue`.
-2. If its `delegate` (a user ID) is null or is not
-   `<<app_user_id>>`, the agent was mentioned. Answer the request in one
-   `response` activity on this agent session, from the prompt context and the
-   issue. Create no card and stop.
+2. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`:
+   - When the agent session creator above is `None` or still a dotted name in
+     braces, no person opened this session. The factory opened it, as
+     "Triage inbox" does for a triage card. Post no activity, create no card,
+     and stop.
+   - Otherwise the agent was mentioned. Answer the request in one `response`
+     activity on this agent session, from the prompt context and the issue.
+     Create no card and stop.
+
+   Otherwise apply "Delegation gate", which can stop here.
 3. Pick the repository. Check the issue's `attachments` for a URL of the form
    `https://github.com/<owner>/<name>/issues/<number>`. If `<owner>/<name>`
    matches, ignoring case, a repository with routing `synced_github`, use that
@@ -156,7 +176,9 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
      again. The Kanban CLI has no command that moves a `done` card back to
      `ready`, so also post a `thought` on this agent session saying the card
      must be reopened from the Kanban dashboard.
-7. If this run created the card, unblocked it, or moved it to this agent
+7. When the gate passed and the issue's `stateType` is `triage`, move it to
+   Todo as "Delegation gate" says.
+   If this run created the card, unblocked it, or moved it to this agent
    session, post one `action` activity on this agent session with `action`
    `Queued as <task id>` and `parameter` `<priorityName> · <repository full_name>`.
    <<queued_link>> Otherwise the card already belongs to this session: post
@@ -167,8 +189,10 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
 Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
 `stop`. A human replied in the agent session.
 
-1. Read the issue with `linear_issue` and find its card. If there is none,
-   handle the event as "Session created" and stop.
+1. Read the issue with `linear_issue`. If it has a triage card whose status
+   is not `done`, follow "Triage card reply" below and stop. Otherwise find
+   its card. If there is none, handle the event as "Session created" and
+   stop.
 2. If the activity body above is still a dotted name in braces, the reply
    arrived without its text. Comment on the card that a Linear reply arrived
    without text, post a `thought` on this agent session asking the human to
@@ -180,7 +204,12 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
    `<owner>/<name>#<number>`, so the comment names no pull request URL.
 3. If the card's body names a different `linear_agent_session_id`, update it as
    in "Session created" step 6.
-4. If the card is `blocked`, read the issue with `linear_issue`. If its
+4. If a `body` in the `comments` of `hermes kanban show <task id> --json`
+   starts `Merge refused by Hermes:`, the pull request merged and Hermes refused
+   to complete the card, so a worker cannot finish it. Do not unblock, reopen, or resume it. Post
+   one `thought` on this agent session saying that the card ends when the
+   issue is marked Done, and stop.
+   If the card is `blocked`, read the issue with `linear_issue`. If its
    `delegate` is `<<app_user_id>>`, unblock it as "Rules" says. If the card
    is `review`, run
    `hermes kanban reopen-review <task id> --reason 'resumed from Linear; see the card comments'`
@@ -196,12 +225,36 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
      from the Kanban dashboard.
    - Any other status: the reply is on the card for its worker.
 
+## Triage card reply
+
+A teammate replied on the agent session of an issue whose triage card is not
+`done`. Any teammate's reply resumes it, whoever delegated the issue.
+
+1. If the activity body above is still a dotted name in braces, comment on
+   the triage card that a Linear reply arrived without text, post a
+   `thought` on this agent session asking the human to send the reply again,
+   and stop.
+2. Comment on the triage card with the reply: the activity body, attributed
+   to Linear, with each pull request URL replaced as "Prompt" step 2 says.
+3. If the triage card is `blocked`, run
+   `hermes kanban --board triage assign <task id> none`, then
+   `hermes kanban --board triage unblock <task id>`. `dispatch-triage`
+   assigns it again when fewer triage cards run than the factory's cap. If
+   the card is `triage`, resume it as "Resume a parked card" says, with
+   `--board triage` on each command, and skip its last step, the assignment,
+   for the same reason.
+4. Post one `thought` on this agent session that names the triage card's
+   task id and says that triage resumes with the reply, or, for any other
+   status, that the reply is on the card for its worker.
+
 ## Stop
 
 Type `AgentSessionEvent`, action `prompted`, activity signal `stop`.
 
-1. Read the issue with `linear_issue` and find its card. If there is none,
-   post a `response` saying there was no work to stop, and stop.
+1. Read the issue with `linear_issue`. If it has a triage card whose status
+   is not `done`, stop that card: run the steps below on it with
+   `--board triage` on each command. Otherwise find its card. If there is
+   none, post a `response` saying there was no work to stop, and stop.
 2. If the card is `review`, first run
    `hermes kanban reopen-review <task id> --reason stopped`. Hermes blocks only
    a `ready` or `running` card, and this returns the card to `ready`.
@@ -217,29 +270,47 @@ Type `AgentSessionEvent`, action `prompted`, activity signal `stop`.
 Type `Issue`. The issue is the data change issue.
 
 1. Read the issue with `linear_issue`.
-2. Find the issue's card.
-3. If the issue's `stateType` is `completed` and the card is not `done`, read
+2. Follow "Triage inbox". It creates or archives the issue's triage card,
+   then sends you back here.
+3. Find the issue's card.
+4. If the issue's `stateType` is `completed` and the card is not `done`, read
    the pull request for the card's `branch:` and `repo:` lines with
-   `gh pr view '<branch>' -R '<repo>' --json state,url`. If it is open or
-   merged, comment on the card that the Linear issue is done, and stop. Do not
-   archive it. Merging the pull request usually marks the issue done, and
-   GitHub triage or the worker moves the card to `done` on the merge. Hermes
-   cannot complete an archived card, so archiving first would leave it
-   unfinished.
-4. Otherwise, if the issue's `stateType` is `completed` or `canceled`, archive
+   `gh pr view '<branch>' -R '<repo>' --json state,url`. If it is merged and
+   a `body` in the `comments` of `hermes kanban show <task id> --json` starts
+   `Merge refused by Hermes:`, Hermes refused to complete the
+   card, so archive it as "Rules" says, and stop.
+   Otherwise, if it is open or merged, comment on the card that the Linear
+   issue is done, and stop. Do not archive it. Merging the pull request usually
+   marks the issue done, and GitHub triage or the worker moves the card to
+   `done` on the merge. Hermes cannot complete an archived card, so archiving
+   first would leave it unfinished.
+5. Otherwise, if the issue's `stateType` is `completed` or `canceled`, archive
    the card as "Rules" says when a card exists, and stop.
-5. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`, the
+6. If its `delegate` (a user ID) is null or is not `<<app_user_id>>`, the
    issue was un-delegated. If a card exists and is not `done`, archive it as
    "Rules" says, whatever its status. Archiving ends a running worker. Do not
    block the card or reopen its review. Delegating the issue again creates a
    new card that continues on the same branch and pull request. Stop.
-6. Otherwise the issue was just delegated to the agent. Linear opens a new
-   agent session on an issue's first delegation, but a re-delegation can
-   arrive with no "Session created" event.
+7. Otherwise the issue is delegated to the agent. Linear opens a new agent
+   session on an issue's first delegation, but a re-delegation can arrive
+   with no "Session created" event, and triage can mark a delegated issue
+   `ready-for-agent` long after its delegation.
+   - When the previous labels above are not a dotted name in braces and the
+     issue has no card, the labels changed, and triage may have just passed
+     the issue. Apply "Delegation gate". It can stop here. Then use the
+     issue's newest `agentSessions` entry whose `appUserId` is
+     `<<app_user_id>>` and whose `status` is not `complete` as this agent
+     session, or open one with `linear_agent_session_create` when there is
+     none, and follow "Session created" from step 3 with the issue you read.
+     Stop.
    - Compare the issue's newest `agentSessions` entry whose `appUserId` is
-     `<<app_user_id>>` with the time from `date -u +%Y-%m-%dT%H:%M:%SZ`. If it
-     was created in the last five minutes, its "Session created" event
-     handles this delegation. Stop.
+     `<<app_user_id>>` and whose `creatorId` is not null with the time from
+     `date -u +%Y-%m-%dT%H:%M:%SZ`. If it was created in the last five
+     minutes, its "Session created" event handles this delegation. Stop. A
+     session with a null `creatorId` was opened by the factory, such as the
+     one "Triage inbox" opens for a triage card, and its "Session created"
+     event never handles a delegation.
+   - Apply "Delegation gate". It can stop here.
    - Otherwise open a session with `linear_agent_session_create` for the
      issue. Then follow "Session created" from step 3, using the issue you
      read and the returned `agent_session_id` as this agent session. That

@@ -5,8 +5,11 @@
 # are preserved.
 #
 # Usage:
-#   install-machinery.sh [--repo <dir>] [--instructions <file>]
-#                        [--codex] [--codex-config <file>] [--codex-agents <file>]
+#   install-machinery.sh [--repo <dir>] [--instructions <file>] [--codex-agents <file>]
+#                        [--codex] [--codex-config <file>]
+#
+# --codex-agents names the Codex AGENTS.md whose legacy managed mandate block the
+# installer removes on every run. The Codex plugin hook delivers the mandate.
 
 set -euo pipefail
 
@@ -56,7 +59,6 @@ fi
 command -v jq >/dev/null || fail "jq is required to update .claude/settings.json"
 require_file "$SETUP_PSTACK_SKILL"
 require_file "${SKILLS_DIR}/patina-mode/references/codex-tools.md"
-require_file "${ASSETS_DIR}/mandate.md"
 require_file "${ASSETS_DIR}/hooks/session-start.sh"
 require_file "${ASSETS_DIR}/hooks/session-start-context.md"
 
@@ -85,38 +87,9 @@ remove_managed_blocks() {
     { print }
     END { flush() }
   ' "$file" > "$tmp" || { rm -f "$tmp"; return 0; }
+  if cmp -s "$file" "$tmp"; then rm -f "$tmp"; return 0; fi
   write_in_place "$file" "$tmp"
-}
-
-# Upsert the managed Codex block. This is retained for --codex because Codex
-# has no project SessionStart hook and reads AGENTS.md directly.
-upsert_block() {
-  local file="$1" payload="$2"
-  mkdir -p "$(dirname "$file")"
-  local blockfile tmp
-  blockfile="$(mktemp)"
-  { printf '%s\n' "$BEGIN_MARKER"; cat "$payload"; printf '%s\n' "$END_MARKER"; } > "$blockfile"
-
-  if [ -f "$file" ] && grep -qF "$BEGIN_MARKER" "$file" && grep -qF "$END_MARKER" "$file"; then
-    tmp="$(mktemp)"
-    awk -v b="$BEGIN_MARKER" -v e="$END_MARKER" -v bf="$blockfile" '
-      function flush(   i) { for (i = 1; i <= nbuf; i++) print buf[i]; nbuf = 0 }
-      $0 == b { flush(); inblock = 1; buf[++nbuf] = $0; next }
-      inblock && $0 == e {
-        inblock = 0; nbuf = 0
-        if (!emitted) { while ((getline line < bf) > 0) print line; emitted = 1 }
-        next
-      }
-      inblock { buf[++nbuf] = $0; next }
-      { print }
-      END { flush() }
-    ' "$file" > "$tmp"
-    write_in_place "$file" "$tmp"
-  else
-    if [ -f "$file" ] && [ -s "$file" ]; then printf '\n' >> "$file"; fi
-    cat "$blockfile" >> "$file"
-  fi
-  rm -f "$blockfile"
+  echo "mandate block removed: ${file}"
 }
 
 # Ensure [features] multi_agent = true exactly once, preserving all unrelated
@@ -194,18 +167,18 @@ install_managed_file "${ASSETS_DIR}/hooks/session-start.sh" "${repo}/.claude/hoo
 chmod +x "${repo}/.claude/hooks/session-start.sh"
 sed 's/engineering://g' "${ASSETS_DIR}/hooks/session-start-context.md" > "${repo}/.claude/hooks/session-start-context.md"
 
-# Claude receives the mandate from the project hook. Remove legacy managed
-# blocks so an old install cannot inject it a second time. The --codex path
-# restores the block in AGENTS.md after this cleanup for Codex sessions.
-if [ "$do_codex" -ne 1 ] || ! [ "$instructions" -ef "$codex_agents" ]; then
-  remove_managed_blocks "$instructions"
+# Claude receives the mandate from the project hook and Codex from the plugin
+# hook, so no instructions file carries it. Remove managed blocks that an
+# earlier install wrote to CLAUDE.md or AGENTS.md, or either file would deliver
+# the mandate a second time.
+remove_managed_blocks "$instructions"
+if ! [ "$codex_agents" -ef "$instructions" ]; then
+  remove_managed_blocks "$codex_agents"
 fi
 upsert_claude_session_hook
 
 if [ "$do_codex" -eq 1 ]; then
-  upsert_block "$codex_agents" "${ASSETS_DIR}/mandate.md"
   enable_multi_agent "$codex_config"
-  echo "mandate block upserted: ${codex_agents}"
   echo "multi_agent enabled: ${codex_config}"
 fi
 

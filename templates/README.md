@@ -18,10 +18,21 @@ the issue's id is listed in `<home>/owned-refs.json`, which holds each card's
 `linear_issue_id`. Deploy the profile and run `refresh-owned-refs` once before
 you re-render this route.
 
+For the Triage board, the route also keeps an `Issue` that is created in the
+Triage status or moved into it, a status change of an issue listed in
+`<home>/triage-refs.json`, which holds each triage card's `linear_issue_id`, and
+a label change that leaves an issue delegated to the agent app with
+`ready-for-agent` and no implementation card. `refresh-owned-refs` writes both
+files.
+
 The triage prompts are `triage-linear.md` and `triage-github.md`. In them,
 `triage-resume.md` is the one parked-card resume section that both prompts
 include through `<<triage_resume>>`. `triage-merged.md` is the merged-pull-request
-completion section that only the GitHub prompt includes through `<<triage_merged>>`. `<<name>>` marks a value the renderer fills from settings, and `{dot.path}` is a
+completion section that only the GitHub prompt includes through `<<triage_merged>>`.
+Only the Linear prompt includes `triage-inbox.md`, which creates and archives
+triage cards, through `<<triage_inbox>>`, and `triage-delegation-gate.md`, which
+creates no implementation card for an issue without `ready-for-agent`, through
+`<<delegation_gate>>`. `<<name>>` marks a value the renderer fills from settings, and `{dot.path}` is a
 Hermes payload placeholder that the webhook adapter fills per event.
 
 `GITHUB_EVENT_TABLE` in `render.py` lists each GitHub event and action triage
