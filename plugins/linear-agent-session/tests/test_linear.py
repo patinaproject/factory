@@ -78,6 +78,17 @@ class ActivityTest(unittest.TestCase):
         self.assertIn("agentSessionUpdate(id: $id, input: $input)", update["query"])
         self.assertEqual(update["variables"], {"id": "session-1", "input": {"externalUrls": urls}})
 
+    def test_reply_in_session_comments_in_the_session_thread(self):
+        thread = (200, {"data": {"agentSession": {"comment": {"id": "comment-1"}, "issue": {"id": "issue-1"}}}})
+        fake = FakeLinear([thread, (200, {"data": {"commentCreate": {"success": True}}})])
+        make_client(fake).reply_in_session("session-1", "https://linear.app/example/profiles/ted see above")
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1"})
+        self.assertIn("commentCreate(input: $input)", fake.graphql_requests[1]["query"])
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"],
+            {"input": {"issueId": "issue-1", "parentId": "comment-1", "body": "https://linear.app/example/profiles/ted see above"}},
+        )
+
     def test_invalid_activity_is_an_error_without_calling_linear(self):
         fake, output = self.post({"agent_session_id": "session-1", "type": "thought"})
         self.assertEqual(output, {"error": "a thought activity needs body"})

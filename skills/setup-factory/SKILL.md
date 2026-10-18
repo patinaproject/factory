@@ -128,6 +128,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
 | `GITHUB_UPLOAD_TOKEN`, the operator's upload-only token | The factory's Infisical folder only, entered by the operator. The gateway loads it. Neither `.env` holds it, and the worker's `worker-secrets` drops it |
 | `platforms.factory_uploads.enabled` and `platforms.factory_uploads.extra.repositories` | `<home>/config.yaml` only |
+| `plugins.entries.team.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
 | `kanban.max_in_progress`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
 | The `default` and `triage` boards' `default_workdir` | Kanban board metadata, not `config.yaml` |
@@ -424,7 +425,7 @@ hermes -p claude-worker plugins list
 ```
 
 Both list `linear-agent-session` and `pr-ready-gate`, enabled. The root home
-also lists `factory-uploads`, enabled, and the worker home does not. On a fresh
+also lists `factory-uploads` and `team`, enabled, and the worker home lists neither. On a fresh
 machine, install both now and skip the content check.
 
 On a re-run, `<worker>` already exists, and a listed plugin can still be
@@ -493,6 +494,37 @@ worker's home. `check-install` reports an install in the worker home.
    attachment URL, never the token. The platform is not a chat platform, so
    `hermes status` lists it without any channel and it is not a cron
    `--deliver` or `send_message` target.
+
+**Team skills, root home only.** The `team` plugin registers the skills in a
+directory on the machine as `team:<name>` skills. It reads the directory in
+place and copies nothing, so no skill content enters this repository. Install
+it in the root home and never in the worker's home. `check-install` reports an
+install in the worker home.
+
+1. Install and enable the plugin in the root home:
+
+   ```sh
+   hermes plugins install "file://<repo>#plugins/team" --enable --yes-deps </dev/null
+   ```
+
+2. Point it at the team skills directory. Each subdirectory that holds a
+   `SKILL.md` is one skill. The real path goes in Hermes config and the
+   private record only:
+
+   ```sh
+   hermes config set plugins.entries.team.settings.skills_dir <team skills directory>
+   ```
+
+   To register only some skills, set `plugins.entries.team.settings.allow` to
+   a list of skill names. An empty or unset `allow` registers every skill. A
+   name the directory lacks stops the plugin from loading.
+3. **Check.** `check-install` reports a `skills_dir` that is unset, missing,
+   or empty, and an `allow` name the directory lacks. It prints no skill
+   content.
+
+Adding, renaming, or removing a skill, or changing its description, takes
+effect at the next gateway restart. An edit to the content of an existing
+skill is served at once.
 
 **Worker profile.** If `<worker>` does not exist, install it. If it exists,
 update it. An update keeps the installed `config.yaml`. Pass `--force-config`
@@ -1211,7 +1243,10 @@ each check. Report each result.
     `hermes kanban show <task id> --json`, the events after the review are the
     same as in check 19: `assigned` with no assignee, `specified`, `edited`,
     and `assigned` to `claude-worker`, with the title and body unchanged. A
-    card in `review` still gets `review_reopened`.
+    card in `review` still gets `review_reopened`. Repeat with an `approved`
+    review from a person: the events are the same, and the worker hands the
+    approved pull request off. An approval from a bot, or on a card in any
+    other status, adds only the card comment.
 21. Merge a card's pull request while the card is in `triage`, with no worker
     running it. In `hermes kanban show <task id> --json`, the events after the
     merge include, in this order, `assigned` with no assignee, `specified`,
@@ -1286,8 +1321,9 @@ each check. Report each result.
     it is in Triage. Start a card by hand on an issue without the label:
     `claude-session` refuses it before Claude starts.
 27. Let a triage card block on a question. Its session gets one
-    `elicitation` that starts with the AI-generated disclaimer, and each
-    person it @-mentions gets a Linear notification. A reply from a teammate
+    `elicitation` that starts with the AI-generated disclaimer, and one reply
+    in the session's thread mentions each person the questions name. Each of
+    them gets one Linear notification. A reply from a teammate
     who did not delegate the issue raises `prompted` on the session the
     factory created, unblocks the card, and `dispatch-triage` assigns it
     again.
@@ -1468,6 +1504,9 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.
+   - A `team skills` line: the team skills directory is missing, empty, or
+     lacks a skill that `allow` names. Fix the directory or the part 5
+     setting.
    - A `webhook config <key>` line: run the part 11 install for that key.
    - A `webhook route <name>: <n> rejected with HTTP 429` line: the gateway
      dropped deliveries in the last hour. Check that
@@ -1499,7 +1538,7 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      If the machine is right, change the part and its row in `check-install`
      in one pull request, as the replicability rule in `AGENTS.md` requires.
 4. Run `check-install` again. It prints nothing.
-5. If step 3 changed a plugin or a webhook config key:
+5. If step 3 changed a plugin, a webhook config key, or a team skills setting:
 
    > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
    > from a shell outside Hermes. Then confirm that

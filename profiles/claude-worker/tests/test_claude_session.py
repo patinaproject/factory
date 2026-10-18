@@ -73,6 +73,10 @@ TRIAGE_ENTRY = (
     "Do not implement it."
 )
 TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
+LINEAR_URL = "https://linear.app/example/issue/ABC-123"
+CARD_BODY = f"```text\nlinear_issue_identifier: ABC-123\n```\ngithub_issue_url: https://github.com/{REPO}/issues/12"
+CLOSING_LINE = f"Closes #12, closes {LINEAR_URL}"
+TAKEOVER_BODY = f"Adds the thing.\n\n{CLOSING_LINE}"
 # What Hermes leaves in a dispatcher worker's subprocess: it scrubs HERMES_KANBAN_TASK, RUN_ID and CLAIM_LOCK.
 HERMES_CHILD_ENV = {"HERMES_DELEGATED_CHILD_CONTEXT": "1", "HERMES_KANBAN_DB": "/nonexistent/kanban.db"}
 SCRUBBED_BY_HERMES = {"HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_CLAIM_LOCK"}
@@ -141,8 +145,8 @@ class ClaudeSessionTest(GitFixture):
             f"name: claude-worker\nsource: {checkout}/profiles/claude-worker\n"
         )
 
-    def set_comments(self, *comments: tuple[int, str, str]) -> None:
-        self.card.write_text(json.dumps({"comments": [
+    def set_comments(self, *comments: tuple[int, str, str], body: str = CARD_BODY) -> None:
+        self.card.write_text(json.dumps({"task": {"body": body}, "comments": [
             {"created_at": at, "author": author, "body": body} for at, author, body in comments
         ]}))
 
@@ -172,7 +176,7 @@ class ClaudeSessionTest(GitFixture):
             *([] if omit_task_id else ["--task-id", TASK_ID]),
             "--issue-id", ISSUE_ID,
             "--issue-identifier", "ABC-123",
-            "--issue-url", "https://linear.app/example/issue/ABC-123",
+            "--issue-url", LINEAR_URL,
             "--repo", REPO,
             "--settings-json", str(self.settings),
             "--card-json", str(self.card),
@@ -239,6 +243,7 @@ class ClaudeSessionTest(GitFixture):
             "subtype": "success",
             "num_turns": 7,
             "superseded": None,
+            "issue_links": {"action": "waiting", "reason": f"no open pull request by {BOT_LOGIN} on abc-123-fix"},
             "triage_documents": None,
             "result": "Opened the pull request.",
             "usage": None,
@@ -561,7 +566,7 @@ class ClaudeSessionTest(GitFixture):
         hermes = bin_dir / "hermes"
         hermes.write_text(
             f"#!/bin/sh\necho \"$@\" > {argv_log}\n"
-            "echo '{\"comments\": [{\"created_at\": 1, \"author\": \"operator\", \"body\": \"From the card.\"}]}'\n"
+            "echo '{\"task\": {\"body\": \"\"}, \"comments\": [{\"created_at\": 1, \"author\": \"operator\", \"body\": \"From the card.\"}]}'\n"
         )
         hermes.chmod(0o755)
         command, env = self.session_command()
@@ -1640,7 +1645,7 @@ class ClaudeSessionTest(GitFixture):
         self.push_upstream_commit("pull", "refs/pull/7/head")
         self.github.create_branch("person-branch", "person")
         self.github.add_pull(7, "person-branch", **person)
-        self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body="Adds the thing.")
+        self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body=TAKEOVER_BODY)
         return f"https://github.com/{REPO}/pull/9"
 
     def test_takeover_pull_request_is_commented_on_and_closed_once_and_the_replacement_names_it(self) -> None:
@@ -1655,17 +1660,17 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.github.pull(7)["state"], "closed")
         self.assertEqual(len(self.github.comments(7)), 1)
         self.assertIn(replacement, self.github.comments(7)[0])
-        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.\n\nSupersedes #7.")
+        self.assertEqual(self.github.pull(9)["body"], f"{TAKEOVER_BODY}\n\nSupersedes #7.")
         self.assertEqual(self.github.pull(9)["state"], "open")
 
     def test_supersedes_line_the_worker_already_wrote_is_not_repeated(self) -> None:
         self.takeover_pair()
-        self.github.state["pulls"]["9"]["body"] = "Supersedes #7 by Ada."
+        self.github.state["pulls"]["9"]["body"] = f"Supersedes #7 by Ada.\n\n{CLOSING_LINE}"
         self.github.save()
 
         self.run_session("--takeover-pr", TAKEOVER_PR)
 
-        self.assertEqual(self.github.pull(9)["body"], "Supersedes #7 by Ada.")
+        self.assertEqual(self.github.pull(9)["body"], f"Supersedes #7 by Ada.\n\n{CLOSING_LINE}")
         self.assertEqual(self.github.pull(7)["state"], "closed")
 
     def test_takeover_pull_request_whose_head_the_factory_contains_is_closed_whatever_its_pushes(self) -> None:
@@ -1694,7 +1699,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["superseded"]["reason"], "person pushed after takeover")
         self.assertEqual(self.github.pull(7)["state"], "open")
         self.assertEqual(self.github.comments(7), [])
-        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+        self.assertEqual(self.github.pull(9)["body"], TAKEOVER_BODY)
 
     def test_person_who_pushed_after_the_factory_opened_keeps_an_open_pull_request(self) -> None:
         self.takeover_pair()
@@ -1728,7 +1733,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(report["superseded"]["action"], "left")
         self.assertEqual(self.github.pull(7)["state"], "open")
         self.assertEqual(self.github.comments(7), [])
-        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+        self.assertEqual(self.github.pull(9)["body"], TAKEOVER_BODY)
 
     def test_pull_request_the_app_authored_as_app_slash_form_is_never_closed(self) -> None:
         self.takeover_pair(author="app/" + BOT_LOGIN.removesuffix("[bot]"))
@@ -1744,7 +1749,7 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(report["superseded"]["action"], "left")
         self.assertEqual(self.github.comments(7), [])
-        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+        self.assertEqual(self.github.pull(9)["body"], TAKEOVER_BODY)
 
     def test_takeover_pull_request_stays_open_until_the_factory_pull_request_is_open(self) -> None:
         self.takeover_pair()
@@ -1774,7 +1779,7 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertIsNone(report["superseded"])
         self.assertEqual(self.github.pull(7)["state"], "open")
-        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
+        self.assertEqual(self.github.pull(9)["body"], TAKEOVER_BODY)
 
     def test_a_failed_close_is_reported_and_does_not_fail_the_run(self) -> None:
         self.takeover_pair()
@@ -1788,6 +1793,79 @@ class ClaudeSessionTest(GitFixture):
         self.assertIn("Resource not accessible", report["superseded"]["error"])
         self.assertEqual(self.github.pull(7)["state"], "open")
         self.assertEqual(self.github.comments(7), [])
+
+    def linked_body(self, body: str, card_body: str = CARD_BODY) -> tuple[dict, str]:
+        """Run a turn with the factory's pull request #9 holding `body`; return the report's links and the new body."""
+        self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body=body)
+        self.set_comments(body=card_body)
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        return report["issue_links"], self.github.pull(9)["body"]
+
+    def test_a_pull_request_with_no_issue_reference_gains_one_closing_line_for_both_issues(self) -> None:
+        links, body = self.linked_body("Adds the thing.")
+
+        self.assertEqual(links, {"pr": f"https://github.com/{REPO}/pull/9", "action": "linked"})
+        self.assertEqual(body, f"Adds the thing.\n\n{CLOSING_LINE}")
+
+    def test_a_bare_linear_identifier_becomes_its_url_without_a_second_closing_line(self) -> None:
+        _, body = self.linked_body("Adds the thing.\n\nCloses #12\nCloses ABC-123")
+
+        self.assertEqual(body, f"Adds the thing.\n\nCloses #12\nCloses {LINEAR_URL}")
+
+    def test_a_pull_request_that_already_links_both_issues_is_unchanged(self) -> None:
+        for body in (
+            f"Adds the thing.\n\n{CLOSING_LINE}",
+            f"Fixes {REPO}#12 and resolves [ABC-123]({LINEAR_URL}/the-title-slug).",
+            f"Closes [#12](https://github.com/{REPO}/issues/12), closes {LINEAR_URL}",
+        ):
+            with self.subTest(body=body):
+                links, after = self.linked_body(body)
+
+                self.assertEqual((links["action"], after), ("unchanged", body))
+
+    def test_a_card_without_a_github_issue_gets_only_the_linear_closing_line(self) -> None:
+        _, body = self.linked_body("", card_body="linear_issue_identifier: ABC-123")
+
+        self.assertEqual(body, f"Closes {LINEAR_URL}")
+
+    def test_another_issue_number_or_identifier_does_not_count_as_linked(self) -> None:
+        _, body = self.linked_body(f"Closes #123, closes ABC-1234 and {LINEAR_URL}4")
+
+        self.assertEqual(body, f"Closes #123, closes ABC-1234 and {LINEAR_URL}4\n\n{CLOSING_LINE}")
+
+    def test_a_reference_inside_an_html_comment_does_not_count(self) -> None:
+        _, body = self.linked_body(f"Adds the thing.\n<!-- {CLOSING_LINE} -->")
+
+        self.assertEqual(body, f"Adds the thing.\n<!-- {CLOSING_LINE} -->\n\n{CLOSING_LINE}")
+
+    def test_a_takeover_body_gets_both_the_supersedes_line_and_the_closing_line(self) -> None:
+        self.takeover_pair()
+        self.github.state["pulls"]["9"]["body"] = "Adds the thing."
+        self.github.save()
+
+        self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(self.github.pull(9)["body"], f"Adds the thing.\n\nSupersedes #7.\n\n{CLOSING_LINE}")
+
+    def test_a_failed_body_edit_is_reported_and_does_not_fail_the_run(self) -> None:
+        self.github.fail_writes()
+
+        links, body = self.linked_body("Adds the thing.")
+
+        self.assertEqual(links["action"], "failed")
+        self.assertIn("Resource not accessible", links["error"])
+        self.assertEqual(body, "Adds the thing.")
+
+    def test_a_triage_card_links_nothing(self) -> None:
+        self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body="Adds the thing.")
+
+        _, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertIsNone(report["issue_links"])
+        self.assertEqual(self.github.pull(9)["body"], "Adds the thing.")
 
     @staticmethod
     def session_module():

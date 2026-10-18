@@ -379,7 +379,7 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertIn("`changes requested on GitHub; see the card comments`", rules)
         self.assertIn("`feedback on GitHub; see the card comments`", rules)
         flat = " ".join(rules.split())
-        review_rule, comment_rule = flat.split("4. For a", 1)
+        review_rule, comment_rule = flat.split("5. For a", 1)
         self.assertIn("`blocked`, when the sender is a person (not a bot): unblock", review_rule)
         self.assertIn("when the sender is a person (not a bot) and the text asks for a change", comment_rule)
         self.assertIn(
@@ -392,6 +392,21 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertIn("`pull_request_review` submitted as a comment", comment_rule)
         self.assertIn("A thanks, an approval, or a bare question is not actionable", comment_rule)
         self.assertNotIn("hermes kanban unblock", rules)
+
+    def test_the_github_prompt_resumes_a_triage_card_on_a_persons_approval(self):
+        prompt = self.prompts["github"]
+        rules = prompt.split("## Record the event", 1)[1].split("## Unblock a card", 1)[0]
+        flat = " ".join(rules.split())
+        approval_rule = flat.split("4. For", 1)[1].split("5. For", 1)[0]
+        self.assertIn("with review state `approved`", approval_rule)
+        self.assertIn(
+            "when the sender is a person (not a bot) and the card's status is `triage`, "
+            'resume it as "Resume a parked card" says, after step 1 has commented on the card',
+            approval_rule,
+        )
+        self.assertIn("When the sender is a bot, or the card is in any other status, the comment from step 1 is enough.", approval_rule)
+        self.assertNotIn("unblock", approval_rule)
+        self.assertNotIn("reopen-review", approval_rule)
 
     def test_the_linear_prompt_unblocks_through_the_shared_section_with_its_own_reason(self):
         prompt = self.prompts["linear"]
