@@ -22,6 +22,11 @@ native sync still propagates updates to synced properties in both directions.
 Do not edit or close the Linear copy; close public work on GitHub, and treat any
 disagreement in favor of GitHub.
 
+The one sanctioned Linear write on a public issue is its delegate. Setting the
+Linear copy's delegate to the factory's agent is how the factory starts a card
+for the issue, and removing it archives that card. Change no other Linear field
+of a public issue: not its title, body, state, labels, assignee, or priority.
+
 The sync creates a comment thread whose replies publish to GitHub. Comments
 outside the synced thread remain private.
 
