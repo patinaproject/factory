@@ -78,15 +78,15 @@ export function parseRecord(path: string, text: string): ReviewRecord {
   )?.[1] ?? "open") as ReviewRecord["status"];
   const standards =
     text.match(
-      /^## Standards\s*\n([\s\S]*?)(?=^## Spec\b|^### Resolution\b|^Status:|$)/m
+      /^## Standards\s*\n([\s\S]*?)(?=^## Spec\b|^### Resolution\b|^Status:|(?![\s\S]))/m
     )?.[1] ?? "";
   const spec =
     text.match(
-      /^## Spec\s*\n([\s\S]*?)(?=^### Resolution\b|^Status:|$)/m
+      /^## Spec\s*\n([\s\S]*?)(?=^### Resolution\b|^Status:|(?![\s\S]))/m
     )?.[1] ??
     (/Spec:\s*skipped, no linked issue\./i.test(text) ? "skipped" : "");
   const section =
-    text.match(/^### Resolution\s*\n([\s\S]*?)(?=^Status:|$)/m)?.[1] ?? "";
+    text.match(/^### Resolution\s*\n([\s\S]*?)(?=^Status:|(?![\s\S]))/m)?.[1] ?? "";
   const resolutions = section
     .split("\n")
     .map((line) => line.replace(/^\s*-\s*/, "").trim())

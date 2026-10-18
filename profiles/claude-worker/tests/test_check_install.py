@@ -111,11 +111,15 @@ ALERT_SOURCE = f"skills/setup-factory/scripts/{ALERT_SCRIPT}"
 RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
 check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(check_install)
 
+TRIAGE_PLAYBOOK = ".agents/skills/patina-mode/playbooks/triage.md"
 REPO_FILES = {
+    TRIAGE_PLAYBOOK: "playbook\n",
     "profiles/claude-worker/SOUL.md": "soul\n",
     "profiles/claude-worker/config.yaml": "model: repo\n",
     "profiles/claude-worker/scripts/x": "#!/bin/sh\n",
@@ -667,14 +671,33 @@ class CheckInstallTest(unittest.TestCase):
     def test_failed_last_run_masks_secrets_in_its_error(self) -> None:
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C1\nSLACK_BOT_TOKEN=xoxb-short\n")
         error = "Script exited with code 1\nstdout:\nrejected xoxb-short and ghs_16C7e42F292c6912E7710c838347Ae178B4a"
-        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}, *ROOT_JOBS[1:]])
+        failed = cron_job("reopen-conflicts", 5, last_status="error", last_error=error)
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
 
         code, out = self.check()
 
         self.assertEqual(
             (code, out),
-            (1, f"cron job check-install in {self.root}: last run failed: Script exited with code 1: "
+            (1, f"cron job reopen-conflicts in {self.worker}: last run failed: Script exited with code 1: "
                 "rejected [redacted] and [redacted] (part 12)\n"),
+        )
+
+    def test_failed_check_install_run_does_not_fail_a_clean_machine(self) -> None:
+        error = (
+            "Script exited with code 1\nstderr:\nprofile claude-worker: scripts/claude-session differs from main "
+            "at c02dda9 (part 12)"
+        )
+        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}, *ROOT_JOBS[1:]])
+
+        self.assertEqual(self.check(), (0, ""))
+
+        failed = cron_job("refresh-checkouts", 60, last_status="error", last_error="Script exited with code 1")
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-checkouts in {self.worker}: last run failed: Script exited with code 1 "
+                "(part 12)\n"),
         )
 
     def test_undelivered_last_run_names_its_delivery_error(self) -> None:
@@ -823,7 +846,7 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (1, f"kanban board triage: is missing in {self.root} (part 10)\n"))
 
-    def test_triage_board_must_anchor_worktrees_at_the_default_repository(self) -> None:
+    def default_repository(self) -> Path:
         checkout = self.tmp / "app"
         git(self.tmp, "init", "-q", str(checkout))
         git(checkout, "commit", "-q", "--allow-empty", "-m", "init")
@@ -832,11 +855,24 @@ class CheckInstallTest(unittest.TestCase):
         settings = {**SETTINGS, "repositories": [{"full_name": "org/app", "path": str(checkout), "routing": "default"}]}
         self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
         self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        return checkout
+
+    def test_triage_board_must_anchor_worktrees_at_the_default_repository(self) -> None:
+        checkout = self.default_repository()
 
         self.assertEqual(self.check(), (1, f"kanban board triage: default_workdir is not {checkout} (part 10)\n"))
         self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
 
         self.assertEqual(self.check(), (0, ""))
+
+    def test_factory_checkout_without_the_triage_playbook(self) -> None:
+        (self.repo / TRIAGE_PLAYBOOK).unlink()
+
+        self.assertEqual(self.check("--no-fetch"), (
+            1,
+            f"triage playbook {self.repo}: has no {TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage "
+            "playbook; update the checkout to a commit that vendors it (part 10)\n",
+        ))
 
     def test_triage_cap_that_is_unset_or_not_positive(self) -> None:
         for value in (None, 0, -1, "2", True):

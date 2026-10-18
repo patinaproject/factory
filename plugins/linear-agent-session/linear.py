@@ -68,6 +68,15 @@ ISSUE_LABELS_QUERY = """query IssueLabels($id: String!) {
   issue(id: $id) { labels { nodes { name } } }
 }"""
 
+ISSUE_DOCUMENTS_QUERY = """query IssueDocuments($id: String!) {
+  viewer { id }
+  issue(id: $id) { identifier documents(first: 100) { nodes { id title creator { id } } } }
+}"""
+
+DOCUMENT_UPDATE_MUTATION = """mutation DocumentUpdate($id: String!, $input: DocumentUpdateInput!) {
+  documentUpdate(id: $id, input: $input) { success }
+}"""
+
 ISSUE_STATES_QUERY = """query IssueStates($id: String!) {
   issue(id: $id) {
     id identifier
@@ -186,6 +195,22 @@ class LinearClient:
     def issue_labels(self, id_or_identifier: str) -> list:
         return _label_names(self._graphql(ISSUE_LABELS_QUERY, {"id": id_or_identifier})["issue"])
 
+    def issue_documents(self, id_or_identifier: str) -> dict:
+        data = self._graphql(ISSUE_DOCUMENTS_QUERY, {"id": id_or_identifier})
+        viewer = data["viewer"]["id"]
+        return {
+            "identifier": data["issue"]["identifier"],
+            "documents": [
+                {"id": n["id"], "title": n["title"], "own": (n["creator"] or {}).get("id") == viewer}
+                for n in data["issue"]["documents"]["nodes"]
+            ],
+        }
+
+    def rename_document(self, document_id: str, title: str) -> None:
+        payload = self._graphql(DOCUMENT_UPDATE_MUTATION, {"id": document_id, "input": {"title": title}})
+        if not payload["documentUpdate"]["success"]:
+            raise LinearError("documentUpdate reported success: false")
+
     def move_to_todo(self, id_or_identifier: str) -> dict:
         """Move an issue from the Triage status to its team's Todo status, and leave any other issue as it is."""
         issue = self._graphql(ISSUE_STATES_QUERY, {"id": id_or_identifier})["issue"]
@@ -215,6 +240,13 @@ class LinearClient:
             if not page["pageInfo"]["hasNextPage"]:
                 return issues
             after = page["pageInfo"]["endCursor"]
+
+    def delegated_to_self(self, id_or_identifier: str) -> bool:
+        data = self._graphql(ISSUE_DELEGATE_QUERY, {"id": id_or_identifier})
+        if data["issue"] is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        delegate = data["issue"]["delegate"]
+        return delegate is not None and delegate["id"] == data["viewer"]["id"]
 
     def undelegate_self(self, id_or_identifier: str) -> dict:
         data = self._graphql(ISSUE_DELEGATE_QUERY, {"id": id_or_identifier})

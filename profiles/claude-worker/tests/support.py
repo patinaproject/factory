@@ -63,7 +63,7 @@ print(json.dumps({
     "type": "result",
     "subtype": options.get("subtype", "success"),
     "is_error": False,
-    "result": "Opened the pull request.",
+    "result": options.get("result", "Opened the pull request."),
     "session_id": "ignored",
     "num_turns": 7,
 }), flush=True)

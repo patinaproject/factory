@@ -451,6 +451,20 @@ def issue_delegate(delegate_id, viewer_id="app-user-1"):
     return 200, {"data": {"viewer": {"id": viewer_id}, "issue": issue}}
 
 
+class DelegatedToSelfTest(unittest.TestCase):
+    def test_only_the_agent_apps_own_delegation_counts(self):
+        for delegate_id, expected in (("app-user-1", True), (None, False), ("other-agent", False)):
+            with self.subTest(delegate_id=delegate_id):
+                fake = FakeLinear([issue_delegate(delegate_id)])
+                self.assertIs(make_client(fake).delegated_to_self("ABC-1"), expected)
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
+
+    def test_an_issue_linear_does_not_return_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"viewer": {"id": "app-user-1"}, "issue": None}})])
+        with self.assertRaisesRegex(linear.LinearError, "no issue ABC-1"):
+            make_client(fake).delegated_to_self("ABC-1")
+
+
 class UndelegateTest(unittest.TestCase):
     def run_undelegate(self, responses):
         fake = FakeLinear(responses)

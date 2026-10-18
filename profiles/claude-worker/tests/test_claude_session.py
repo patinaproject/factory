@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from tests.support import BOT_LOGIN, SCRIPTS, FakeGithub, GitFixture, git
+from tests.support import BOT_LOGIN, REPO as FACTORY, SCRIPTS, FakeGithub, GitFixture, git
 
 # A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
 ISSUE_ID = str(uuid.uuid4())
@@ -129,11 +129,17 @@ class ClaudeSessionTest(GitFixture):
         self.nvm_dir = self.tmp / "nvm"
         self.hermes_home = self.tmp / "hermes" / "profiles" / "claude-worker"
         self.install_linear_plugin(self.hermes_home)
+        self.install_from(FACTORY)
         self.github = FakeGithub(self.tmp, REPO)
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
         self.card = self.tmp / "card.json"
         self.set_comments()
+
+    def install_from(self, checkout: Path) -> None:
+        (self.hermes_home / "distribution.yaml").write_text(
+            f"name: claude-worker\nsource: {checkout}/profiles/claude-worker\n"
+        )
 
     def set_comments(self, *comments: tuple[int, str, str]) -> None:
         self.card.write_text(json.dumps({"comments": [
@@ -233,6 +239,7 @@ class ClaudeSessionTest(GitFixture):
             "subtype": "success",
             "num_turns": 7,
             "superseded": None,
+            "triage_documents": None,
             "result": "Opened the pull request.",
             "usage": None,
             "first_context_tokens": None,
@@ -292,12 +299,67 @@ class ClaudeSessionTest(GitFixture):
         for implementation_rule in ("Publish commits only", "A finished check never runs again",
                                     "Every pull request description shows its proof", "To wait for CI"):
             self.assertNotIn(implementation_rule, system)
-        for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token"):
+        playbook = FACTORY / ".agents/skills/patina-mode/playbooks/triage.md"
+        for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token",
+                                f"patina-mode's triage playbook at `{playbook}`"):
             self.assertIn(triage_contract, system)
+        self.assertTrue(playbook.is_absolute() and playbook.is_file())
+        for retired_skill in ("`triage` skill", "`grilling`"):
+            self.assertNotIn(retired_skill, system)
         self.assertTrue(self.prompt().startswith(
             "Triage Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) for example-org/example-repo."
         ))
         self.assertNotIn("pull request", self.prompt())
+
+    def test_a_triage_outcome_names_the_activity_that_reports_it(self) -> None:
+        cases = (
+            ("Triage outcome: ready-for-agent\nReproduced.", "app-user", "thought"),
+            ("Triage outcome: ready-for-agent\nReproduced.", None, "response"),
+            ("Triage outcome: ready-for-agent", "another-agent", "response"),
+            ("Triage outcome: ready-for-human\nNeeds a design call.", "app-user", "response"),
+            ("Triage outcome: `Ready-for-agent`.", "app-user", "thought"),
+            ("Triage outcome: `ready-for-agent`", None, "response"),
+            ("Triage outcome: wontfix", None, "response"),
+            ("Triage outcome: done", "app-user", None),
+            ("Needs input:\nWhich version?", "app-user", None),
+        )
+        for result, delegate, activity in cases:
+            with self.subTest(result=result, delegate=delegate):
+                self.set_linear_issue(delegate=delegate)
+                self.configure_fake_claude(result=result)
+
+                status, report = self.run_session(env=TRIAGE_ENV)
+
+                self.assertEqual((status, report["result"], report["activity"]), (0, result, activity))
+
+    def test_a_triage_outcome_keeps_the_session_open_when_linear_cannot_say_who_is_delegated(self) -> None:
+        self.set_linear_issue(hidden=True)
+        self.configure_fake_claude(result="Triage outcome: ready-for-agent")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["result"], report["activity"]), (0, "Triage outcome: ready-for-agent", "thought"))
+
+    def set_linear_issue(self, **fields) -> None:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, **fields}))
+
+    def test_an_implementation_run_names_no_activity(self) -> None:
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertNotIn("activity", report)
+
+    def test_a_triage_card_refuses_when_the_factory_checkout_has_no_playbook(self) -> None:
+        self.install_from(self.main)
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        playbook = self.main / ".agents/skills/patina-mode/playbooks/triage.md"
+        self.assertEqual((status, report), (2, {
+            "error": f"{playbook} does not exist, so a triage card cannot follow the triage playbook"
+        }))
+        self.assertFalse(self.log.exists())
 
     def test_a_triage_card_settings_forbid_publishing(self) -> None:
         self.run_session(env=TRIAGE_ENV)
@@ -323,6 +385,62 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.github.calls(), [])
         self.assertEqual(self.github.pull(7)["state"], "open")
         self.assertEqual(git(self.worktree, "rev-parse", "HEAD"), head)
+
+    def set_documents(self, *documents: tuple[str, str, str], error: str | None = None, timeout: bool = False) -> None:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        state["documents"] = [{"id": id, "title": title, "creator": creator} for id, title, creator in documents]
+        state.update(documents_error=error, documents_timeout=timeout)
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps(state))
+
+    def document_titles(self) -> dict:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        return {document["id"]: document["title"] for document in state["documents"]}
+
+    def test_a_triage_run_gives_its_prefixed_documents_their_exact_titles(self) -> None:
+        self.set_documents(("d1", "ABC-123 Triage notes", "app-user"), ("d2", "ABC-123 Agent brief", "app-user"))
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {
+            "renamed": ["ABC-123 Triage notes", "ABC-123 Agent brief"], "missing": [],
+        }))
+        self.assertEqual(self.document_titles(), {"d1": "Triage notes", "d2": "Agent brief"})
+
+    def test_a_triage_run_leaves_a_persons_document_and_one_beside_an_exact_title(self) -> None:
+        self.set_documents(
+            ("d1", "ABC-123 Triage notes", "person"),
+            ("d2", "Agent brief", "app-user"),
+            ("d3", "ABC-123 Agent brief", "app-user"),
+        )
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {"renamed": [], "missing": []}))
+        self.assertEqual(self.document_titles(), {
+            "d1": "ABC-123 Triage notes", "d2": "Agent brief", "d3": "ABC-123 Agent brief",
+        })
+
+    def test_a_triage_run_reports_missing_documents(self) -> None:
+        self.set_documents()
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {
+            "renamed": [], "missing": ["Triage notes", "Agent brief"],
+        }))
+
+    def test_a_triage_run_reports_a_failed_document_check_without_failing(self) -> None:
+        for options, reason in (({"error": "Entity not found"}, "Entity not found"),
+                                ({"timeout": True}, "The read operation timed out")):
+            with self.subTest(reason=reason):
+                self.set_documents(**options)
+
+                status, report = self.run_session(env=TRIAGE_ENV)
+
+                self.assertEqual((status, report["triage_documents"]), (0, {
+                    "error": f"checking the triage Documents failed: {reason}",
+                }))
+                self.assertEqual(report["result"], "Opened the pull request.")
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(

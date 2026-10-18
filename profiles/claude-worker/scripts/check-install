@@ -21,7 +21,8 @@ repository checkout exists and has origin/HEAD set, and that the root home's
 upload broker socket answers a status request and reports a token present. That
 check sends only {"op": "status"}, never uploads, and prints no value. It also checks
 that the Triage board exists and anchors its worktrees at the default
-repository, and that the triage refs file is as fresh as the owned refs. When any difference is
+repository, that the source checkout vendors the triage playbook that
+claude-session gives triage cards, and that the triage refs file is as fresh as the owned refs. When any difference is
 reported and the source checkout is not at origin/HEAD, the last line names
 that checkout. It gives the fast-forward command only when the checkout is
 behind, on the default branch, and clean. --ref turns the line off, because
@@ -51,6 +52,8 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, NamedTuple
+
+import factory_source
 
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
@@ -557,12 +560,16 @@ def error_summary(error: str) -> str:
     return lines[0] if lines else ""
 
 
-def last_run_failure(live: dict, secrets: list) -> list:
+def last_run_failure(job: CronJob, live: dict, secrets: list) -> list:
     status = live.get("last_status")
     if status in HEALTHY_RUNS:
         return []
     if status == "delivery_failed":
         what, error = "last run's output was not delivered", live.get("last_delivery_error")
+    elif job.runs == ROOT_ALERT_SCRIPT:
+        # The alert job runs this check, so its failure is the previous run's report. Reporting it would fail this
+        # run as well, and one failure would repeat after the machine is clean.
+        return []
     else:
         what, error = "last run failed", live.get("last_error")
     # Redacted before it is clipped, so a clip never leaves part of a secret unmasked.
@@ -621,7 +628,7 @@ def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
             drifts.append(Drift("cron job", where, f"exists {len(found)} times (part {job.part})"))
         for live in found:
             details = [
-                *cron_differences(job, live), *unresolved_deliveries(home, live, hermes), *last_run_failure(live, secrets)
+                *cron_differences(job, live), *unresolved_deliveries(home, live, hermes), *last_run_failure(job, live, secrets)
             ]
             drifts.extend(Drift("cron job", where, f"{d} (part {job.part})") for d in details)
     owners = {job.name: job for job in CRON}
@@ -707,6 +714,17 @@ def check_triage_board(root: Path, hermes: str, settings) -> list:
     return []
 
 
+def check_triage_playbook(repo: Path) -> list:
+    # claude-session reads the playbook from the checkout's working tree, not from the compared commit.
+    if (repo / factory_source.TRIAGE_PLAYBOOK).is_file():
+        return []
+    return [Drift(
+        "triage playbook", repo,
+        f"has no {factory_source.TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage playbook; "
+        "update the checkout to a commit that vendors it (part 10)",
+    )]
+
+
 def check_source_checkout(commit: Commit) -> list:
     repo = commit.repo
     head = git(repo, "rev-parse", "HEAD").strip()
@@ -785,14 +803,10 @@ def homes() -> tuple:
 
 
 def default_repo(worker: Path) -> Path:
-    distribution = worker / "distribution.yaml"
-    if not distribution.is_file():
-        raise Refusal(f"{distribution} does not exist; pass --repo")
-    for line in distribution.read_text().splitlines():
-        match = re.match(r"^source:\s*['\"]?(.+?)['\"]?\s*$", line)
-        if match:
-            return Path(match.group(1)).parents[1]
-    raise Refusal(f"{distribution} has no source: line; pass --repo")
+    try:
+        return factory_source.checkout(worker)
+    except factory_source.SourceError as error:
+        raise Refusal(f"{error}; pass --repo") from None
 
 
 def resolve_commit(repo: Path, ref: str | None) -> Commit:
@@ -844,6 +858,7 @@ def main() -> int:
             *check_rejected_deliveries(root),
             *check_owned_refs(root),
             *check_triage_board(root, hermes, config_value(worker, hermes, SETTINGS_KEY)),
+            *check_triage_playbook(repo),
             *check_checkouts(config_value(worker, hermes, SETTINGS_KEY)),
             *check_model_tiers(config_value(worker, hermes, SETTINGS_KEY), worker),
         ]

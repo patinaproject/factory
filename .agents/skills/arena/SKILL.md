@@ -7,6 +7,8 @@ description: "Spawn N parallel candidates at the same task, pick a base, graft t
 
 On Codex, read the [platform mapping](../patina-mode/references/codex-tools.md), including its per-skill notes, before following this skill.
 
+On GitHub Copilot, read the [platform mapping](../patina-mode/references/copilot-tools.md), including its per-skill notes, before following this skill.
+
 Fan out N parallel attempts at the same task. Read every candidate end to end. Pick the strongest as the base. Graft the best ideas from the others into it. Verify the synthesized result.
 
 ## Start
@@ -75,9 +77,9 @@ One synthesized artifact. One short synthesis note alongside, naming the base, t
 
 Role defaults, stamped from `plugins/pstack/models.json` (edit there, rerun `tools/generate.mjs`). A matching role line in the `pstack-models.md` override sheet overrides each at runtime; `/setup-pstack` writes it and lists its path per runtime.
 
-- arena runners: `opus`, `fable`, `sonnet`
-- arena cross-judge pool: `opus`, `fable`, `sonnet`
+- arena runners: `opus`, `fable`, `sonnet`, `haiku`
+- arena cross-judge pool: `opus`, `fable`, `sonnet`, `haiku`
 
 ## Reasoning effort
 
-A role value in the override sheet may name a reasoning effort after its model, as in `opus @xhigh`. Levels on Claude Code: `low`, `medium`, `high`, `xhigh`, `max`. Which ones apply depends on the model. A value without `@` takes the sheet's `default effort` line, a level or `session`, and `session` when the sheet has no such line. `session` sets no effort, so the dispatch is the usual one. Strip the suffix before reading the model: `inherit-parent` or `auto` still omits `model` at every level, and a model name is passed as `model`. On Claude Code, a level picks the effort agent from the `subagent_type` you would otherwise use. `pstack:patina-agent` becomes `subagent_type: "pstack:patina-agent-<level>"`. `general-purpose`, or no `subagent_type`, becomes `subagent_type: "pstack:effort-<level>"`. The effort agents set only `effort`, so the model you pass still decides the model. On Codex, pass the level as `spawn_agent`'s `reasoning_effort` and keep the usual instructions.
+A role value in the override sheet may name a reasoning effort after its model, as in `opus @xhigh`. Levels on Claude Code: `low`, `medium`, `high`, `xhigh`, `max`. Which ones apply depends on the model. A value without `@` takes the sheet's `default effort` line, a level or `session`, and `session` when the sheet has no such line. `session` sets no effort, so the dispatch is the usual one. Strip the suffix before reading the model: `inherit-parent` or `auto` still omits `model` at every level, and a model name is passed as `model`. On Claude Code, a level picks the effort agent from the `subagent_type` you would otherwise use. `engineering:patina-agent` becomes `subagent_type: "engineering:patina-agent-<level>"`. `general-purpose`, or no `subagent_type`, becomes `subagent_type: "engineering:effort-<level>"`. The effort agents set only `effort`, so the model you pass still decides the model. On Codex, pass the level as `spawn_agent`'s `reasoning_effort` and keep the usual instructions.

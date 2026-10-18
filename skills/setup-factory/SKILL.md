@@ -801,6 +801,15 @@ is, so when the board exists, run
 instead. An implementation card starts only when its Linear issue carries
 `ready-for-agent`, which triage applies.
 
+A triage card follows patina-mode's triage playbook from the factory checkout
+that the worker home was installed from, the checkout that
+`check-install --print-source` prints. That checkout vendors it as
+`.agents/skills/patina-mode/playbooks/triage.md`, so a triage card follows the
+same playbook in every repository, whatever that repository vendors.
+`claude-session` refuses a triage card when the file is missing, and
+`check-install` reports it. Update the checkout to the factory's default
+branch to restore it.
+
 A worker hands a card with a merge-ready pull request to the `review` lane.
 With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,
 so the card waits there for a person. GitHub triage moves it to `done` when the
@@ -827,8 +836,8 @@ and a default assignee would route the unassigned card to a worker first.
 `hermes kanban boards list --json` lists the `default` and `triage` boards,
 each with the default repository's path as its `default_workdir`.
 `check-install` reports a missing `triage` board, another `default_workdir`,
-and a `triage.max_running` that is not a positive integer or differs between
-the homes.
+a default repository without the triage playbook, and a `triage.max_running`
+that is not a positive integer or differs between the homes.
 
 ## 11. Webhook routes
 
@@ -970,9 +979,10 @@ machine changes this runbook cannot reproduce: a `config.yaml` key from parts
 missing, duplicated, changed, not created by the runbook, or in the wrong
 profile, a cron job that delivers to a platform with no home channel in its
 profile, a cron job whose last run failed or was not delivered, with the first
-line of its error and secrets masked, the root home's
-`scripts/check-install-alert` and `scripts/retry-failed-webhooks` when one is
-missing or differs from the repository, and, on macOS, a launchd service from part 7 or 15
+line of its error and secrets masked (a failed run of the `check-install` job
+itself is not reported, because that failure is the previous run's report), the
+root home's `scripts/check-install-alert` and `scripts/retry-failed-webhooks`
+when one is missing or differs from the repository, and, on macOS, a launchd service from part 7 or 15
 that is not installed, does not run at load, or is not running, and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never
 prints a config value. It prints one line per difference and nothing when the
@@ -1283,8 +1293,14 @@ each check. Report each result.
     `Merge refused by Hermes: Hermes counted failed runs that newer passing runs replaced:`
     and the elicitation says the checks passed on their newest runs. Repeat
     either case with the issue already Done before the merge: the card is
-    archived with the same comment, and the session gets no post. In every case
-    the card stays unassigned.
+    archived with the same comment, and the session gets no post. Then merge a
+    pull request into a base branch with no required checks, so Hermes refuses
+    it as `missing`. The comment is
+    `Merge refused by Hermes: the base branch has no required checks.`, and the
+    elicitation asks whether the issue is done. Repeat it with the issue
+    already Done before the merge, and with the issue marked Done after the
+    refusal: the card is archived both times. In every case the card stays
+    unassigned.
 
 25. Create an issue in the team's Triage status. Within a minute the
     `triage` board has one card for it, with no assignee until
