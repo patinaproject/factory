@@ -91,6 +91,10 @@ DEFAULT_RULES = [
     {"type": "required_linear_history"},
     {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Required checks pass"}]}},
 ]
+VALIDATE_REQUIRED = [
+    *DEFAULT_RULES[:-1],
+    {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Required checks pass"}, {"context": "Validate pull request"}]}},
+]
 REVIEW_STATE = {
     "data": {
         "repository": {
@@ -192,6 +196,16 @@ class HookScopeTest(unittest.TestCase):
         result = call_hook(shell, ctx=FakeCtx(profile="other-worker", gated=["other-worker"]))
         self.assertEqual(result["action"], "block")
 
+    def test_a_triage_board_card_is_not_gated(self):
+        shell = FakeShell(pr={**CLEAN, "isDraft": True})
+        self.assertIsNone(call_hook(shell, env={**WORKER_ENV, "HERMES_KANBAN_BOARD": "triage"}))
+        self.assertEqual(shell.calls, [])
+
+    def test_an_implementation_board_card_is_gated(self):
+        shell = FakeShell(pr={**CLEAN, "isDraft": True})
+        result = call_hook(shell, env={**WORKER_ENV, "HERMES_KANBAN_BOARD": "default"})
+        self.assertEqual(result["action"], "block")
+
     def test_profile_falls_back_to_hermes_profile_env(self):
         shell = FakeShell(pr={**CLEAN, "isDraft": True})
         result = call_hook(shell, env={**WORKER_ENV, "HERMES_PROFILE": "claude-worker"}, ctx=FakeCtx(profile=""))
@@ -256,10 +270,13 @@ class HookDecisionTest(unittest.TestCase):
         self.assertEqual(result["action"], "block")
         self.assertIn("mergeStateStatus is 'BLOCKED'", result["message"])
 
-    def test_review_handoff_after_changes_requested_refuses_a_failed_status(self):
-        failed = {**AWAITING_RE_REVIEW, "statusCheckRollup": [*PASSING_CHECKS, {"state": "FAILURE"}]}
-        result = call_hook(FakeShell(pr={**CLEAN, **failed}), tool_name="kanban_request_review")
+    def test_review_handoff_after_changes_requested_refuses_a_failed_required_status(self):
+        rules = [*DEFAULT_RULES[:-1], {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Preview"}]}}]
+        rollup = [*PASSING_CHECKS[:2], {"__typename": "StatusContext", "context": "Preview", "state": "FAILURE"}]
+        failed = {**AWAITING_RE_REVIEW, "statusCheckRollup": rollup}
+        result = call_hook(FakeShell(pr={**CLEAN, **failed}, rules=rules), tool_name="kanban_request_review")
         self.assertEqual(result["action"], "block")
+        self.assertIn("required check 'Preview' has not passed", result["message"])
 
     def test_review_handoff_after_changes_requested_waits_for_checks_to_register(self):
         unregistered = {**AWAITING_RE_REVIEW, "statusCheckRollup": []}
@@ -313,9 +330,26 @@ class HookDecisionTest(unittest.TestCase):
         self.assert_blocked(result, "mergeStateStatus is 'BLOCKED'")
         self.assertEqual([call for call in shell.calls if call[0][:2] == ["gh", "api"]], [])
 
-    def test_approval_wait_with_a_failing_check_is_refused(self):
-        failed = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Test", "status": "COMPLETED", "conclusion": "FAILURE"}]
-        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": failed}), "mergeStateStatus is 'BLOCKED'")
+    def test_approval_wait_with_a_failing_check_no_rule_requires_is_allowed(self):
+        failed = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Diff infra", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        self.assertIsNone(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": failed}))
+
+    def test_approval_wait_with_a_failing_status_no_rule_requires_is_allowed(self):
+        failed = [*PASSING_CHECKS, {"__typename": "StatusContext", "context": "Vercel - cms", "state": "FAILURE"}]
+        self.assertIsNone(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": failed}))
+
+    def test_approval_wait_with_a_failing_required_check_is_refused_naming_it(self):
+        failed = [PASSING_CHECKS[1], {"__typename": "CheckRun", "name": "Required checks pass", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": failed})
+        self.assert_blocked(result, "required check 'Required checks pass' has not passed")
+        self.assertIn("check 'Required checks pass' failed (FAILURE)", result["message"])
+
+    def test_completion_with_a_failing_check_no_rule_requires_is_blocked(self):
+        failed = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Diff infra", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        result = self.review_handoff({"mergeStateStatus": "UNSTABLE", "statusCheckRollup": failed}, tool_name="kanban_complete")
+        self.assert_blocked(result, "check 'Diff infra' failed (FAILURE)")
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": failed}, tool_name="kanban_complete")
+        self.assert_blocked(result, "check 'Diff infra' failed (FAILURE)")
 
     def test_approval_wait_with_a_pending_check_is_refused(self):
         pending = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Test", "status": "IN_PROGRESS", "conclusion": ""}]
@@ -339,7 +373,7 @@ class HookDecisionTest(unittest.TestCase):
 
     def test_approval_wait_whose_latest_run_failed_is_refused_naming_the_check(self):
         rollup = [*PASSING_CHECKS, self.check_run("FAILURE", "2026-10-14T01:10:14Z"), self.check_run("SUCCESS", "2026-10-14T01:09:23Z")]
-        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup})
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}, rules=VALIDATE_REQUIRED)
         self.assert_blocked(result, "check 'Validate pull request' failed (FAILURE)")
         self.assertNotIn("Required checks pass", result["message"])
 
@@ -350,7 +384,17 @@ class HookDecisionTest(unittest.TestCase):
 
     def test_runs_that_started_together_count_the_one_that_did_not_pass(self):
         rollup = [*PASSING_CHECKS, self.check_run("FAILURE", "2026-10-14T01:09:23Z"), self.check_run("SUCCESS", "2026-10-14T01:09:23Z")]
-        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}), "check 'Validate pull request' failed")
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}, rules=VALIDATE_REQUIRED)
+        self.assert_blocked(result, "check 'Validate pull request' failed")
+
+    def test_a_non_required_check_whose_older_run_passed_is_judged_by_its_latest_run(self):
+        rollup = [*PASSING_CHECKS, self.check_run("SUCCESS", "2026-10-14T01:09:23Z"), self.check_run("FAILURE", "2026-10-14T01:10:14Z")]
+        self.assertIsNone(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}))
+
+    def test_a_required_check_whose_older_run_passed_is_judged_by_its_latest_run(self):
+        rollup = [*PASSING_CHECKS, self.check_run("SUCCESS", "2026-10-14T01:09:23Z"), self.check_run("FAILURE", "2026-10-14T01:10:14Z")]
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}, rules=VALIDATE_REQUIRED)
+        self.assert_blocked(result, "required check 'Validate pull request' has not passed")
 
     def test_a_pending_status_context_is_named(self):
         rollup = [*PASSING_CHECKS, {"__typename": "StatusContext", "context": "Preview deploy", "state": "PENDING"}]
@@ -619,6 +663,20 @@ class ReviewHookTest(unittest.TestCase):
         shell = self.shell(reviews)
         self.assertIsNone(call_review_hook(shell))
         self.assertEqual(self.posts(shell), [])
+
+    def test_a_failed_check_the_gate_let_through_is_named_in_the_result(self):
+        rollup = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Diff infra", "status": "COMPLETED", "conclusion": "FAILURE"},
+                  {"__typename": "StatusContext", "context": "Vercel - cms", "state": "ERROR"}]
+        shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL, "statusCheckRollup": rollup})
+        result = json.loads(call_review_hook(shell))
+        self.assertEqual(result, {**json.loads(LANDED_IN_REVIEW), "failed_unrequired_checks": ["Diff infra", "Vercel - cms"]})
+        self.assertEqual(self.posts(shell), [])
+
+    def test_a_failed_check_replaced_by_a_passing_run_is_not_named(self):
+        old = {"__typename": "CheckRun", "name": "Diff infra", "status": "COMPLETED", "conclusion": "FAILURE", "startedAt": "2026-10-14T01:09:23Z"}
+        new = {**old, "conclusion": "SUCCESS", "startedAt": "2026-10-14T01:10:14Z"}
+        shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, old, new]})
+        self.assertIsNone(call_review_hook(shell))
 
     def test_an_ungated_profile_is_ignored(self):
         shell = self.shell(review_nodes(("reviewer", OTHER)))

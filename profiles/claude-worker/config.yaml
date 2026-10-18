@@ -29,6 +29,8 @@ plugins:
             path: /abs/path/to/example-repo
             routing: default
             worker_entry: ""
+        triage:
+          max_running: 2
         github:
           login: ""
           app_id: ""

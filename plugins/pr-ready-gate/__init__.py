@@ -9,6 +9,7 @@ import urllib.parse
 from typing import Any, Callable, Optional
 
 DEFAULT_GATED_PROFILES = ["claude-worker"]
+TRIAGE_BOARD = "triage"
 # Hermes runs its completion contract inside complete_task only, so a review handoff needs this gate too.
 GATED_TOOLS = ("kanban_complete", "kanban_request_review")
 PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"
@@ -99,13 +100,18 @@ def evaluate(
 
 
 def _awaiting_review(pr: dict) -> bool:
+    """A failed check may still be one no rule requires, which other_blockers judges; a pending one is not judged yet."""
     checks = _latest_runs(pr.get("statusCheckRollup"))
     return (
         pr.get("mergeStateStatus") == "BLOCKED"
         and pr.get("reviewDecision") in ("CHANGES_REQUESTED", "REVIEW_REQUIRED")
         and bool(checks)
-        and all(_check_passed(check) for check in checks)
+        and all(_check_passed(check) or _check_failed(check) for check in checks)
     )
+
+
+def _failed_checks(pr: dict) -> list[str]:
+    return [_rollup_name(check) or "unnamed" for check in _latest_runs(pr.get("statusCheckRollup")) if _check_failed(check)]
 
 
 def _latest_runs(rollup) -> list:
@@ -136,7 +142,7 @@ def _check_failures(pr: dict) -> list[str]:
         name = _rollup_name(check) or "unnamed"
         if not isinstance(check, dict):
             problems.append(f"a check in the rollup is unreadable: {check!r}")
-        elif check.get("state") in ("PENDING", "EXPECTED") or check.get("status", "COMPLETED") != "COMPLETED":
+        elif not _check_failed(check):
             observed = check.get("state") or check.get("status")
             problems.append(f"check {name!r} is pending ({observed}): wait for it to finish, then call again")
         else:
@@ -163,14 +169,14 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
     types = {rule.get("type") for rule in rules if isinstance(rule, dict)}
     for unknown in sorted(str(t) for t in types - REVIEW_HANDOFF_RULES):
         problems.append(f"branch rule {unknown!r} is one this gate cannot verify, so BLOCKED may not be only the review")
-    rollup = pr.get("statusCheckRollup") or []
+    latest = _latest_runs(pr.get("statusCheckRollup"))
     for rule in rules:
         if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
             continue
         for required in (rule.get("parameters") or {}).get("required_status_checks") or []:
             context = required.get("context")
-            seen = [check for check in rollup if _rollup_name(check) == context]
-            if not seen:
+            seen = [check for check in latest if _rollup_name(check) == context]
+            if not seen or not all(_check_passed(check) for check in seen):
                 problems.append(f"required check {context!r} has not passed: wait for it, or fix and push")
     changes_requested = pr.get("reviewDecision") == "CHANGES_REQUESTED"
     wants_threads = any(
@@ -205,6 +211,13 @@ def _check_passed(check) -> bool:
     if "state" in check:
         return check["state"] == "SUCCESS"
     return check.get("status") == "COMPLETED" and check.get("conclusion") in PASSING_CONCLUSIONS
+
+
+def _check_failed(check) -> bool:
+    """A finished run that did not pass, as opposed to one still pending."""
+    if not isinstance(check, dict) or _check_passed(check):
+        return False
+    return check.get("state") not in ("PENDING", "EXPECTED") and check.get("status", "COMPLETED") == "COMPLETED"
 
 
 def _head_failures(pr: dict, local_head: str) -> list[str]:
@@ -247,10 +260,8 @@ def check(tool_name: str, args: Any, env: dict) -> tuple[str, list[str]]:
     return pr["url"], evaluate(pr, local_head, tool_name, _blockers(pr, workspace, deadline))
 
 
-def re_request_reviews(args: Any, env: dict) -> tuple[list[str], list[str]]:
+def re_request_reviews(pr: dict, workspace: str, deadline: float) -> tuple[list[str], list[str]]:
     """Asks each reviewer whose changes-requested review is on an older head to review again; returns who was asked and what failed."""
-    deadline = time.monotonic() + HOOK_BUDGET_SECONDS
-    workspace, _, pr = _load_pr(args, env, deadline)
     match = PR_URL.match(str(pr.get("url")))
     if pr.get("state") != "OPEN" or pr.get("reviewDecision") != "CHANGES_REQUESTED" or not match:
         return [], []
@@ -349,6 +360,8 @@ def _blockers(pr: dict, workspace: str, deadline: float) -> Optional[Callable[[]
 
 
 def _gated(ctx: Any) -> bool:
+    if os.environ.get("HERMES_KANBAN_BOARD") == TRIAGE_BOARD:
+        return False
     profile = ctx.profile_name or os.environ.get("HERMES_PROFILE", "")
     return profile in ctx.get_config("gated_profiles", default=DEFAULT_GATED_PROFILES)
 
@@ -390,6 +403,8 @@ def make_hook(ctx: Any):
 def make_review_hook(ctx: Any):
     """After a card lands in review, asks stale changes-requested reviewers to look again and names them in the tool result.
 
+    It also names each failed check, which the gate let through only because no branch rule requires it.
+
     transform_tool_result is the one hook that can change what the worker reads, and Hermes bounds it at 30s and fails open.
     """
 
@@ -402,16 +417,22 @@ def make_review_hook(ctx: Any):
             return None
         if not isinstance(landed, dict) or landed.get("status") != "review":
             return None
+        unrequired: list[str] = []
         try:
-            asked, failed = re_request_reviews(args, dict(os.environ))
+            deadline = time.monotonic() + HOOK_BUDGET_SECONDS
+            workspace, _, pr = _load_pr(args, dict(os.environ), deadline)
+            unrequired = _failed_checks(pr)
+            asked, failed = re_request_reviews(pr, workspace, deadline)
         except GateError as exc:
             asked, failed = [], [str(exc)]
-        if not asked and not failed:
+        if not asked and not failed and not unrequired:
             return None
         if asked:
             landed["re_requested_reviewers"] = asked
         if failed:
             landed["re_request_failures"] = failed
+        if unrequired:
+            landed["failed_unrequired_checks"] = unrequired
         return json.dumps(landed)
 
     return on_tool_result
