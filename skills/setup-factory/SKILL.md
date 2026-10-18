@@ -704,7 +704,8 @@ It exits `0` and prints nothing when both homes match. Otherwise it prints one
 line per home and differing key, such as
 `claude-worker: claude_session.model differs`, and never a value. The installed
 settings can hold `${...}` references, so do not compare them by printing
-them.
+them. Without the argument, it compares the worker home with the
+root home, which is how a deploy runs it.
 
 **Set** the settings in both homes when the check prints a line:
 
@@ -1562,14 +1563,29 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      If the machine is right, change the part and its row in `check-install`
      in one pull request, as the replicability rule in `AGENTS.md` requires.
 4. Run `check-install` again. It prints nothing.
-5. If step 3 changed a plugin, a webhook config key, or a team skills setting:
+5. Check that the worker home's factory settings match the root home's:
+
+   ```sh
+   python3 <source checkout>/skills/setup-factory/scripts/check-settings
+   ```
+
+   With no argument, it uses the root home's installed settings as the
+   reference, so a deploy needs no settings file and no `--raw` read. It
+   exits `0` and prints nothing when the homes match. Otherwise it prints one
+   line per differing key, such as
+   `claude-worker: claude_session.model differs`, and never a value. It does
+   not prove that the root home holds what the operator intended; part 10's
+   check against the settings file does. When it prints a line, find which
+   home is right with the operator, and set that home's settings in the other
+   as in part 10.
+6. If step 3 changed a plugin, a webhook config key, or a team skills setting:
 
    > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
    > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes. Then confirm
    > that
    > `~/.hermes/logs/gateway.log` shows a startup after the install.
 
-6. Record the deployed commit in the private configuration record.
+7. Record the deployed commit in the private configuration record.
 
 ## Report
 

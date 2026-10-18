@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Compare the installed linear-agent-session settings in both homes with a settings file.
 
+With no argument, compare the worker home with the root home's installed
+settings instead, for a deploy on a machine that keeps no settings file.
+
 Prints one line per home and differing key, such as
-`claude-worker: claude_session.model differs`, and nothing when both homes
+`claude-worker: claude_session.model differs`, and nothing when the homes
 match. It never prints a value: `hermes config get --raw` expands each
 `${...}` reference into its live value, so the installed settings stay in this
 process and only home and key names reach the output.
@@ -42,17 +45,24 @@ def differing(expected, actual, path: str = "") -> list:
 
 
 def main(argv: list) -> int:
-    if len(argv) != 1:
-        print("usage: check-settings <settings.json>", file=sys.stderr)
+    if len(argv) > 1:
+        print("usage: check-settings [<settings.json>]", file=sys.stderr)
         return 2
-    try:
-        with open(argv[0], encoding="utf-8") as handle:
-            expected = json.load(handle)
-    except (OSError, ValueError) as exc:
-        print(f"check-settings: could not read {argv[0]}: {type(exc).__name__}", file=sys.stderr)
-        return 2
+    homes = dict(HOMES)
+    if argv:
+        try:
+            with open(argv[0], encoding="utf-8") as handle:
+                expected = json.load(handle)
+        except (OSError, ValueError) as exc:
+            print(f"check-settings: could not read {argv[0]}: {type(exc).__name__}", file=sys.stderr)
+            return 2
+    else:
+        expected, error = installed(homes.pop("default"))
+        if error:
+            print(f"default: {error}")
+            return 1
     lines = []
-    for home, profile_args in HOMES.items():
+    for home, profile_args in homes.items():
         actual, error = installed(profile_args)
         if error:
             lines.append(f"{home}: {error}")
