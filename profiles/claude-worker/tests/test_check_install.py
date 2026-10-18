@@ -664,14 +664,33 @@ class CheckInstallTest(unittest.TestCase):
     def test_failed_last_run_masks_secrets_in_its_error(self) -> None:
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C1\nSLACK_BOT_TOKEN=xoxb-short\n")
         error = "Script exited with code 1\nstdout:\nrejected xoxb-short and ghs_16C7e42F292c6912E7710c838347Ae178B4a"
-        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}])
+        failed = cron_job("reopen-conflicts", 5, last_status="error", last_error=error)
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
 
         code, out = self.check()
 
         self.assertEqual(
             (code, out),
-            (1, f"cron job check-install in {self.root}: last run failed: Script exited with code 1: "
+            (1, f"cron job reopen-conflicts in {self.worker}: last run failed: Script exited with code 1: "
                 "rejected [redacted] and [redacted] (part 12)\n"),
+        )
+
+    def test_failed_check_install_run_does_not_fail_a_clean_machine(self) -> None:
+        error = (
+            "Script exited with code 1\nstderr:\nprofile claude-worker: scripts/claude-session differs from main "
+            "at c02dda9 (part 12)"
+        )
+        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}])
+
+        self.assertEqual(self.check(), (0, ""))
+
+        failed = cron_job("refresh-checkouts", 60, last_status="error", last_error="Script exited with code 1")
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-checkouts in {self.worker}: last run failed: Script exited with code 1 "
+                "(part 12)\n"),
         )
 
     def test_undelivered_last_run_names_its_delivery_error(self) -> None:
