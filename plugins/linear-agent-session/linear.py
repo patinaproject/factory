@@ -81,6 +81,14 @@ ISSUE_DOCUMENTS_QUERY = """query IssueDocuments($id: String!) {
   issue(id: $id) { identifier documents(first: 100) { nodes { id title creator { id } } } }
 }"""
 
+TRIAGE_PEOPLE_QUERY = """query TriagePeople($id: String!) {
+  issue(id: $id) {
+    assignee { url }
+    creator { url app }
+    team { triageResponsibility { currentUser { url } } }
+  }
+}"""
+
 DOCUMENT_UPDATE_MUTATION = """mutation DocumentUpdate($id: String!, $input: DocumentUpdateInput!) {
   documentUpdate(id: $id, input: $input) { success }
 }"""
@@ -223,6 +231,20 @@ class LinearClient:
                 {"id": n["id"], "title": n["title"], "own": (n["creator"] or {}).get("id") == viewer}
                 for n in data["issue"]["documents"]["nodes"]
             ],
+        }
+
+    def triage_people(self, id_or_identifier: str) -> dict:
+        """Profile URLs of the people a triage question can go to. An app that created the issue is not a reporter."""
+        issue = self._graphql(TRIAGE_PEOPLE_QUERY, {"id": id_or_identifier})["issue"]
+        if issue is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        creator = issue["creator"]
+        responsibility = issue["team"]["triageResponsibility"]
+        on_triage = responsibility and responsibility["currentUser"]
+        return {
+            "assignee": issue["assignee"]["url"] if issue["assignee"] else None,
+            "creator": creator["url"] if creator and not creator["app"] else None,
+            "triage": on_triage["url"] if on_triage else None,
         }
 
     def rename_document(self, document_id: str, title: str) -> None:

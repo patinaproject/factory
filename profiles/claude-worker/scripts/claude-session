@@ -150,11 +150,10 @@ TRIAGE_RULE = (
     "When the playbook waits for people, update `Triage notes` under \"still needed\", then end your turn. Make "
     "the first line of your final message `Needs input:` and put that round's questions after it, one per "
     "line. Mention a person by writing their Linear profile URL alone, with no `@` before it. The worker "
-    "replies under the questions with one notifying mention of each person they name. Mention the issue's "
-    "creator on each question only the reporter can answer, such as steps to reproduce or their environment. "
-    "Mention the team's triage-responsibility person on each scope or design question, and on every question "
-    "when the creator is an integration, not a person. Do not post the questions yourself: the worker posts "
-    "them on the issue's agent session with the disclaimer.\n\n"
+    "replies under the questions with one notifying mention of each person they name. {mentions} Mention each "
+    "person once in the round: write their URL on its own line, then the questions they answer. Mention no one "
+    "else. Do not post the questions yourself: the worker posts them on the issue's agent session with the "
+    "disclaimer.\n\n"
     "When triage ends, make the first line of your final message `Triage outcome: <role>`, where <role> is "
     "`ready-for-agent`, `ready-for-human`, or `wontfix` for a recommendation, and add a short summary."
 )
@@ -678,6 +677,27 @@ def title_triage_documents(client, issue_id: str) -> dict:
     return {"renamed": renamed, "missing": missing}
 
 
+def triage_mentions(client, issue_id: str, identifier: str) -> str:
+    """Resolved here, not by the model, because a team can list several triage people and the model picked one."""
+    import linear
+
+    try:
+        people = client.triage_people(issue_id)
+    except (linear.LinearError, OSError) as error:
+        raise Refusal(f"reading who answers Linear issue {identifier}'s triage questions failed: {error}") from None
+    owner = people["assignee"] or people["triage"]
+    reporter = people["creator"] or owner
+    if owner is None and reporter is None:
+        return ("Linear names no assignee, person creator, or current triage person for this issue, so mention "
+                "no one: the questions still reach the issue's agent session.")
+    if owner is None:
+        return (f"Ask {reporter} each question only the reporter can answer, such as steps to reproduce "
+                "or their environment. Linear names no assignee and no current triage person, so mention no one "
+                "for the other questions.")
+    return (f"Ask {owner} each scope, design, or decision question. Ask {reporter} each question "
+            "only the reporter can answer, such as steps to reproduce or their environment.")
+
+
 def require_ready(client, issue_id: str, identifier: str) -> None:
     import linear
 
@@ -1056,7 +1076,10 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         remove_on_stop(settings_path)
         client, api_key = linear_access()
         if triage:
-            system_prompt = TRIAGE_SYSTEM_PROMPT.format(triage_playbook=triage_playbook())
+            system_prompt = TRIAGE_SYSTEM_PROMPT.format(
+                triage_playbook=triage_playbook(),
+                mentions=triage_mentions(client, args.issue_id, args.issue_identifier),
+            )
         else:
             require_ready(client, args.issue_id, args.issue_identifier)
             system_prompt = SYSTEM_PROMPT.format(
