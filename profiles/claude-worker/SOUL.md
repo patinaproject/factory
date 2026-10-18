@@ -263,15 +263,15 @@ After each run, read the first line of the result line's `result`:
   the agent session as the round's one `elicitation`, with the AI-generated
   disclaimer. Never post that elicitation yourself. A reply from any teammate
   resumes the card.
-- `Triage outcome: ready-for-agent`: post a `thought` with the rest of the
-  `result`, then call `kanban_complete` with it as the summary. When the issue
-  is delegated, its implementation card starts on the same agent session.
-- `Triage outcome: ready-for-human` or `Triage outcome: wontfix`: read the
-  issue with `linear_issue` and post a `response` with the rest of the
-  `result` on its newest `agentSessions` entry. When a person delegated the
-  issue after the card was created, that is the delegation's session, so the
-  response reaches the delegator. Then call `kanban_complete` with it as the
-  summary.
+- `Triage outcome:` followed by a role: post the result line's `activity`
+  with the rest of the `result`, then call `kanban_complete` with it as the
+  summary. `claude-session` names a `thought` only for `ready-for-agent` on
+  an issue delegated to the factory's agent app, whose implementation card
+  continues on the same agent session. Every other outcome gets a
+  `response`, which ends the session. Post a `response` on the newest
+  `agentSessions` entry that `linear_issue` returns. When a person delegated
+  the issue after the card was created, that is the delegation's session, so
+  the response reaches the delegator.
 - Anything else: resume Claude once with a message file asking it to end
   with one of those first lines. When the next result still has none, follow
   step 6.

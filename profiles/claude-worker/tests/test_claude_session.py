@@ -311,6 +311,45 @@ class ClaudeSessionTest(GitFixture):
         ))
         self.assertNotIn("pull request", self.prompt())
 
+    def test_a_triage_outcome_names_the_activity_that_reports_it(self) -> None:
+        cases = (
+            ("Triage outcome: ready-for-agent\nReproduced.", "app-user", "thought"),
+            ("Triage outcome: ready-for-agent\nReproduced.", None, "response"),
+            ("Triage outcome: ready-for-agent", "another-agent", "response"),
+            ("Triage outcome: ready-for-human\nNeeds a design call.", "app-user", "response"),
+            ("Triage outcome: `Ready-for-agent`.", "app-user", "thought"),
+            ("Triage outcome: `ready-for-agent`", None, "response"),
+            ("Triage outcome: wontfix", None, "response"),
+            ("Triage outcome: done", "app-user", None),
+            ("Needs input:\nWhich version?", "app-user", None),
+        )
+        for result, delegate, activity in cases:
+            with self.subTest(result=result, delegate=delegate):
+                self.set_linear_issue(delegate=delegate)
+                self.configure_fake_claude(result=result)
+
+                status, report = self.run_session(env=TRIAGE_ENV)
+
+                self.assertEqual((status, report["result"], report["activity"]), (0, result, activity))
+
+    def test_a_triage_outcome_keeps_the_session_open_when_linear_cannot_say_who_is_delegated(self) -> None:
+        self.set_linear_issue(hidden=True)
+        self.configure_fake_claude(result="Triage outcome: ready-for-agent")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["result"], report["activity"]), (0, "Triage outcome: ready-for-agent", "thought"))
+
+    def set_linear_issue(self, **fields) -> None:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, **fields}))
+
+    def test_an_implementation_run_names_no_activity(self) -> None:
+        status, report = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertNotIn("activity", report)
+
     def test_a_triage_card_refuses_when_the_factory_checkout_has_no_playbook(self) -> None:
         self.install_from(self.main)
 
