@@ -1777,6 +1777,7 @@ class ClaudeSessionTest(GitFixture):
         for body in (
             f"Adds the thing.\n\n{CLOSING_LINE}",
             f"Fixes {REPO}#12 and resolves [ABC-123]({LINEAR_URL}/the-title-slug).",
+            f"Closes [#12](https://github.com/{REPO}/issues/12), closes {LINEAR_URL}",
         ):
             with self.subTest(body=body):
                 links, after = self.linked_body(body)
@@ -1792,6 +1793,20 @@ class ClaudeSessionTest(GitFixture):
         _, body = self.linked_body(f"Closes #123, closes ABC-1234 and {LINEAR_URL}4")
 
         self.assertEqual(body, f"Closes #123, closes ABC-1234 and {LINEAR_URL}4\n\n{CLOSING_LINE}")
+
+    def test_a_reference_inside_an_html_comment_does_not_count(self) -> None:
+        _, body = self.linked_body(f"Adds the thing.\n<!-- {CLOSING_LINE} -->")
+
+        self.assertEqual(body, f"Adds the thing.\n<!-- {CLOSING_LINE} -->\n\n{CLOSING_LINE}")
+
+    def test_a_takeover_body_gets_both_the_supersedes_line_and_the_closing_line(self) -> None:
+        self.takeover_pair()
+        self.github.state["pulls"]["9"]["body"] = "Adds the thing."
+        self.github.save()
+
+        self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(self.github.pull(9)["body"], f"Adds the thing.\n\nSupersedes #7.\n\n{CLOSING_LINE}")
 
     def test_a_failed_body_edit_is_reported_and_does_not_fail_the_run(self) -> None:
         self.github.fail_writes()
