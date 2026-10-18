@@ -49,6 +49,13 @@ def register(ctx: Any) -> None:
         description=tools.ACTIVITY_SCHEMA["description"],
     )
     ctx.register_tool(
+        name="linear_agent_activity_read",
+        toolset=TOOLSET,
+        schema=tools.ACTIVITY_READ_SCHEMA,
+        handler=lambda args, **_: tools.run_activity_read(get_client, args),
+        description=tools.ACTIVITY_READ_SCHEMA["description"],
+    )
+    ctx.register_tool(
         name="linear_issue",
         toolset=TOOLSET,
         schema=tools.ISSUE_SCHEMA,

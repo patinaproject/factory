@@ -239,7 +239,11 @@ PROMPTED_EVENT = {
         "id": "00000000-0000-4000-8000-0000000000a1",
         "issue": {"id": "00000000-0000-4000-8000-0000000000b1", "identifier": "ABC-1"},
     },
-    "agentActivity": {"signal": None, "content": {"type": "prompt", "body": "close"}},
+    "agentActivity": {
+        "id": "00000000-0000-4000-8000-0000000000c1",
+        "signal": None,
+        "content": {"type": "prompt", "body": "close"},
+    },
 }
 
 
@@ -258,11 +262,43 @@ def render_like_hermes(template: str, payload: dict) -> str:
 
 
 class LinearPayloadTest(unittest.TestCase):
-    def test_a_prompted_reply_reaches_the_prompt(self):
-        prompt = render_like_hermes(render.build_routes(SETTINGS)["linear"]["prompt"], PROMPTED_EVENT)
+    def prompted(self, body):
+        event = {**PROMPTED_EVENT, "agentActivity": {**PROMPTED_EVENT["agentActivity"], "content": {"type": "prompt", "body": body}}}
+        return render_like_hermes(render.build_routes(SETTINGS)["linear"]["prompt"], event)
 
-        self.assertIn("- Activity body: close\n", prompt)
+    def test_a_prompted_reply_reaches_the_prompt(self):
+        prompt = self.prompted("close")
+
+        self.assertIn("\n<reply>\nclose\n</reply>\n", prompt)
         self.assertIn("- Activity signal: None\n", prompt)
+        self.assertIn("- Activity id: 00000000-0000-4000-8000-0000000000c1\n", prompt)
+
+    def test_a_one_word_reply_is_the_only_text_in_its_block(self):
+        prompt = self.prompted("yes")
+
+        self.assertIn("\n<reply>\nyes\n</reply>\n", prompt)
+        self.assertEqual(prompt.count("<reply>\n"), 1)
+        self.assertNotIn("Activity body", prompt)
+
+    def test_a_multi_line_reply_keeps_every_line_in_its_block(self):
+        prompt = self.prompted("yes\n\nbut only on main")
+
+        self.assertIn("\n<reply>\nyes\n\nbut only on main\n</reply>\n", prompt)
+
+    def test_an_event_without_an_activity_leaves_the_placeholders(self):
+        event = {key: value for key, value in PROMPTED_EVENT.items() if key != "agentActivity"}
+        prompt = render_like_hermes(render.build_routes(SETTINGS)["linear"]["prompt"], {**event, "action": "created"})
+
+        self.assertIn("\n<reply>\n{agentActivity.content.body}\n</reply>\n", prompt)
+        self.assertIn("- Activity id: {agentActivity.id}\n", prompt)
+
+    def test_a_reply_without_text_is_read_from_linear_before_it_is_called_missing(self):
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        for heading, end in (("## Prompt", "## Triage card reply"), ("## Triage card reply", "## Stop")):
+            with self.subTest(section=heading):
+                section = " ".join(prompt[prompt.index(f"{heading}\n") : prompt.index(f"{end}\n")].split())
+                self.assertLess(section.index("`linear_agent_activity_read`"), section.index("arrived without text"))
+                self.assertIn("When it returns `found: false` or an error", section)
 
     def test_a_created_event_renders_who_opened_the_session(self):
         template = render.build_routes(SETTINGS)["linear"]["prompt"]

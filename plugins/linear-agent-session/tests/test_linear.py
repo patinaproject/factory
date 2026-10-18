@@ -281,6 +281,100 @@ class IssueArgumentTest(unittest.TestCase):
                 self.assertIn("`issue`", schema["description"][:60])
 
 
+def prompt_node(activity_id, created_at, body, signal=None):
+    return {
+        "id": activity_id,
+        "createdAt": created_at,
+        "signal": signal,
+        "content": {"__typename": "AgentActivityPromptContent", "body": body},
+    }
+
+
+def thought_node(activity_id, created_at):
+    return {"id": activity_id, "createdAt": created_at, "signal": None, "content": {"__typename": "AgentActivityThoughtContent"}}
+
+
+def session_activities(*nodes):
+    return (200, {"data": {"agentSession": {"activities": {"nodes": list(nodes)}}}})
+
+
+class ActivityReadTest(unittest.TestCase):
+    def read(self, responses, args):
+        fake = FakeLinear(responses)
+        return fake, json.loads(tools.run_activity_read(lambda: make_client(fake), args))
+
+    def test_an_activity_id_returns_its_prompt_body(self):
+        node = prompt_node("activity-1", "2026-10-18T16:57:29.889Z", "yes")
+        fake, output = self.read([(200, {"data": {"agentActivity": node}})], {"agent_activity_id": "activity-1"})
+        self.assertEqual(
+            output,
+            {"found": True, "id": "activity-1", "createdAt": "2026-10-18T16:57:29.889Z", "signal": None, "body": "yes"},
+        )
+        self.assertIn("agentActivity(id: $id)", fake.graphql_requests[0]["query"])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "activity-1"})
+
+    def test_an_activity_that_is_not_a_prompt_is_not_found(self):
+        _, output = self.read(
+            [(200, {"data": {"agentActivity": thought_node("activity-2", "2026-10-18T16:58:00Z")}})],
+            {"agent_activity_id": "activity-2"},
+        )
+        self.assertEqual(output, {"found": False})
+
+    def test_a_session_returns_its_newest_prompt_that_is_not_a_stop(self):
+        fake, output = self.read(
+            [
+                session_activities(
+                    prompt_node("activity-1", "2026-10-18T16:50:00Z", "maybe"),
+                    prompt_node("activity-3", "2026-10-18T16:59:00Z", "", signal="stop"),
+                    thought_node("activity-4", "2026-10-18T17:00:00Z"),
+                    prompt_node("activity-2", "2026-10-18T16:57:29Z", "yes"),
+                )
+            ],
+            {"agent_session_id": "session-1"},
+        )
+        self.assertEqual(
+            output, {"found": True, "id": "activity-2", "createdAt": "2026-10-18T16:57:29Z", "signal": None, "body": "yes"}
+        )
+        self.assertIn("agentSession(id: $id)", fake.graphql_requests[0]["query"])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1"})
+
+    def test_a_session_without_a_prompt_is_not_found(self):
+        _, output = self.read(
+            [session_activities(thought_node("activity-4", "2026-10-18T17:00:00Z"))], {"agent_session_id": "session-1"}
+        )
+        self.assertEqual(output, {"found": False})
+
+    def test_a_linear_error_is_a_tool_error(self):
+        _, output = self.read(
+            [(200, {"errors": [{"message": "Entity not found: AgentActivity"}], "data": None})],
+            {"agent_activity_id": "activity-9"},
+        )
+        self.assertEqual(output, {"error": "Entity not found: AgentActivity"})
+
+    def test_the_names_models_guess_reach_the_handler(self):
+        cases = {
+            "agent_activity_id": "agentActivity(id: $id)",
+            "activity_id": "agentActivity(id: $id)",
+            "id": "agentActivity(id: $id)",
+            "agent_session_id": "agentSession(id: $id)",
+            "session_id": "agentSession(id: $id)",
+        }
+        for name, query in cases.items():
+            with self.subTest(name=name):
+                fake, _ = self.read([(200, {"errors": [{"message": "stop after the request"}]})], {name: "uuid-9"})
+                self.assertIn(query, fake.graphql_requests[0]["query"])
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "uuid-9"})
+
+    def test_without_an_id_it_names_the_argument(self):
+        fake, output = self.read([], {})
+        self.assertEqual(output, {"error": "pass agent_activity_id, or agent_session_id when the activity id is unknown"})
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_the_schema_requires_nothing_and_its_catalog_line_names_the_argument(self):
+        self.assertNotIn("required", tools.ACTIVITY_READ_SCHEMA["parameters"])
+        self.assertIn("`agent_activity_id`", tools.ACTIVITY_READ_SCHEMA["description"][:60])
+
+
 class IssueTest(unittest.TestCase):
     RESPONSE = {
         "data": {

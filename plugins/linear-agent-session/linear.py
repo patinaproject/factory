@@ -34,6 +34,16 @@ SESSION_THREAD_QUERY = """query AgentSessionThread($id: String!) {
   agentSession(id: $id) { comment { id } issue { id } }
 }"""
 
+ACTIVITY_FIELDS = "id createdAt signal content { __typename ... on AgentActivityPromptContent { body } }"
+
+ACTIVITY_QUERY = f"""query AgentActivity($id: String!) {{
+  agentActivity(id: $id) {{ {ACTIVITY_FIELDS} }}
+}}"""
+
+SESSION_ACTIVITIES_QUERY = f"""query AgentSessionActivities($id: String!) {{
+  agentSession(id: $id) {{ activities(first: 50, orderBy: createdAt) {{ nodes {{ {ACTIVITY_FIELDS} }} }} }}
+}}"""
+
 COMMENT_CREATE_MUTATION = """mutation CommentCreate($input: CommentCreateInput!) {
   commentCreate(input: $input) { success }
 }"""
@@ -183,6 +193,24 @@ class LinearClient:
         )["commentCreate"]
         if not payload["success"]:
             raise LinearError("commentCreate reported success: false")
+
+    def read_prompt(self, *, agent_activity_id: Optional[str] = None, agent_session_id: Optional[str] = None) -> dict:
+        """A person's prompt by its activity id, or else the newest prompt in the session that is not a stop."""
+        if agent_activity_id:
+            prompts = [self._graphql(ACTIVITY_QUERY, {"id": agent_activity_id})["agentActivity"]]
+        else:
+            session = self._graphql(SESSION_ACTIVITIES_QUERY, {"id": agent_session_id})["agentSession"]
+            prompts = sorted(session["activities"]["nodes"], key=lambda n: n["createdAt"], reverse=True)
+        for node in prompts:
+            if node and node["content"]["__typename"] == "AgentActivityPromptContent" and node["signal"] != "stop":
+                return {
+                    "found": True,
+                    "id": node["id"],
+                    "createdAt": node["createdAt"],
+                    "signal": node["signal"],
+                    "body": node["content"]["body"],
+                }
+        return {"found": False}
 
     def create_session_on_issue(self, id_or_identifier: str) -> str:
         payload = self._graphql(SESSION_CREATE_MUTATION, {"input": {"issueId": id_or_identifier}})[

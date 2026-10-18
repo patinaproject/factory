@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Callable
+from typing import Callable, Optional
 
 from .linear import ACTIVITY_TYPES, LinearClient, LinearError, activity_content
 
@@ -60,6 +60,28 @@ ISSUE_SCHEMA = {
         "(id, status, createdAt, appUserId, creatorId (null when no person opened it); newest first)."
     ),
     "parameters": ISSUE_PARAMETERS,
+}
+
+ACTIVITY_ID_NAMES = ("agent_activity_id", "activity_id", "id")
+SESSION_ID_NAMES = ("agent_session_id", "session_id")
+
+ACTIVITY_READ_SCHEMA = {
+    "name": "linear_agent_activity_read",
+    "description": (
+        "Read the prompt `agent_activity_id`, or else the newest prompt in `agent_session_id` that is not a "
+        "stop. Reads as the agent app and returns found, id, createdAt, signal, and body (the person's "
+        "reply text), or found: false when Linear has no such prompt."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "agent_activity_id": {"type": "string", "description": "Linear agent activity UUID of the prompt."},
+            "agent_session_id": {
+                "type": "string",
+                "description": "Linear agent session UUID, used when the activity id is unknown.",
+            },
+        },
+    },
 }
 
 
@@ -129,6 +151,17 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(run)
 
 
+def run_activity_read(client_factory: ClientFactory, args: dict) -> str:
+    def run() -> dict:
+        activity_id = _first_argument(args, ACTIVITY_ID_NAMES)
+        session_id = _first_argument(args, SESSION_ID_NAMES)
+        if not activity_id and not session_id:
+            raise LinearError("pass agent_activity_id, or agent_session_id when the activity id is unknown")
+        return client_factory().read_prompt(agent_activity_id=activity_id, agent_session_id=session_id)
+
+    return _tool_result_or_error(run)
+
+
 def run_session_create(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(
         lambda: {"agent_session_id": client_factory().create_session_on_issue(_issue_argument(args))}
@@ -154,10 +187,14 @@ def run_to_todo(client_factory: ClientFactory, args: dict) -> str:
 
 
 def _issue_argument(args: dict) -> str:
-    for name in ISSUE_ARGUMENT_NAMES:
-        if args.get(name):
-            return args[name]
-    raise LinearError("pass issue: the issue UUID or identifier such as ABC-123")
+    issue = _first_argument(args, ISSUE_ARGUMENT_NAMES)
+    if issue is None:
+        raise LinearError("pass issue: the issue UUID or identifier such as ABC-123")
+    return issue
+
+
+def _first_argument(args: dict, names: tuple) -> Optional[str]:
+    return next((args[name] for name in names if args.get(name)), None)
 
 
 def _tool_result_or_error(run: Callable[[], dict]) -> str:
