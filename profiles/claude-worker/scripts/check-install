@@ -559,12 +559,16 @@ def error_summary(error: str) -> str:
     return lines[0] if lines else ""
 
 
-def last_run_failure(live: dict, secrets: list) -> list:
+def last_run_failure(job: CronJob, live: dict, secrets: list) -> list:
     status = live.get("last_status")
     if status in HEALTHY_RUNS:
         return []
     if status == "delivery_failed":
         what, error = "last run's output was not delivered", live.get("last_delivery_error")
+    elif job.runs == ROOT_ALERT_SCRIPT:
+        # The alert job runs this check, so its failure is the previous run's report. Reporting it would fail this
+        # run as well, and one failure would repeat after the machine is clean.
+        return []
     else:
         what, error = "last run failed", live.get("last_error")
     # Redacted before it is clipped, so a clip never leaves part of a secret unmasked.
@@ -620,7 +624,7 @@ def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
             drifts.append(Drift("cron job", where, f"exists {len(found)} times (part {job.part})"))
         for live in found:
             details = [
-                *cron_differences(job, live), *unresolved_deliveries(home, live, hermes), *last_run_failure(live, secrets)
+                *cron_differences(job, live), *unresolved_deliveries(home, live, hermes), *last_run_failure(job, live, secrets)
             ]
             drifts.extend(Drift("cron job", where, f"{d} (part {job.part})") for d in details)
     owners = {job.name: job for job in CRON}
