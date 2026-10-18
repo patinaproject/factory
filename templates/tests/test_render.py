@@ -567,6 +567,36 @@ class MergedCardTest(unittest.TestCase):
         )
         self.assertEqual(positions, sorted(positions))
 
+    def test_a_missing_refusal_with_no_checks_routes_to_the_refused_merge_rule(self):
+        call = self.completion_call()
+        positions = self.positions(
+            call,
+            [
+                "`head_sha` is that `headRefOid`",
+                "its own\n`classification` is `missing` and its `checks` is empty",
+                '"A refused merge"',
+                "Otherwise comment",
+            ],
+        )
+        self.assertEqual(positions, sorted(positions))
+
+    def test_a_missing_refusal_skips_the_check_lookup_and_writes_the_marker(self):
+        rule = self.failing_checks()
+        merged = render.merged_checks_command(render.hermes_home())
+        positions = self.positions(
+            rule,
+            [
+                "own `classification` is `missing` and its `checks` is empty",
+                "Skip the check lookup below and go to step 1.",
+                f"{merged} '<pull request URL>'",
+                "1. Comment on the card",
+                "`Merge refused by Hermes: the base branch has no required checks.`",
+                "`linear_issue`",
+                "merged, but its base branch has no required checks",
+            ],
+        )
+        self.assertEqual(positions, sorted(positions))
+
     def test_the_rule_sorts_the_refused_checks_before_it_writes_anything(self):
         rule = self.failing_checks()
         merged = render.merged_checks_command(render.hermes_home())

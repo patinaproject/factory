@@ -131,6 +131,7 @@ FINISH_RULE = STOP_RULE + (
     "watch`, and any sleep or polling loop that waits longer."
 )
 CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
+TRIAGE_DOCUMENTS = ("Triage notes", "Agent brief")
 TRIAGE_RULE = (
     "This run triages one issue on the factory's Triage board. It changes no code for the issue: create no "
     "branch, commit, or pull request, and never run push-signed, `git push`, or `gh pr create`. This run's "
@@ -139,7 +140,9 @@ TRIAGE_RULE = (
     "Follow patina-mode's triage playbook at `{triage_playbook}`. It belongs to the factory, so read it there "
     "and not in this repository's skills. Keep the issue's "
     "triage state in its `Triage notes` and `Agent brief` Documents, written through the tracker adapter's "
-    "issue-artifact operation, and start every Document with an AI-generated disclaimer. For a public repository synced to Linear, the Documents stay on the Linear issue and "
+    "issue-artifact operation, and start every Document with an AI-generated disclaimer. Title them exactly "
+    "`Triage notes` and `Agent brief`, with no issue identifier before the title, even where the adapter "
+    "titles other Documents with one. For a public repository synced to Linear, the Documents stay on the Linear issue and "
     "the roles are written as GitHub labels, because GitHub is canonical.\n\n"
     "Apply only category and state roles. Never change the issue's status, assignee, or delegate, with one "
     "exception: when the issue is delegated to the factory's agent app and passes as `ready-for-agent`, move "
@@ -599,6 +602,31 @@ def triage_playbook() -> Path:
     return playbook
 
 
+def title_triage_documents(client, issue_id: str) -> dict:
+    """Rename only the run's own prefixed Documents, and only when no Document has the exact title.
+
+    The result goes in the run's report and never changes its status: a failure here must not lose the
+    triage outcome that the worker relays.
+    """
+    import linear
+
+    try:
+        issue = client.issue_documents(issue_id)
+        titles = {document["title"] for document in issue["documents"]}
+        renamed, missing = [], []
+        for title in TRIAGE_DOCUMENTS:
+            prefixed = f"{issue['identifier']} {title}"
+            own = [d for d in issue["documents"] if d["own"] and d["title"] == prefixed]
+            if title not in titles and own:
+                client.rename_document(own[0]["id"], title)
+                renamed.append(prefixed)
+            elif title not in titles and prefixed not in titles:
+                missing.append(title)
+    except (linear.LinearError, OSError) as error:
+        return {"error": f"checking the triage Documents failed: {error}"}
+    return {"renamed": renamed, "missing": missing}
+
+
 def require_ready(client, issue_id: str, identifier: str) -> None:
     import linear
 
@@ -1021,9 +1049,10 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         superseded = None
         if output is not None and not triage:
             superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login)
+        documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
         first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
 
-    report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None, "superseded": superseded}
+    report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None, "superseded": superseded, "triage_documents": documents}
     if output is None:
         return 1, {"error": f"claude exited {exit_code} without JSON output: {detail}", **report}
     report.update(subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"))
