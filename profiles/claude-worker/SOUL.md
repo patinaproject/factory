@@ -122,8 +122,12 @@ process output once it exits. It prints one JSON line.
   timeout is never a crash.
 - On failure the line holds `error`. A refusal that another process holds the
   worktree means a second worker is running this card: post an `error`
-  activity saying so, call `kanban_block` with kind `transient`, and stop. For any other error, post an `error` activity with
-  the message, call `kanban_block` with kind `capability`, and stop.
+  activity saying so, call `kanban_block` with kind `transient`, and stop.
+  When the line also holds `"transient": true`, GitHub kept answering with a
+  server error: post an `error` activity with the message, call
+  `kanban_block` with kind `transient`, and stop. For any other error, post an
+  `error` activity with the message, call `kanban_block` with kind
+  `capability`, and stop.
 
 ## 4. Pick up new comments and resume
 
@@ -183,6 +187,10 @@ step 3.
 When the card has `takeover_pr`, the result line's `superseded` object says what `claude-session` did
 with it. If its `action` is `failed`, add the `error` to the handoff `summary`. Do nothing else with
 `<takeover_pr>`.
+
+The result line's `issue_links` object says whether `claude-session` added the closing references to the
+Linear and GitHub issues to the pull request description. If its `action` is `failed`, add the `error` to the
+handoff `summary`.
 
 The handoff payload is the same for every call in this step:
 
@@ -267,15 +275,15 @@ After each run, read the first line of the result line's `result`:
   the agent session as the round's one `elicitation`, with the AI-generated
   disclaimer. Never post that elicitation yourself. A reply from any teammate
   resumes the card.
-- `Triage outcome: ready-for-agent`: post a `thought` with the rest of the
-  `result`, then call `kanban_complete` with it as the summary. When the issue
-  is delegated, its implementation card starts on the same agent session.
-- `Triage outcome: ready-for-human` or `Triage outcome: wontfix`: read the
-  issue with `linear_issue` and post a `response` with the rest of the
-  `result` on its newest `agentSessions` entry. When a person delegated the
-  issue after the card was created, that is the delegation's session, so the
-  response reaches the delegator. Then call `kanban_complete` with it as the
-  summary.
+- `Triage outcome:` followed by a role: post the result line's `activity`
+  with the rest of the `result`, then call `kanban_complete` with it as the
+  summary. `claude-session` names a `thought` only for `ready-for-agent` on
+  an issue delegated to the factory's agent app, whose implementation card
+  continues on the same agent session. Every other outcome gets a
+  `response`, which ends the session. Post a `response` on the newest
+  `agentSessions` entry that `linear_issue` returns. When a person delegated
+  the issue after the card was created, that is the delegation's session, so
+  the response reaches the delegator.
 - Anything else: resume Claude once with a message file asking it to end
   with one of those first lines. When the next result still has none, follow
   step 6.

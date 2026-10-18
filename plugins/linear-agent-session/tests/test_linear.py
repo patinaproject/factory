@@ -78,6 +78,17 @@ class ActivityTest(unittest.TestCase):
         self.assertIn("agentSessionUpdate(id: $id, input: $input)", update["query"])
         self.assertEqual(update["variables"], {"id": "session-1", "input": {"externalUrls": urls}})
 
+    def test_reply_in_session_comments_in_the_session_thread(self):
+        thread = (200, {"data": {"agentSession": {"comment": {"id": "comment-1"}, "issue": {"id": "issue-1"}}}})
+        fake = FakeLinear([thread, (200, {"data": {"commentCreate": {"success": True}}})])
+        make_client(fake).reply_in_session("session-1", "https://linear.app/example/profiles/ted see above")
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1"})
+        self.assertIn("commentCreate(input: $input)", fake.graphql_requests[1]["query"])
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"],
+            {"input": {"issueId": "issue-1", "parentId": "comment-1", "body": "https://linear.app/example/profiles/ted see above"}},
+        )
+
     def test_invalid_activity_is_an_error_without_calling_linear(self):
         fake, output = self.post({"agent_session_id": "session-1", "type": "thought"})
         self.assertEqual(output, {"error": "a thought activity needs body"})
@@ -291,9 +302,9 @@ class IssueTest(unittest.TestCase):
                 "agentSessions": {
                     "nodes": [
                         {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z",
-                         "appUser": {"id": "app-user-1"}},
+                         "appUser": {"id": "app-user-1"}, "creator": {"id": "user-1"}},
                         {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z",
-                         "appUser": {"id": "app-user-1"}},
+                         "appUser": {"id": "app-user-1"}, "creator": None},
                     ]
                 },
             }
@@ -322,8 +333,10 @@ class IssueTest(unittest.TestCase):
                     {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
                 ],
                 "agentSessions": [
-                    {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1"},
-                    {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z", "appUserId": "app-user-1"},
+                    {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1",
+                     "creatorId": None},
+                    {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z", "appUserId": "app-user-1",
+                     "creatorId": "user-1"},
                 ],
             },
         )
@@ -447,6 +460,20 @@ def issue_delegate(delegate_id, viewer_id="app-user-1"):
     delegate = {"id": delegate_id} if delegate_id else None
     issue = {"id": "issue-uuid", "identifier": "ABC-1", "delegate": delegate}
     return 200, {"data": {"viewer": {"id": viewer_id}, "issue": issue}}
+
+
+class DelegatedToSelfTest(unittest.TestCase):
+    def test_only_the_agent_apps_own_delegation_counts(self):
+        for delegate_id, expected in (("app-user-1", True), (None, False), ("other-agent", False)):
+            with self.subTest(delegate_id=delegate_id):
+                fake = FakeLinear([issue_delegate(delegate_id)])
+                self.assertIs(make_client(fake).delegated_to_self("ABC-1"), expected)
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
+
+    def test_an_issue_linear_does_not_return_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"viewer": {"id": "app-user-1"}, "issue": None}})])
+        with self.assertRaisesRegex(linear.LinearError, "no issue ABC-1"):
+            make_client(fake).delegated_to_self("ABC-1")
 
 
 class UndelegateTest(unittest.TestCase):

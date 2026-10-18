@@ -4,7 +4,12 @@ A test links this file as linear.py in a staged home's plugins/linear-agent-sess
 $HERMES_HOME/linear-fake.json lists the tokens Linear accepts. Each request is
 appended to $HERMES_HOME/linear-fake.log as one JSON line, and every token
 request issues minted-<n>, which Linear then accepts unless reject_all is set.
-An issue's labels come from its `labels` list, `["ready-for-agent"]` when unset.
+An issue's labels come from its `labels` list, `["ready-for-agent"]` when unset, and its delegate
+from `delegate`, none when unset; `hidden` makes Linear return no issue.
+Its Documents come from its `documents` list of {id, title, creator}, and a
+DocumentUpdate rewrites the title there, `documents_error` fails the read, and
+`documents_timeout` times it out.
+The app's own user id is app-user.
 """
 from __future__ import annotations
 
@@ -39,10 +44,30 @@ def _fake_urlopen(request, timeout=None):
             state_path.write_text(json.dumps(state))
         response = _Response(200, {"access_token": token, "token_type": "Bearer", "expires_in": 2591999})
     elif request.get_header("Authorization", "").removeprefix("Bearer ") in state["accepted"]:
-        query = json.loads(request.data.decode())["query"]
+        body = json.loads(request.data.decode())
+        query = body["query"]
         if "IssueLabels" in query:
             labels = [{"name": name} for name in state.get("labels", ["ready-for-agent"])]
             response = _Response(200, {"data": {"issue": {"labels": {"nodes": labels}}}})
+        elif "IssueDelegate" in query:
+            delegate = {"id": state["delegate"]} if state.get("delegate") else None
+            issue = None if state.get("hidden") else {"id": "issue-uuid", "identifier": "ABC-123", "delegate": delegate}
+            response = _Response(200, {"data": {"viewer": {"id": "app-user"}, "issue": issue}})
+        elif "IssueDocuments" in query and state.get("documents_timeout"):
+            raise TimeoutError("The read operation timed out")
+        elif "IssueDocuments" in query and state.get("documents_error"):
+            response = _Response(200, {"errors": [{"message": state["documents_error"]}]})
+        elif "IssueDocuments" in query:
+            nodes = [{**d, "creator": {"id": d["creator"]}} for d in state.get("documents", [])]
+            issue = {"identifier": "ABC-123", "documents": {"nodes": nodes}}
+            response = _Response(200, {"data": {"viewer": {"id": "app-user"}, "issue": issue}})
+        elif "DocumentUpdate" in query:
+            variables = body["variables"]
+            for document in state.get("documents", []):
+                if document["id"] == variables["id"]:
+                    document["title"] = variables["input"]["title"]
+            state_path.write_text(json.dumps(state))
+            response = _Response(200, {"data": {"documentUpdate": {"success": True}}})
         else:
             response = _Response(200, {"data": {"viewer": {"id": "app-user"}}})
     else:

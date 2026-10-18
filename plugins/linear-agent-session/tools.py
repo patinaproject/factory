@@ -57,7 +57,7 @@ ISSUE_SCHEMA = {
         "id, identifier, title, url, gitBranchName, priority, priorityName, "
         "cardPriority (the Kanban card priority for this issue), "
         "state, stateType, delegate (the delegate's user ID, or null), labels (names), attachments, and agentSessions "
-        "(id, status, createdAt, appUserId; newest first)."
+        "(id, status, createdAt, appUserId, creatorId (null when no person opened it); newest first)."
     ),
     "parameters": ISSUE_PARAMETERS,
 }

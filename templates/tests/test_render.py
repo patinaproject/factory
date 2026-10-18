@@ -264,6 +264,32 @@ class LinearPayloadTest(unittest.TestCase):
         self.assertIn("- Activity body: close\n", prompt)
         self.assertIn("- Activity signal: None\n", prompt)
 
+    def test_a_created_event_renders_who_opened_the_session(self):
+        template = render.build_routes(SETTINGS)["linear"]["prompt"]
+        cases = {"opened by the factory": (None, "None"), "opened by a person": ("user-1", "user-1")}
+        for case, (creator, rendered) in cases.items():
+            with self.subTest(case=case):
+                event = {**PROMPTED_EVENT, "action": "created", "agentSession": {**PROMPTED_EVENT["agentSession"], "creatorId": creator}}
+                self.assertIn(f"- Agent session creator: {rendered}\n", render_like_hermes(template, event))
+        self.assertIn(
+            "- Agent session creator: {agentSession.creatorId}\n", render_like_hermes(template, PROMPTED_EVENT)
+        )
+
+    def test_an_undelegated_session_no_person_opened_is_skipped_before_the_mention_answer(self):
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        created = " ".join(prompt[prompt.index("## Session created") : prompt.index("## Prompt")].split())
+        undelegated = created[created.index("2. If its `delegate`") : created.index('Otherwise apply "Delegation gate"')]
+        skip = undelegated.index("creator above is `None` or still a dotted name in braces")
+        self.assertLess(skip, undelegated.index("Post no activity, create no card, and stop."))
+        self.assertLess(skip, undelegated.index("`response`"))
+
+    def test_only_a_session_a_person_opened_defers_a_delegation_to_session_created(self):
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        change = " ".join(prompt[prompt.index("## Issue change") :].split())
+        check = change[change.index("- Compare the issue's newest") : change.index('- Apply "Delegation gate"')]
+        self.assertIn("whose `creatorId` is not null", check)
+        self.assertLess(check.index("whose `creatorId` is not null"), check.index("in the last five minutes"))
+
 
 class PromptSubstitutionTest(unittest.TestCase):
     def setUp(self):
@@ -353,7 +379,7 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertIn("`changes requested on GitHub; see the card comments`", rules)
         self.assertIn("`feedback on GitHub; see the card comments`", rules)
         flat = " ".join(rules.split())
-        review_rule, comment_rule = flat.split("4. For a", 1)
+        review_rule, comment_rule = flat.split("5. For a", 1)
         self.assertIn("`blocked`, when the sender is a person (not a bot): unblock", review_rule)
         self.assertIn("when the sender is a person (not a bot) and the text asks for a change", comment_rule)
         self.assertIn(
@@ -366,6 +392,21 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertIn("`pull_request_review` submitted as a comment", comment_rule)
         self.assertIn("A thanks, an approval, or a bare question is not actionable", comment_rule)
         self.assertNotIn("hermes kanban unblock", rules)
+
+    def test_the_github_prompt_resumes_a_triage_card_on_a_persons_approval(self):
+        prompt = self.prompts["github"]
+        rules = prompt.split("## Record the event", 1)[1].split("## Unblock a card", 1)[0]
+        flat = " ".join(rules.split())
+        approval_rule = flat.split("4. For", 1)[1].split("5. For", 1)[0]
+        self.assertIn("with review state `approved`", approval_rule)
+        self.assertIn(
+            "when the sender is a person (not a bot) and the card's status is `triage`, "
+            'resume it as "Resume a parked card" says, after step 1 has commented on the card',
+            approval_rule,
+        )
+        self.assertIn("When the sender is a bot, or the card is in any other status, the comment from step 1 is enough.", approval_rule)
+        self.assertNotIn("unblock", approval_rule)
+        self.assertNotIn("reopen-review", approval_rule)
 
     def test_the_linear_prompt_unblocks_through_the_shared_section_with_its_own_reason(self):
         prompt = self.prompts["linear"]
@@ -402,7 +443,7 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertLess(change.index('Apply "Delegation gate"'), change.index('follow "Session created" from step 3'))
 
     def test_a_label_change_is_handled_before_the_five_minute_session_check(self):
-        change = self.prompts["linear"][self.prompts["linear"].index("## Issue change") :]
+        change = " ".join(self.prompts["linear"][self.prompts["linear"].index("## Issue change") :].split())
         self.assertLess(change.index("the previous labels above"), change.index("in the last five minutes"))
 
     def test_the_gate_answers_ready_for_human_and_unready_issues_without_a_card(self):
@@ -537,6 +578,36 @@ class MergedCardTest(unittest.TestCase):
                 "`classification` other than `success` or `pending`",
                 '"A refused merge"',
                 "Otherwise comment",
+            ],
+        )
+        self.assertEqual(positions, sorted(positions))
+
+    def test_a_missing_refusal_with_no_checks_routes_to_the_refused_merge_rule(self):
+        call = self.completion_call()
+        positions = self.positions(
+            call,
+            [
+                "`head_sha` is that `headRefOid`",
+                "its own\n`classification` is `missing` and its `checks` is empty",
+                '"A refused merge"',
+                "Otherwise comment",
+            ],
+        )
+        self.assertEqual(positions, sorted(positions))
+
+    def test_a_missing_refusal_skips_the_check_lookup_and_writes_the_marker(self):
+        rule = self.failing_checks()
+        merged = render.merged_checks_command(render.hermes_home())
+        positions = self.positions(
+            rule,
+            [
+                "own `classification` is `missing` and its `checks` is empty",
+                "Skip the check lookup below and go to step 1.",
+                f"{merged} '<pull request URL>'",
+                "1. Comment on the card",
+                "`Merge refused by Hermes: the base branch has no required checks.`",
+                "`linear_issue`",
+                "merged, but its base branch has no required checks",
             ],
         )
         self.assertEqual(positions, sorted(positions))

@@ -38,6 +38,7 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 import card_branch
+import factory_source
 
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_WORKER_ENTRY = (
@@ -62,6 +63,8 @@ TAKEOVER_RULES = (
 )
 TRIAGE_BOARD = "triage"
 READY_LABEL = "ready-for-agent"
+TRIAGE_OUTCOME = "Triage outcome:"
+TRIAGE_ROLES = {READY_LABEL, "ready-for-human", "wontfix"}
 TRIAGE_ENTRY = (
     "Triage Linear issue {issue_identifier} ({issue_url}) for {repo}. Work out what it asks, check that its claim "
     "holds, and settle what you can before you ask people. Do not implement it."
@@ -128,26 +131,30 @@ FINISH_RULE = STOP_RULE + (
     "watch`, and any sleep or polling loop that waits longer."
 )
 CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
+TRIAGE_DOCUMENTS = ("Triage notes", "Agent brief")
 TRIAGE_RULE = (
     "This run triages one issue on the factory's Triage board. It changes no code for the issue: create no "
     "branch, commit, or pull request, and never run push-signed, `git push`, or `gh pr create`. This run's "
     "settings refuse them. Read the repository and run its tests freely to reproduce a bug or check existing "
     "behavior.\n\n"
-    "Run the `triage` skill first, then the `grilling` skill only for the gaps that triage leaves. Keep the "
-    "issue's triage state in its `Triage notes` and `Agent brief` Documents, written through the tracker "
-    "adapter's issue-artifact operation, and start every Document with the AI-generated disclaimer that the "
-    "triage skill names. For a public repository synced to Linear, the Documents stay on the Linear issue and "
+    "Follow patina-mode's triage playbook at `{triage_playbook}`. It belongs to the factory, so read it there "
+    "and not in this repository's skills. Keep the issue's "
+    "triage state in its `Triage notes` and `Agent brief` Documents, written through the tracker adapter's "
+    "issue-artifact operation, and start every Document with an AI-generated disclaimer. Title them exactly "
+    "`Triage notes` and `Agent brief`, with no issue identifier before the title, even where the adapter "
+    "titles other Documents with one. For a public repository synced to Linear, the Documents stay on the Linear issue and "
     "the roles are written as GitHub labels, because GitHub is canonical.\n\n"
     "Apply only category and state roles. Never change the issue's status, assignee, or delegate, with one "
     "exception: when the issue is delegated to the factory's agent app and passes as `ready-for-agent`, move "
     "it to `Todo`. Recommend `wontfix` in `Triage notes` and never apply it.\n\n"
-    "When a skill waits for people, update `Triage notes` under \"still needed\", then end your turn. Make "
+    "When the playbook waits for people, update `Triage notes` under \"still needed\", then end your turn. Make "
     "the first line of your final message `Needs input:` and put that round's questions after it, one per "
-    "line. Mention the issue's creator, by their Linear profile URL, on each question only the reporter can "
-    "answer, such as steps to reproduce or their environment. Mention the team's triage-responsibility person "
-    "on each scope or design question, and on every question when the creator is an integration, not a "
-    "person. Do not post the questions yourself: the worker posts them on the issue's agent session with the "
-    "disclaimer.\n\n"
+    "line. Mention a person by writing their Linear profile URL alone, with no `@` before it. The worker "
+    "replies under the questions with one notifying mention of each person they name. Mention the issue's "
+    "creator on each question only the reporter can answer, such as steps to reproduce or their environment. "
+    "Mention the team's triage-responsibility person on each scope or design question, and on every question "
+    "when the creator is an integration, not a person. Do not post the questions yourself: the worker posts "
+    "them on the issue's agent session with the disclaimer.\n\n"
     "When triage ends, make the first line of your final message `Triage outcome: <role>`, where <role> is "
     "`ready-for-agent`, `ready-for-human`, or `wontfix` for a recommendation, and add a short summary."
 )
@@ -182,10 +189,16 @@ LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
+ISSUE_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/([0-9]+)$")
+GITHUB_ISSUE_LINE = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
+CLOSING_KEYWORD = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:\[[^\]]*\]\()?"
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 
 class Refusal(Exception):
-    pass
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 class Adoption(NamedTuple):
@@ -246,7 +259,7 @@ def adopt_existing_work(
     try:
         branch_owner = card_branch.owner(card_branch.run_gh, repo, branch, login)
     except card_branch.GhFailed as failure:
-        raise Refusal(str(failure)) from failure
+        raise Refusal(str(failure), transient=isinstance(failure, card_branch.GhServerError)) from failure
     source = card_branch.adoption(pull_ref is not None, branch_owner)
     if source is card_branch.Source.FRESH:
         return None
@@ -329,6 +342,51 @@ def supersede_takeover(repo: str, branch: str, takeover_pr: str | None, login: s
         return result
     except (card_branch.GhFailed, json.JSONDecodeError, KeyError, TypeError) as failure:
         return {**result, "action": "failed", "error": str(failure)}
+
+
+def link_issues(
+    repo: str, branch: str, login: str | None, identifier: str, linear_url: str, github_issue: str | None,
+    gh=card_branch.run_gh,
+) -> dict:
+    """Give the factory's open pull request for the branch a closing reference to each of the card's issues.
+
+    Runs after each Claude turn, like supersede_takeover. A bare Linear identifier after a closing keyword
+    becomes the issue's URL, and one closing line names whatever is still missing, so no issue gets a second
+    closing reference. The result goes in the run's report and never changes its status.
+    """
+    try:
+        if not login:
+            raise card_branch.GhFailed("github.login is not set in the settings")
+        open_pulls = gh(f"repos/{repo}/pulls?state=open&head={repo.split('/')[0]}:{branch}&per_page=100")
+        pull = next((pull for pull in open_pulls if card_branch.is_app(pull["user"]["login"], login)), None)
+        if pull is None:
+            return {"action": "waiting", "reason": f"no open pull request by {login} on {branch}"}
+        result = {"pr": pull["html_url"]}
+        body = pull.get("body") or ""
+        key = re.escape(identifier) + r"(?![0-9])"
+        linear = rf"https://linear\.app/[^/\s]+/issue/{key}"
+        edited = re.sub(rf"({CLOSING_KEYWORD}){key}", lambda m: m.group(1) + linear_url, body, flags=re.I)
+        # A reference left inside the template's HTML comment does not render, so it does not count.
+        visible = HTML_COMMENT.sub("", edited)
+        missing = []
+        issue = ISSUE_URL.match(github_issue or "")
+        if issue:
+            issue_repo, number = issue.groups()
+            refs = [re.escape(f"{issue_repo}#{number}"), re.escape(f"https://github.com/{issue_repo}/issues/{number}")]
+            if issue_repo.lower() == repo.lower():
+                refs.append(f"#{number}")
+            if not re.search(rf"{CLOSING_KEYWORD}(?:{'|'.join(refs)})(?![0-9])", visible, re.I):
+                missing.append(f"#{number}" if issue_repo.lower() == repo.lower() else f"{issue_repo}#{number}")
+        if not re.search(CLOSING_KEYWORD + linear, visible, re.I):
+            missing.append(linear_url)
+        if missing:
+            edited = f"{edited.rstrip()}\n\nCloses {', closes '.join(missing)}".strip()
+        if edited == body:
+            return {**result, "action": "unchanged"}
+        gh(f"repos/{repo}/pulls/{pull['number']}", "-X", "PATCH", "-f", f"body={edited}")
+        return {**result, "action": "linked"}
+    except (card_branch.GhFailed, json.JSONDecodeError, KeyError, TypeError) as failure:
+        return {"action": "failed", "error": str(failure)}
 
 
 def load_settings(settings_file: str | None) -> dict:
@@ -584,6 +642,42 @@ def linear_access() -> tuple:
         raise Refusal(f"Linear token: {error}") from None
 
 
+def triage_playbook() -> Path:
+    """The playbook that the worker home's factory checkout vendors, whatever the triaged repository vendors."""
+    try:
+        playbook = factory_source.checkout(Path(os.environ["HERMES_HOME"])) / factory_source.TRIAGE_PLAYBOOK
+    except factory_source.SourceError as error:
+        raise Refusal(f"the factory checkout: {error}") from None
+    if not playbook.is_file():
+        raise Refusal(f"{playbook} does not exist, so a triage card cannot follow the triage playbook")
+    return playbook
+
+
+def title_triage_documents(client, issue_id: str) -> dict:
+    """Rename only the run's own prefixed Documents, and only when no Document has the exact title.
+
+    The result goes in the run's report and never changes its status: a failure here must not lose the
+    triage outcome that the worker relays.
+    """
+    import linear
+
+    try:
+        issue = client.issue_documents(issue_id)
+        titles = {document["title"] for document in issue["documents"]}
+        renamed, missing = [], []
+        for title in TRIAGE_DOCUMENTS:
+            prefixed = f"{issue['identifier']} {title}"
+            own = [d for d in issue["documents"] if d["own"] and d["title"] == prefixed]
+            if title not in titles and own:
+                client.rename_document(own[0]["id"], title)
+                renamed.append(prefixed)
+            elif title not in titles and prefixed not in titles:
+                missing.append(title)
+    except (linear.LinearError, OSError) as error:
+        return {"error": f"checking the triage Documents failed: {error}"}
+    return {"renamed": renamed, "missing": missing}
+
+
 def require_ready(client, issue_id: str, identifier: str) -> None:
     import linear
 
@@ -596,6 +690,26 @@ def require_ready(client, issue_id: str, identifier: str) -> None:
             f"Linear issue {identifier} does not carry {READY_LABEL}, so its implementation card does not start; "
             "it starts once the issue passes the readiness check"
         )
+
+
+def triage_activity(client, issue_id: str, result: str | None) -> str | None:
+    """The Linear activity that reports a triage outcome. Only a delegated issue that passes keeps its
+    session open, because its implementation card continues on it; every other outcome ends the session."""
+    first = (result or "").partition("\n")[0]
+    if not first.startswith(TRIAGE_OUTCOME):
+        return None
+    role = first.removeprefix(TRIAGE_OUTCOME).strip(" `*.").lower()
+    if role not in TRIAGE_ROLES:
+        return None
+    if role != READY_LABEL:
+        return "response"
+    import linear
+
+    try:
+        return "thought" if client.delegated_to_self(issue_id) else "response"
+    except (linear.LinearError, OSError):
+        # Ending a delegated issue's session under its implementation card is worse than leaving one open.
+        return "thought"
 
 
 def tier_models(transport: dict) -> dict:
@@ -754,13 +868,19 @@ def handoff_text(plan: SessionPlan, branch: str, head: str, triage: bool = False
     return HANDOFF.format(branch=branch, head=head, transcript=plan.previous, result=result)
 
 
-def card_comments(card_json: str | None, task_id: str) -> list[dict]:
+def read_card(card_json: str | None, task_id: str) -> dict:
     if card_json:
-        return json.loads(Path(card_json).read_text())["comments"]
+        return json.loads(Path(card_json).read_text())
     proc = subprocess.run(["hermes", "kanban", "show", task_id, "--json"], capture_output=True, text=True)
     if proc.returncode != 0:
         raise Refusal(f"hermes kanban show {task_id} failed: {proc.stderr.strip()}")
-    return json.loads(proc.stdout)["comments"]
+    return json.loads(proc.stdout)
+
+
+def github_issue_url(card: dict) -> str | None:
+    """The `github_issue_url:` line that triage writes into the card body when the issue has one."""
+    match = GITHUB_ISSUE_LINE.search(card["task"]["body"] or "")
+    return match.group(1) if match else None
 
 
 def comment_key(comment: dict) -> list:
@@ -793,6 +913,8 @@ def build_prompt(
         return message or RESUME_PROMPT
     if triage:
         entry = TRIAGE_ENTRY.format(issue_identifier=args.issue_identifier, issue_url=args.issue_url, repo=args.repo)
+        if prefix:
+            entry = f"{prefix} {entry}"
         return "\n\n".join(filter(None, [entry, handoff, message]))
     entry = DEFAULT_WORKER_ENTRY.format(
         issue_id=args.issue_id,
@@ -933,8 +1055,15 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         settings_path.unlink(missing_ok=True)
         remove_on_stop(settings_path)
         client, api_key = linear_access()
-        if not triage:
+        if triage:
+            system_prompt = TRIAGE_SYSTEM_PROMPT.format(triage_playbook=triage_playbook())
+        else:
             require_ready(client, args.issue_id, args.issue_identifier)
+            system_prompt = SYSTEM_PROMPT.format(
+                push_signed=Path(__file__).resolve().with_name("push-signed"),
+                upload_image=Path(__file__).resolve().with_name("github-upload-image"),
+                wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
+            )
         plan = plan_session(session_key(args.issue_id, triage), worktree, threshold, time.time())
         session_id = plan.session_id
         for running_id in filter(None, [plan.previous_id, session_id]):
@@ -946,7 +1075,8 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         adopted = None if triage else adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
         handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"), triage)
         # A successful run marks this snapshot as seen, so a comment that lands mid-run goes to the next run.
-        comments = card_comments(args.card_json, args.task_id)
+        card = read_card(args.card_json, args.task_id)
+        comments = card["comments"]
         seen_path = lock_path.with_name(COMMENTS_SEEN_NAME)
         seen = json.loads(seen_path.read_text()) if seen_path.exists() else []
         own = os.environ.get("HERMES_PROFILE") or Path(os.environ.get("HERMES_HOME", "")).name
@@ -959,11 +1089,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             *turn_limit,
             "--permission-mode", "bypassPermissions",
             "--resume" if plan.resumed else "--session-id", session_id,
-            "--append-system-prompt", TRIAGE_SYSTEM_PROMPT if triage else SYSTEM_PROMPT.format(
-                push_signed=Path(__file__).resolve().with_name("push-signed"),
-                upload_image=Path(__file__).resolve().with_name("github-upload-image"),
-                wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
-            ),
+            "--append-system-prompt", system_prompt,
             "--mcp-config", mcp,
         ]
         if transport.get("model"):
@@ -978,18 +1104,24 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
             settings_path.unlink(missing_ok=True)
         if output is not None:
             seen_path.write_text(json.dumps([*seen, *map(comment_key, comments)]))
-        superseded = None
+        superseded = links = None
         if output is not None and not triage:
             superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login)
+            links = link_issues(
+                args.repo, branch, login, args.issue_identifier, args.issue_url, github_issue_url(card)
+            )
+        documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
         first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
 
-    report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None, "superseded": superseded}
+    report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None, "superseded": superseded, "issue_links": links, "triage_documents": documents}
     if output is None:
         return 1, {"error": f"claude exited {exit_code} without JSON output: {detail}", **report}
     report.update(subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"))
     report.update(usage=model_usage(output), first_context_tokens=first)
     if report["subtype"] not in COMPLETED_SUBTYPES:
         return 1, {"error": f"claude run ended with {report['subtype']} (exit {exit_code})", **report}
+    if triage:
+        report["activity"] = triage_activity(client, args.issue_id, report["result"])
     return 0, report
 
 
@@ -1012,7 +1144,7 @@ def main() -> int:
         os.kill(os.getpid(), stopped.signum)
         raise
     except Refusal as refusal:
-        status, report = 2, {"error": str(refusal)}
+        status, report = 2, {"error": str(refusal), **({"transient": True} if refusal.transient else {})}
     except Exception as error:
         status, report = 1, {"error": f"{type(error).__name__}: {error}"}
     print(json.dumps(report))

@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Compare the installed linear-agent-session settings in both homes with a settings file.
+
+Prints one line per home and differing key, such as
+`claude-worker: claude_session.model differs`, and nothing when both homes
+match. It never prints a value: `hermes config get --raw` expands each
+`${...}` reference into its live value, so the installed settings stay in this
+process and only home and key names reach the output.
+"""
+import json
+import subprocess
+import sys
+
+SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
+HOMES = {"default": [], "claude-worker": ["-p", "claude-worker"]}
+MISSING = object()
+
+
+def installed(profile_args: list):
+    proc = subprocess.run(
+        ["hermes", *profile_args, "config", "get", SETTINGS_KEY, "--json", "--raw"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None, f"`hermes config get` exited {proc.returncode}"
+    try:
+        return json.loads(proc.stdout), None
+    except ValueError:
+        return None, "`hermes config get` did not print JSON"
+
+
+def differing(expected, actual, path: str = "") -> list:
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        keys = sorted(expected.keys() | actual.keys())
+        return [
+            key
+            for name in keys
+            for key in differing(expected.get(name, MISSING), actual.get(name, MISSING), f"{path}{name}.")
+        ]
+    return [] if expected == actual else [path.rstrip(".") or "settings"]
+
+
+def main(argv: list) -> int:
+    if len(argv) != 1:
+        print("usage: check-settings <settings.json>", file=sys.stderr)
+        return 2
+    try:
+        with open(argv[0], encoding="utf-8") as handle:
+            expected = json.load(handle)
+    except (OSError, ValueError) as exc:
+        print(f"check-settings: could not read {argv[0]}: {type(exc).__name__}", file=sys.stderr)
+        return 2
+    lines = []
+    for home, profile_args in HOMES.items():
+        actual, error = installed(profile_args)
+        if error:
+            lines.append(f"{home}: {error}")
+            continue
+        lines.extend(f"{home}: {key} differs" for key in differing(expected, actual))
+    for line in lines:
+        print(line)
+    return 1 if lines else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
