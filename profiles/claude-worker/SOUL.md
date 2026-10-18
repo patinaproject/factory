@@ -184,6 +184,10 @@ When the card has `takeover_pr`, the result line's `superseded` object says what
 with it. If its `action` is `failed`, add the `error` to the handoff `summary`. Do nothing else with
 `<takeover_pr>`.
 
+The result line's `issue_links` object says whether `claude-session` added the closing references to the
+Linear and GitHub issues to the pull request description. If its `action` is `failed`, add the `error` to the
+handoff `summary`.
+
 The handoff payload is the same for every call in this step:
 
 - `summary`: one sentence.

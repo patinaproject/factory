@@ -21,6 +21,7 @@
 │   ├── factory-uploads/       # Gateway platform plugin: Unix-socket broker that uploads evidence images, upload_token.py
 │   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, block and triage-park report hook, activity, issue, and session tools, cli.py
 │   ├── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
+│   ├── team/                  # Registers the skills in a configured directory as team:<name> skills
 │   └── webhook-retry/         # Hooks that queue a delivery whose turn failed on a usage limit, and retry.py, which reruns it
 ├── profiles/
 │   └── claude-worker/         # Kanban worker profile distribution
