@@ -1258,8 +1258,14 @@ each check. Report each result.
     `Merge refused by Hermes: Hermes counted failed runs that newer passing runs replaced:`
     and the elicitation says the checks passed on their newest runs. Repeat
     either case with the issue already Done before the merge: the card is
-    archived with the same comment, and the session gets no post. In every case
-    the card stays unassigned.
+    archived with the same comment, and the session gets no post. Then merge a
+    pull request into a base branch with no required checks, so Hermes refuses
+    it as `missing`. The comment is
+    `Merge refused by Hermes: the base branch has no required checks.`, and the
+    elicitation asks whether the issue is done. Repeat it with the issue
+    already Done before the merge, and with the issue marked Done after the
+    refusal: the card is archived both times. In every case the card stays
+    unassigned.
 
 25. Create an issue in the team's Triage status. Within a minute the
     `triage` board has one card for it, with no assignee until
