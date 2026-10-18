@@ -631,7 +631,7 @@ def triage_mentions(client, issue_id: str, identifier: str) -> str:
 
     try:
         people = client.triage_people(issue_id)
-    except linear.LinearError as error:
+    except (linear.LinearError, OSError) as error:
         raise Refusal(f"reading who answers Linear issue {identifier}'s triage questions failed: {error}") from None
     owner = people["assignee"] or people["triage"]
     reporter = people["creator"] or owner

@@ -341,14 +341,17 @@ class ClaudeSessionTest(GitFixture):
                 self.assertIn(f"{mentions} Mention each person once in the round", argv[argv.index("--append-system-prompt") + 1])
 
     def test_a_triage_card_refuses_when_linear_cannot_say_who_answers_it(self) -> None:
-        self.set_linear_issue(people_error="Entity not found: Issue")
+        for failure, reason in (({"people_error": "Entity not found: Issue"}, "Entity not found: Issue"),
+                                ({"people_timeout": True}, "The read operation timed out")):
+            with self.subTest(reason=reason):
+                self.set_linear_issue(**{"people_error": None, "people_timeout": None, **failure})
 
-        status, report = self.run_session(env=TRIAGE_ENV)
+                status, report = self.run_session(env=TRIAGE_ENV)
 
-        self.assertEqual((status, report), (2, {
-            "error": "reading who answers Linear issue ABC-123's triage questions failed: Entity not found: Issue"
-        }))
-        self.assertFalse(self.log.exists())
+                self.assertEqual((status, report), (2, {
+                    "error": f"reading who answers Linear issue ABC-123's triage questions failed: {reason}"
+                }))
+                self.assertFalse(self.log.exists())
 
     def test_a_triage_outcome_names_the_activity_that_reports_it(self) -> None:
         cases = (

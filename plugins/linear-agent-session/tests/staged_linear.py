@@ -10,8 +10,8 @@ Its Documents come from its `documents` list of {id, title, creator}, and a
 DocumentUpdate rewrites the title there, `documents_error` fails the read, and
 `documents_timeout` times it out.
 Its assignee and the team's current triage person are the profile URLs in `assignee` and `on_triage`, and
-its creator is `creator`, an app when `creator_app` is set; each is no one when unset, and `people_error`
-fails the read.
+its creator is `creator`, an app when `creator_app` is set; each is no one when unset, `people_error`
+fails the read, and `people_timeout` times it out.
 The app's own user id is app-user.
 """
 from __future__ import annotations
@@ -56,6 +56,8 @@ def _fake_urlopen(request, timeout=None):
             delegate = {"id": state["delegate"]} if state.get("delegate") else None
             issue = None if state.get("hidden") else {"id": "issue-uuid", "identifier": "ABC-123", "delegate": delegate}
             response = _Response(200, {"data": {"viewer": {"id": "app-user"}, "issue": issue}})
+        elif "TriagePeople" in query and state.get("people_timeout"):
+            raise TimeoutError("The read operation timed out")
         elif "TriagePeople" in query and state.get("people_error"):
             response = _Response(200, {"errors": [{"message": state["people_error"]}]})
         elif "TriagePeople" in query:
