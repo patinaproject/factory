@@ -196,7 +196,9 @@ HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 
 class Refusal(Exception):
-    pass
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 class Adoption(NamedTuple):
@@ -257,7 +259,7 @@ def adopt_existing_work(
     try:
         branch_owner = card_branch.owner(card_branch.run_gh, repo, branch, login)
     except card_branch.GhFailed as failure:
-        raise Refusal(str(failure)) from failure
+        raise Refusal(str(failure), transient=isinstance(failure, card_branch.GhServerError)) from failure
     source = card_branch.adoption(pull_ref is not None, branch_owner)
     if source is card_branch.Source.FRESH:
         return None
@@ -1142,7 +1144,7 @@ def main() -> int:
         os.kill(os.getpid(), stopped.signum)
         raise
     except Refusal as refusal:
-        status, report = 2, {"error": str(refusal)}
+        status, report = 2, {"error": str(refusal), **({"transient": True} if refusal.transient else {})}
     except Exception as error:
         status, report = 1, {"error": f"{type(error).__name__}: {error}"}
     print(json.dumps(report))
