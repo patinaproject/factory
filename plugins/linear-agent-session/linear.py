@@ -30,6 +30,14 @@ SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: A
   agentSessionUpdate(id: $id, input: $input) { success }
 }"""
 
+SESSION_THREAD_QUERY = """query AgentSessionThread($id: String!) {
+  agentSession(id: $id) { comment { id } issue { id } }
+}"""
+
+COMMENT_CREATE_MUTATION = """mutation CommentCreate($input: CommentCreateInput!) {
+  commentCreate(input: $input) { success }
+}"""
+
 SESSION_CREATE_MUTATION = """mutation AgentSessionCreateOnIssue($input: AgentSessionCreateOnIssue!) {
   agentSessionCreateOnIssue(input: $input) { success agentSession { id } }
 }"""
@@ -156,6 +164,17 @@ class LinearClient:
         )["agentSessionUpdate"]
         if not payload["success"]:
             raise LinearError("agentSessionUpdate reported success: false")
+
+    def reply_in_session(self, agent_session_id: str, body: str) -> None:
+        """Reply in the session's comment thread. Linear turns a mention in a comment into one that notifies,
+        but leaves a mention in an activity body as plain text or a link."""
+        session = self._graphql(SESSION_THREAD_QUERY, {"id": agent_session_id})["agentSession"]
+        payload = self._graphql(
+            COMMENT_CREATE_MUTATION,
+            {"input": {"issueId": session["issue"]["id"], "parentId": session["comment"]["id"], "body": body}},
+        )["commentCreate"]
+        if not payload["success"]:
+            raise LinearError("commentCreate reported success: false")
 
     def create_session_on_issue(self, id_or_identifier: str) -> str:
         payload = self._graphql(SESSION_CREATE_MUTATION, {"input": {"issueId": id_or_identifier}})[

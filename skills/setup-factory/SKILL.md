@@ -1286,8 +1286,9 @@ each check. Report each result.
     it is in Triage. Start a card by hand on an issue without the label:
     `claude-session` refuses it before Claude starts.
 27. Let a triage card block on a question. Its session gets one
-    `elicitation` that starts with the AI-generated disclaimer, and each
-    person it @-mentions gets a Linear notification. A reply from a teammate
+    `elicitation` that starts with the AI-generated disclaimer, and one reply
+    in the session's thread mentions each person the questions name. Each of
+    them gets one Linear notification. A reply from a teammate
     who did not delegate the issue raises `prompted` on the session the
     factory created, unblocks the card, and `dispatch-triage` assigns it
     again.
