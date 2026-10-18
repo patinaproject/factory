@@ -465,6 +465,40 @@ class DelegatedToSelfTest(unittest.TestCase):
             make_client(fake).delegated_to_self("ABC-1")
 
 
+def triage_people(assignee, creator, on_triage, *, app=False, responsibility=True):
+    issue = {
+        "assignee": {"url": assignee} if assignee else None,
+        "creator": {"url": creator, "app": app} if creator else None,
+        "team": {"triageResponsibility": {"currentUser": {"url": on_triage} if on_triage else None}
+                 if responsibility else None},
+    }
+    return 200, {"data": {"issue": issue}}
+
+
+class TriagePeopleTest(unittest.TestCase):
+    TED = "https://linear.app/example/profiles/ted"
+    LUKE = "https://linear.app/example/profiles/luke"
+    APP = "https://linear.app/example/profiles/goodyear"
+
+    def test_names_the_assignee_the_person_who_created_it_and_who_is_on_triage(self):
+        cases = (
+            (triage_people(self.TED, self.TED, self.LUKE), {"assignee": self.TED, "creator": self.TED, "triage": self.LUKE}),
+            (triage_people(None, self.APP, self.LUKE, app=True), {"assignee": None, "creator": None, "triage": self.LUKE}),
+            (triage_people(None, None, None), {"assignee": None, "creator": None, "triage": None}),
+            (triage_people(self.TED, None, None, responsibility=False), {"assignee": self.TED, "creator": None, "triage": None}),
+        )
+        for response, expected in cases:
+            with self.subTest(expected=expected):
+                fake = FakeLinear([response])
+                self.assertEqual(make_client(fake).triage_people("ABC-1"), expected)
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
+
+    def test_an_issue_linear_does_not_return_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"issue": None}})])
+        with self.assertRaisesRegex(linear.LinearError, "no issue ABC-1"):
+            make_client(fake).triage_people("ABC-1")
+
+
 class UndelegateTest(unittest.TestCase):
     def run_undelegate(self, responses):
         fake = FakeLinear(responses)

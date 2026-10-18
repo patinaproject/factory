@@ -311,6 +311,45 @@ class ClaudeSessionTest(GitFixture):
         ))
         self.assertNotIn("pull request", self.prompt())
 
+    def test_a_triage_card_asks_the_issues_owner_and_its_reporter(self) -> None:
+        ted, luke, app = ("https://linear.app/example/profiles/" + name for name in ("ted", "luke", "goodyear"))
+        reporter = "each question only the reporter can answer, such as steps to reproduce or their environment."
+        cases = (
+            ({"assignee": ted, "creator": luke, "on_triage": luke},
+             f"Ask {ted} each scope, design, or decision question. Ask {luke} {reporter}"),
+            ({"creator": ted, "on_triage": luke},
+             f"Ask {luke} each scope, design, or decision question. Ask {ted} {reporter}"),
+            ({"assignee": ted, "creator": app, "creator_app": True, "on_triage": luke},
+             f"Ask {ted} each scope, design, or decision question. Ask {ted} {reporter}"),
+            ({"creator": app, "creator_app": True, "on_triage": luke},
+             f"Ask {luke} each scope, design, or decision question. Ask {luke} {reporter}"),
+            ({"creator": ted},
+             f"Ask {ted} {reporter} Linear names no assignee and no current triage person, so mention no one "
+             "for the other questions."),
+            ({},
+             "Linear names no assignee, person creator, or current triage person for this issue, so mention no "
+             "one: the questions still reach the issue's agent session."),
+        )
+        for people, mentions in cases:
+            with self.subTest(people=people):
+                self.set_linear_issue(**{"assignee": None, "creator": None, "creator_app": None, "on_triage": None, **people})
+
+                status, _ = self.run_session(env=TRIAGE_ENV)
+
+                argv = self.claude_call()["argv"]
+                self.assertEqual(status, 0)
+                self.assertIn(f"{mentions} Mention each person once in the round", argv[argv.index("--append-system-prompt") + 1])
+
+    def test_a_triage_card_refuses_when_linear_cannot_say_who_answers_it(self) -> None:
+        self.set_linear_issue(people_error="Entity not found: Issue")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report), (2, {
+            "error": "reading who answers Linear issue ABC-123's triage questions failed: Entity not found: Issue"
+        }))
+        self.assertFalse(self.log.exists())
+
     def test_a_triage_outcome_names_the_activity_that_reports_it(self) -> None:
         cases = (
             ("Triage outcome: ready-for-agent\nReproduced.", "app-user", "thought"),
