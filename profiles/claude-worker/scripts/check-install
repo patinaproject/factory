@@ -16,13 +16,16 @@ tables), that a cron job delivers only to a platform with a home channel in
 its profile and that its last run did not fail, naming the error with secrets
 masked, that the root home's cron wrappers match the
 repository, that the worker home's secrets.command is the worker helper
-whenever the root home has a secret source, and that each configured
-repository checkout exists and has origin/HEAD set, and that the root home's
-upload broker socket answers a status request and reports a token present. That
-check sends only {"op": "status"}, never uploads, and prints no value. It also checks
-that the Triage board exists and anchors its worktrees at the default
-repository, that the source checkout vendors the triage playbook that
-claude-session gives triage cards, and that the triage refs file is as fresh as the owned refs. When any difference is
+whenever a proxy token is configured, that the worker's .env holds no secret
+only the gateway may hold, and that each configured repository checkout exists
+and has origin/HEAD set, and that the root home's broker socket answers a
+status request and reports the upload token, the Linear app credentials, the
+proxy token, and a configured Sentry token present. That check sends only
+{"op": "status"}, never uploads or asks for a token, and prints no value. It
+also checks that the Triage board exists and anchors its worktrees at the
+default repository, that the source checkout vendors the triage playbook that
+claude-session gives triage cards, and that the triage refs file is as fresh as
+the owned refs. When any difference is
 reported and the source checkout is not at origin/HEAD, the last line names
 that checkout. It gives the fast-forward command only when the checkout is
 behind, on the default branch, and clean. --ref turns the line off, because
@@ -189,6 +192,7 @@ CONFIG = (
     ConfigKey(10, "kanban.auto_decompose", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.default_assignee", (ROOT,), unset()),
     ConfigKey(5, "terminal.timeout", (WORKER,), equal(400)),
+    ConfigKey(5, "terminal.env_passthrough", (WORKER,), Want(lambda live: not live, "empty")),
     ConfigKey(5, "platforms.factory_uploads.enabled", (ROOT,), equal(True)),
     ConfigKey(
         5, "platforms.factory_uploads.extra.repositories", (ROOT,),
@@ -454,8 +458,8 @@ UPLOAD_SOCKET = "factory-uploads.sock"
 UPLOAD_STATUS_SECONDS = 5
 
 
-def check_upload_broker(root: Path) -> list:
-    """Ask the root home's upload broker for its status. Sends no upload and reports no value."""
+def check_upload_broker(root: Path, token_env: str, sentry_env: str = "") -> list:
+    """Ask the root home's broker for its status. Sends no upload, asks for no token, and reports no value."""
     path = root / UPLOAD_SOCKET
 
     def drift(detail: str) -> list:
@@ -480,26 +484,59 @@ def check_upload_broker(root: Path) -> list:
         return drift("did not answer a status request with JSON")
     if not isinstance(status, dict) or status.get("ok") is not True:
         return drift("did not answer a status request with ok")
+    drifts = []
     if status.get("token_present") is not True:
-        return drift("reports token_present false: the gateway holds no upload token")
-    return []
+        drifts += drift("reports token_present false: the gateway holds no upload token")
+    if status.get("linear_ready") is not True:
+        drifts += drift("reports linear_ready false: the gateway holds no Linear app credentials, so no worker reaches Linear")
+    if token_env and status.get("proxy_token_present") is not True:
+        drifts += drift(f"reports proxy_token_present false: the gateway holds no {token_env}, so no worker reaches the proxy")
+    if sentry_env and status.get("sentry_token_present") is not True:
+        drifts += drift(f"reports sentry_token_present false: the gateway holds no {sentry_env}, so every worker run is refused")
+    return drifts
 
 
-def check_worker_secrets(root: Path, worker: Path, hermes: str) -> list:
-    def enabled(value) -> bool:
-        return isinstance(value, dict) and value.get("enabled") is True
+GATEWAY_ONLY = {
+    "LINEAR_CLIENT_ID": 8, "LINEAR_CLIENT_SECRET": 8,
+    "FACTORY_INFISICAL_CLIENT_ID": 14, "FACTORY_INFISICAL_CLIENT_SECRET": 14,
+}
+SECRET_NAMES = "plugins/factory-secret-names/plugin.yaml"
+DECLARED_NAME = re.compile(r"^\s*-\s*name:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", re.MULTILINE)
 
+
+def token_variable(settings, key: str = "auth_token_env") -> str:
+    session = settings.get("claude_session") if isinstance(settings, dict) else None
+    return (session.get(key) or "") if isinstance(session, dict) else ""
+
+
+def check_worker_secrets(commit: Commit, worker: Path, hermes: str, settings) -> list:
+    token_env = token_variable(settings)
+    sentry_env = token_variable(settings, "sentry_token_env")
     live = config_value(worker, hermes, "secrets.command")
-    where = f"secrets.command in {worker}"
-    # The live command is never printed, since a tuned command could embed a secret.
-    if not enabled(config_value(root, hermes, "secrets.command")):
-        if enabled(live):
-            return [Drift("config", where, "is set while the root home has no secret source (part 14)")]
-        return []
+    enabled = isinstance(live, dict) and live.get("enabled") is True
     helper = f"python3 {worker}/scripts/worker-secrets"
-    if enabled(live) and live.get("command") == helper:
-        return []
-    return [Drift("config", where, f"is not the worker helper {helper} (part 14)")]
+    where = f"secrets.command in {worker}"
+    drifts = []
+    # The live command is never printed, since a tuned command could embed a secret.
+    if token_env and not (enabled and live.get("command") == helper):
+        drifts.append(Drift("config", where, f"is not the worker helper {helper} (part 5)"))
+    elif not token_env and enabled:
+        drifts.append(Drift("config", where, "is set, but a worker without a proxy token loads no secret (part 5)"))
+    held = {**GATEWAY_ONLY, **{name: 3 for name in (token_env, sentry_env) if name}}
+    for name, part in held.items():
+        if env_has(worker, name):
+            drifts.append(Drift(
+                "secret", f"{name} in {worker}/.env", f"is set, but the worker holds no factory secret; remove it (part {part})"
+            ))
+    files = commit.files(SECRET_NAMES)
+    declared = set(DECLARED_NAME.findall(commit.blob(files[SECRET_NAMES]).decode())) if SECRET_NAMES in files else set()
+    for key, name in (("auth_token_env", token_env), ("sentry_token_env", sentry_env)):
+        if name and name not in declared:
+            drifts.append(Drift(
+                "config", f"claude_session.{key} in {worker}",
+                f"names {name}, which {SECRET_NAMES} does not declare, so every process a home starts inherits it (part 3)",
+            ))
+    return drifts
 
 
 def cron_jobs(home: Path) -> list:
@@ -872,25 +909,26 @@ def main() -> int:
         commit = resolve_commit(repo, args.ref)
         hermes = find_hermes()
         hermes = os.path.abspath(hermes)
+        settings = config_value(worker, hermes, SETTINGS_KEY)
         drifts = [
             *check_profile(commit, worker),
             *check_plugins(commit, [root, worker]),
             *check_config({ROOT: root, WORKER: worker}, hermes),
-            *check_worker_secrets(root, worker, hermes),
-            *check_upload_broker(root),
+            *check_worker_secrets(commit, worker, hermes, settings),
+            *check_upload_broker(root, token_variable(settings), token_variable(settings, "sentry_token_env")),
             *check_cron(commit, root, worker, hermes),
             *check_routes(commit, root, hermes),
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
             *check_owned_refs(root),
-            *check_triage_board(root, hermes, config_value(worker, hermes, SETTINGS_KEY)),
+            *check_triage_board(root, hermes, settings),
             *check_triage_playbook(repo),
-            *check_checkouts(config_value(worker, hermes, SETTINGS_KEY)),
+            *check_checkouts(settings),
             *check_team_skills(
                 config_value(root, hermes, "plugins.entries.team.settings.skills_dir"),
                 config_value(root, hermes, "plugins.entries.team.settings.allow"),
             ),
-            *check_model_tiers(config_value(worker, hermes, SETTINGS_KEY), worker),
+            *check_model_tiers(settings, worker),
         ]
         if sys.platform == "darwin":
             launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))

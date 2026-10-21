@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Print the model proxy's token for Claude Code's apiKeyHelper.
+
+claude-session points apiKeyHelper here, so Claude Code keeps the token in
+memory and sends it as its Authorization and x-api-key headers, and no process
+Claude Code starts inherits it. Claude Code runs the helper again when its
+cached value ages out. Each run asks the gateway's broker through the
+linear-agent-session plugin in $HERMES_HOME, which the helper command sets, so
+the worker never stores the token. Run it with python3. Exits 1 when the broker
+refuses or does not answer, and 2 on an argument or a terminal stdout.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+
+def main() -> int:
+    if len(sys.argv) > 1:
+        print("proxy-token: takes no arguments; it prints the proxy token", file=sys.stderr)
+        return 2
+    if sys.stdout.isatty():
+        print("proxy-token: refusing to print a secret to a terminal; Claude Code reads it through a pipe", file=sys.stderr)
+        return 2
+    home = os.environ.get("HERMES_HOME")
+    if not home:
+        print("proxy-token: HERMES_HOME is not set; claude-session sets it to the worker home", file=sys.stderr)
+        return 1
+    sys.path.insert(0, str(Path(home) / "plugins" / "linear-agent-session"))
+    import linear
+
+    try:
+        reply = linear.broker_request(linear.broker_socket_path({"HERMES_HOME": home}), "proxy_token")
+    except linear.LinearError as error:
+        print(f"proxy-token: {error}", file=sys.stderr)
+        return 1
+    print(reply["token"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -3,11 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import os
+import socket
 import stat
 import tempfile
 import unittest
 
-from tests import FakeLinear, activity_ok, load_plugin, session_update_ok
+from unittest import mock
+
+from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin, session_update_ok
 
 plugin = load_plugin()
 linear = plugin.linear
@@ -213,15 +216,151 @@ class TokenTest(unittest.TestCase):
             {"error": "client credentials token request failed: Client does not support the client_credentials grant type"},
         )
 
-    def test_missing_credentials(self):
-        with self.assertRaisesRegex(linear.LinearError, "set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"):
-            linear.client_from_env({})
+    def test_issue_token_proves_the_token_and_says_when_it_expires(self):
+        viewer_ok = (200, {"data": {"viewer": {"id": "app-user"}}})
+        fake = FakeLinear([viewer_ok], expires_in=3600)
+
+        issued = make_client(fake, Clock(1000.0)).issue_token()
+
+        self.assertEqual(issued, {"access_token": "token-1", "expires_at": 4600.0})
+        self.assertIn("viewer", fake.graphql_requests[0]["query"])
 
     def test_token_cache_path_resolution(self):
         self.assertIsNone(linear.token_cache_path({}))
         self.assertEqual(
             linear.token_cache_path({"HERMES_HOME": "/h"}), "/h/plugin-data/linear-agent-session/token.json"
         )
+
+
+class BrokerClientTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = os.path.realpath(tmp.name)
+        self.worker = os.path.join(self.root, "profiles", "claude-worker")
+        os.makedirs(self.worker)
+        self.socket = os.path.join(self.root, "factory-uploads.sock")
+
+    def broker(self, *replies):
+        broker = FakeBroker(self.socket, replies)
+        self.addCleanup(broker.close)
+        return broker
+
+    def test_a_home_without_app_credentials_never_mints_and_uses_the_brokers_token(self):
+        broker = self.broker(linear_token("brokered-1"))
+        fake = FakeLinear([activity_ok()])
+
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=fake)
+        client.create_activity("session-1", {"type": "thought", "body": "x"})
+
+        self.assertEqual(broker.requests, [{"op": "linear_token"}])
+        self.assertEqual(fake.token_requests, [])
+        self.assertEqual(fake.graphql_requests[0]["authorization"], "Bearer brokered-1")
+
+    def test_the_brokered_token_is_reused_until_it_expires(self):
+        clock = Clock()
+        broker = self.broker(linear_token("brokered-1", 1000.0 + 3600), linear_token("brokered-2", 1e12))
+        fake = FakeLinear([activity_ok(), activity_ok()])
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=fake, clock=clock)
+
+        client.create_activity("session-1", {"type": "thought", "body": "x"})
+        clock.now += 3600
+        client.create_activity("session-1", {"type": "thought", "body": "x"})
+
+        self.assertEqual(len(broker.requests), 2)
+        self.assertEqual([r["authorization"] for r in fake.graphql_requests], ["Bearer brokered-1", "Bearer brokered-2"])
+
+    def test_a_rejected_brokered_token_is_replaced_by_asking_the_broker_again(self):
+        broker = self.broker(linear_token("revoked"), linear_token("fresh"))
+        fake = FakeLinear([(401, {"errors": [{"message": "Authentication required"}]}), activity_ok("activity-3")])
+
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=fake)
+
+        self.assertEqual(client.create_activity("session-1", {"type": "thought", "body": "x"}), "activity-3")
+        self.assertEqual(len(broker.requests), 2)
+        self.assertEqual([r["authorization"] for r in fake.graphql_requests], ["Bearer revoked", "Bearer fresh"])
+
+    def test_a_brokered_token_is_never_written_to_the_worker_home(self):
+        self.broker(linear_token("brokered-1"))
+
+        linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()])).create_activity(
+            "session-1", {"type": "thought", "body": "x"}
+        )
+
+        self.assertEqual(os.listdir(self.worker), [])
+
+    def test_a_broker_that_does_not_answer_is_a_linear_error(self):
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()]))
+
+        with self.assertRaisesRegex(linear.LinearError, f"the gateway's broker at {self.socket} did not answer"):
+            client.create_activity("session-1", {"type": "thought", "body": "x"})
+
+    def test_a_broker_refusal_names_its_reason(self):
+        self.broker({"ok": False, "state": "unavailable", "message": "The gateway holds no Linear app credentials."})
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()]))
+
+        with self.assertRaisesRegex(
+            linear.LinearError, "refused linear_token: The gateway holds no Linear app credentials."
+        ):
+            client.access_token()
+
+    def test_a_busy_broker_is_asked_again_until_it_answers(self):
+        broker = self.broker(BUSY, BUSY, linear_token("brokered-1"))
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()]))
+
+        with mock.patch("time.sleep") as sleep:
+            client.create_activity("session-1", {"type": "thought", "body": "x"})
+
+        self.assertEqual(len(broker.requests), 3)
+        self.assertEqual(len(sleep.call_args_list), 2)
+
+    def test_a_broker_that_stays_busy_or_down_is_unavailable_after_a_bounded_wait(self):
+        broker = self.broker(BUSY)
+        for case in ("busy", "down"):
+            with self.subTest(case=case), mock.patch("time.sleep") as sleep:
+                if case == "down":
+                    broker.close()
+                    os.unlink(self.socket)
+                with self.assertRaises(linear.BrokerUnavailable):
+                    linear.broker_request(self.socket, "proxy_token")
+                waited = sum(call.args[0] for call in sleep.call_args_list)
+                self.assertGreater(len(sleep.call_args_list), 1)
+                self.assertLessEqual(waited, 10)
+        self.assertEqual(len(broker.requests), len(sleep.call_args_list) + 1)
+
+    def test_a_broker_that_stalls_is_unavailable_without_a_retry(self):
+        stalled = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(stalled.close)
+        stalled.bind(self.socket)
+        stalled.listen()
+
+        with mock.patch("time.sleep") as sleep, self.assertRaisesRegex(linear.BrokerUnavailable, "did not answer in 0.2s"):
+            linear.broker_request(self.socket, "proxy_token", timeout=0.2)
+
+        self.assertEqual(sleep.call_args_list, [])
+
+    def test_a_refusal_is_not_retried_and_is_not_unavailability(self):
+        broker = self.broker({"ok": False, "state": "unavailable", "message": "The gateway holds no proxy token."})
+
+        with mock.patch("time.sleep") as sleep, self.assertRaises(linear.LinearError) as raised:
+            linear.broker_request(self.socket, "proxy_token")
+
+        self.assertNotIsInstance(raised.exception, linear.BrokerUnavailable)
+        self.assertEqual((len(broker.requests), sleep.call_args_list), (1, []))
+
+    def test_the_broker_lives_in_the_root_home(self):
+        self.assertEqual(linear.broker_socket_path({"HERMES_HOME": self.worker}), self.socket)
+        self.assertEqual(linear.broker_socket_path({"HERMES_HOME": self.root}), self.socket)
+
+    def test_a_home_with_app_credentials_never_asks_the_broker(self):
+        broker = self.broker()
+        fake = FakeLinear([activity_ok()])
+        env = {"HERMES_HOME": self.root, "LINEAR_CLIENT_ID": "client-id", "LINEAR_CLIENT_SECRET": "client-secret"}
+
+        linear.client_from_env(env, urlopen=fake).create_activity("session-1", {"type": "thought", "body": "x"})
+
+        self.assertEqual(broker.requests, [])
+        self.assertEqual(len(fake.token_requests), 1)
 
 
 class SessionCreateTest(unittest.TestCase):

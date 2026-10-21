@@ -11,11 +11,14 @@ command. Any other card starts only when its Linear issue carries
 `ready-for-agent`.
 
 Claude Code starts with the allowlisted environment in CHILD_ENV_NAMES and
-CHILD_ENV_PREFIXES. Every credential it needs, the Linear token and the proxy
-token, reaches it only through the per-run settings file, mode 0600. Claude Code
-removes that file through a SessionStart hook as soon as it has read it.
-claude-session also removes it before each run and when it ends, whether it
-returns or stops on SIGTERM, SIGINT, or SIGHUP.
+CHILD_ENV_PREFIXES. The run's Linear token reaches it only through the per-run
+settings file, mode 0600, as LINEAR_API_KEY, which the commands Claude runs
+also get on purpose: LINEAR_RULE tells Claude to use it. Claude Code removes that file through a SessionStart
+hook as soon as it has read it. claude-session also removes it before each run
+and when it ends, whether it returns or stops on SIGTERM, SIGINT, or SIGHUP.
+The proxy token and the Sentry token never enter Claude Code's environment:
+the settings point apiKeyHelper at proxy-token, and the sentry server's
+headersHelper is sentry-headers, and both ask the gateway's broker.
 """
 from __future__ import annotations
 
@@ -137,6 +140,8 @@ FINISH_RULE = STOP_RULE + (
     "watch`, and any sleep or polling loop that waits longer."
 )
 CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
+PROXY_TOKEN_HELPER = Path(__file__).resolve().with_name("proxy-token")
+SENTRY_HEADERS_HELPER = Path(__file__).resolve().with_name("sentry-headers")
 TRIAGE_DOCUMENTS = ("Triage notes", "Agent brief")
 TRIAGE_RULE = (
     "This run triages one issue on the factory's Triage board. It changes no code for the issue: create no "
@@ -175,7 +180,6 @@ LINEAR_MCP_SERVER = {
 # Replaces a repository's `sentry` server, whose OAuth sign-in needs a browser. `Sentry-Bearer` sends a
 # static Sentry token, and the `inspect` skill exposes only Sentry's read-only tools.
 SENTRY_MCP_URL = "https://mcp.sentry.dev/mcp?skills=inspect"
-ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
@@ -630,7 +634,7 @@ def check_toolchain(repo: dict, worktree: Path) -> None:
 
 
 def linear_access() -> tuple:
-    """A client and a token from the worker home's linear-agent-session plugin, which shares its token cache."""
+    """A client and a token from the worker home's linear-agent-session plugin, which gets tokens from the gateway's broker."""
     home = os.environ.get("HERMES_HOME")
     if not home:
         raise Refusal("HERMES_HOME is not set; claude-session reads the Linear token through the worker home's plugin")
@@ -644,7 +648,7 @@ def linear_access() -> tuple:
         client = linear.client_from_env()
         return client, client.access_token()
     except linear.LinearError as error:
-        raise Refusal(f"Linear token: {error}") from None
+        raise Refusal(f"Linear token: {error}", transient=isinstance(error, linear.BrokerUnavailable)) from None
 
 
 def triage_playbook() -> Path:
@@ -764,30 +768,30 @@ def model_environment(transport: dict, tiers: dict) -> dict:
     return env
 
 
-def sentry_token_env(transport: dict) -> str | None:
-    name = transport.get("sentry_token_env")
-    if not name:
-        return None
-    # The settings env also carries LINEAR_API_KEY and ANTHROPIC_*, which would overwrite the token.
-    if not isinstance(name, str) or not ENV_NAME.match(name) or name == "LINEAR_API_KEY" or name.startswith("ANTHROPIC_"):
-        raise Refusal(
-            f"claude_session.sentry_token_env {name!r} must name an environment variable other than "
-            "LINEAR_API_KEY and ANTHROPIC_*"
-        )
-    if not os.environ.get(name):
-        raise Refusal(f"sentry_token_env names {name}, which is not set")
-    return name
+def sentry_enabled(transport: dict) -> bool:
+    if not transport.get("sentry_token_env"):
+        return False
+    import linear
+
+    try:
+        status = linear.broker_request(linear.broker_socket_path(os.environ), "status")
+    except linear.LinearError as error:
+        raise Refusal(f"Sentry token: {error}", transient=isinstance(error, linear.BrokerUnavailable)) from None
+    if status.get("sentry_token_present") is not True:
+        raise Refusal("Sentry token: the gateway's broker reports sentry_token_present false")
+    return True
 
 
-def mcp_config(transport: dict) -> str:
+def helper_command(helper: Path) -> str:
+    """HERMES_HOME is not in Claude Code's allowlisted environment, so the command sets it for the helper."""
+    home = shlex.quote(os.environ["HERMES_HOME"])
+    return f"HERMES_HOME={home} {shlex.quote(sys.executable)} {shlex.quote(str(helper))}"
+
+
+def mcp_config(sentry: bool) -> str:
     servers = {"linear": LINEAR_MCP_SERVER}
-    sentry = sentry_token_env(transport)
     if sentry:
-        servers["sentry"] = {
-            "type": "http",
-            "url": SENTRY_MCP_URL,
-            "headers": {"Authorization": f"Sentry-Bearer ${{{sentry}}}"},
-        }
+        servers["sentry"] = {"type": "http", "url": SENTRY_MCP_URL, "headersHelper": helper_command(SENTRY_HEADERS_HELPER)}
     return json.dumps({"mcpServers": servers})
 
 
@@ -814,16 +818,8 @@ def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = Fa
     # Claude Code sends every MCP schema inline when ANTHROPIC_BASE_URL is not Anthropic's,
     # unless tool search is forced on; deferred schemas keep the worker's fixed prefix small.
     env = {"LINEAR_API_KEY": api_key, "ENABLE_TOOL_SEARCH": "true"}
-    sentry = sentry_token_env(transport)
-    if sentry:
-        env[sentry] = os.environ[sentry]
     if transport.get("base_url"):
         env["ANTHROPIC_BASE_URL"] = transport["base_url"]
-    token_env = transport.get("auth_token_env")
-    if token_env:
-        if not os.environ.get(token_env):
-            raise Refusal(f"auth_token_env names {token_env}, which is not set")
-        env["ANTHROPIC_AUTH_TOKEN"] = os.environ[token_env]
     tiers = tier_models(transport)
     if transport.get("model"):
         env.update(model_environment(transport, tiers))
@@ -835,6 +831,8 @@ def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = Fa
         "SessionStart": [{"hooks": [remove]}],
         "PreToolUse": [{"matcher": "Bash", "hooks": [guard]}],
     }}
+    if transport.get("auth_token_env"):
+        settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)
     disabled = disabled_mcp_servers(transport)
     if disabled:
         settings["disabledMcpjsonServers"] = disabled
@@ -1075,7 +1073,6 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
     repo = find_repository(settings, args.repo)
     transport = settings.get("claude_session") or {}
     turn_limit = max_turns_args(transport)
-    mcp = mcp_config(transport)
     threshold = fresh_after_tokens(transport)
     prefix = worker_entry_prefix(repo)
     worktree = resolve_worktree(workspace, repo["path"])
@@ -1091,6 +1088,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         settings_path.unlink(missing_ok=True)
         remove_on_stop(settings_path)
         client, api_key = linear_access()
+        mcp = mcp_config(sentry_enabled(transport))
         if triage:
             system_prompt = TRIAGE_SYSTEM_PROMPT.format(
                 triage_playbook=triage_playbook(),

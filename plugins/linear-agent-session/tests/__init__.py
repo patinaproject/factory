@@ -4,7 +4,9 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import sys
+import threading
 import urllib.error
 import urllib.parse
 
@@ -73,3 +75,40 @@ def activity_ok(activity_id: str = "activity-1"):
 
 def session_update_ok():
     return 200, {"data": {"agentSessionUpdate": {"success": True}}}
+
+
+class FakeBroker:
+    def __init__(self, path: str, replies) -> None:
+        self.requests = []
+        self.replies = list(replies)
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(path)
+        self.server.listen()
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self) -> None:
+        while True:
+            try:
+                client, _ = self.server.accept()
+            except OSError:
+                return
+            with client:
+                request = b""
+                while not request.endswith(b"\n"):
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    request += chunk
+                self.requests.append(json.loads(request))
+                reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+                client.sendall(json.dumps(reply).encode() + b"\n")
+
+    def close(self) -> None:
+        self.server.close()
+
+
+BUSY = {"ok": False, "state": "busy", "message": "The upload broker is busy. Try again in a moment."}
+
+
+def linear_token(token: str, expires_at: float = 1e12) -> dict:
+    return {"ok": True, "token": token, "expires_at": expires_at}

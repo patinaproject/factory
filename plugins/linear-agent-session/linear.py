@@ -4,6 +4,7 @@ import base64
 import contextlib
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -16,6 +17,11 @@ TOKEN_URL = "https://api.linear.app/oauth/token"
 # client credentials tokens when a request asks for a different scope set.
 TOKEN_SCOPE = "read,write,app:assignable,app:mentionable"
 TOKEN_REFRESH_MARGIN_SECONDS = 60
+BROKER_SOCKET = "factory-uploads.sock"
+BROKER_TIMEOUT_SECONDS = 30
+BROKER_REPLY_LIMIT = 65536
+# A busy or restarting broker gets a few seconds; a card waits on it far longer in the queue.
+BROKER_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0)
 
 BODY_ACTIVITY_TYPES = ("thought", "response", "elicitation", "error")
 ACTIVITY_TYPES = BODY_ACTIVITY_TYPES + ("action",)
@@ -123,6 +129,14 @@ UrlOpen = Callable[..., Any]
 
 class LinearError(Exception):
     pass
+
+
+class BrokerUnavailable(LinearError):
+    """The broker was busy, unreachable, or slow, which a later run can outlast."""
+
+    def __init__(self, message: str, *, retry: bool = True) -> None:
+        super().__init__(message)
+        self.retry = retry
 
 
 def activity_content(
@@ -334,13 +348,15 @@ class LinearClient:
         return {"identifier": issue["identifier"], "removed": True}
 
     def access_token(self) -> str:
-        """A token Linear accepts now, for a process that calls Linear without this client.
+        return self.issue_token()["access_token"]
 
-        A cached token can be revoked before it expires, so a cheap query proves it first.
+    def issue_token(self) -> dict:
+        """A cached token can be revoked before it expires, so a cheap query proves it first.
         A rejected token is replaced the same way any other call replaces it.
         """
         self._graphql(VIEWER_QUERY, {})
-        return self._access_token()
+        self._access_token()
+        return {"access_token": self._token["access_token"], "expires_at": self._token["expires_at"]}
 
     def _graphql(self, query: str, variables: dict) -> dict:
         try:
@@ -437,6 +453,57 @@ class LinearClient:
             raise LinearError(f"Linear is unreachable: {e.reason}") from None
 
 
+class BrokerLinearClient(LinearClient):
+    def __init__(self, socket_path: str, **kwargs: Any) -> None:
+        super().__init__("", "", **kwargs)
+        self._socket_path = socket_path
+
+    def _mint_token(self) -> dict:
+        reply = broker_request(self._socket_path, "linear_token")
+        return {"client_id": "", "access_token": reply["token"], "expires_at": float(reply["expires_at"])}
+
+
+def broker_request(socket_path: str, op: str, *, timeout: float = BROKER_TIMEOUT_SECONDS) -> dict:
+    for delay in (*BROKER_RETRY_DELAYS, None):
+        try:
+            return _broker_attempt(socket_path, op, timeout)
+        except BrokerUnavailable as error:
+            if delay is None or not error.retry:
+                raise
+            time.sleep(delay)
+
+
+def _broker_attempt(socket_path: str, op: str, timeout: float) -> dict:
+    reply = b""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(socket_path)
+            client.sendall(json.dumps({"op": op}).encode() + b"\n")
+            while not reply.endswith(b"\n") and len(reply) < BROKER_REPLY_LIMIT:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                reply += chunk
+    except TimeoutError:
+        # A broker that accepted the request and then stalled would stall a retry the same way.
+        raise BrokerUnavailable(f"the gateway's broker at {socket_path} did not answer in {timeout}s", retry=False) from None
+    except OSError as error:
+        raise BrokerUnavailable(
+            f"the gateway's broker at {socket_path} did not answer: {error.strerror or error}"
+        ) from None
+    try:
+        document = json.loads(reply)
+    except ValueError:
+        raise BrokerUnavailable(f"the gateway's broker at {socket_path} closed the connection without an answer") from None
+    if isinstance(document, dict) and document.get("state") == "busy":
+        raise BrokerUnavailable(f"the gateway's broker is busy and refused {op}")
+    if not isinstance(document, dict) or document.get("ok") is not True:
+        message = document.get("message") if isinstance(document, dict) else None
+        raise LinearError(f"the gateway's broker refused {op}: {message or 'no reason given'}")
+    return document
+
+
 class _Unauthorized(Exception):
     pass
 
@@ -472,7 +539,7 @@ def client_from_env(environ: Mapping[str, str] = os.environ, *, timeout: float =
     client_id = environ.get("LINEAR_CLIENT_ID")
     client_secret = environ.get("LINEAR_CLIENT_SECRET")
     if not client_id or not client_secret:
-        raise LinearError("set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET")
+        return BrokerLinearClient(broker_socket_path(environ), timeout=timeout, **kwargs)
     return LinearClient(
         client_id,
         client_secret,
@@ -480,6 +547,13 @@ def client_from_env(environ: Mapping[str, str] = os.environ, *, timeout: float =
         timeout=timeout,
         **kwargs,
     )
+
+
+def broker_socket_path(environ: Mapping[str, str]) -> str:
+    home = os.path.realpath(environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes"))
+    parent = os.path.dirname(home)
+    root = os.path.dirname(parent) if os.path.basename(parent) == "profiles" else home
+    return os.path.join(root, BROKER_SOCKET)
 
 
 def token_cache_path(environ: Mapping[str, str]) -> Optional[str]:
