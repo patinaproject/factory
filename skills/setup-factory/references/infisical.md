@@ -126,18 +126,47 @@ project.
 
 Then sign in as the identity and try each other environment of the project.
 New projects have `dev`, `staging`, and `prod`. The project's settings page
-lists its environment slugs. These lines read only the two
-`FACTORY_INFISICAL_` keys from `<home>/.env` with `sed`, so they load nothing
-else from the file. This prints nothing when the scope is right:
+lists its environment slugs. Define `identity_keys` in the operator's shell
+first. It signs in as the identity in an env file, reads one folder, and
+prints the names of the secrets it can read. It makes the same REST calls as
+the helper in "Configure the default home", so the identity never sits in the
+environment or arguments of a process that another process of the same user
+can read with `ps eww`: only `/usr/bin/curl` and `/usr/bin/perl` receive it,
+on standard input, and macOS hides the environment of those platform binaries.
+The function reads only the two `FACTORY_INFISICAL_` keys of the file it
+names, and prints no value:
 
 ```sh
-( t=$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' <home>/.env)" \
-    INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' <home>/.env)" \
-    infisical login --method=universal-auth --silent --plain)
-  for env in <each other environment slug>; do
-    INFISICAL_TOKEN="$t" infisical export --silent --projectId <project id> --env "$env" --path / --format dotenv >/dev/null 2>&1 \
-      && echo "readable: $env"
-  done )
+identity_keys() { # <env file> <environment> <secret path>
+  _id=$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' "$1" | head -n 1)
+  _secret=$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' "$1" | head -n 1)
+  _tok=$(printf '%s\n%s\n' "$_id" "$_secret" |
+    /usr/bin/perl -MJSON::PP -e 'chomp(my @l = <STDIN>); print encode_json({clientId => $l[0], clientSecret => $l[1]})' |
+    /usr/bin/curl -q --silent --fail --max-time 15 -H 'Content-Type: application/json' --data-binary @- \
+      '<api url>/api/v1/auth/universal-auth/login' |
+    /usr/bin/perl -MJSON::PP -e 'print decode_json(do { local $/; <STDIN> })->{accessToken}' 2>/dev/null)
+  unset _id _secret
+  [ -n "$_tok" ] || { echo "identity_keys: sign-in failed" >&2; return 2; }
+  _out=$(printf 'Authorization: Bearer %s\n' "$_tok" |
+    /usr/bin/curl -q --silent --fail --max-time 15 -H @- --get \
+      --data-urlencode 'projectId=<project id>' --data-urlencode "environment=$2" \
+      --data-urlencode "secretPath=$3" --data-urlencode recursive=false \
+      '<api url>/api/v4/secrets') || { unset _tok; return 1; }
+  unset _tok
+  printf '%s' "$_out" |
+    /usr/bin/perl -MJSON::PP -e 'print "$_->{secretKey}\n" for @{decode_json(do { local $/; <STDIN> })->{secrets}}'
+}
+```
+
+It returns `2` and prints `identity_keys: sign-in failed` when sign-in fails,
+and returns `1` and prints nothing when the identity cannot read the folder.
+A sign-in failure is not a pass, so leave stderr on. This prints nothing when
+the scope is right:
+
+```sh
+for env in <each other environment slug>; do
+  identity_keys <home>/.env "$env" / >/dev/null && echo "readable: $env"
+done
 ```
 
 Each `readable:` line fails the check. Remove the extra grant, or create a new
@@ -176,16 +205,14 @@ below keeps the default home's identity out of the subfolder.
 >    the `set-secret` lines of step 5 in "Broker user, macOS"
 >    Never into `<home>/.env`.
 
-Check it from the factory user's shell. The default home's identity must read
-none of the moved values. These lines print only names, and print nothing
-when the scope is right:
+Check it from the factory user's shell, with `identity_keys` from
+[Check the identity's scope](#check-the-identitys-scope). The default home's
+identity must read none of the moved values. This prints only names, and
+prints nothing when the scope is right. A `sign-in failed` line means the
+check proved nothing:
 
 ```sh
-( t=$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' <home>/.env)" \
-    INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' <home>/.env)" \
-    infisical login --method=universal-auth --silent --plain)
-  INFISICAL_TOKEN="$t" infisical export --silent --projectId <project id> --env <environment> \
-    --path <folder>/broker --format dotenv 2>/dev/null | cut -d= -f1 )
+identity_keys <home>/.env <environment> <folder>/broker
 ```
 
 `check-install` then reports `upload broker` lines when the broker holds
@@ -333,8 +360,8 @@ FACTORY_INFISICAL_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//
   <home>/bin/factory-secrets >/dev/null; echo "exit $?"
 ```
 
-`infisical` must be on the `PATH` that the gateway's service definition sets.
-Check with `command -v infisical`, and compare the directory with that `PATH`.
+The gateway needs no Infisical CLI on its `PATH`. The helper runs only
+`/usr/bin/curl` and `/usr/bin/perl`.
 
 ## Retire the worker's identity
 
