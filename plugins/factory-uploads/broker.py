@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import socket
+import struct
 import sys
 import time
 from pathlib import Path
@@ -108,14 +109,29 @@ class NoCredentials:
         return None
 
 
+NOT_PERMITTED = "This user may not use the broker."
+SOL_LOCAL, LOCAL_PEERCRED, LOCAL_PEERPID = 0, 1, 2
+XUCRED_SIZE = 76
+XUCRED_VERSION = 0
+
+
 def peer_pid(sock: socket.socket) -> int | None:
     if sys.platform == "darwin":
-        return sock.getsockopt(0, 2)  # SOL_LOCAL, LOCAL_PEERPID
+        return sock.getsockopt(SOL_LOCAL, LOCAL_PEERPID)
     if sys.platform.startswith("linux"):
-        import struct
-
         return struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
     return None
+
+
+def peer_uid(sock: socket.socket) -> int:
+    if sys.platform == "darwin":
+        version, uid = struct.unpack_from("=II", sock.getsockopt(SOL_LOCAL, LOCAL_PEERCRED, XUCRED_SIZE))
+        if version != XUCRED_VERSION:
+            raise OSError(f"unknown xucred version {version}")
+        return uid
+    if sys.platform.startswith("linux"):
+        return struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[1]
+    raise OSError(f"no peer credentials on {sys.platform}")
 
 
 class Broker:
@@ -130,10 +146,16 @@ class Broker:
         base_url: str = upload_token.UPLOAD_BASE,
         clock: Callable[[], float] = time.time,
         credentials: Credentials = NoCredentials(),
+        socket_path: Path | None = None,
+        state_dir: Path | None = None,
+        socket_mode: int = 0o600,
+        allowed_uids: frozenset[int] | None = None,
     ):
         self.home = Path(home)
-        self.socket_path = self.home / SOCKET_NAME
-        self.state_dir = self.home / STATE_DIR
+        self.socket_path = Path(socket_path) if socket_path else self.home / SOCKET_NAME
+        self.state_dir = Path(state_dir) if state_dir else self.home / STATE_DIR
+        self.socket_mode = socket_mode
+        self.allowed_uids = allowed_uids
         self.repositories = frozenset(repositories)
         self._get_token = get_token
         self._resolve_repository_id = resolve_repository_id
@@ -154,7 +176,7 @@ class Broker:
         self.socket_path.unlink(missing_ok=True)
         self.state_dir.mkdir(mode=0o700, exist_ok=True)
         self._server = await asyncio.start_unix_server(self._serve, path=str(self.socket_path))
-        os.chmod(self.socket_path, 0o600)
+        os.chmod(self.socket_path, self.socket_mode)
         return True
 
     async def stop(self) -> None:
@@ -182,7 +204,9 @@ class Broker:
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
-        if len(self._clients) >= MAX_CONNECTIONS + MAX_CREDENTIAL_CONNECTIONS:
+        if not self._permitted(writer.get_extra_info("socket")):
+            reply = self._failure("refused", NOT_PERMITTED)
+        elif len(self._clients) >= MAX_CONNECTIONS + MAX_CREDENTIAL_CONNECTIONS:
             reply = self._failure("busy", BUSY)
         else:
             self._clients[task] = writer
@@ -200,6 +224,18 @@ class Broker:
                 writer.write(json.dumps(reply).encode() + b"\n")
                 await writer.drain()
         writer.close()
+
+    def _permitted(self, sock: socket.socket) -> bool:
+        if self.allowed_uids is None:
+            return True
+        try:
+            uid, pid = peer_uid(sock), peer_pid(sock)
+        except OSError:
+            uid = pid = None
+        if uid in self.allowed_uids:
+            return True
+        self._audit({"op": "connect", "uid": uid, "pid": pid, "state": "refused"})
+        return False
 
     async def _reply(self, reader, writer) -> dict:
         try:

@@ -517,6 +517,135 @@ in the worker home.
    `hermes status` lists it without any channel and it is not a cron
    `--deliver` or `send_message` target.
 
+**Broker user, macOS.** The gateway runs as the factory user, and so does
+every process Claude Code starts. Such a process can read any file the factory
+user can read. On macOS, move the broker and the secrets only it needs to a
+hidden service user. The worker side then reaches them only through a socket
+in a shared directory, and the broker answers only the factory user's uid.
+
+The gateway itself stays with the factory user. Hermes' Kanban dispatcher runs
+inside the gateway and starts every worker, so a gateway under the service
+user would start Claude Code there too.
+
+| Path | Owner and mode | Holds |
+| --- | --- | --- |
+| `/Library/Application Support/factory-broker/lib` | `root:wheel`, `0755`, files `0644` | The broker's code, copied from this repository |
+| `/Library/Application Support/factory-broker/broker.json` | `root:wheel`, `0644` | Non-secret config: socket, allowed uid, repository ids, Infisical location |
+| `/Library/Application Support/factory-broker/home` | `_factorybroker`, `0700` | `.env`, the audit log, and the Linear token cache |
+| `/Library/Application Support/factory-broker/run` | `_factorybroker:_factorybroker`, `0750` | The socket, mode `0660` |
+| `/Library/LaunchDaemons/local.factory-broker.plist` | `root:wheel`, `0644` | The service, run as `_factorybroker` with the Command Line Tools' `python3` |
+
+Only root can change the code the broker runs. A copy in the factory user's
+home would let a factory process rewrite the broker and read its secrets. For
+the same reason, root never runs the script from the factory's checkout: a
+factory process can change that checkout. `apply` and `set-secret` refuse to
+run unless the script and every file they copy are root-owned, so the operator
+runs them from a fresh root-owned clone at the commit to install. The service
+runs `/Library/Developer/CommandLineTools/usr/bin/python3`, not
+`/usr/bin/python3`, because that shim follows `xcode-select` into
+`/Applications`, which any admin can write.
+
+1. **Check.** `check-install` reads `broker.json` when it exists and reports
+   each difference as a `broker user` line. When `broker.json` exists and
+   `check-install` prints no `broker user` or `upload broker` line, skip to
+   the next part.
+2. **Operator, in Infisical.** Follow
+   [Broker identity](references/infisical.md#broker-identity). It moves
+   `GITHUB_UPLOAD_TOKEN`, `LINEAR_CLIENT_ID`, and `LINEAR_CLIENT_SECRET` into
+   a folder that only the broker's own identity reads. Without Infisical, skip
+   this step. The operator enters the three values with `set-secret` in step 5.
+3. Write the input file in your scratch directory. It holds no secret. Get
+   each repository's numeric id with
+   `gh api repos/<owner>/<repo> --jq .id`, and the variable names from
+   `hermes config get plugins.entries.linear-agent-session.settings.claude_session --json`:
+
+   ```json
+   {"factory_user": "<account>",
+    "repositories": {"<owner>/<repo>": <id>},
+    "claude_session": {"auth_token_env": "<name>", "mcp_servers": {"<server>": {"token_env": "<name>"}}},
+    "infisical": {"api_url": "<url>", "project_id": "<project id>",
+                  "environment": "<environment>", "paths": ["<folder>", "<folder>/broker"]}}
+   ```
+
+   Leave `infisical` out when the factory does not use Infisical. `api_url`
+   is `https://app.infisical.com` or `https://eu.infisical.com`. For a
+   self-hosted server, also set `"self_hosted_host"` to the URL's host name.
+   The script refuses any other URL, because the broker sends its Infisical
+   identity there.
+4. Print the plan. It changes nothing and needs no `sudo`:
+
+   ```sh
+   python3 <repo>/skills/setup-factory/scripts/setup-broker-user plan --input <scratch>/broker-input.json
+   ```
+
+   It refuses, before any change, a name that belongs to an existing login
+   account, a factory user that is not a login account, a group with other
+   members, an interpreter or parent directory that a non-root user can
+   write, and a broker directory that is a link or another user's. It never
+   edits an existing account, the factory user's shell, sshd, sudoers, or
+   the SSH access group.
+5. > **HUMAN CHECKPOINT. Privileged step.** Show the operator the plan.
+   > `<sha>` is the full 40-character commit to install. The operator checks on GitHub that it
+   > is on the default branch, because a factory process can push other
+   > branches. The factory's App can also merge to the default branch
+   > without a person's review, so the operator reads the broker's code
+   > before root installs it. On a first install, they read the files at
+   > `<sha>`. On an update, they read the change since the installed commit:
+   >
+   > ```sh
+   > cat "/Library/Application Support/factory-broker/installed-commit"
+   > git diff <installed>..<sha> -- plugins/factory-uploads plugins/linear-agent-session/linear.py skills/setup-factory/scripts/setup-broker-user
+   > ```
+   >
+   > Then ask them to run, in their own terminal:
+   >
+   > ```sh
+   > /usr/bin/sudo -H /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /bin/sh -ec 'g=/Library/Developer/CommandLineTools/usr/bin/git; d=/var/root/factory-src; [ -d "$d" ] || "$g" clone -q https://github.com/<owner>/<repo> "$d"; "$g" -C "$d" fetch -q origin; "$g" -C "$d" merge-base --is-ancestor <sha> origin/<default branch>; "$g" -C "$d" checkout -q --detach <sha>; test "$("$g" -C "$d" rev-parse HEAD)" = <sha>'
+   > /usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Developer/CommandLineTools/usr/bin/python3 -I /var/root/factory-src/skills/setup-factory/scripts/setup-broker-user apply --input <scratch>/broker-input.json
+   > /usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Developer/CommandLineTools/usr/bin/python3 -I /var/root/factory-src/skills/setup-factory/scripts/setup-broker-user set-secret BROKER_INFISICAL_CLIENT_ID
+   > /usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Developer/CommandLineTools/usr/bin/python3 -I /var/root/factory-src/skills/setup-factory/scripts/setup-broker-user set-secret BROKER_INFISICAL_CLIENT_SECRET
+   > ```
+   >
+   > The first line clones as root with no Git config from the factory
+   > user's home, so no hook or URL rewrite of theirs runs, and it stops
+   > unless `<sha>` is on the default branch. `env -i` keeps the factory
+   > user's `PATH` and variables out of every root process, and
+   > `/usr/bin/sudo` keeps the factory user's `PATH` from choosing `sudo`
+   > itself. `apply` prints the diff of every root-owned file it changes,
+   > against the installed copy, including its own copy of
+   > `setup-broker-user`. It asks the operator to type `yes` before any
+   > change, and records the commit in `installed-commit`. The operator
+   > checks the code, the factory user, the repositories, and the Infisical
+   > host. Without Infisical, the `set-secret` lines name
+   > `GITHUB_UPLOAD_TOKEN`, `LINEAR_CLIENT_ID`, and `LINEAR_CLIENT_SECRET`
+   > instead. `set-secret` reads the value from the terminal and never from
+   > an argument. A second `apply` changes nothing.
+6. Turn off the gateway's own broker, and remove `GITHUB_UPLOAD_TOKEN`,
+   `LINEAR_CLIENT_ID`, and `LINEAR_CLIENT_SECRET` from `<home>/.env` when it
+   holds them:
+
+   ```sh
+   hermes config set platforms.factory_uploads.enabled false
+   ```
+
+7. > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
+   > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a
+   > shell outside Hermes. The gateway then runs no broker, and processes it
+   > starts carry the new group.
+8. Link the root home's socket path to the service. Every worker script and
+   the gateway's Linear client connect to `<home>/factory-uploads.sock`.
+   Create the link after the restart, because the stopping gateway removes
+   that path:
+
+   ```sh
+   ln -sfn "/Library/Application Support/factory-broker/run/factory-uploads.sock" <home>/factory-uploads.sock
+   ```
+
+9. **Check.** `check-install` prints no `broker user` and no `upload broker`
+   line, and `check-host-exposure` still prints only `PASS` lines. The
+   broker's log is `/Library/Application Support/factory-broker/home/broker.log`,
+   which only root and the broker user read.
+
 **Team skills, root home only.** The `team` plugin registers the skills in a
 directory on the machine as `team:<name>` skills. It reads the directory in
 place and copies nothing, so no skill content enters this repository. Install
@@ -1641,6 +1770,11 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      the gateway may hold. Follow
      [Retire the worker's identity](references/infisical.md#retire-the-workers-identity),
      which also applies to a factory without Infisical.
+   - A `broker user` line that says a file under `lib` differs: the broker
+     runs a root-owned copy of its code, so a deploy cannot change it. Print
+     the plan as in step 4 of "Broker user, macOS" in part 5, and ask the
+     operator to read the `git diff` that step 5 shows and then run its
+     clone and `apply` lines at the deployed commit. Other `broker user` lines name the step of that section to repeat.
    - A `checkout` line: the checkout is missing or has no `origin/HEAD`. Clone
      it as in part 10, or run `git -C <path> remote set-head origin -a`.
    - A `dashboard sign-in` line: follow step 6 of

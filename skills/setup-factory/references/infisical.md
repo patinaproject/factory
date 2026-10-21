@@ -144,6 +144,53 @@ Each `readable:` line fails the check. Remove the extra grant, or create a new
 identity for the factory. Reuse its client ID only after the check passes, and
 give this machine its own client secret.
 
+## Broker identity
+
+Run this when the broker runs as its own macOS user, as "Broker user, macOS"
+in part 5 of the skill sets up. The broker then signs in as a second machine
+identity, whose credential lives only in the broker user's home. The secrets
+that only the broker needs move to a subfolder that the default home's
+identity cannot read:
+
+| Value | Folder | Read by |
+| --- | --- | --- |
+| `GITHUB_UPLOAD_TOKEN`, `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | `<folder>/broker` | The broker |
+| The proxy token and the Sentry token | `<folder>` | The default home and the broker |
+
+The broker reads `<folder>` first and `<folder>/broker` second. The grant
+below keeps the default home's identity out of the subfolder.
+
+> **HUMAN CHECKPOINT.** Ask the operator to do these steps in Infisical:
+>
+> 1. Create the folder `<folder>/broker` in `<environment>`, and move
+>    `GITHUB_UPLOAD_TOKEN`, `LINEAR_CLIENT_ID`, and `LINEAR_CLIENT_SECRET`
+>    into it.
+> 2. Narrow the default home's identity: change the condition of its
+>    additional privilege to `environment` equals `<environment>` and
+>    `secretPath` equals `<folder>`.
+> 3. Create an identity for the broker, as in
+>    [Create the machine identity](#create-the-machine-identity), with the
+>    condition `environment` equals `<environment>` and `secretPath` glob
+>    `<folder>/**`, and a Universal Auth client secret.
+> 4. Enter its client ID and secret in their own terminal with
+>    the `set-secret` lines of step 5 in "Broker user, macOS"
+>    Never into `<home>/.env`.
+
+Check it from the factory user's shell. The default home's identity must read
+none of the moved values. These lines print only names, and print nothing
+when the scope is right:
+
+```sh
+( t=$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' <home>/.env)" \
+    INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' <home>/.env)" \
+    infisical login --method=universal-auth --silent --plain)
+  INFISICAL_TOKEN="$t" infisical export --silent --projectId <project id> --env <environment> \
+    --path <folder>/broker --format dotenv 2>/dev/null | cut -d= -f1 )
+```
+
+`check-install` then reports `upload broker` lines when the broker holds
+no upload token or no Linear app credentials.
+
 ## Store the secrets
 
 Create the folder under the operator's own Infisical login, which can write to

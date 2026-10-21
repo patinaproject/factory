@@ -1,0 +1,599 @@
+#!/usr/bin/env python3
+"""Run the factory's broker as its own macOS user. The operator runs it with sudo.
+
+Subcommands:
+
+    plan  --input <json>   print what apply would change; needs no root
+    apply --input <json>   make those changes; needs root
+    set-secret NAME        read a value from the terminal into the broker's .env; needs root
+
+The input file holds no secret:
+
+    {"factory_user": "<account>", "repositories": {"<owner>/<repo>": <id>},
+     "claude_session": {"auth_token_env": "<name>", "mcp_servers": {"<server>": {"token_env": "<name>"}}},
+     "infisical": {"api_url": "https://app.infisical.com", "project_id": "...", "environment": "...",
+                   "paths": ["/factory", "/factory/broker"]}}
+
+It runs on the macOS system Python, 3.9.
+"""
+from __future__ import annotations
+
+import argparse
+import difflib
+import getpass
+import grp
+import json
+import os
+import plistlib
+import pwd
+import re
+import subprocess
+import sys
+import urllib.parse
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional, Union
+
+REPO = Path(__file__).resolve().parents[3]
+BASE = Path("/Library/Application Support/factory-broker")
+LABEL = "local.factory-broker"
+USER = GROUP = "_factorybroker"
+# The Command Line Tools copy, not /usr/bin/python3: that shim follows xcode-select into /Applications, which admins can write.
+INTERPRETER = Path("/Library/Developer/CommandLineTools/usr/bin/python3")
+SCRIPT = Path(__file__).resolve()
+# Full paths: sudo on macOS keeps the caller's PATH, which can lead to a binary the factory user owns.
+LAUNCHCTL, DSCL, DSEDITGROUP = "/bin/launchctl", "/usr/bin/dscl", "/usr/sbin/dseditgroup"
+NO_SHELL = "/usr/bin/false"
+FIRST_PERSON_UID = 500
+SERVICE_IDS = range(499, 449, -1)
+SERVICE_FILES = {
+    "factory_uploads/__init__.py": "plugins/factory-uploads/__init__.py",
+    "factory_uploads/broker.py": "plugins/factory-uploads/broker.py",
+    "factory_uploads/credentials.py": "plugins/factory-uploads/credentials.py",
+    "factory_uploads/service.py": "plugins/factory-uploads/service.py",
+    "factory_uploads/upload_token.py": "plugins/factory-uploads/upload_token.py",
+    "linear.py": "plugins/linear-agent-session/linear.py",
+}
+PROTECTED = frozenset({
+    "root", "wheel", "admin", "staff", "everyone", "daemon", "nobody",
+    "com.apple.access_ssh", "com.apple.access_screensharing", "com.apple.access_remote_ae",
+})
+SECRET_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+INFISICAL_KEYS = ("api_url", "project_id", "environment", "paths")
+INFISICAL_CLOUD = frozenset({"app.infisical.com", "eu.infisical.com"})
+REVIEWED_SOURCES = ("plugins/factory-uploads", "plugins/linear-agent-session/linear.py", "skills/setup-factory/scripts/setup-broker-user")
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
+
+
+class Refuse(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Layout:
+    base: Path = BASE
+    label: str = LABEL
+    user: str = USER
+    group: str = GROUP
+
+    @property
+    def lib(self) -> Path:
+        return self.base / "lib"
+
+    @property
+    def home(self) -> Path:
+        return self.base / "home"
+
+    @property
+    def run(self) -> Path:
+        return self.base / "run"
+
+    @property
+    def socket(self) -> Path:
+        return self.run / "factory-uploads.sock"
+
+    @property
+    def config(self) -> Path:
+        return self.base / "broker.json"
+
+    @property
+    def script_copy(self) -> Path:
+        return self.base / "setup-broker-user"
+
+    @property
+    def commit_file(self) -> Path:
+        return self.base / "installed-commit"
+
+    @property
+    def plist(self) -> Path:
+        return Path("/Library/LaunchDaemons") / f"{self.label}.plist"
+
+
+@dataclass(frozen=True)
+class Run:
+    argv: tuple
+
+    def __str__(self) -> str:
+        return "run    " + " ".join(_quote(arg) for arg in self.argv)
+
+
+@dataclass(frozen=True)
+class Directory:
+    path: Path
+    owner: str
+    group: str
+    mode: int
+
+    def __str__(self) -> str:
+        return f"dir    {self.path} {self.owner}:{self.group} {self.mode:04o}"
+
+
+@dataclass(frozen=True)
+class File:
+    path: Path
+    content: bytes = field(repr=False)
+    owner: str
+    group: str
+    mode: int
+
+    def __str__(self) -> str:
+        return f"write  {self.path} {self.owner}:{self.group} {self.mode:04o}"
+
+
+Step = Union[Run, Directory, File]
+
+
+def _quote(arg: str) -> str:
+    return arg if re.fullmatch(r"[A-Za-z0-9_./:=@%+-]+", arg) else "'" + arg.replace("'", "'\\''") + "'"
+
+
+@dataclass(frozen=True)
+class Entry:
+    uid: int
+    gid: int
+    mode: int
+    content: Optional[bytes] = None
+    link: bool = False
+
+
+UNREADABLE_WITHOUT_ROOT = Entry(-1, -1, 0)
+
+
+@dataclass
+class System:
+    user: Callable[[str], Optional[pwd.struct_passwd]]
+    group: Callable[[str], Optional[grp.struct_group]]
+    used_ids: Callable[[], set]
+    entry: Callable[[Path], Optional[Entry]]
+    loaded: Callable[[str], bool]
+    euid: int
+    platform: str
+    realpath: Callable[[Path], Path] = lambda path: Path(os.path.realpath(path))
+
+
+def _lookup(table, name):
+    try:
+        return table(name)
+    except KeyError:
+        return None
+
+
+def _entry(path: Path) -> Optional[Entry]:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except PermissionError:
+        return UNREADABLE_WITHOUT_ROOT
+    link = path.is_symlink()
+    content = path.read_bytes() if path.is_file() and not link and os.access(path, os.R_OK) else None
+    return Entry(info.st_uid, info.st_gid, info.st_mode & 0o7777, content, link)
+
+
+def _loaded(label: str) -> bool:
+    return subprocess.run([LAUNCHCTL, "print", f"system/{label}"], capture_output=True).returncode == 0
+
+
+def live_system() -> System:
+    return System(
+        user=lambda name: _lookup(pwd.getpwnam, name),
+        group=lambda name: _lookup(grp.getgrnam, name),
+        used_ids=lambda: {p.pw_uid for p in pwd.getpwall()} | {g.gr_gid for g in grp.getgrall()},
+        entry=_entry,
+        loaded=_loaded,
+        euid=os.geteuid(),
+        platform=sys.platform,
+    )
+
+
+def read_input(path: Path) -> dict:
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as error:
+        raise Refuse(f"cannot read the input file {path}: {error}") from None
+    if not isinstance(data.get("factory_user"), str):
+        raise Refuse("the input names no factory_user")
+    repositories = data.get("repositories")
+    if not isinstance(repositories, dict) or not repositories:
+        raise Refuse("the input lists no repositories")
+    if not all(isinstance(k, str) and "/" in k and isinstance(v, int) and not isinstance(v, bool) for k, v in repositories.items()):
+        raise Refuse("each repository maps <owner>/<repo> to its numeric GitHub id")
+    session = data.get("claude_session") or {}
+    servers = session.get("mcp_servers", {}) if isinstance(session, dict) else None
+    if (
+        not isinstance(session, dict)
+        or not isinstance(session.get("auth_token_env", ""), str)
+        or not isinstance(servers, dict)
+        or not all(isinstance(spec, dict) and isinstance(spec.get("token_env"), str) for spec in servers.values())
+    ):
+        raise Refuse("claude_session must name auth_token_env and each mcp_servers.<server>.token_env")
+    infisical = data.get("infisical")
+    if infisical is not None:
+        if not isinstance(infisical, dict) or any(not infisical.get(key) for key in INFISICAL_KEYS):
+            raise Refuse(f"infisical needs {', '.join(INFISICAL_KEYS)}")
+        if not isinstance(infisical["paths"], list):
+            raise Refuse("infisical.paths must be a list of folders")
+        check_infisical_url(infisical["api_url"], infisical.get("self_hosted_host"))
+    return data
+
+
+def check_infisical_url(api_url: str, self_hosted_host: Optional[str]) -> None:
+    url = urllib.parse.urlsplit(api_url)
+    if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment or url.path not in ("", "/"):
+        raise Refuse("infisical.api_url must be https://<host> with no credentials, path, or query")
+    if url.hostname not in INFISICAL_CLOUD and url.hostname != self_hosted_host:
+        raise Refuse(
+            f"{url.hostname} is not Infisical Cloud; for a self-hosted server, set infisical.self_hosted_host to {url.hostname}"
+        )
+
+
+def unsafe_paths(path: Path, entry: Callable[[Path], Optional[Entry]], *, link_ok: bool = False) -> list:
+    """Each path from `path` up to `/` that is missing, a link, or writable by anyone but root."""
+    unsafe = []
+    for candidate in [path, *path.parents]:
+        found = entry(candidate)
+        if found is None or found.uid != 0 or found.mode & 0o022 or (found.link and not (link_ok and candidate == path)):
+            unsafe.append(candidate)
+    return unsafe
+
+
+def source_paths(repo: Path = REPO, script: Path = SCRIPT) -> tuple:
+    return (script, repo / ".git" / "HEAD", *(repo / source for source in SERVICE_FILES.values()))
+
+
+def source_commit(repo: Path = REPO) -> str:
+    head = (repo / ".git" / "HEAD").read_text().strip()
+    if not COMMIT.match(head):
+        raise Refuse(f"{repo} is not a detached checkout of one commit; check out the commit to install with --detach")
+    return head
+
+
+def check_source(entry: Callable[[Path], Optional[Entry]], repo: Path = REPO, script: Path = SCRIPT) -> None:
+    """Root runs this script and copies these files into the broker, so no factory process may be able to change them."""
+    for path in source_paths(repo, script):
+        unsafe = unsafe_paths(path, entry)
+        if unsafe:
+            raise Refuse(
+                f"{unsafe[0]} is not root-owned and closed to other writers; run apply from a root-owned clone, "
+                "as the privileged step in part 5 of the setup runbook shows"
+            )
+
+
+def check_interpreter(system: System, interpreter: Path = INTERPRETER) -> None:
+    """The broker runs this interpreter and its standard library with its secrets loaded."""
+    real = system.realpath(interpreter)
+    for path, link_ok in ((interpreter, True), (real, False), (real.parent.parent / "lib", False)):
+        unsafe = unsafe_paths(path, system.entry, link_ok=link_ok)
+        if unsafe:
+            raise Refuse(f"{unsafe[0]} is not root-owned and closed to group and other writes")
+
+
+def check_accounts(layout: Layout, factory_user: str, system: System) -> tuple:
+    for name in (layout.user, layout.group):
+        if name in PROTECTED or name == factory_user:
+            raise Refuse(f"{name} is a protected name; the broker needs an account of its own")
+    person = system.user(factory_user)
+    if person is None:
+        raise Refuse(f"the factory user {factory_user} does not exist")
+    if person.pw_uid < FIRST_PERSON_UID:
+        raise Refuse(f"{factory_user} has uid {person.pw_uid}; the factory user is a person's login account")
+    user, group = system.user(layout.user), system.group(layout.group)
+    if user is not None:
+        if user.pw_uid >= FIRST_PERSON_UID or user.pw_shell != NO_SHELL:
+            raise Refuse(f"{layout.user} exists and is a login account; this script never edits an existing account")
+        if group is None or user.pw_gid != group.gr_gid:
+            raise Refuse(f"{layout.user} exists without {layout.group} as its primary group")
+    if group is not None:
+        strangers = set(group.gr_mem) - {factory_user, layout.user}
+        if strangers:
+            raise Refuse(f"{layout.group} already has other members ({', '.join(sorted(strangers))})")
+    if user is not None and group is not None:
+        return user.pw_uid, group.gr_gid
+    if user is None and group is not None:
+        return _free_id(system.used_ids() - {group.gr_gid}, group.gr_gid), group.gr_gid
+    free = _free_id(system.used_ids())
+    return free, free
+
+
+def _free_id(used: set, prefer: Optional[int] = None) -> int:
+    if prefer is not None and prefer not in used:
+        return prefer
+    for candidate in SERVICE_IDS:
+        if candidate not in used:
+            return candidate
+    raise Refuse(f"no free service id in {SERVICE_IDS.stop + 1}-{SERVICE_IDS.start}")
+
+
+def broker_session(session: dict) -> dict:
+    """The broker reads only the variable names; each server's URL and headers stay in the gateway's settings."""
+    kept = {"auth_token_env": session["auth_token_env"]} if "auth_token_env" in session else {}
+    servers = session.get("mcp_servers") or {}
+    if servers:
+        kept["mcp_servers"] = {name: {"token_env": spec["token_env"]} for name, spec in servers.items()}
+    return kept
+
+
+def broker_config(layout: Layout, data: dict, factory_uid: int) -> dict:
+    return {
+        "user": layout.user,
+        "group": layout.group,
+        "label": layout.label,
+        "lib": str(layout.lib),
+        "socket": str(layout.socket),
+        "home": str(layout.home),
+        "allowed_uids": [factory_uid],
+        "repositories": data["repositories"],
+        "claude_session": broker_session(data.get("claude_session") or {}),
+        "infisical": data.get("infisical"),
+    }
+
+
+def daemon_plist(layout: Layout, interpreter: Path = INTERPRETER) -> bytes:
+    return plistlib.dumps({
+        "Label": layout.label,
+        "UserName": layout.user,
+        "GroupName": layout.group,
+        "ProgramArguments": [
+            str(interpreter), "-I", "-B", str(layout.lib / "factory_uploads" / "service.py"),
+            "--config", str(layout.config),
+        ],
+        "WorkingDirectory": str(layout.home),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ThrottleInterval": 30,
+        "Umask": 0o077,
+        "StandardOutPath": str(layout.home / "broker.log"),
+        "StandardErrorPath": str(layout.home / "broker.log"),
+    })
+
+
+def plan(data: dict, system: System, layout: Layout = Layout(), repo: Path = REPO, commit: Optional[str] = None) -> list:
+    if system.platform != "darwin":
+        raise Refuse("the broker user is a macOS launchd service")
+    check_interpreter(system)
+    factory_user = data["factory_user"]
+    uid, gid = check_accounts(layout, factory_user, system)
+    for path in [layout.base.parent, *layout.base.parent.parents]:
+        found = system.entry(path)
+        if found is not None and (found.uid != 0 or found.mode & 0o022):
+            raise Refuse(f"{path} is writable by a non-root user, so the broker's code would be too")
+    steps: list = []
+    if system.group(layout.group) is None:
+        steps.append(Run((DSEDITGROUP, "-o", "create", "-r", "Factory broker", "-i", str(gid), layout.group)))
+    if system.user(layout.user) is None:
+        record = f"/Users/{layout.user}"
+        steps.append(Run((DSCL, ".", "-create", record)))
+        for key, value in (
+            ("UniqueID", str(uid)), ("PrimaryGroupID", str(gid)), ("UserShell", NO_SHELL),
+            ("NFSHomeDirectory", str(layout.home)), ("RealName", "Factory broker"), ("Password", "*"), ("IsHidden", "1"),
+        ):
+            steps.append(Run((DSCL, ".", "-create", record, key, value)))
+    group = system.group(layout.group)
+    if group is None or factory_user not in group.gr_mem:
+        steps.append(Run((DSEDITGROUP, "-o", "edit", "-a", factory_user, "-t", "user", layout.group)))
+
+    want_dirs = [
+        Directory(layout.base, "root", "wheel", 0o755),
+        Directory(layout.lib, "root", "wheel", 0o755),
+        Directory(layout.lib / "factory_uploads", "root", "wheel", 0o755),
+        Directory(layout.home, layout.user, layout.group, 0o700),
+        Directory(layout.run, layout.user, layout.group, 0o750),
+    ]
+    ids = {"root": 0, "wheel": 0, layout.user: uid, layout.group: gid}
+    for directory in want_dirs:
+        found = system.entry(directory.path)
+        if found is not None and (found.link or found.uid not in (0, ids[directory.owner])):
+            raise Refuse(f"{directory.path} exists and is a link or another user's; remove it by hand after checking it")
+        if found is None or (found.uid, found.gid, found.mode) != (ids[directory.owner], ids[directory.group], directory.mode):
+            steps.append(directory)
+
+    person = system.user(factory_user)
+    want_files = [
+        File(layout.lib / target, (repo / source).read_bytes(), "root", "wheel", 0o644)
+        for target, source in SERVICE_FILES.items()
+    ]
+    want_files.append(File(layout.script_copy, SCRIPT.read_bytes(), "root", "wheel", 0o644))
+    config = json.dumps(broker_config(layout, data, person.pw_uid), indent=2, sort_keys=True).encode() + b"\n"
+    want_files.append(File(layout.config, config, "root", "wheel", 0o644))
+    plist = File(layout.plist, daemon_plist(layout), "root", "wheel", 0o644)
+    want_files.append(plist)
+    changed = []
+    for wanted in want_files:
+        found = system.entry(wanted.path)
+        if found is None or found.content != wanted.content or (found.uid, found.gid, found.mode) != (0, 0, wanted.mode):
+            steps.append(wanted)
+            changed.append(wanted)
+    env = layout.home / ".env"
+    if system.entry(env) is None:
+        steps.append(File(env, b"", layout.user, layout.group, 0o600))
+
+    launch: list = []
+    if not system.loaded(layout.label):
+        launch.append(Run((LAUNCHCTL, "bootstrap", "system", str(layout.plist))))
+    elif plist in changed:
+        launch.append(Run((LAUNCHCTL, "bootout", f"system/{layout.label}")))
+        launch.append(Run((LAUNCHCTL, "bootstrap", "system", str(layout.plist))))
+    elif changed:
+        launch.append(Run((LAUNCHCTL, "kickstart", "-k", f"system/{layout.label}")))
+    if commit is not None and (steps or launch):
+        recorded = File(layout.commit_file, f"{commit}\n".encode(), "root", "wheel", 0o644)
+        found = system.entry(recorded.path)
+        if found is None or found.content != recorded.content:
+            steps.append(recorded)
+    return steps + launch
+
+
+def write_file(path: Path, content: bytes, uid: int, gid: int, mode: int) -> None:
+    """Write through a fresh temporary file that no link can redirect, then rename it into place."""
+    temporary = path.with_name(path.name + ".new")
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(content)
+        os.fchown(handle.fileno(), uid, gid)
+        os.fchmod(handle.fileno(), mode)
+    os.replace(temporary, path)
+
+
+def apply(steps: list, run: Callable = subprocess.run) -> None:
+    for step in steps:
+        print(step)
+        if isinstance(step, Run):
+            run(list(step.argv), check=True)
+            continue
+        uid, gid = pwd.getpwnam(step.owner).pw_uid, grp.getgrnam(step.group).gr_gid
+        if isinstance(step, File):
+            write_file(step.path, step.content, uid, gid, step.mode)
+            continue
+        step.path.mkdir(mode=0o700, exist_ok=True)
+        fd = os.open(step.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fchown(fd, uid, gid)
+            os.fchmod(fd, step.mode)
+        finally:
+            os.close(fd)
+
+
+def set_env_value(path: Path, name: str, value: str, uid: int, gid: int) -> None:
+    """Replace or add one NAME=value line, keeping the file the broker's with mode 0600."""
+    if not SECRET_NAME.match(name):
+        raise Refuse(f"{name} is not a variable name")
+    if "\n" in value or not value:
+        raise Refuse("the value must be one non-empty line")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        lines = []
+    else:
+        with os.fdopen(fd) as handle:
+            info = os.fstat(handle.fileno())
+            if info.st_nlink != 1 or info.st_uid != uid:
+                raise Refuse(f"{path} has another link or another owner; check it and remove it by hand")
+            lines = handle.read().splitlines()
+    kept = [line for line in lines if line.split("=", 1)[0].strip() != name]
+    write_file(path, ("\n".join([*kept, f"{name}={value}"]) + "\n").encode(), uid, gid, 0o600)
+
+
+def describe_infisical(data: dict) -> str:
+    infisical = data.get("infisical")
+    if not infisical:
+        return "The broker reads its secrets from its .env file only."
+    url = infisical["api_url"]
+    if urllib.parse.urlsplit(url).hostname in INFISICAL_CLOUD:
+        return f"The broker sends its Infisical identity to Infisical Cloud at {url}."
+    return f"The broker sends its Infisical identity to the self-hosted Infisical at {url}."
+
+
+def confirm_changes(
+    steps: list, layout: Layout, data: dict, entry: Callable[[Path], Optional[Entry]], commit: Optional[str], ask: Callable[[str], str],
+) -> None:
+    for step in steps:
+        print(step)
+    for step in steps:
+        if not isinstance(step, File) or step.owner != "root" or step.path == layout.commit_file:
+            continue
+        found = entry(step.path)
+        before = found.content if found is not None and found.content is not None else b""
+        print("".join(difflib.unified_diff(
+            before.decode(errors="replace").splitlines(keepends=True),
+            step.content.decode(errors="replace").splitlines(keepends=True),
+            f"{step.path} (installed)", f"{step.path} (new)",
+        )))
+    installed = entry(layout.commit_file)
+    if installed is not None and installed.content and commit is not None:
+        before = installed.content.decode().strip()
+        print(f"Installed commit {before}. Review the change with: git diff {before}..{commit} -- {' '.join(REVIEWED_SOURCES)}")
+    else:
+        print("No installed commit is recorded, so the diffs above are the whole change.")
+    print(f"{data['factory_user']} joins {layout.group} and is the only user the broker answers.")
+    print(describe_infisical(data))
+    if ask("Install these changes as root? Type yes: ").strip() != "yes":
+        raise Refuse("the operator did not confirm the changes")
+
+
+def install(
+    data: dict, system: System, layout: Layout, commit: str, ask: Callable[[str], str], write: Optional[Callable[[list], None]] = None,
+) -> list:
+    steps = plan(data, system, layout, commit=commit)
+    if steps:
+        confirm_changes(steps, layout, data, system.entry, commit, ask)
+        (write or apply)(steps)
+    return steps
+
+
+def terminal_ask(prompt: str) -> str:
+    if not sys.stdin.isatty():
+        raise Refuse("apply asks the operator to confirm its changes in a terminal")
+    return input(prompt)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("plan", "apply"):
+        sub = commands.add_parser(name)
+        sub.add_argument("--input", required=True, type=Path)
+    secret = commands.add_parser("set-secret")
+    secret.add_argument("name")
+    args = parser.parse_args(argv)
+    layout = Layout()
+    system = live_system()
+    try:
+        if args.command == "set-secret":
+            if system.euid != 0:
+                raise Refuse("run it with sudo")
+            if not sys.stdin.isatty():
+                raise Refuse("type the value into a terminal; it is never read from a pipe or an argument")
+            check_source(system.entry)
+            broker = system.user(layout.user)
+            if broker is None:
+                raise Refuse(f"{layout.user} does not exist; run apply first")
+            set_env_value(layout.home / ".env", args.name, getpass.getpass(f"{args.name}: "), broker.pw_uid, broker.pw_gid)
+            print(f"set {args.name} in {layout.home / '.env'}")
+            if system.loaded(layout.label):
+                subprocess.run([LAUNCHCTL, "kickstart", "-k", f"system/{layout.label}"], check=True)
+                print(f"restarted {layout.label}")
+            return 0
+        data = read_input(args.input)
+        if args.command == "plan":
+            steps = plan(data, system, layout)
+            for step in steps:
+                print(step)
+            print("no change" if not steps else f"{len(steps)} changes; apply them with sudo")
+            return 0
+        if system.euid != 0:
+            raise Refuse("run apply with sudo")
+        check_source(system.entry)
+        applied = install(data, system, layout, source_commit(), terminal_ask)
+        print("no change" if not applied else f"applied {len(applied)} changes")
+        return 0
+    except Refuse as refusal:
+        print(f"setup-broker-user: refused: {refusal}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
