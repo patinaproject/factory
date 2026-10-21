@@ -1362,6 +1362,18 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(call["settings"]["mode"], "0o600")
         self.assertNotIn("mcp_token", self.broker.requests)
 
+    def test_mcp_status_disables_every_hook_so_the_repositorys_own_session_start_hooks_never_run(self) -> None:
+        self.configure_fake_claude(init=[])
+
+        self.run_probe()
+
+        self.assertIs(self.claude_call()["settings"]["content"]["disableAllHooks"], True)
+
+    def test_a_worker_run_keeps_its_hooks_enabled(self) -> None:
+        self.run_session()
+
+        self.assertNotIn("disableAllHooks", self.claude_call()["settings"]["content"])
+
     def test_mcp_status_redacts_the_linear_token_when_claude_ends_without_an_init_event(self) -> None:
         self.configure_fake_claude(stderr_env="LINEAR_API_KEY")
 

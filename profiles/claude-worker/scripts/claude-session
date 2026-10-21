@@ -24,6 +24,7 @@ gateway's broker.
 --mcp-status --repo <full_name> starts Claude Code once in the repository's
 main checkout with a run's environment, settings, and MCP config, reads its
 init event, and prints each MCP server's status. It never reaches the model.
+It disables all hooks, so the repository's own hooks never run.
 """
 from __future__ import annotations
 
@@ -1243,6 +1244,7 @@ def mcp_status(args: argparse.Namespace) -> tuple[int, dict]:
         remove_on_stop(path)
         content = claude_settings({"disabled_mcp_servers": transport.get("disabled_mcp_servers")}, api_key, path)
         content["env"].update(ANTHROPIC_BASE_URL=UNREACHABLE_MODEL_URL, ANTHROPIC_AUTH_TOKEN="mcp-status-probe")
+        content["disableAllHooks"] = True
         write_private(path, content)
         command = [
             os.environ.get("CLAUDE_BIN", "claude"), "-p", "Report MCP server status.",
