@@ -119,7 +119,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
 | `CLAUDE_PROXY_TOKEN`, the proxy's token that `claude_session.auth_token_env` names | `<home>/.env`. The worker's `worker-secrets` asks the gateway's broker for it when a worker process starts, because the worker's own agent loop sends it to the proxy, and Claude Code gets it through `apiKeyHelper`. Never store it in `<worker>/.env`, and never name it `ANTHROPIC_*` |
-| `SENTRY_ACCESS_TOKEN`, the Sentry token that `claude_session.sentry_token_env` names, when workers read Sentry | `<home>/.env`. The run's `sentry` server gets it through `sentry-headers`, which asks the gateway's broker. Never store it in `<worker>/.env`. See [Sentry access](references/sentry.md) |
+| Each MCP server token that `claude_session.mcp_servers.<name>.token_env` names, such as `SENTRY_ACCESS_TOKEN` | `<home>/.env`. The run's server of that name gets it through `mcp-headers`, which asks the gateway's broker. Never store it in `<worker>/.env`. See [MCP server identities](references/mcp-identities.md) |
 | `FACTORY_INFISICAL_CLIENT_ID` and `FACTORY_INFISICAL_CLIENT_SECRET`, when the factory uses Infisical | `<home>/.env` only. The worker has no Infisical identity. Claude Code never receives it: `claude-session` starts it from an allowlist of variable names |
 | The factory's secret names that Hermes strips from every process a home starts | `plugins/factory-secret-names/plugin.yaml`, installed in both homes |
 | Cloudflare tunnel token | The `cloudflared` system service only |
@@ -681,7 +681,7 @@ key file but does not contain the key.
   },
   "kanban_url": "https://<hostname>/kanban",
   "triage": {"max_running": <n>},
-  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "sentry_token_env": "", "disabled_mcp_servers": [], "max_turns": 0}
+  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0}
 }
 ```
 
@@ -698,8 +698,13 @@ it to the prefix. `claude_session.max_turns`
 caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
 one run can finish a whole task. A positive limit pauses a long task, such as
 a dependency upgrade, and the worker resumes it in a second run.
-`claude_session.sentry_token_env` and `disabled_mcp_servers` stay empty unless
-workers read Sentry, as [Sentry access](references/sentry.md) describes.
+`claude_session.mcp_servers` gives the factory its own identity on each
+third-party MCP service, and `disabled_mcp_servers` lists the repository
+servers a worker does not load, as [MCP server
+identities](references/mcp-identities.md) describes. Both stay empty until
+the operator creates the first identity. `check-install` reports each
+repository server that a worker run does not see connected and that
+`disabled_mcp_servers` does not list.
 
 A card that waits in review leaves its Claude session idle past the 5-minute
 prompt cache, and a resumed large session re-writes its whole context at the

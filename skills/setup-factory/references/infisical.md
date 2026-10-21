@@ -18,7 +18,7 @@ These values move to Infisical:
 | `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | `<home>` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>` |
 | `CLAUDE_PROXY_TOKEN`, the variable that `claude_session.auth_token_env` names | `<home>` |
-| `SENTRY_ACCESS_TOKEN`, the variable that `claude_session.sentry_token_env` names, when set | `<home>` |
+| Each variable that `claude_session.mcp_servers.<name>.token_env` names, such as `SENTRY_ACCESS_TOKEN` | `<home>` |
 
 The default home loads the whole folder. The worker home loads nothing from
 Infisical and has no machine identity. It holds no factory secret of its own.
@@ -285,7 +285,7 @@ Check with `command -v infisical`, and compare the directory with that `PATH`.
 A worker set up before it gave up its own Infisical identity still holds one.
 `check-install` reports it as a `secret FACTORY_INFISICAL_CLIENT_SECRET in
 <worker>/.env` line, and reports `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`,
-the proxy token variable, and the Sentry token variable the same way. Retire it after the gateway runs
+the proxy token variable, and each MCP server token variable the same way. Retire it after the gateway runs
 the broker from part 5, so the worker has a source for its tokens:
 
 1. Remove each reported key from `<worker>/.env`. Back up the file first,

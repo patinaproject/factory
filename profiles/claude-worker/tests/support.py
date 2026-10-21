@@ -32,6 +32,7 @@ class FakeBroker:
         self.path = root / "factory-uploads.sock"
         self.answers = {op: list(replies) for op, replies in answers.items()}
         self.requests: list = []
+        self.bodies: list = []
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(str(self.path))
         self.server.listen()
@@ -50,8 +51,10 @@ class FakeBroker:
                     if not chunk:
                         break
                     request += chunk
-                op = json.loads(request)["op"]
+                body = json.loads(request)
+                op = body["op"]
                 self.requests.append(op)
+                self.bodies.append(body)
                 replies = self.answers.get(op) or [{"ok": False, "state": "refused", "message": "unknown op"}]
                 reply = replies.pop(0) if len(replies) > 1 else replies[0]
                 client.sendall(json.dumps(reply).encode() + b"\n")
@@ -91,6 +94,12 @@ if "--settings" in argv:
 with open(options["log"] + ".tmp", "w") as log:
     json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings, "pid": os.getpid()}, log)
 os.rename(options["log"] + ".tmp", options["log"])
+if options.get("stderr_env"):
+    print("token " + settings["content"]["env"][options["stderr_env"]], file=sys.stderr, flush=True)
+if "init" in options:
+    print(json.dumps({"type": "system", "subtype": "init", "mcp_servers": options["init"]}), flush=True)
+    import time
+    time.sleep(600)
 if options.get("hold_seconds"):
     import time
     time.sleep(options["hold_seconds"])

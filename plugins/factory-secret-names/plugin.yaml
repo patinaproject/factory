@@ -29,5 +29,5 @@ optional_env:
   - name: SENTRY_ACCESS_TOKEN
     description: >-
       The read-only Sentry token, the variable that
-      claude_session.sentry_token_env names. Only the gateway holds it;
-      claude-session gets it from the broker for each run's settings file.
+      claude_session.mcp_servers.sentry.token_env names. Only the gateway
+      holds it; the run's sentry server gets it through mcp-headers.
