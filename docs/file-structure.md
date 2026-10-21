@@ -29,7 +29,7 @@
 │       ├── SOUL.md            # Worker instructions
 │       ├── config.yaml        # Toolsets, skills, plugins, and placeholder settings
 │       ├── distribution.yaml  # Profile distribution manifest
-│       └── scripts/           # claude-session, card_branch.py, factory_source.py, archive_card.py, github-upload-image, guard-ci-wait, wait-for-checks, push-signed, worker-secrets, proxy-token, sentry-headers, check-install, and the refresh cron scripts
+│       └── scripts/           # claude-session, card_branch.py, factory_source.py, archive_card.py, github-upload-image, guard-ci-wait, wait-for-checks, push-signed, worker-secrets, proxy-token, mcp-headers, check-install, and the refresh cron scripts
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
 │   └── ...                    # Repository maintenance scripts

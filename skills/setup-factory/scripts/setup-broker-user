@@ -10,7 +10,7 @@ Subcommands:
 The input file holds no secret:
 
     {"factory_user": "<account>", "repositories": {"<owner>/<repo>": <id>},
-     "claude_session": {"auth_token_env": "<name>", "sentry_token_env": "<name>"},
+     "claude_session": {"auth_token_env": "<name>", "mcp_servers": {"<server>": {"token_env": "<name>"}}},
      "infisical": {"api_url": "https://app.infisical.com", "project_id": "...", "environment": "...",
                    "paths": ["/factory", "/factory/broker"]}}
 
@@ -219,8 +219,14 @@ def read_input(path: Path) -> dict:
     if not all(isinstance(k, str) and "/" in k and isinstance(v, int) and not isinstance(v, bool) for k, v in repositories.items()):
         raise Refuse("each repository maps <owner>/<repo> to its numeric GitHub id")
     session = data.get("claude_session") or {}
-    if not isinstance(session, dict) or not all(isinstance(v, str) for v in session.values()):
-        raise Refuse("claude_session must map auth_token_env and sentry_token_env to variable names")
+    servers = session.get("mcp_servers", {}) if isinstance(session, dict) else None
+    if (
+        not isinstance(session, dict)
+        or not isinstance(session.get("auth_token_env", ""), str)
+        or not isinstance(servers, dict)
+        or not all(isinstance(spec, dict) and isinstance(spec.get("token_env"), str) for spec in servers.values())
+    ):
+        raise Refuse("claude_session must name auth_token_env and each mcp_servers.<server>.token_env")
     infisical = data.get("infisical")
     if infisical is not None:
         if not isinstance(infisical, dict) or any(not infisical.get(key) for key in INFISICAL_KEYS):
@@ -318,6 +324,15 @@ def _free_id(used: set, prefer: Optional[int] = None) -> int:
     raise Refuse(f"no free service id in {SERVICE_IDS.stop + 1}-{SERVICE_IDS.start}")
 
 
+def broker_session(session: dict) -> dict:
+    """The broker reads only the variable names; each server's URL and headers stay in the gateway's settings."""
+    kept = {"auth_token_env": session["auth_token_env"]} if "auth_token_env" in session else {}
+    servers = session.get("mcp_servers") or {}
+    if servers:
+        kept["mcp_servers"] = {name: {"token_env": spec["token_env"]} for name, spec in servers.items()}
+    return kept
+
+
 def broker_config(layout: Layout, data: dict, factory_uid: int) -> dict:
     return {
         "user": layout.user,
@@ -328,7 +343,7 @@ def broker_config(layout: Layout, data: dict, factory_uid: int) -> dict:
         "home": str(layout.home),
         "allowed_uids": [factory_uid],
         "repositories": data["repositories"],
-        "claude_session": data.get("claude_session") or {},
+        "claude_session": broker_session(data.get("claude_session") or {}),
         "infisical": data.get("infisical"),
     }
 

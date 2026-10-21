@@ -141,6 +141,17 @@ class PlanTest(unittest.TestCase):
             "infisical": None,
         })
 
+    def test_the_config_keeps_only_each_mcp_servers_variable_name(self):
+        session = {"auth_token_env": "EXAMPLE_PROXY_TOKEN", "mcp_servers": {
+            "sentry": {"url": "https://mcp.example.com/mcp", "token_env": "EXAMPLE_SENTRY_TOKEN", "headers": {"x-read-only": "true"}},
+        }}
+        steps = setup.plan({**INPUT, "claude_session": session}, Machine().system())
+
+        [config] = [s for s in steps if isinstance(s, setup.File) and s.path == LAYOUT.config]
+        self.assertEqual(json.loads(config.content)["claude_session"], {
+            "auth_token_env": "EXAMPLE_PROXY_TOKEN", "mcp_servers": {"sentry": {"token_env": "EXAMPLE_SENTRY_TOKEN"}},
+        })
+
     def test_the_daemon_runs_the_root_owned_copy_as_the_broker_user(self):
         steps = setup.plan(INPUT, Machine().system())
 
@@ -419,6 +430,8 @@ class InputTest(unittest.TestCase):
             {**INPUT, "factory_user": None},
             {**INPUT, "repositories": {}},
             {**INPUT, "repositories": {"example-org/example-repo": "123"}},
+            {**INPUT, "claude_session": {"mcp_servers": {"sentry": "EXAMPLE_SENTRY_TOKEN"}}},
+            {**INPUT, "claude_session": {"auth_token_env": 7}},
             {**INPUT, "infisical": {"api_url": "https://example.invalid"}},
         ):
             with self.subTest(broken=broken), self.assertRaises(setup.Refuse):

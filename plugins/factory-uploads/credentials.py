@@ -32,7 +32,12 @@ class GatewayCredentials:
         self._linear_path = Path(linear_path)
         self._cache_home = Path(cache_home)
         self._proxy_env = worker_variable(transport.get("auth_token_env"))
-        self._sentry_env = worker_variable(transport.get("sentry_token_env"))
+        servers = transport.get("mcp_servers")
+        self._mcp_envs = {
+            name: worker_variable(spec.get("token_env"))
+            for name, spec in (servers.items() if isinstance(servers, dict) else ())
+            if isinstance(spec, dict)
+        }
         self._lock = threading.Lock()
         self._client = None
         self._client_for = None
@@ -59,8 +64,12 @@ class GatewayCredentials:
     def proxy_token(self):
         return self._get_secret(self._proxy_env) if self._proxy_env else None
 
-    def sentry_token(self):
-        return self._get_secret(self._sentry_env) if self._sentry_env else None
+    def mcp_servers(self):
+        return sorted(self._mcp_envs)
+
+    def mcp_token(self, server: str):
+        name = self._mcp_envs.get(server)
+        return self._get_secret(name) if name else None
 
     def _linear_module(self):
         spec = importlib.util.spec_from_file_location("factory_uploads_linear", self._linear_path)

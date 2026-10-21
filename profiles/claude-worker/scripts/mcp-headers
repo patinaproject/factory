@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Print one factory MCP server's Authorization header for Claude Code's headersHelper.
+
+Usage: mcp-headers <server> <scheme>. Asks the gateway's broker, through the
+linear-agent-session plugin in $HERMES_HOME, for the server's token. Run it
+with python3. Exits 1 when the broker refuses or does not answer, and 2 on a
+wrong argument count or a terminal stdout.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        print("mcp-headers: takes a server name and an Authorization scheme, never a value", file=sys.stderr)
+        return 2
+    server, scheme = sys.argv[1:]
+    if sys.stdout.isatty():
+        print("mcp-headers: refusing to print a secret to a terminal; Claude Code reads it through a pipe", file=sys.stderr)
+        return 2
+    home = os.environ.get("HERMES_HOME")
+    if not home:
+        print("mcp-headers: HERMES_HOME is not set; claude-session sets it to the worker home", file=sys.stderr)
+        return 1
+    sys.path.insert(0, str(Path(home) / "plugins" / "linear-agent-session"))
+    import linear
+
+    try:
+        reply = linear.broker_request(linear.broker_socket_path({"HERMES_HOME": home}), "mcp_token", server=server)
+    except linear.LinearError as error:
+        print(f"mcp-headers: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps({"Authorization": f"{scheme} {reply['token']}"}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

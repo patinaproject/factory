@@ -39,6 +39,7 @@ class HelperTestCase(unittest.TestCase):
     script_name = ""
     op = "proxy_token"
     printed = ""
+    args: tuple = ()
 
     def setUp(self) -> None:
         if not self.script_name:
@@ -69,14 +70,14 @@ class HelperTestCase(unittest.TestCase):
         broker = FakeBroker(self.root, **{self.op: [BUSY, granted("t", None)]})
         self.addCleanup(broker.close)
 
-        self.assertEqual(self.run_script(), (0, self.printed))
+        self.assertEqual(self.run_script(*self.args), (0, self.printed))
         self.assertEqual(broker.requests, [self.op, self.op])
 
     def test_a_broker_that_stays_busy_prints_nothing_after_a_bounded_wait(self) -> None:
         broker = FakeBroker(self.root, **{self.op: [BUSY]})
         self.addCleanup(broker.close)
 
-        self.assertEqual(self.run_script(), (1, ""))
+        self.assertEqual(self.run_script(*self.args), (1, ""))
         self.assertGreater(len(broker.requests), 2)
 
 
@@ -143,33 +144,40 @@ class ProxyTokenTest(HelperTestCase):
         self.assertEqual(run_on_a_terminal([sys.executable, str(self.script)], self.env), (2, b""))
 
 
-class SentryHeadersTest(HelperTestCase):
-    script_name = "sentry-headers"
-    op = "sentry_token"
+class McpHeadersTest(HelperTestCase):
+    script_name = "mcp-headers"
+    op = "mcp_token"
+    args = ("sentry", "Sentry-Bearer")
     printed = '{"Authorization": "Sentry-Bearer t"}\n'
 
-    def sentry_broker(self, *replies: dict) -> FakeBroker:
-        broker = FakeBroker(self.root, sentry_token=list(replies))
+    def mcp_broker(self, *replies: dict) -> FakeBroker:
+        broker = FakeBroker(self.root, mcp_token=list(replies))
         self.addCleanup(broker.close)
         return broker
 
-    def test_prints_the_sentry_bearer_header_for_claude_code(self) -> None:
-        broker = self.sentry_broker(granted("st", None))
+    def test_asks_for_the_named_server_and_prints_its_header_with_the_scheme(self) -> None:
+        broker = self.mcp_broker(granted("st", None))
 
-        self.assertEqual(self.run_script(), (0, '{"Authorization": "Sentry-Bearer st"}\n'))
-        self.assertEqual(broker.requests, ["sentry_token"])
+        self.assertEqual(self.run_script("sentry", "Sentry-Bearer"), (0, '{"Authorization": "Sentry-Bearer st"}\n'))
+        self.assertEqual(self.run_script("posthog", "Bearer"), (0, '{"Authorization": "Bearer st"}\n'))
+        self.assertEqual(broker.bodies, [{"op": "mcp_token", "server": "sentry"}, {"op": "mcp_token", "server": "posthog"}])
 
     def test_prints_nothing_when_the_broker_refuses_or_is_down(self) -> None:
-        broker = self.sentry_broker({"ok": False, "state": "unavailable", "message": "The gateway holds no Sentry token."})
-        self.assertEqual(self.run_script(), (1, ""))
+        broker = self.mcp_broker({"ok": False, "state": "unavailable", "message": "The gateway holds no token for that MCP server."})
+        self.assertEqual(self.run_script(*self.args), (1, ""))
         broker.close()
-        self.assertEqual(self.run_script(), (1, ""))
+        self.assertEqual(self.run_script(*self.args), (1, ""))
 
-    def test_refuses_any_argument_or_a_terminal(self) -> None:
-        self.sentry_broker(granted("st", None))
+    def test_refuses_another_argument_count_or_a_terminal(self) -> None:
+        broker = self.mcp_broker(granted("st", None))
 
-        self.assertEqual(self.run_script("--print"), (2, ""))
-        self.assertEqual(run_on_a_terminal([sys.executable, str(self.script)], self.env), (2, b""))
+        for args in ((), ("sentry",), ("sentry", "Bearer", "st")):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_script(*args), (2, ""))
+        self.assertEqual(
+            run_on_a_terminal([sys.executable, str(self.script), *self.args], self.env), (2, b"")
+        )
+        self.assertEqual(broker.requests, [])
 
 
 if __name__ == "__main__":

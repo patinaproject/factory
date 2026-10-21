@@ -8,15 +8,16 @@ never returns the upload token, and never writes a token to a log.
 The worker home holds no factory secret of its own. It asks here for a Linear
 access token, minted with the gateway's Linear app credentials, which never
 leave the gateway, for the proxy token that its own agent loop and Claude
-Code send to the model proxy, and for the Sentry token of the run's read-only
-sentry server.
+Code send to the model proxy, and for the token of each MCP server that
+claude_session.mcp_servers gives the factory an identity on. The request names
+the server; the gateway's own settings name the variable that holds its token.
 
 Wire protocol, one request per connection:
 
     {"op": "upload", "repo": "owner/repo", "name": "a.png", "size": 123}\\n<size raw bytes>
     {"op": "linear_token"}\\n
     {"op": "proxy_token"}\\n
-    {"op": "sentry_token"}\\n
+    {"op": "mcp_token", "server": "sentry"}\\n
     {"op": "status"}\\n
 
 Every reply is one JSON line.
@@ -61,7 +62,7 @@ FIXED_MESSAGES = {
 CREDENTIAL_MESSAGES = {
     "linear_token": "The gateway holds no Linear app credentials.",
     "proxy_token": "The gateway holds no proxy token.",
-    "sentry_token": "The gateway holds no Sentry token.",
+    "mcp_token": "The gateway holds no token for that MCP server.",
 }
 LINEAR_FAILED = "The gateway could not issue a Linear token. The gateway log has the detail."
 BUSY = "The upload broker is busy. Try again in a moment."
@@ -86,7 +87,9 @@ class Credentials(Protocol):
 
     def proxy_token(self) -> str | None: ...
 
-    def sentry_token(self) -> str | None: ...
+    def mcp_servers(self) -> list[str]: ...
+
+    def mcp_token(self, server: str) -> str | None: ...
 
 
 class NoCredentials:
@@ -99,7 +102,10 @@ class NoCredentials:
     def proxy_token(self) -> str | None:
         return None
 
-    def sentry_token(self) -> str | None:
+    def mcp_servers(self) -> list[str]:
+        return []
+
+    def mcp_token(self, server: str) -> str | None:
         return None
 
 
@@ -241,7 +247,7 @@ class Broker:
             return self._status()
         pid = peer_pid(writer.get_extra_info("socket"))
         if op in CREDENTIAL_MESSAGES:
-            return await self._credential_request(op, pid)
+            return await self._credential_request(op, pid, request.get("server"))
         if op != "upload":
             return self._failure("refused", BAD_REQUEST)
         if self._uploading >= MAX_CONNECTIONS:
@@ -252,23 +258,27 @@ class Broker:
         finally:
             self._uploading -= 1
 
-    async def _credential_request(self, op: str, pid: int | None) -> dict:
+    async def _credential_request(self, op: str, pid: int | None, server) -> dict:
+        entry = {"op": op, "pid": pid}
         if op == "proxy_token":
             token, expires_at = self._credentials.proxy_token(), None
-        elif op == "sentry_token":
-            token, expires_at = self._credentials.sentry_token(), None
+        elif op == "mcp_token":
+            if not isinstance(server, str) or not server or len(server) > MAX_NAME:
+                return self._failure("refused", BAD_REQUEST)
+            entry["server"] = server
+            token, expires_at = self._credentials.mcp_token(server), None
         else:
             try:
                 issued = await asyncio.to_thread(self._credentials.linear_token)
             except Exception as error:
                 logger.warning("factory-uploads: Linear token for pid %s failed: %s", pid, error)
-                self._audit({"op": op, "pid": pid, "state": "error"})
+                self._audit({**entry, "state": "error"})
                 return self._failure("error", LINEAR_FAILED)
             token, expires_at = (issued["access_token"], issued["expires_at"]) if issued else (None, None)
         if not token:
-            self._audit({"op": op, "pid": pid, "state": "unavailable"})
+            self._audit({**entry, "state": "unavailable"})
             return self._failure("unavailable", CREDENTIAL_MESSAGES[op])
-        self._audit({"op": op, "pid": pid, "state": "ok"})
+        self._audit({**entry, "state": "ok"})
         return {"ok": True, "token": token, "expires_at": expires_at}
 
     async def _upload_request(self, request: dict, reader, pid: int | None) -> dict:
@@ -338,7 +348,9 @@ class Broker:
             "token_present": bool(self._get_token()),
             "linear_ready": self._credentials.linear_ready(),
             "proxy_token_present": bool(self._credentials.proxy_token()),
-            "sentry_token_present": bool(self._credentials.sentry_token()),
+            "mcp_tokens_present": {
+                server: bool(self._credentials.mcp_token(server)) for server in self._credentials.mcp_servers()
+            },
             "last_state": record.get("state"),
             "expires_at": record.get("expires_at"),
             "checked_at": record.get("checked_at"),
