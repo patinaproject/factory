@@ -49,7 +49,7 @@ Ask the operator for these. None of them is a secret.
 | Folder for the factory's secrets | `/factory` |
 | The machine identity the default home signs in as | `<identity name>` |
 | The machine identity the worker signs in as | `<worker identity name>` |
-| Infisical API URL, when it is not US Cloud | `https://eu.infisical.com` |
+| Infisical URL: `https://app.infisical.com` for US Cloud | `https://eu.infisical.com` |
 
 ## Check
 
@@ -222,10 +222,20 @@ infisical export --silent --projectId <project id> --env <environment> \
 The default home's helper is a script at `<home>/bin/factory-secrets`,
 rendered from
 [`scripts/factory-secrets`](../scripts/factory-secrets) in this skill. It
-signs in as the machine identity, then exports the folder. When sign-in
-fails, it exports nothing, so it never falls back to the operator's own
-Infisical login. Add `--domain <api url>` to both `infisical` calls when the
-operator does not use US Cloud.
+signs in as the machine identity through Infisical's Universal Auth login
+endpoint, then reads the folder from the `GET /api/v4/secrets` endpoint. When
+sign-in fails, it reads nothing, so it never falls back to the operator's own
+Infisical login. It prints the same `KEY='value'` lines as
+`infisical export --format=dotenv`.
+
+The helper does not run the Infisical CLI. The CLI accepts the identity only
+through environment variables or arguments, and while it runs, any process of
+the same user can read them with `ps eww`. The helper runs only
+`/usr/bin/curl` and `/usr/bin/perl`. macOS hides the environment of these
+platform binaries from other processes. The helper also removes the two
+`FACTORY_INFISICAL_` variables from its environment before it starts them,
+keeps the identity and the access token in shell variables, and sends both to
+`curl` on standard input, never as arguments.
 
 The script prints secrets only to Hermes. It refuses any argument, so a
 `--help` run prints nothing, and it refuses to run when its standard output is
@@ -234,14 +244,15 @@ the diagnostic run below, which sends stdout to `/dev/null`.
 
 The script guards against a slow or failed run:
 
-- It sets `INFISICAL_DISABLE_UPDATE_CHECK=true`. The Infisical CLI's automatic
-  update check can hang, and a hung check made a real install miss the helper
-  timeout.
-- It stops each `infisical` call after 15 seconds.
+- It stops each request after 15 seconds.
 - It retries a failed or empty attempt, up to 3 attempts, 2 seconds apart.
 - It prints the export only after an attempt succeeds with output. On failure
   it prints nothing to stdout and exits `1`, so Hermes never reads partial
   output.
+- It prints a message without secret values to stderr for each failed
+  attempt, such as `curl: (22) The requested URL returned error: 401`, and
+  exits `1` before any request when either `FACTORY_INFISICAL_` variable is
+  unset.
 
 The commands below render the template into `<home>/bin/factory-secrets.new`
 first, so they never overwrite a helper that an operator has tuned for this
@@ -249,7 +260,8 @@ machine:
 
 ```sh
 mkdir -p <home>/bin
-sed -e 's|<project id>|<project id>|g' -e 's|<environment>|<environment>|g' -e 's|<folder>|<folder>|g' \
+sed -e 's|<api url>|<infisical url>|g' -e 's|<project id>|<project id>|g' \
+  -e 's|<environment>|<environment>|g' -e 's|<folder>|<folder>|g' \
   <repo>/skills/setup-factory/scripts/factory-secrets > <home>/bin/factory-secrets.new
 grep -c '<[a-z ]*>' <home>/bin/factory-secrets.new   # 0: every placeholder is rendered
 chmod 700 <home>/bin/factory-secrets.new
@@ -300,13 +312,10 @@ A healthy run takes about two seconds. The worst case is 3 attempts of two
 sets `helper_timeout_seconds` to 100 to cover it. The Hermes default of 3
 seconds is too short.
 
-The 15-second bound stops only the `infisical` process itself. If a hung
-`infisical` starts a child process that keeps its stdout open, the attempt
-waits for that child, so one attempt can run past 15 seconds. The
-`helper_timeout_seconds` of 100 still stops the whole helper. Hermes then
-starts with no secrets, and the forged-signature check below catches it. Keep
-`helper_timeout_seconds` above the 94-second worst case when you change the
-bound, the attempts, or the pause.
+If the helper still runs when `helper_timeout_seconds` ends, Hermes stops it
+and starts with no secrets, and the forged-signature check below catches it.
+Keep `helper_timeout_seconds` above the 94-second worst case when you change
+the bound, the attempts, or the pause.
 
 Hermes discards the helper's stderr. To see why a run fails, run the script
 with the two `FACTORY_INFISICAL_` values from `.env`. These lines read only
@@ -319,9 +328,6 @@ FACTORY_INFISICAL_CLIENT_ID="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' <home
 FACTORY_INFISICAL_CLIENT_SECRET="$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' <home>/.env)" \
   <home>/bin/factory-secrets >/dev/null; echo "exit $?"
 ```
-
-`infisical` must be on the `PATH` that the gateway's service definition sets.
-Check with `command -v infisical`, and compare the directory with that `PATH`.
 
 `terminal.env_passthrough` keeps the proxy token and the Linear app
 credentials reaching `claude-session`, which puts the proxy token and a Linear
