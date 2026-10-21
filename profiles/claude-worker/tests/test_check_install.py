@@ -114,8 +114,10 @@ WORKER_JOBS = [
     cron_job("dispatch-triage", 1),
 ]
 ALERT_SCRIPT = "check-install-alert"
-ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}]
+RETRY_SCRIPT = "retry-failed-webhooks"
+ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}, cron_job(RETRY_SCRIPT, 10, "slack")]
 ALERT_SOURCE = f"skills/setup-factory/scripts/{ALERT_SCRIPT}"
+RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
 if str(SCRIPTS) not in sys.path:
@@ -134,8 +136,10 @@ REPO_FILES = {
     "plugins/p1/tests/test_a.py": "test\n",
     "plugins/factory-uploads/__init__.py": "uploads\n",
     "plugins/team/__init__.py": "team\n",
+    "plugins/webhook-retry/__init__.py": "retry\n",
     "templates/render.py": RENDER,
     ALERT_SOURCE: "#!/usr/bin/env python3\nalert\n",
+    RETRY_SOURCE: "#!/usr/bin/env python3\nretry\n",
 }
 
 
@@ -200,6 +204,7 @@ class CheckInstallTest(unittest.TestCase):
             self.install(home, "plugins/p1/__init__.py", "plugin\n")
         self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
         self.install(self.root, "plugins/team/__init__.py", "team\n")
+        self.install(self.root, "plugins/webhook-retry/__init__.py", "retry\n")
         self.install(self.worker, "SOUL.md", "soul\n")
         self.install(self.worker, "scripts/x", "#!/bin/sh\n")
         self.install(self.worker, "config.yaml", "model: local\n")
@@ -210,6 +215,7 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, f"installed-config/{RATE_LIMIT_KEY}.json", "600")
         self.install(self.root, "logs/agent.log", "")
         self.install(self.root, f"scripts/{ALERT_SCRIPT}", REPO_FILES[ALERT_SOURCE])
+        self.install(self.root, f"scripts/{RETRY_SCRIPT}", REPO_FILES[RETRY_SOURCE])
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C0123\n")
         self.owned_refs = self.root / "owned-refs.json"
         self.install(self.root, "owned-refs.json", f'["goodyear/abc-1-fix", "{LINEAR_ID}"]\n')
@@ -628,7 +634,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job refresh-checkouts in {self.worker}: is missing (part 12)\n"
-                f"cron job check-install in {self.root}: exists 2 times (part 12)\n"),
+                f"cron job check-install in {self.root}: exists 2 times (part 12)\n"
+                f"cron job {RETRY_SCRIPT} in {self.root}: exists 2 times (part 12)\n"),
         )
 
     def test_cron_job_changed_by_hand(self) -> None:
@@ -639,7 +646,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("reopen-conflicts", 5),
             cron_job("dispatch-triage", 1),
         ])
-        self.cron(self.root, [{**cron_job("check-install", 60, "local"), "script": ALERT_SCRIPT}])
+        self.cron(self.root, [{**cron_job("check-install", 60, "local"), "script": ALERT_SCRIPT}, ROOT_JOBS[1]])
 
         self.assertEqual(
             self.check(),
@@ -701,7 +708,7 @@ class CheckInstallTest(unittest.TestCase):
             "Script exited with code 1\nstderr:\nprofile claude-worker: scripts/claude-session differs from main "
             "at c02dda9 (part 12)"
         )
-        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}])
+        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}, *ROOT_JOBS[1:]])
 
         self.assertEqual(self.check(), (0, ""))
 
@@ -717,7 +724,7 @@ class CheckInstallTest(unittest.TestCase):
     def test_undelivered_last_run_names_its_delivery_error(self) -> None:
         undelivered = {**ROOT_JOBS[0], "last_status": "delivery_failed", "last_error": None,
                        "last_delivery_error": "slack: channel_not_found\nmore"}
-        self.cron(self.root, [undelivered])
+        self.cron(self.root, [undelivered, *ROOT_JOBS[1:]])
 
         self.assertEqual(
             self.check(),
@@ -739,6 +746,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job check-install in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"
+                f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -748,6 +757,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job check-install in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"
+                f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -759,7 +770,7 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_explicit_and_local_delivery_targets_need_no_home_channel(self) -> None:
         (self.root / ".env").unlink()
-        self.cron(self.root, [{**cron_job("check-install", 60, "slack:C0123"), "script": ALERT_SCRIPT}])
+        self.cron(self.root, [{**cron_job("check-install", 60, "slack:C0123"), "script": ALERT_SCRIPT}, cron_job(RETRY_SCRIPT, 10, "slack:C0123")])
 
         self.assertEqual(self.check(), (0, ""))
 
@@ -774,6 +785,40 @@ class CheckInstallTest(unittest.TestCase):
             (changed, missing),
             ((1, f"script {script}: differs from main at {self.sha} (part 12)\n"),
              (1, f"script {script}: is missing; install it from {ALERT_SOURCE} (part 12)\n")),
+        )
+
+    def test_retry_cron_job_missing_or_changed(self) -> None:
+        self.cron(self.root, ROOT_JOBS[:1])
+        missing = self.check()
+        self.cron(self.root, [ROOT_JOBS[0], cron_job(RETRY_SCRIPT, 30, "slack", enabled=False)])
+        changed = self.check()
+
+        self.assertEqual(
+            (missing, changed),
+            ((1, f"cron job {RETRY_SCRIPT} in {self.root}: is missing (part 12)\n"),
+             (1, f"cron job {RETRY_SCRIPT} in {self.root}: is disabled (part 12)\n"
+                 f"cron job {RETRY_SCRIPT} in {self.root}: runs every 30m, not every 10m (part 12)\n")),
+        )
+
+    def test_retry_wrapper_missing_or_changed(self) -> None:
+        script = self.root / "scripts" / RETRY_SCRIPT
+        script.write_text("old\n")
+        changed = self.check()
+        script.unlink()
+        missing = self.check()
+
+        self.assertEqual(
+            (changed, missing),
+            ((1, f"script {script}: differs from main at {self.sha} (part 12)\n"),
+             (1, f"script {script}: is missing; install it from {RETRY_SOURCE} (part 12)\n")),
+        )
+
+    def test_webhook_retry_installed_in_the_worker_home_is_reported(self) -> None:
+        self.install(self.worker, "plugins/webhook-retry/__init__.py", "retry\n")
+
+        self.assertEqual(
+            self.check(),
+            (1, f"plugin webhook-retry in {self.worker}: installed, but it runs only in the root home\n"),
         )
 
     def test_missing_owned_refs_file(self) -> None:
