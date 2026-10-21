@@ -232,12 +232,114 @@ class StatusTest(BrokerTestCase):
             {key: after[key] for key in ("ok", "token_present", "last_state", "expires_at")},
             {"ok": True, "token_present": True, "last_state": "ok", "expires_at": "2027-01-01 00:00:00 UTC"},
         )
-        self.assertEqual(set(after), {"ok", "token_present", "last_state", "expires_at", "checked_at"})
+        self.assertEqual(
+            set(after),
+            {
+                "ok", "token_present", "linear_ready", "proxy_token_present", "sentry_token_present",
+                "last_state", "expires_at", "checked_at",
+            },
+        )
 
     async def test_status_says_when_the_token_is_missing(self):
         self.token = None
 
         self.assertFalse((await ask(self.broker.socket_path, {"op": "status"}))["token_present"])
+
+
+class FakeCredentials:
+    def __init__(self):
+        self.linear = {"access_token": "lin_oauth_FAKE_access", "expires_at": 1_900_000_000.0}
+        self.proxy = "proxy-FAKE-token"
+        self.sentry = "sntryu_FAKE"
+        self.failure = None
+
+    def linear_ready(self):
+        return self.linear is not None
+
+    def linear_token(self):
+        if self.failure:
+            raise self.failure
+        return self.linear
+
+    def proxy_token(self):
+        return self.proxy
+
+    def sentry_token(self):
+        return self.sentry
+
+
+class CredentialTest(BrokerTestCase):
+    async def asyncSetUp(self):
+        self.credentials = FakeCredentials()
+        await super().asyncSetUp()
+
+    def make_broker(self, repositories=(REPO,)):
+        return broker_module.Broker(
+            self.home, list(repositories), lambda: self.token, base_url=self.uploads.base,
+            clock=lambda: self.now, credentials=self.credentials,
+        )
+
+    async def test_each_credential_comes_back_with_its_expiry(self):
+        self.assertEqual(
+            await ask(self.broker.socket_path, {"op": "linear_token"}),
+            {"ok": True, "token": "lin_oauth_FAKE_access", "expires_at": 1_900_000_000.0},
+        )
+        self.assertEqual(
+            await ask(self.broker.socket_path, {"op": "proxy_token"}),
+            {"ok": True, "token": "proxy-FAKE-token", "expires_at": None},
+        )
+        self.assertEqual(
+            await ask(self.broker.socket_path, {"op": "sentry_token"}),
+            {"ok": True, "token": "sntryu_FAKE", "expires_at": None},
+        )
+
+    async def test_a_missing_credential_answers_unavailable(self):
+        self.credentials.linear = self.credentials.proxy = self.credentials.sentry = None
+
+        for op in ("linear_token", "proxy_token", "sentry_token"):
+            with self.subTest(op=op):
+                reply = await ask(self.broker.socket_path, {"op": op})
+                self.assertEqual(reply, {"ok": False, "state": "unavailable", "message": broker_module.CREDENTIAL_MESSAGES[op]})
+
+    async def test_a_failed_linear_token_gets_a_fixed_reply(self):
+        self.credentials.failure = RuntimeError("Linear is unreachable")
+
+        with self.assertLogs("factory_uploads.broker", level="WARNING"):
+            reply = await ask(self.broker.socket_path, {"op": "linear_token"})
+
+        self.assertEqual(reply, {"ok": False, "state": "error", "message": broker_module.LINEAR_FAILED})
+
+    async def test_the_upload_token_is_never_handed_out(self):
+        replies = [await ask(self.broker.socket_path, {"op": op}) for op in ("linear_token", "proxy_token", "sentry_token", "status")]
+
+        self.assertNotIn(TOKEN, json.dumps(replies))
+
+    async def test_each_credential_request_is_audited_without_the_token(self):
+        await ask(self.broker.socket_path, {"op": "linear_token"})
+        self.credentials.proxy = None
+        await ask(self.broker.socket_path, {"op": "proxy_token"})
+        await ask(self.broker.socket_path, {"op": "sentry_token"})
+
+        log = (self.home / "factory-uploads" / "log.jsonl").read_text()
+        entries = [json.loads(line) for line in log.splitlines()]
+        self.assertEqual([(e["op"], e["state"]) for e in entries], [
+            ("linear_token", "ok"), ("proxy_token", "unavailable"), ("sentry_token", "ok"),
+        ])
+        self.assertIsInstance(entries[0]["pid"], int)
+        self.assertNotIn("lin_oauth_FAKE_access", log)
+        self.assertNotIn("proxy-FAKE-token", log)
+        self.assertNotIn("sntryu_FAKE", log)
+
+    async def test_status_reports_the_credentials_as_booleans(self):
+        status = await ask(self.broker.socket_path, {"op": "status"})
+
+        self.assertEqual(
+            (status["linear_ready"], status["proxy_token_present"], status["sentry_token_present"]), (True, True, True)
+        )
+        self.assertNotIn("proxy-FAKE-token", json.dumps(status))
+        self.assertNotIn("sntryu_FAKE", json.dumps(status))
+        self.credentials.sentry = None
+        self.assertFalse((await ask(self.broker.socket_path, {"op": "status"}))["sentry_token_present"])
 
 
 class LifecycleTest(BrokerTestCase):
@@ -267,22 +369,40 @@ if __name__ == "__main__":
 
 
 class ConnectionCapTest(BrokerTestCase):
-    async def idle_clients(self, count: int):
+    async def idle_clients(self, count: int, header: dict | None = None):
         clients = [await asyncio.open_unix_connection(str(self.broker.socket_path)) for _ in range(count)]
+        if header is not None:
+            for _, writer in clients:
+                writer.write(json.dumps(header).encode() + b"\n")
+                await writer.drain()
         await asyncio.sleep(0.1)
         return clients
 
-    async def test_a_connection_past_the_cap_gets_a_fixed_refusal_and_a_freed_slot_works_again(self):
+    async def test_uploads_past_their_cap_are_busy_while_credential_requests_still_answer(self):
         self.assertLessEqual(broker_module.MAX_CONNECTIONS, 8)
-        clients = await self.idle_clients(broker_module.MAX_CONNECTIONS)
+        header, _ = upload_request()
+        clients = await self.idle_clients(broker_module.MAX_CONNECTIONS, header)
 
-        reply = await self.upload()
-
-        self.assertEqual(reply, {"ok": False, "state": "refused", "message": broker_module.BUSY})
+        self.assertEqual(await self.upload(), {"ok": False, "state": "busy", "message": broker_module.BUSY})
+        self.assertTrue((await ask(self.broker.socket_path, {"op": "status"}))["ok"])
         self.assertEqual(self.uploads.requests, [])
         clients[0][1].close()
         await asyncio.sleep(0.1)
         self.assertTrue((await self.upload())["ok"])
+        for _, writer in clients[1:]:
+            writer.close()
+
+    async def test_a_connection_past_the_total_cap_gets_a_fixed_refusal_and_a_freed_slot_works_again(self):
+        total = broker_module.MAX_CONNECTIONS + broker_module.MAX_CREDENTIAL_CONNECTIONS
+        self.assertLessEqual(total, 16)
+        clients = await self.idle_clients(total)
+
+        reply = await ask(self.broker.socket_path, {"op": "status"})
+
+        self.assertEqual(reply, {"ok": False, "state": "busy", "message": broker_module.BUSY})
+        clients[0][1].close()
+        await asyncio.sleep(0.1)
+        self.assertTrue((await ask(self.broker.socket_path, {"op": "status"}))["ok"])
         for _, writer in clients[1:]:
             writer.close()
 

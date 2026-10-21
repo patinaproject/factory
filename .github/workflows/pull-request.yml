@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
   pull-requests: read
 
 jobs:
@@ -80,6 +81,18 @@ jobs:
           fi
           echo '::error::PR body must contain "Closes #N", "Fixes #N", or "Resolves #N" outside code blocks, HTML comments, strikethrough, and blockquotes.'
           exit 1
+
+      - name: Check out repository
+        if: "${{ github.event.pull_request.user.login != 'dependabot[bot]' }}"
+        # actions/checkout@v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Check for the Linear closing line of each synced issue
+        if: "${{ github.event.pull_request.user.login != 'dependabot[bot]' }}"
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 profiles/claude-worker/scripts/check_linear_closes.py
 
       - name: Compare title `!` with breaking-change markers
         env:

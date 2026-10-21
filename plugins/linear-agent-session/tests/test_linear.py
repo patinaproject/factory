@@ -3,11 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import os
+import socket
 import stat
 import tempfile
 import unittest
 
-from tests import FakeLinear, activity_ok, load_plugin, session_update_ok
+from unittest import mock
+
+from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin, session_update_ok
 
 plugin = load_plugin()
 linear = plugin.linear
@@ -77,6 +80,17 @@ class ActivityTest(unittest.TestCase):
         update = fake.graphql_requests[1]
         self.assertIn("agentSessionUpdate(id: $id, input: $input)", update["query"])
         self.assertEqual(update["variables"], {"id": "session-1", "input": {"externalUrls": urls}})
+
+    def test_reply_in_session_comments_in_the_session_thread(self):
+        thread = (200, {"data": {"agentSession": {"comment": {"id": "comment-1"}, "issue": {"id": "issue-1"}}}})
+        fake = FakeLinear([thread, (200, {"data": {"commentCreate": {"success": True}}})])
+        make_client(fake).reply_in_session("session-1", "https://linear.app/example/profiles/ted see above")
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1"})
+        self.assertIn("commentCreate(input: $input)", fake.graphql_requests[1]["query"])
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"],
+            {"input": {"issueId": "issue-1", "parentId": "comment-1", "body": "https://linear.app/example/profiles/ted see above"}},
+        )
 
     def test_invalid_activity_is_an_error_without_calling_linear(self):
         fake, output = self.post({"agent_session_id": "session-1", "type": "thought"})
@@ -202,15 +216,151 @@ class TokenTest(unittest.TestCase):
             {"error": "client credentials token request failed: Client does not support the client_credentials grant type"},
         )
 
-    def test_missing_credentials(self):
-        with self.assertRaisesRegex(linear.LinearError, "set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"):
-            linear.client_from_env({})
+    def test_issue_token_proves_the_token_and_says_when_it_expires(self):
+        viewer_ok = (200, {"data": {"viewer": {"id": "app-user"}}})
+        fake = FakeLinear([viewer_ok], expires_in=3600)
+
+        issued = make_client(fake, Clock(1000.0)).issue_token()
+
+        self.assertEqual(issued, {"access_token": "token-1", "expires_at": 4600.0})
+        self.assertIn("viewer", fake.graphql_requests[0]["query"])
 
     def test_token_cache_path_resolution(self):
         self.assertIsNone(linear.token_cache_path({}))
         self.assertEqual(
             linear.token_cache_path({"HERMES_HOME": "/h"}), "/h/plugin-data/linear-agent-session/token.json"
         )
+
+
+class BrokerClientTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = os.path.realpath(tmp.name)
+        self.worker = os.path.join(self.root, "profiles", "claude-worker")
+        os.makedirs(self.worker)
+        self.socket = os.path.join(self.root, "factory-uploads.sock")
+
+    def broker(self, *replies):
+        broker = FakeBroker(self.socket, replies)
+        self.addCleanup(broker.close)
+        return broker
+
+    def test_a_home_without_app_credentials_never_mints_and_uses_the_brokers_token(self):
+        broker = self.broker(linear_token("brokered-1"))
+        fake = FakeLinear([activity_ok()])
+
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=fake)
+        client.create_activity("session-1", {"type": "thought", "body": "x"})
+
+        self.assertEqual(broker.requests, [{"op": "linear_token"}])
+        self.assertEqual(fake.token_requests, [])
+        self.assertEqual(fake.graphql_requests[0]["authorization"], "Bearer brokered-1")
+
+    def test_the_brokered_token_is_reused_until_it_expires(self):
+        clock = Clock()
+        broker = self.broker(linear_token("brokered-1", 1000.0 + 3600), linear_token("brokered-2", 1e12))
+        fake = FakeLinear([activity_ok(), activity_ok()])
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=fake, clock=clock)
+
+        client.create_activity("session-1", {"type": "thought", "body": "x"})
+        clock.now += 3600
+        client.create_activity("session-1", {"type": "thought", "body": "x"})
+
+        self.assertEqual(len(broker.requests), 2)
+        self.assertEqual([r["authorization"] for r in fake.graphql_requests], ["Bearer brokered-1", "Bearer brokered-2"])
+
+    def test_a_rejected_brokered_token_is_replaced_by_asking_the_broker_again(self):
+        broker = self.broker(linear_token("revoked"), linear_token("fresh"))
+        fake = FakeLinear([(401, {"errors": [{"message": "Authentication required"}]}), activity_ok("activity-3")])
+
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=fake)
+
+        self.assertEqual(client.create_activity("session-1", {"type": "thought", "body": "x"}), "activity-3")
+        self.assertEqual(len(broker.requests), 2)
+        self.assertEqual([r["authorization"] for r in fake.graphql_requests], ["Bearer revoked", "Bearer fresh"])
+
+    def test_a_brokered_token_is_never_written_to_the_worker_home(self):
+        self.broker(linear_token("brokered-1"))
+
+        linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()])).create_activity(
+            "session-1", {"type": "thought", "body": "x"}
+        )
+
+        self.assertEqual(os.listdir(self.worker), [])
+
+    def test_a_broker_that_does_not_answer_is_a_linear_error(self):
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()]))
+
+        with self.assertRaisesRegex(linear.LinearError, f"the gateway's broker at {self.socket} did not answer"):
+            client.create_activity("session-1", {"type": "thought", "body": "x"})
+
+    def test_a_broker_refusal_names_its_reason(self):
+        self.broker({"ok": False, "state": "unavailable", "message": "The gateway holds no Linear app credentials."})
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()]))
+
+        with self.assertRaisesRegex(
+            linear.LinearError, "refused linear_token: The gateway holds no Linear app credentials."
+        ):
+            client.access_token()
+
+    def test_a_busy_broker_is_asked_again_until_it_answers(self):
+        broker = self.broker(BUSY, BUSY, linear_token("brokered-1"))
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()]))
+
+        with mock.patch("time.sleep") as sleep:
+            client.create_activity("session-1", {"type": "thought", "body": "x"})
+
+        self.assertEqual(len(broker.requests), 3)
+        self.assertEqual(len(sleep.call_args_list), 2)
+
+    def test_a_broker_that_stays_busy_or_down_is_unavailable_after_a_bounded_wait(self):
+        broker = self.broker(BUSY)
+        for case in ("busy", "down"):
+            with self.subTest(case=case), mock.patch("time.sleep") as sleep:
+                if case == "down":
+                    broker.close()
+                    os.unlink(self.socket)
+                with self.assertRaises(linear.BrokerUnavailable):
+                    linear.broker_request(self.socket, "proxy_token")
+                waited = sum(call.args[0] for call in sleep.call_args_list)
+                self.assertGreater(len(sleep.call_args_list), 1)
+                self.assertLessEqual(waited, 10)
+        self.assertEqual(len(broker.requests), len(sleep.call_args_list) + 1)
+
+    def test_a_broker_that_stalls_is_unavailable_without_a_retry(self):
+        stalled = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(stalled.close)
+        stalled.bind(self.socket)
+        stalled.listen()
+
+        with mock.patch("time.sleep") as sleep, self.assertRaisesRegex(linear.BrokerUnavailable, "did not answer in 0.2s"):
+            linear.broker_request(self.socket, "proxy_token", timeout=0.2)
+
+        self.assertEqual(sleep.call_args_list, [])
+
+    def test_a_refusal_is_not_retried_and_is_not_unavailability(self):
+        broker = self.broker({"ok": False, "state": "unavailable", "message": "The gateway holds no proxy token."})
+
+        with mock.patch("time.sleep") as sleep, self.assertRaises(linear.LinearError) as raised:
+            linear.broker_request(self.socket, "proxy_token")
+
+        self.assertNotIsInstance(raised.exception, linear.BrokerUnavailable)
+        self.assertEqual((len(broker.requests), sleep.call_args_list), (1, []))
+
+    def test_the_broker_lives_in_the_root_home(self):
+        self.assertEqual(linear.broker_socket_path({"HERMES_HOME": self.worker}), self.socket)
+        self.assertEqual(linear.broker_socket_path({"HERMES_HOME": self.root}), self.socket)
+
+    def test_a_home_with_app_credentials_never_asks_the_broker(self):
+        broker = self.broker()
+        fake = FakeLinear([activity_ok()])
+        env = {"HERMES_HOME": self.root, "LINEAR_CLIENT_ID": "client-id", "LINEAR_CLIENT_SECRET": "client-secret"}
+
+        linear.client_from_env(env, urlopen=fake).create_activity("session-1", {"type": "thought", "body": "x"})
+
+        self.assertEqual(broker.requests, [])
+        self.assertEqual(len(fake.token_requests), 1)
 
 
 class SessionCreateTest(unittest.TestCase):
@@ -236,6 +386,7 @@ class IssueArgumentTest(unittest.TestCase):
         "linear_issue": lambda fake, args: tools.run_issue(lambda: make_client(fake), args),
         "linear_agent_session_create": lambda fake, args: tools.run_session_create(lambda: make_client(fake), args),
         "linear_issue_undelegate": lambda fake, args: tools.run_undelegate(lambda: make_client(fake), args),
+        "linear_issue_to_todo": lambda fake, args: tools.run_to_todo(lambda: make_client(fake), args),
     }
 
     def test_issue_tools_take_the_names_models_guess(self):
@@ -256,7 +407,7 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_hermes_lets_every_guessed_name_reach_the_handler(self):
         # Hermes refuses a deferred tool_call that lacks a name in the schema's "required" list.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA):
             for name in ("issue", "id", "issue_id"):
                 with self.subTest(tool=schema["name"], name=name):
                     missing = [r for r in schema["parameters"].get("required", []) if r not in {name: "ABC-9"}]
@@ -264,9 +415,103 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_the_deferred_catalog_line_names_the_argument(self):
         # Hermes lists a deferred tool by the first 60 characters of its description.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA):
             with self.subTest(tool=schema["name"]):
                 self.assertIn("`issue`", schema["description"][:60])
+
+
+def prompt_node(activity_id, created_at, body, signal=None):
+    return {
+        "id": activity_id,
+        "createdAt": created_at,
+        "signal": signal,
+        "content": {"__typename": "AgentActivityPromptContent", "body": body},
+    }
+
+
+def thought_node(activity_id, created_at):
+    return {"id": activity_id, "createdAt": created_at, "signal": None, "content": {"__typename": "AgentActivityThoughtContent"}}
+
+
+def session_activities(*nodes):
+    return (200, {"data": {"agentSession": {"activities": {"nodes": list(nodes)}}}})
+
+
+class ActivityReadTest(unittest.TestCase):
+    def read(self, responses, args):
+        fake = FakeLinear(responses)
+        return fake, json.loads(tools.run_activity_read(lambda: make_client(fake), args))
+
+    def test_an_activity_id_returns_its_prompt_body(self):
+        node = prompt_node("activity-1", "2026-10-18T16:57:29.889Z", "yes")
+        fake, output = self.read([(200, {"data": {"agentActivity": node}})], {"agent_activity_id": "activity-1"})
+        self.assertEqual(
+            output,
+            {"found": True, "id": "activity-1", "createdAt": "2026-10-18T16:57:29.889Z", "signal": None, "body": "yes"},
+        )
+        self.assertIn("agentActivity(id: $id)", fake.graphql_requests[0]["query"])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "activity-1"})
+
+    def test_an_activity_that_is_not_a_prompt_is_not_found(self):
+        _, output = self.read(
+            [(200, {"data": {"agentActivity": thought_node("activity-2", "2026-10-18T16:58:00Z")}})],
+            {"agent_activity_id": "activity-2"},
+        )
+        self.assertEqual(output, {"found": False})
+
+    def test_a_session_returns_its_newest_prompt_that_is_not_a_stop(self):
+        fake, output = self.read(
+            [
+                session_activities(
+                    prompt_node("activity-1", "2026-10-18T16:50:00Z", "maybe"),
+                    prompt_node("activity-3", "2026-10-18T16:59:00Z", "", signal="stop"),
+                    thought_node("activity-4", "2026-10-18T17:00:00Z"),
+                    prompt_node("activity-2", "2026-10-18T16:57:29Z", "yes"),
+                )
+            ],
+            {"agent_session_id": "session-1"},
+        )
+        self.assertEqual(
+            output, {"found": True, "id": "activity-2", "createdAt": "2026-10-18T16:57:29Z", "signal": None, "body": "yes"}
+        )
+        self.assertIn("agentSession(id: $id)", fake.graphql_requests[0]["query"])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1"})
+
+    def test_a_session_without_a_prompt_is_not_found(self):
+        _, output = self.read(
+            [session_activities(thought_node("activity-4", "2026-10-18T17:00:00Z"))], {"agent_session_id": "session-1"}
+        )
+        self.assertEqual(output, {"found": False})
+
+    def test_a_linear_error_is_a_tool_error(self):
+        _, output = self.read(
+            [(200, {"errors": [{"message": "Entity not found: AgentActivity"}], "data": None})],
+            {"agent_activity_id": "activity-9"},
+        )
+        self.assertEqual(output, {"error": "Entity not found: AgentActivity"})
+
+    def test_the_names_models_guess_reach_the_handler(self):
+        cases = {
+            "agent_activity_id": "agentActivity(id: $id)",
+            "activity_id": "agentActivity(id: $id)",
+            "id": "agentActivity(id: $id)",
+            "agent_session_id": "agentSession(id: $id)",
+            "session_id": "agentSession(id: $id)",
+        }
+        for name, query in cases.items():
+            with self.subTest(name=name):
+                fake, _ = self.read([(200, {"errors": [{"message": "stop after the request"}]})], {name: "uuid-9"})
+                self.assertIn(query, fake.graphql_requests[0]["query"])
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "uuid-9"})
+
+    def test_without_an_id_it_names_the_argument(self):
+        fake, output = self.read([], {})
+        self.assertEqual(output, {"error": "pass agent_activity_id, or agent_session_id when the activity id is unknown"})
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_the_schema_requires_nothing_and_its_catalog_line_names_the_argument(self):
+        self.assertNotIn("required", tools.ACTIVITY_READ_SCHEMA["parameters"])
+        self.assertIn("`agent_activity_id`", tools.ACTIVITY_READ_SCHEMA["description"][:60])
 
 
 class IssueTest(unittest.TestCase):
@@ -281,6 +526,7 @@ class IssueTest(unittest.TestCase):
                 "priority": 2.0,
                 "state": {"name": "Todo", "type": "unstarted"},
                 "delegate": {"id": "app-user-1"},
+                "labels": {"nodes": [{"name": "ready-for-agent"}, {"name": "bug"}]},
                 "attachments": {
                     "nodes": [
                         {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
@@ -289,9 +535,9 @@ class IssueTest(unittest.TestCase):
                 "agentSessions": {
                     "nodes": [
                         {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z",
-                         "appUser": {"id": "app-user-1"}},
+                         "appUser": {"id": "app-user-1"}, "creator": {"id": "user-1"}},
                         {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z",
-                         "appUser": {"id": "app-user-1"}},
+                         "appUser": {"id": "app-user-1"}, "creator": None},
                     ]
                 },
             }
@@ -315,12 +561,15 @@ class IssueTest(unittest.TestCase):
                 "state": "Todo",
                 "stateType": "unstarted",
                 "delegate": "app-user-1",
+                "labels": ["bug", "ready-for-agent"],
                 "attachments": [
                     {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
                 ],
                 "agentSessions": [
-                    {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1"},
-                    {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z", "appUserId": "app-user-1"},
+                    {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1",
+                     "creatorId": None},
+                    {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z", "appUserId": "app-user-1",
+                     "creatorId": "user-1"},
                 ],
             },
         )
@@ -340,6 +589,55 @@ class IssueTest(unittest.TestCase):
         response["data"]["issue"]["delegate"] = None
         fake = FakeLinear([(200, response)])
         self.assertIsNone(make_client(fake).get_issue("ABC-123")["delegate"])
+
+
+class IssueLabelsTest(unittest.TestCase):
+    def test_returns_the_label_names(self):
+        labels = {"nodes": [{"name": "ready-for-agent"}, {"name": "bug"}]}
+        fake = FakeLinear([(200, {"data": {"issue": {"labels": labels}}})])
+        self.assertEqual(make_client(fake).issue_labels("issue-uuid"), ["bug", "ready-for-agent"])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "issue-uuid"})
+
+
+def issue_states(state_type, states):
+    team = {"states": {"nodes": [
+        {"id": f"state-{name}", "name": name, "type": kind, "position": position} for name, kind, position in states
+    ]}}
+    issue = {"id": "issue-uuid", "identifier": "ABC-1", "state": {"name": "Now", "type": state_type}, "team": team}
+    return 200, {"data": {"issue": issue}}
+
+
+TEAM_STATES = [("Triage", "triage", 0), ("Backlog", "backlog", 1), ("Later", "unstarted", 3), ("Todo", "unstarted", 2)]
+UPDATE_OK = (200, {"data": {"issueUpdate": {"success": True}}})
+
+
+class ToTodoTest(unittest.TestCase):
+    def run_to_todo(self, responses):
+        fake = FakeLinear(responses)
+        return fake, json.loads(tools.run_to_todo(lambda: make_client(fake), {"issue": "ABC-1"}))
+
+    def test_moves_a_triage_issue_to_the_todo_status(self):
+        fake, output = self.run_to_todo([issue_states("triage", TEAM_STATES), UPDATE_OK])
+        self.assertEqual(output, {"identifier": "ABC-1", "moved": True, "state": "Todo"})
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "issue-uuid", "input": {"stateId": "state-Todo"}})
+
+    def test_without_a_todo_status_takes_the_first_unstarted_one(self):
+        states = [("Triage", "triage", 0), ("Ready", "unstarted", 5), ("Queued", "unstarted", 4)]
+        fake, output = self.run_to_todo([issue_states("triage", states), UPDATE_OK])
+        self.assertEqual(output, {"identifier": "ABC-1", "moved": True, "state": "Queued"})
+        self.assertEqual(fake.graphql_requests[1]["variables"]["input"], {"stateId": "state-Queued"})
+
+    def test_leaves_an_issue_outside_triage_alone(self):
+        for state_type in ("backlog", "unstarted", "started", "completed", "canceled"):
+            with self.subTest(state_type=state_type):
+                fake, output = self.run_to_todo([issue_states(state_type, TEAM_STATES)])
+                self.assertEqual(output, {"identifier": "ABC-1", "moved": False, "state": "Now"})
+                self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_a_team_without_an_unstarted_status_is_an_error(self):
+        fake, output = self.run_to_todo([issue_states("triage", [("Triage", "triage", 0)])])
+        self.assertEqual(output, {"error": "ABC-1's team has no unstarted status to move it to"})
+        self.assertEqual(len(fake.graphql_requests), 1)
 
 
 def issue_node(identifier, attachments=()):
@@ -395,6 +693,54 @@ def issue_delegate(delegate_id, viewer_id="app-user-1"):
     delegate = {"id": delegate_id} if delegate_id else None
     issue = {"id": "issue-uuid", "identifier": "ABC-1", "delegate": delegate}
     return 200, {"data": {"viewer": {"id": viewer_id}, "issue": issue}}
+
+
+class DelegatedToSelfTest(unittest.TestCase):
+    def test_only_the_agent_apps_own_delegation_counts(self):
+        for delegate_id, expected in (("app-user-1", True), (None, False), ("other-agent", False)):
+            with self.subTest(delegate_id=delegate_id):
+                fake = FakeLinear([issue_delegate(delegate_id)])
+                self.assertIs(make_client(fake).delegated_to_self("ABC-1"), expected)
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
+
+    def test_an_issue_linear_does_not_return_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"viewer": {"id": "app-user-1"}, "issue": None}})])
+        with self.assertRaisesRegex(linear.LinearError, "no issue ABC-1"):
+            make_client(fake).delegated_to_self("ABC-1")
+
+
+def triage_people(assignee, creator, on_triage, *, app=False, responsibility=True):
+    issue = {
+        "assignee": {"url": assignee} if assignee else None,
+        "creator": {"url": creator, "app": app} if creator else None,
+        "team": {"triageResponsibility": {"currentUser": {"url": on_triage} if on_triage else None}
+                 if responsibility else None},
+    }
+    return 200, {"data": {"issue": issue}}
+
+
+class TriagePeopleTest(unittest.TestCase):
+    TED = "https://linear.app/example/profiles/ted"
+    LUKE = "https://linear.app/example/profiles/luke"
+    APP = "https://linear.app/example/profiles/goodyear"
+
+    def test_names_the_assignee_the_person_who_created_it_and_who_is_on_triage(self):
+        cases = (
+            (triage_people(self.TED, self.TED, self.LUKE), {"assignee": self.TED, "creator": self.TED, "triage": self.LUKE}),
+            (triage_people(None, self.APP, self.LUKE, app=True), {"assignee": None, "creator": None, "triage": self.LUKE}),
+            (triage_people(None, None, None), {"assignee": None, "creator": None, "triage": None}),
+            (triage_people(self.TED, None, None, responsibility=False), {"assignee": self.TED, "creator": None, "triage": None}),
+        )
+        for response, expected in cases:
+            with self.subTest(expected=expected):
+                fake = FakeLinear([response])
+                self.assertEqual(make_client(fake).triage_people("ABC-1"), expected)
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
+
+    def test_an_issue_linear_does_not_return_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"issue": None}})])
+        with self.assertRaisesRegex(linear.LinearError, "no issue ABC-1"):
+            make_client(fake).triage_people("ABC-1")
 
 
 class UndelegateTest(unittest.TestCase):

@@ -7,6 +7,10 @@ A branch is the factory's own when GitHub's repository activity records the App
 as the actor of the branch's newest `branch_creation` entry. Commit authors and
 pull request authors play no part, because a person can write either.
 
+The card's pull requests are the ones Linear links to the issue, plus every open
+pull request by the App whose body closes the issue under any of its references,
+so a card finds the App's pull request whatever its branch is called.
+
 As a command, it prints one JSON line and exits 0 with `{"branch", "takeover_pr"}`,
 exits 2 with `{"blocked": reason}`, or exits 1 with `{"error": reason}`.
 """
@@ -18,12 +22,29 @@ import os
 import re
 import subprocess
 import sys
+import time
 from enum import Enum
 from typing import Any, Callable, Mapping, NamedTuple
 from urllib.parse import quote
 
 TAKEOVER_SUFFIX = "-takeover"
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
+ISSUE_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/([0-9]+)$")
+IDENTIFIER = re.compile(r"^[A-Z][A-Z0-9]*-[1-9][0-9]*$")
+NUMBER = re.compile(r"^#([1-9][0-9]*)$")
+# GitHub's closing keywords, which Linear also reads, followed by `#n`, `owner/name#n`, a GitHub issue URL,
+# a Linear identifier, or a Linear issue URL.
+CLOSING = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[ \t]*:?[ \t]+"
+    r"(?:(?P<repo>[\w.-]+/[\w.-]+)?#(?P<number>[1-9][0-9]*)\b"
+    r"|https://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/(?P<url_number>[1-9][0-9]*)\b"
+    r"|(?:https://linear\.app/[\w-]+/issue/)?(?P<identifier>[A-Z][A-Z0-9]*-[1-9][0-9]*)\b)",
+    re.IGNORECASE,
+)
+QUOTED = re.compile(r"<!--.*?-->|^(```|~~~).*?^\1|`[^`\n]*`|~~.*?~~|^[ \t]*>.*?$", re.DOTALL | re.MULTILINE)
+SERVER_ERROR = re.compile(r"\bHTTP 5[0-9][0-9]\b")
+WRITE_OPTIONS = ("-X", "--method", "-f", "--raw-field", "-F", "--field", "--input")
+RETRY_DELAYS = (1, 2)
 
 
 class Owner(Enum):
@@ -61,6 +82,10 @@ class GhFailed(Exception):
 
 class BranchNotFound(GhFailed):
     pass
+
+
+class GhServerError(GhFailed):
+    """GitHub kept answering with a 5xx, so the caller can wait and try again."""
 
 
 def is_app(login: str, app: str) -> bool:
@@ -130,18 +155,51 @@ def choose(git_branch: str, pulls: list[Pull], owners: Mapping[str, Owner | None
     )
 
 
+def reference(text: str, repo: str) -> str:
+    """`#n` for an issue of `repo`, given as `#n` or its URL, or a Linear identifier in upper case."""
+    issue = ISSUE_URL.match(text)
+    if issue and issue.group(1).lower() == repo.lower():
+        return "#" + issue.group(2)
+    if NUMBER.match(text) or IDENTIFIER.match(text.upper()):
+        return text.upper()
+    raise GhFailed(f"--closes {text} is not a Linear identifier, #n, or an issue URL in {repo}")
+
+
+def closes(body: str | None, repo: str) -> set[str]:
+    """The references that a pull request body closes, written as `reference` writes them.
+
+    Code, HTML comments, struck-out text, and blockquotes close nothing, as in the pull request workflow's check. An issue of another repository is left out.
+    """
+    found = set()
+    for match in CLOSING.finditer(QUOTED.sub("", body or "")):
+        if match["identifier"]:
+            found.add(match["identifier"].upper())
+            continue
+        other = match["repo"] or match["url_repo"]
+        if other is None or other.lower() == repo.lower():
+            found.add("#" + (match["number"] or match["url_number"]))
+    return found
+
+
 def run_gh(*args: str) -> Any:
+    """Call `gh api`, retrying a server error only when the call reads, so a write is never sent twice."""
     gh = os.environ.get("GH_BIN", "gh")
-    try:
-        proc = subprocess.run([gh, "api", *args], capture_output=True, text=True)
-    except OSError as failure:
-        raise GhFailed(f"{gh} could not run: {failure.strerror or failure}") from failure
-    if proc.returncode != 0:
+    delays = () if any(arg.startswith(WRITE_OPTIONS) for arg in args) else RETRY_DELAYS
+    for attempt in range(len(delays) + 1):
+        try:
+            proc = subprocess.run([gh, "api", *args], capture_output=True, text=True)
+        except OSError as failure:
+            raise GhFailed(f"{gh} could not run: {failure.strerror or failure}") from failure
+        if proc.returncode == 0:
+            return json.loads(proc.stdout) if proc.stdout.strip() else None
         detail = proc.stderr.strip().splitlines()[0] if proc.stderr.strip() else "no error output"
         if "Branch not found" in proc.stderr:
             raise BranchNotFound(detail)
-        raise GhFailed(f"gh api {args[0]} failed: {detail}")
-    return json.loads(proc.stdout) if proc.stdout.strip() else None
+        if not SERVER_ERROR.search(proc.stderr):
+            raise GhFailed(f"gh api {args[0]} failed: {detail}")
+        if attempt == len(delays):
+            raise GhServerError(f"gh api {args[0]} failed: {detail}")
+        time.sleep(delays[attempt])
 
 
 def owner(gh: Callable[..., Any], repo: str, branch: str, app: str) -> Owner | None:
@@ -157,16 +215,32 @@ def owner(gh: Callable[..., Any], repo: str, branch: str, app: str) -> Owner | N
     return Owner.PERSON
 
 
+def parse_pull(url: str, data: Mapping[str, Any], repo: str) -> Pull:
+    head_repo = (data["head"].get("repo") or {}).get("full_name", "")
+    state = "OPEN" if data["state"] == "open" else "MERGED" if data.get("merged") else "CLOSED"
+    return Pull(url, state, data["head"]["ref"], head_repo.lower() != repo.lower(), data["updated_at"])
+
+
 def read_pulls(gh: Callable[..., Any], repo: str, urls: list[str]) -> list[Pull]:
     pulls = []
     for url in urls:
         match = PULL_URL.match(url)
         if not match or match.group(1).lower() != repo.lower():
             raise GhFailed(f"--pull {url} is not a pull request URL in {repo}")
-        data = gh(f"repos/{repo}/pulls/{match.group(2)}")
-        head_repo = (data["head"].get("repo") or {}).get("full_name", "")
-        state = "OPEN" if data["state"] == "open" else "MERGED" if data.get("merged") else "CLOSED"
-        pulls.append(Pull(url, state, data["head"]["ref"], head_repo.lower() != repo.lower(), data["updated_at"]))
+        pulls.append(parse_pull(url, gh(f"repos/{repo}/pulls/{match.group(2)}"), repo))
+    return pulls
+
+
+def closing_pulls(gh: Callable[..., Any], repo: str, app: str, refs: set[str]) -> list[Pull]:
+    """The open pull requests by the App whose body closes any of `refs`."""
+    pulls = []
+    page = 1
+    while batch := gh(f"repos/{repo}/pulls?state=open&per_page=100&page={page}"):
+        pulls += [
+            parse_pull(data["html_url"], data, repo) for data in batch
+            if is_app(data["user"]["login"], app) and closes(data["body"], repo) & refs
+        ]
+        page += 1
     return pulls
 
 
@@ -176,12 +250,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--git-branch", required=True, help="the issue's gitBranchName")
     parser.add_argument("--pull", action="append", default=[], help="a pull request URL linked to the issue")
+    parser.add_argument(
+        "--closes", action="append", default=[],
+        help="a reference that closes the issue: its Linear identifier, or its synced GitHub issue as #n or URL",
+    )
     args = parser.parse_args(argv)
     try:
-        pulls = read_pulls(run_gh, args.repo, args.pull)
+        refs = {reference(text, args.repo) for text in args.closes}
+        linked = read_pulls(run_gh, args.repo, args.pull)
+        found = closing_pulls(run_gh, args.repo, args.app, refs) if refs else []
         names = {args.git_branch, args.git_branch + TAKEOVER_SUFFIX}
-        names.update(pull.head for pull in pulls if pull.state == "OPEN" and not pull.cross_repository)
+        names.update(pull.head for pull in linked + found if pull.state == "OPEN" and not pull.cross_repository)
         owners = {name: owner(run_gh, args.repo, name, args.app) for name in sorted(names)}
+        # A found pull request only adopts. Taking one over would name the App's own pull request.
+        pulls = linked + [
+            pull for pull in found
+            if pull.url not in {each.url for each in linked} and owners.get(pull.head) is Owner.FACTORY
+        ]
         choice = choose(args.git_branch, pulls, owners)
     except GhFailed as failure:
         print(json.dumps({"error": str(failure)}))

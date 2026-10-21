@@ -5,16 +5,17 @@ Every comment and activity comes from the app. The `linear-agent-session`
 plugin authenticates with the app's `LINEAR_CLIENT_ID` and
 `LINEAR_CLIENT_SECRET`. It mints client credentials tokens with the scopes
 `read,write,app:assignable,app:mentionable`, and mints a new one when a token
-expires or Linear rejects it. Put both values in `<home>/.env` and
-`<worker>/.env`.
+expires or Linear rejects it. Put both values in `<home>/.env` only. The
+worker home holds neither: its copy of the plugin asks the gateway's broker,
+which part 5 of the skill installs, for a token the gateway minted.
 
 ## Check
 
 All of these must hold:
 
-- In both `<home>/.env` and `<worker>/.env`,
-  `env_has <file> LINEAR_CLIENT_ID` and `env_has <file> LINEAR_CLIENT_SECRET`
-  each print `1`.
+- `env_has <home>/.env LINEAR_CLIENT_ID` and
+  `env_has <home>/.env LINEAR_CLIENT_SECRET` each print `1`, and the same
+  lines for `<worker>/.env` each print `0`.
 - The token acts as the app (see [Verify](#verify)).
 - `env_has <home>/.env LINEAR_WEBHOOK_SECRET` prints `1`.
 - The plugin can read an issue as the app (see
@@ -34,15 +35,14 @@ If all of them hold, skip to the live test.
 > - **Client credentials:** enabled.
 >
 > Then ask the operator to store the client ID and client secret with the
-> `read -rs` line from the skill, once per key, into both `<home>/.env` and
-> `<worker>/.env`.
+> `read -rs` line from the skill, once per key, into `<home>/.env`.
 
 **Existing app.** If the operator already has an agent app, keep it. Ask
 the operator to turn on **Client credentials** in the app's settings, confirm
 that its webhook URL and events match the values above, and store its client
 ID and client secret the same way.
 
-Check both files with `env_has` afterwards.
+Check `<home>/.env` with `env_has` afterwards.
 
 ## Store the signing secret
 
@@ -96,7 +96,9 @@ command never prints the token:
     <repo>/plugins/linear-agent-session )
 ```
 
-Run it again with `<home>/.env` and `HERMES_HOME=<home>`.
+Run it again with `<home>/.env` and `HERMES_HOME=<home>`. In the worker home
+the client asks the gateway's broker for its token, so that run passes only
+once the gateway runs the broker from part 5 of the skill.
 
 Expect `"app": true`. `viewer.id` is the app user ID, and it equals
 `app_user_id` in the settings. `"app": false` means the token acts as a person,

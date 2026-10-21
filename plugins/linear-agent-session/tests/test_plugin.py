@@ -11,10 +11,11 @@ import tempfile
 import types
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests import FakeLinear, activity_ok, load_plugin
+from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin
 
 plugin = load_plugin()
 
@@ -262,16 +263,62 @@ class RegisterTest(unittest.TestCase):
             sorted(ctx.tools),
             [
                 "linear_agent_activity",
+                "linear_agent_activity_read",
                 "linear_agent_session_create",
                 "linear_delegated_issues",
                 "linear_issue",
+                "linear_issue_to_todo",
                 "linear_issue_undelegate",
             ],
         )
         for name, tool in ctx.tools.items():
             self.assertEqual(tool["toolset"], "linear_agent_session")
             self.assertEqual(tool["schema"]["name"], name)
-        self.assertEqual([name for name, _ in ctx.hooks], ["pre_gateway_dispatch", "kanban_task_blocked"])
+        self.assertEqual(
+            [name for name, _ in ctx.hooks],
+            ["pre_gateway_dispatch", "kanban_task_blocked", "transform_api_error_classification"],
+        )
+
+    def test_the_manifest_lists_every_registered_tool(self):
+        ctx = FakeContext()
+        plugin.register(ctx)
+        manifest = (Path(plugin.__file__).parent / "plugin.yaml").read_text().splitlines()
+        start = manifest.index("provides_tools:") + 1
+        listed = []
+        for line in manifest[start:]:
+            if not line.startswith("  - "):
+                break
+            listed.append(line.removeprefix("  - "))
+        self.assertEqual(listed, list(ctx.tools))
+
+    def test_register_names_an_empty_provider_key_in_a_worker(self):
+        config = {"model": {"provider": "custom:proxy"}, "providers": {"proxy": {"key_env": "PROXY_TOKEN"}}}
+        ctx = FakeContext()
+        environ = {"HERMES_KANBAN_TASK": "t_1234", "PROXY_TOKEN": ""}
+        with hermes_config(config), mock.patch.dict(os.environ, environ), self.assertLogs(
+            "linear_agent_session", "ERROR"
+        ) as logs:
+            plugin.register(ctx)
+            classify = dict(ctx.hooks)["transform_api_error_classification"]
+            self.assertEqual(classify(status_code=401)["reason"], "timeout")
+        self.assertEqual(
+            logs.output,
+            [
+                "ERROR:linear_agent_session:linear-agent-session: PROXY_TOKEN is empty in this worker; "
+                "a provider 401 or 403 requeues the card"
+            ],
+        )
+
+    def test_register_is_quiet_when_the_provider_key_is_present(self):
+        config = {"model": {"provider": "custom:proxy"}, "providers": {"proxy": {"key_env": "PROXY_TOKEN"}}}
+        ctx = FakeContext()
+        environ = {"HERMES_KANBAN_TASK": "t_1234", "PROXY_TOKEN": "a-real-token"}
+        with hermes_config(config), mock.patch.dict(os.environ, environ), self.assertNoLogs(
+            "linear_agent_session", "ERROR"
+        ):
+            plugin.register(ctx)
+            classify = dict(ctx.hooks)["transform_api_error_classification"]
+            self.assertIsNone(classify(status_code=401))
 
     def test_registered_handlers_call_linear(self):
         fake = FakeLinear([activity_ok("activity-9")])
@@ -282,12 +329,15 @@ class RegisterTest(unittest.TestCase):
             output = handler({"agent_session_id": "session-1", "type": "thought", "body": "Working"}, task_id="t")
         self.assertEqual(json.loads(output), {"ok": True, "agent_activity_id": "activity-9"})
 
-    def test_registered_handler_reports_missing_credentials(self):
+    def test_registered_handler_without_credentials_reports_the_unreachable_broker(self):
         ctx = FakeContext()
         plugin.register(ctx)
-        with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": ""}):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"LINEAR_CLIENT_ID": "", "HERMES_HOME": os.path.realpath(tmp)}
+        ):
             output = ctx.tools["linear_issue"]["handler"]({"issue": "ABC-1"})
-        self.assertEqual(json.loads(output), {"error": "set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET"})
+        error = json.loads(output)["error"]
+        self.assertRegex(error, r"^the gateway's broker at .*/factory-uploads\.sock did not answer")
 
     def test_registered_hook_uses_configured_route(self):
         fake = FakeLinear([activity_ok()])
@@ -324,6 +374,22 @@ class CliTest(unittest.TestCase):
         ), mock.patch("urllib.request.urlopen", fake), contextlib.redirect_stdout(out):
             code = cli.main(argv)
         return code, json.loads(out.getvalue())
+
+    def test_a_worker_command_waits_out_a_busy_broker(self):
+        fake = FakeLinear([(200, {"data": {"issue": None}})])
+        cli = _load_cli()
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.realpath(tmp)
+            worker = os.path.join(root, "profiles", "claude-worker")
+            os.makedirs(worker)
+            broker = FakeBroker(os.path.join(root, "factory-uploads.sock"), [BUSY, linear_token("brokered-1")])
+            self.addCleanup(broker.close)
+            with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": "", "LINEAR_CLIENT_SECRET": "", "HERMES_HOME": worker}), \
+                    mock.patch("urllib.request.urlopen", fake), mock.patch("time.sleep"), contextlib.redirect_stdout(out):
+                cli.main(["issue", "ABC-1"])
+        self.assertEqual(len(broker.requests), 2)
+        self.assertEqual(fake.graphql_requests[0]["authorization"], "Bearer brokered-1")
 
     def test_activity_command(self):
         fake = FakeLinear([activity_ok("activity-5"), (200, {"data": {"agentSessionUpdate": {"success": True}}})])

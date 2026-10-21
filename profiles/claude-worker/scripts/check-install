@@ -13,15 +13,19 @@ run.
 It also checks that the config keys, cron jobs, and launchd services the setup
 runbook creates still match what it creates (the CONFIG, CRON, and SERVICES
 tables), that a cron job delivers only to a platform with a home channel in
-its profile, that the root home's check-install-alert wrapper matches the
+its profile and that its last run did not fail, naming the error with secrets
+masked, that the root home's cron wrappers match the
 repository, that the worker home's secrets.command is the worker helper
-whenever the root home has a secret source, and that each configured
-repository checkout exists and has origin/HEAD set, that the worker home passes
-through each FACTORY_MCP_* name a repository's mcp_servers references, that each MCP
-server the installed claude-session reports for a repository connects unless its mcp_left_out
-names it, and that the root home's
-upload broker socket answers a status request and reports a token present. That
-check sends only {"op": "status"}, never uploads, and prints no value. When any difference is
+whenever a proxy token is configured, that the worker's .env holds no secret
+only the gateway may hold, and that each configured repository checkout exists
+and has origin/HEAD set, and that the root home's broker socket answers a
+status request and reports the upload token, the Linear app credentials, the
+proxy token, and a configured Sentry token present. That check sends only
+{"op": "status"}, never uploads or asks for a token, and prints no value. It
+also checks that the Triage board exists and anchors its worktrees at the
+default repository, that the source checkout vendors the triage playbook that
+claude-session gives triage cards, and that the triage refs file is as fresh as
+the owned refs. When any difference is
 reported and the source checkout is not at origin/HEAD, the last line names
 that checkout. It gives the fast-forward command only when the checkout is
 behind, on the default branch, and clean. --ref turns the line off, because
@@ -52,15 +56,24 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+import factory_source
+
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
 OWNED_REFS = "owned-refs.json"
+TRIAGE_REFS = "triage-refs.json"
+TRIAGE_BOARD = "triage"
 LINEAR_ISSUE_FIELD = "data.id"
 LINEAR_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Deliver values that name no platform, so no home channel is needed.
 NON_PLATFORM_TARGETS = ("local", "origin", "all")
+# Statuses of a job's last run that are not a failure; None means the job has not run yet.
+HEALTHY_RUNS = (None, "ok", "delivery_queued")
+RUN_ERROR_LIMIT = 200
+SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE)
+TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
 ROOT_ALERT_SCRIPT = "check-install-alert"
-ROOT_ALERT_SOURCE = f"skills/setup-factory/scripts/{ROOT_ALERT_SCRIPT}"
+ROOT_WRAPPERS = (ROOT_ALERT_SCRIPT, "retry-failed-webhooks")
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -107,6 +120,10 @@ def unset() -> Want:
 def declared(what: str, *, besides: tuple = ()) -> Want:
     """A per-factory value from the runbook's inputs: any value counts, except an empty one or `besides`."""
     return Want(lambda live: live not in (None, "", *besides), what)
+
+
+def positive_int(what: str) -> Want:
+    return Want(lambda live: isinstance(live, int) and not isinstance(live, bool) and live > 0, what)
 
 
 def non_empty_list(what: str) -> Want:
@@ -166,16 +183,22 @@ CONFIG = (
         10, SETTINGS_KEY, BOTH, declared("set to the factory settings"),
         same_in_homes=True,
     ),
+    ConfigKey(
+        10, f"{SETTINGS_KEY}.triage.max_running", BOTH, positive_int("a positive limit on running triage cards"),
+        same_in_homes=True,
+    ),
     ConfigKey(10, "kanban.max_in_progress", (ROOT,), declared("set to the operator's card limit")),
     ConfigKey(10, "kanban.review_dispatch", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.auto_decompose", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.default_assignee", (ROOT,), unset()),
     ConfigKey(5, "terminal.timeout", (WORKER,), equal(400)),
+    ConfigKey(5, "terminal.env_passthrough", (WORKER,), Want(lambda live: not live, "empty")),
     ConfigKey(5, "platforms.factory_uploads.enabled", (ROOT,), equal(True)),
     ConfigKey(
         5, "platforms.factory_uploads.extra.repositories", (ROOT,),
         non_empty_list("a non-empty list of <owner>/<repo> names"),
     ),
+    ConfigKey(5, "plugins.entries.team.settings.skills_dir", (ROOT,), declared("set to the team skills directory")),
     ConfigKey(13, "streaming.enabled", (ROOT,), equal(True)),
     ConfigKey(13, "platforms.slack.extra.native_task_cards", (ROOT,), equal(True)),
 )
@@ -187,10 +210,13 @@ CRON = (
     CronJob(10, "refresh-gh-app-login", 30, equal("local")),
     CronJob(12, "refresh-checkouts", 60, equal("local")),
     CronJob(12, "refresh-owned-refs", 1, equal("local")),
+    CronJob(12, "reopen-conflicts", 5, equal("local")),
+    CronJob(12, "dispatch-triage", 1, equal("local")),
     CronJob(
         12, "check-install", 60, declared("the operator's chat platform", besides=("local",)),
         home=ROOT, script=ROOT_ALERT_SCRIPT,
     ),
+    CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
 )
 OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
 
@@ -253,7 +279,7 @@ def check_profile(commit: Commit, worker: Path) -> list:
 
 
 # Plugins that run in the gateway only. Their code lives in the root home and never in the worker's.
-ROOT_ONLY_PLUGINS = frozenset({"factory-uploads"})
+ROOT_ONLY_PLUGINS = frozenset({"factory-uploads", "team", "webhook-retry"})
 
 
 def check_plugins(commit: Commit, homes: list) -> list:
@@ -432,8 +458,8 @@ UPLOAD_SOCKET = "factory-uploads.sock"
 UPLOAD_STATUS_SECONDS = 5
 
 
-def check_upload_broker(root: Path) -> list:
-    """Ask the root home's upload broker for its status. Sends no upload and reports no value."""
+def check_upload_broker(root: Path, token_env: str, sentry_env: str = "") -> list:
+    """Ask the root home's broker for its status. Sends no upload, asks for no token, and reports no value."""
     path = root / UPLOAD_SOCKET
 
     def drift(detail: str) -> list:
@@ -458,26 +484,59 @@ def check_upload_broker(root: Path) -> list:
         return drift("did not answer a status request with JSON")
     if not isinstance(status, dict) or status.get("ok") is not True:
         return drift("did not answer a status request with ok")
+    drifts = []
     if status.get("token_present") is not True:
-        return drift("reports token_present false: the gateway holds no upload token")
-    return []
+        drifts += drift("reports token_present false: the gateway holds no upload token")
+    if status.get("linear_ready") is not True:
+        drifts += drift("reports linear_ready false: the gateway holds no Linear app credentials, so no worker reaches Linear")
+    if token_env and status.get("proxy_token_present") is not True:
+        drifts += drift(f"reports proxy_token_present false: the gateway holds no {token_env}, so no worker reaches the proxy")
+    if sentry_env and status.get("sentry_token_present") is not True:
+        drifts += drift(f"reports sentry_token_present false: the gateway holds no {sentry_env}, so every worker run is refused")
+    return drifts
 
 
-def check_worker_secrets(root: Path, worker: Path, hermes: str) -> list:
-    def enabled(value) -> bool:
-        return isinstance(value, dict) and value.get("enabled") is True
+GATEWAY_ONLY = {
+    "LINEAR_CLIENT_ID": 8, "LINEAR_CLIENT_SECRET": 8,
+    "FACTORY_INFISICAL_CLIENT_ID": 14, "FACTORY_INFISICAL_CLIENT_SECRET": 14,
+}
+SECRET_NAMES = "plugins/factory-secret-names/plugin.yaml"
+DECLARED_NAME = re.compile(r"^\s*-\s*name:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", re.MULTILINE)
 
+
+def token_variable(settings, key: str = "auth_token_env") -> str:
+    session = settings.get("claude_session") if isinstance(settings, dict) else None
+    return (session.get(key) or "") if isinstance(session, dict) else ""
+
+
+def check_worker_secrets(commit: Commit, worker: Path, hermes: str, settings) -> list:
+    token_env = token_variable(settings)
+    sentry_env = token_variable(settings, "sentry_token_env")
     live = config_value(worker, hermes, "secrets.command")
-    where = f"secrets.command in {worker}"
-    # The live command is never printed, since a tuned command could embed a secret.
-    if not enabled(config_value(root, hermes, "secrets.command")):
-        if enabled(live):
-            return [Drift("config", where, "is set while the root home has no secret source (part 14)")]
-        return []
+    enabled = isinstance(live, dict) and live.get("enabled") is True
     helper = f"python3 {worker}/scripts/worker-secrets"
-    if enabled(live) and live.get("command") == helper:
-        return []
-    return [Drift("config", where, f"is not the worker helper {helper} (part 14)")]
+    where = f"secrets.command in {worker}"
+    drifts = []
+    # The live command is never printed, since a tuned command could embed a secret.
+    if token_env and not (enabled and live.get("command") == helper):
+        drifts.append(Drift("config", where, f"is not the worker helper {helper} (part 5)"))
+    elif not token_env and enabled:
+        drifts.append(Drift("config", where, "is set, but a worker without a proxy token loads no secret (part 5)"))
+    held = {**GATEWAY_ONLY, **{name: 3 for name in (token_env, sentry_env) if name}}
+    for name, part in held.items():
+        if env_has(worker, name):
+            drifts.append(Drift(
+                "secret", f"{name} in {worker}/.env", f"is set, but the worker holds no factory secret; remove it (part {part})"
+            ))
+    files = commit.files(SECRET_NAMES)
+    declared = set(DECLARED_NAME.findall(commit.blob(files[SECRET_NAMES]).decode())) if SECRET_NAMES in files else set()
+    for key, name in (("auth_token_env", token_env), ("sentry_token_env", sentry_env)):
+        if name and name not in declared:
+            drifts.append(Drift(
+                "config", f"claude_session.{key} in {worker}",
+                f"names {name}, which {SECRET_NAMES} does not declare, so every process a home starts inherits it (part 3)",
+            ))
+    return drifts
 
 
 def cron_jobs(home: Path) -> list:
@@ -499,16 +558,63 @@ def cron_differences(job: CronJob, live: dict) -> list:
     return details
 
 
-def env_has(home: Path, name: str) -> bool:
-    """Whether `<home>/.env` sets `name` to a non-empty value. Values are never returned."""
+def env_file(home: Path) -> dict:
+    """The non-empty variables `<home>/.env` sets. Callers never print a value."""
     path = home / ".env"
-    if not path.is_file():
-        return False
-    for line in path.read_text().splitlines():
+    values = {}
+    for line in path.read_text().splitlines() if path.is_file() else ():
         key, sep, value = line.strip().removeprefix("export ").partition("=")
-        if sep and key.strip() == name and value.strip().strip("'\""):
-            return True
-    return False
+        if sep and value.strip().strip("'\""):
+            values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def env_has(home: Path, name: str) -> bool:
+    return name in env_file(home)
+
+
+def known_secrets(homes) -> list:
+    """Every value the homes' .env files set and every secret-named variable this process holds, longest first."""
+    values = {value for home in homes for value in env_file(home).values()}
+    values |= {value for name, value in os.environ.items() if SECRET_NAME.search(name)}
+    return sorted((value for value in values if len(value) >= 8), key=len, reverse=True)
+
+
+def redact(text: str, secrets: list) -> str:
+    for value in secrets:
+        text = text.replace(value, "[redacted]")
+    # A credential the process never held, such as a minted token, is masked by its shape.
+    return TOKEN_SHAPED.sub(
+        lambda m: "[redacted]" if re.search(r"\d", m[0]) and re.search(r"[A-Za-z]", m[0]) else m[0], text
+    )
+
+
+def error_summary(error: str) -> str:
+    """The error's first line, joined to the first output line when Hermes heads the script's output with
+    `stderr:` or `stdout:` under its `Script exited with code N` line."""
+    lines = [line.strip() for line in error.splitlines() if line.strip()]
+    if len(lines) > 2 and lines[1] in ("stderr:", "stdout:"):
+        return f"{lines[0]}: {lines[2]}"
+    return lines[0] if lines else ""
+
+
+def last_run_failure(job: CronJob, live: dict, secrets: list) -> list:
+    status = live.get("last_status")
+    if status in HEALTHY_RUNS:
+        return []
+    if status == "delivery_failed":
+        what, error = "last run's output was not delivered", live.get("last_delivery_error")
+    elif job.runs == ROOT_ALERT_SCRIPT:
+        # The alert job runs this check, so its failure is the previous run's report. Reporting it would fail this
+        # run as well, and one failure would repeat after the machine is clean.
+        return []
+    else:
+        what, error = "last run failed", live.get("last_error")
+    # Redacted before it is clipped, so a clip never leaves part of a secret unmasked.
+    summary = redact(error_summary(error or "") or str(status), secrets)
+    if len(summary) > RUN_ERROR_LIMIT:
+        summary = summary[:RUN_ERROR_LIMIT - 3] + "..."
+    return [f"{what}: {summary}"]
 
 
 def unresolved_deliveries(home: Path, live: dict, hermes: str) -> list:
@@ -530,22 +636,26 @@ def unresolved_deliveries(home: Path, live: dict, hermes: str) -> list:
     return details
 
 
-def check_root_alert_script(commit: Commit, root: Path) -> list:
-    if ROOT_ALERT_SOURCE not in commit.files(ROOT_ALERT_SOURCE):
-        return []
-    installed = root / "scripts" / ROOT_ALERT_SCRIPT
-    where = str(installed)
-    if not installed.is_file():
-        return [Drift("script", where, f"is missing; install it from {ROOT_ALERT_SOURCE} (part 12)")]
-    if installed.read_bytes() != commit.blob(commit.files(ROOT_ALERT_SOURCE)[ROOT_ALERT_SOURCE]):
-        return [Drift("script", where, f"differs from {commit.label} at {commit.short} (part 12)")]
-    return []
+def check_root_wrappers(commit: Commit, root: Path) -> list:
+    drifts = []
+    for name in ROOT_WRAPPERS:
+        source = f"skills/setup-factory/scripts/{name}"
+        if source not in commit.files(source):
+            continue
+        installed = root / "scripts" / name
+        where = str(installed)
+        if not installed.is_file():
+            drifts.append(Drift("script", where, f"is missing; install it from {source} (part 12)"))
+        elif installed.read_bytes() != commit.blob(commit.files(source)[source]):
+            drifts.append(Drift("script", where, f"differs from {commit.label} at {commit.short} (part 12)"))
+    return drifts
 
 
 def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
     homes = {ROOT: root, WORKER: worker}
     live_jobs = {name: cron_jobs(home) for name, home in homes.items()}
-    drifts = check_root_alert_script(commit, root)
+    drifts = check_root_wrappers(commit, root)
+    secrets = known_secrets(homes.values())
     for job in CRON:
         home = homes[job.home]
         where = f"{job.name} in {home}"
@@ -555,7 +665,9 @@ def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
         elif len(found) > 1:
             drifts.append(Drift("cron job", where, f"exists {len(found)} times (part {job.part})"))
         for live in found:
-            details = [*cron_differences(job, live), *unresolved_deliveries(home, live, hermes)]
+            details = [
+                *cron_differences(job, live), *unresolved_deliveries(home, live, hermes), *last_run_failure(job, live, secrets)
+            ]
             drifts.extend(Drift("cron job", where, f"{d} (part {job.part})") for d in details)
     owners = {job.name: job for job in CRON}
     for name, jobs in live_jobs.items():
@@ -606,16 +718,49 @@ def check_services(launchd_root: Path, launchctl: str) -> list:
 
 
 def check_owned_refs(root: Path) -> list:
-    path = root / OWNED_REFS
-    if not path.is_file():
-        return [Drift("owned refs", str(path), "is missing; create or run the refresh-owned-refs cron job (part 12)")]
-    age = time.time() - path.stat().st_mtime
-    if age > OWNED_REFS_MAX_AGE:
-        return [Drift(
-            "owned refs", str(path),
-            f"is {int(age // 60)} minutes old; the refresh-owned-refs cron job is not running (part 12)",
-        )]
+    drifts = []
+    for name in (OWNED_REFS, TRIAGE_REFS):
+        path = root / name
+        if not path.is_file():
+            drifts.append(Drift(
+                "owned refs", str(path), "is missing; create or run the refresh-owned-refs cron job (part 12)"
+            ))
+            continue
+        age = time.time() - path.stat().st_mtime
+        if age > OWNED_REFS_MAX_AGE:
+            drifts.append(Drift(
+                "owned refs", str(path),
+                f"is {int(age // 60)} minutes old; the refresh-owned-refs cron job is not running (part 12)",
+            ))
+    return drifts
+
+
+def check_triage_board(root: Path, hermes: str, settings) -> list:
+    proc = subprocess.run(
+        [hermes, "kanban", "boards", "list", "--json"], env={**os.environ, "HERMES_HOME": str(root)},
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise Refusal(f"hermes kanban boards list failed in {root}: {proc.stderr.strip()}")
+    board = next((b for b in json.loads(proc.stdout) if b.get("slug") == TRIAGE_BOARD), None)
+    if board is None:
+        return [Drift("kanban board", TRIAGE_BOARD, f"is missing in {root} (part 10)")]
+    repositories = settings.get("repositories") if isinstance(settings, dict) else None
+    default = next((r["path"] for r in repositories or [] if r.get("routing") == "default"), None)
+    if default and board.get("default_workdir") != default:
+        return [Drift("kanban board", TRIAGE_BOARD, f"default_workdir is not {default} (part 10)")]
     return []
+
+
+def check_triage_playbook(repo: Path) -> list:
+    # claude-session reads the playbook from the checkout's working tree, not from the compared commit.
+    if (repo / factory_source.TRIAGE_PLAYBOOK).is_file():
+        return []
+    return [Drift(
+        "triage playbook", repo,
+        f"has no {factory_source.TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage playbook; "
+        "update the checkout to a commit that vendors it (part 10)",
+    )]
 
 
 def check_source_checkout(commit: Commit) -> list:
@@ -672,6 +817,31 @@ def check_checkouts(settings) -> list:
     return drifts
 
 
+# The team plugin skips any other directory name, since Hermes refuses it as a skill name.
+TEAM_SKILL_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def check_team_skills(skills_dir, allow) -> list:
+    # An unset directory is check_config's to report.
+    if not skills_dir:
+        return []
+    root = Path(skills_dir)
+    if not root.is_dir():
+        return [Drift("team skills", str(root), "does not exist (part 5)")]
+    if allow is not None and not isinstance(allow, list):
+        return [Drift("team skills", "plugins.entries.team.settings.allow", "is not a list of skill names (part 5)")]
+    names = {
+        child.name for child in root.iterdir()
+        if TEAM_SKILL_NAME.match(child.name) and (child / "SKILL.md").is_file()
+    }
+    if not names:
+        return [Drift("team skills", str(root), "holds no <name>/SKILL.md (part 5)")]
+    return [
+        Drift("team skills", str(root), f"lacks the allowed skill {name} (part 5)")
+        for name in sorted(set(allow or []) - names)
+    ]
+
+
 def check_model_tiers(settings, worker: Path) -> list:
     # Missing or malformed settings are check_config's to report.
     session = settings.get("claude_session") if isinstance(settings, dict) else None
@@ -686,56 +856,6 @@ def check_model_tiers(settings, worker: Path) -> list:
     )]
 
 
-MCP_STATUS_TIMEOUT = 120
-
-
-def mcp_probe(worker: Path, full_name: str) -> dict | str:
-    """The installed claude-session's --mcp-status report for a repository, or the text of its failure."""
-    script = worker / "scripts" / "claude-session"
-    try:
-        proc = subprocess.run(
-            [sys.executable, str(script), "--mcp-status", "--repo", full_name],
-            env={**os.environ, "HERMES_HOME": str(worker)}, capture_output=True, text=True, timeout=MCP_STATUS_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return f"printed nothing within {MCP_STATUS_TIMEOUT} s"
-    try:
-        report = json.loads(proc.stdout)
-    except ValueError:
-        return f"exited {proc.returncode} without a report"
-    return report if proc.returncode == 0 else str(report.get("error"))
-
-
-def check_mcp_servers(settings, worker: Path, hermes: str) -> list:
-    # Missing or malformed settings are check_config's to report; a missing script is check_profile's.
-    if not isinstance(settings, dict):
-        return []
-    repositories = [r for r in settings.get("repositories") or [] if Path(r["path"]).is_dir()]
-    passed = config_value(worker, hermes, "terminal.env_passthrough") or []
-    drifts = []
-    for repository in repositories:
-        wanted = set(re.findall(r"\$\{(FACTORY_MCP_[A-Z0-9_]+)", json.dumps(repository.get("mcp_servers") or {})))
-        drifts.extend(
-            Drift("mcp", f"{name} in {worker}", f"is used by {repository['full_name']} but not in terminal.env_passthrough (part 10)")
-            for name in sorted(wanted - set(passed))
-        )
-    if not (worker / "scripts" / "claude-session").is_file():
-        return drifts
-    with concurrent.futures.ThreadPoolExecutor() as pool:
-        reports = list(pool.map(lambda r: mcp_probe(worker, r["full_name"]), repositories))
-    for repository, report in zip(repositories, reports):
-        full_name = repository["full_name"]
-        if isinstance(report, str):
-            drifts.append(Drift("mcp", full_name, f"cannot read the MCP server status: {report} (part 10)"))
-            continue
-        drifts.extend(
-            Drift("mcp", f"{server['name']} in {full_name}", f"is {server['status']}, not connected (part 10)")
-            for server in report["servers"]
-            if server["status"] != "connected" and server["name"] not in report["left_out"]
-        )
-    return drifts
-
-
 def homes() -> tuple:
     if not os.environ.get("HERMES_HOME"):
         raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
@@ -746,14 +866,10 @@ def homes() -> tuple:
 
 
 def default_repo(worker: Path) -> Path:
-    distribution = worker / "distribution.yaml"
-    if not distribution.is_file():
-        raise Refusal(f"{distribution} does not exist; pass --repo")
-    for line in distribution.read_text().splitlines():
-        match = re.match(r"^source:\s*['\"]?(.+?)['\"]?\s*$", line)
-        if match:
-            return Path(match.group(1)).parents[1]
-    raise Refusal(f"{distribution} has no source: line; pass --repo")
+    try:
+        return factory_source.checkout(worker)
+    except factory_source.SourceError as error:
+        raise Refusal(f"{error}; pass --repo") from None
 
 
 def resolve_commit(repo: Path, ref: str | None) -> Commit:
@@ -793,20 +909,26 @@ def main() -> int:
         commit = resolve_commit(repo, args.ref)
         hermes = find_hermes()
         hermes = os.path.abspath(hermes)
+        settings = config_value(worker, hermes, SETTINGS_KEY)
         drifts = [
             *check_profile(commit, worker),
             *check_plugins(commit, [root, worker]),
             *check_config({ROOT: root, WORKER: worker}, hermes),
-            *check_worker_secrets(root, worker, hermes),
-            *check_upload_broker(root),
+            *check_worker_secrets(commit, worker, hermes, settings),
+            *check_upload_broker(root, token_variable(settings), token_variable(settings, "sentry_token_env")),
             *check_cron(commit, root, worker, hermes),
             *check_routes(commit, root, hermes),
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
             *check_owned_refs(root),
-            *check_checkouts(config_value(worker, hermes, SETTINGS_KEY)),
-            *check_model_tiers(config_value(worker, hermes, SETTINGS_KEY), worker),
-            *check_mcp_servers(config_value(worker, hermes, SETTINGS_KEY), worker, hermes),
+            *check_triage_board(root, hermes, settings),
+            *check_triage_playbook(repo),
+            *check_checkouts(settings),
+            *check_team_skills(
+                config_value(root, hermes, "plugins.entries.team.settings.skills_dir"),
+                config_value(root, hermes, "plugins.entries.team.settings.allow"),
+            ),
+            *check_model_tiers(settings, worker),
         ]
         if sys.platform == "darwin":
             launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))

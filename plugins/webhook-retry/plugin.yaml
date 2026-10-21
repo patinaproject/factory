@@ -1,0 +1,8 @@
+manifest_version: 2
+name: webhook-retry
+version: "0.1.0"
+description: >-
+  Records each webhook delivery, queues it when its agent turn fails on a usage
+  limit, and lets the retry-failed-webhooks cron job rerun it once usage is
+  back, oldest first and one at a time. Runs in the root home only.
+provides_hooks: [pre_gateway_dispatch, api_request_error, on_session_end]

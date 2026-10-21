@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import atexit
 import json
 import os
 import plistlib
@@ -35,6 +36,10 @@ print(json.dumps({{{RATE_LIMIT_KEY!r}: 600, {ROUTE_KEY!r}: {ROUTE!r}}}))
 
 FAKE_HERMES = """#!/usr/bin/env python3
 import json, os, sys
+if sys.argv[1:4] == ["kanban", "boards", "list"]:
+    boards = os.path.join(os.environ["HERMES_HOME"], "installed-boards.json")
+    print(open(boards).read() if os.path.exists(boards) else "[]")
+    sys.exit()
 key = sys.argv[3]
 config = os.path.join(os.environ["HERMES_HOME"], "installed-config.json")
 if os.path.exists(config) and key in json.load(open(config)):
@@ -58,7 +63,16 @@ if target not in states:
 print("ai.example = {\\n\\tactive count = 1\\n\\tstate = " + states[target] + "\\n}")
 """
 
-SETTINGS = {"app_user_id": "u1", "repositories": []}
+TEAM_SKILLS = Path(tempfile.mkdtemp()).resolve()
+atexit.register(shutil.rmtree, TEAM_SKILLS, ignore_errors=True)
+(TEAM_SKILLS / "example-skill").mkdir()
+(TEAM_SKILLS / "example-skill" / "SKILL.md").write_text("---\nname: example-skill\n---\n")
+TEAM_KEY = "plugins.entries.team.settings.skills_dir"
+TEAM_ALLOW_KEY = "plugins.entries.team.settings.allow"
+
+SETTINGS = {"app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}}
+MAX_RUNNING_KEY = "plugins.entries.linear-agent-session.settings.triage.max_running"
+BOARDS = [{"slug": "default", "default_workdir": None}, {"slug": "triage", "default_workdir": None}]
 ROOT_CONFIG = {
     "model.provider": "claude-subscription-directsdk-experimental",
     "model.default": "opus",
@@ -66,6 +80,7 @@ ROOT_CONFIG = {
     "platforms.webhook.extra.host": "127.0.0.1",
     "platforms.webhook.extra.port": 8644,
     "plugins.entries.linear-agent-session.settings": SETTINGS,
+    MAX_RUNNING_KEY: 2,
     "kanban.max_in_progress": 4,
     "kanban.review_dispatch": False,
     "kanban.auto_decompose": False,
@@ -73,10 +88,11 @@ ROOT_CONFIG = {
     "platforms.slack.extra.native_task_cards": True,
     "platforms.factory_uploads.enabled": True,
     "platforms.factory_uploads.extra.repositories": ["example-org/example-repo"],
+    TEAM_KEY: str(TEAM_SKILLS),
 }
 WORKER_CONFIG = {
     **{key: ROOT_CONFIG[key] for key in (
-        "model.provider", "model.default", "plugins.entries.linear-agent-session.settings",
+        "model.provider", "model.default", "plugins.entries.linear-agent-session.settings", MAX_RUNNING_KEY,
     )},
     "terminal.timeout": 400,
 }
@@ -94,25 +110,39 @@ WORKER_JOBS = [
     cron_job("refresh-gh-app-login", 30),
     cron_job("refresh-checkouts", 60),
     cron_job("refresh-owned-refs", 1),
+    cron_job("reopen-conflicts", 5),
+    cron_job("dispatch-triage", 1),
 ]
 ALERT_SCRIPT = "check-install-alert"
-ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}]
+RETRY_SCRIPT = "retry-failed-webhooks"
+ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}, cron_job(RETRY_SCRIPT, 10, "slack")]
 ALERT_SOURCE = f"skills/setup-factory/scripts/{ALERT_SCRIPT}"
+RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
 check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(check_install)
 
+SECRET_NAMES = "plugin.yaml"
+SECRET_NAMES_MANIFEST = "kind: platform\noptional_env:\n  - name: LINEAR_CLIENT_SECRET\n  - name: CLAUDE_PROXY_TOKEN\n  - name: SENTRY_ACCESS_TOKEN\n"
+TRIAGE_PLAYBOOK = ".agents/skills/patina-mode/playbooks/triage.md"
 REPO_FILES = {
+    f"plugins/factory-secret-names/{SECRET_NAMES}": SECRET_NAMES_MANIFEST,
+    TRIAGE_PLAYBOOK: "playbook\n",
     "profiles/claude-worker/SOUL.md": "soul\n",
     "profiles/claude-worker/config.yaml": "model: repo\n",
     "profiles/claude-worker/scripts/x": "#!/bin/sh\n",
     "plugins/p1/__init__.py": "plugin\n",
     "plugins/p1/tests/test_a.py": "test\n",
     "plugins/factory-uploads/__init__.py": "uploads\n",
+    "plugins/team/__init__.py": "team\n",
+    "plugins/webhook-retry/__init__.py": "retry\n",
     "templates/render.py": RENDER,
     ALERT_SOURCE: "#!/usr/bin/env python3\nalert\n",
+    RETRY_SOURCE: "#!/usr/bin/env python3\nretry\n",
 }
 
 
@@ -148,7 +178,8 @@ class FakeBroker:
         self.server.close()
 
 
-OK_STATUS = json.dumps({"ok": True, "token_present": True, "last_state": None}).encode() + b"\n"
+STATUS = {"ok": True, "token_present": True, "linear_ready": True, "proxy_token_present": True, "last_state": None}
+OK_STATUS = json.dumps(STATUS).encode() + b"\n"
 
 
 class CheckInstallTest(unittest.TestCase):
@@ -175,7 +206,10 @@ class CheckInstallTest(unittest.TestCase):
         self.worker = self.root / "profiles" / "claude-worker"
         for home in (self.root, self.worker):
             self.install(home, "plugins/p1/__init__.py", "plugin\n")
+            self.install(home, f"plugins/factory-secret-names/{SECRET_NAMES}", SECRET_NAMES_MANIFEST)
         self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
+        self.install(self.root, "plugins/team/__init__.py", "team\n")
+        self.install(self.root, "plugins/webhook-retry/__init__.py", "retry\n")
         self.install(self.worker, "SOUL.md", "soul\n")
         self.install(self.worker, "scripts/x", "#!/bin/sh\n")
         self.install(self.worker, "config.yaml", "model: local\n")
@@ -186,9 +220,12 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, f"installed-config/{RATE_LIMIT_KEY}.json", "600")
         self.install(self.root, "logs/agent.log", "")
         self.install(self.root, f"scripts/{ALERT_SCRIPT}", REPO_FILES[ALERT_SOURCE])
+        self.install(self.root, f"scripts/{RETRY_SCRIPT}", REPO_FILES[RETRY_SOURCE])
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C0123\n")
         self.owned_refs = self.root / "owned-refs.json"
         self.install(self.root, "owned-refs.json", f'["goodyear/abc-1-fix", "{LINEAR_ID}"]\n')
+        self.install(self.root, "triage-refs.json", "[]\n")
+        self.boards(BOARDS)
 
         self.issuer = self.tmp / "issuer"
         self.discovery(["authorization_code_with_pkce", "refresh_tokens"])
@@ -208,6 +245,9 @@ class CheckInstallTest(unittest.TestCase):
     def install(self, home: Path, path: str, text: str) -> None:
         (home / path).parent.mkdir(parents=True, exist_ok=True)
         (home / path).write_text(text)
+
+    def boards(self, boards: list) -> None:
+        self.install(self.root, "installed-boards.json", json.dumps(boards))
 
     def config(self, home: Path, config: dict) -> None:
         self.install(home, "installed-config.json", json.dumps(config))
@@ -260,6 +300,16 @@ class CheckInstallTest(unittest.TestCase):
         )
         shutil.rmtree(self.root / "plugins" / "factory-uploads")
         self.assertEqual(self.check(), (1, f"plugin factory-uploads in {self.root}: not installed\n"))
+
+    def test_the_team_plugin_is_root_only(self) -> None:
+        shutil.rmtree(self.root / "plugins" / "team")
+        self.assertEqual(self.check(), (1, f"plugin team in {self.root}: not installed\n"))
+
+        self.install(self.root, "plugins/team/__init__.py", "team\n")
+        self.install(self.worker, "plugins/team/__init__.py", "team\n")
+        self.assertEqual(
+            self.check(), (1, f"plugin team in {self.worker}: installed, but it runs only in the root home\n")
+        )
 
     def test_a_root_only_plugin_installed_in_the_worker_home_is_reported(self) -> None:
         self.install(self.worker, "plugins/factory-uploads/__init__.py", "uploads\n")
@@ -450,7 +500,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_a_token(self) -> None:
-        self.uploads.reply = json.dumps({"ok": True, "token_present": False}).encode() + b"\n"
+        self.uploads.reply = json.dumps({**STATUS, "token_present": False}).encode() + b"\n"
 
         self.assertEqual(
             self.check(),
@@ -458,6 +508,49 @@ class CheckInstallTest(unittest.TestCase):
                 1,
                 f"upload broker {self.root}/factory-uploads.sock: "
                 "reports token_present false: the gateway holds no upload token (part 5)\n",
+            ),
+        )
+
+    def test_broker_without_linear_credentials_leaves_every_worker_without_linear(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "linear_ready": False}).encode() + b"\n"
+
+        self.assertEqual(
+            self.check(),
+            (
+                1,
+                f"upload broker {self.root}/factory-uploads.sock: reports linear_ready false: the gateway holds no "
+                "Linear app credentials, so no worker reaches Linear (part 5)\n",
+            ),
+        )
+
+    def test_broker_without_the_proxy_token_matters_only_when_one_is_configured(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "proxy_token_present": False}).encode() + b"\n"
+        self.assertEqual(self.check(), (0, ""))
+
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
+
+        self.assertEqual(
+            self.check(),
+            (
+                1,
+                f"upload broker {self.root}/factory-uploads.sock: reports proxy_token_present false: the gateway "
+                "holds no CLAUDE_PROXY_TOKEN, so no worker reaches the proxy (part 5)\n",
+            ),
+        )
+
+    def test_broker_without_the_sentry_token_matters_only_when_one_is_configured(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "sentry_token_present": False}).encode() + b"\n"
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
+        self.assertEqual(self.check(), (0, ""))
+
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), "SENTRY_ACCESS_TOKEN")
+
+        self.assertEqual(
+            self.check(),
+            (
+                1,
+                f"upload broker {self.root}/factory-uploads.sock: reports sentry_token_present false: the gateway "
+                "holds no SENTRY_ACCESS_TOKEN, so every worker run is refused (part 5)\n",
             ),
         )
 
@@ -531,65 +624,126 @@ class CheckInstallTest(unittest.TestCase):
                 "(part 10)\n"),
         )
 
-    def secrets(self, root: dict | None, worker: dict | None) -> None:
-        self.config(self.root, {**ROOT_CONFIG, **({"secrets.command": root} if root else {})})
-        self.config(self.worker, {**WORKER_CONFIG, **({"secrets.command": worker} if worker else {})})
+    def proxy(self, token_env: str, worker_command: dict | None = None, sentry_env: str = "") -> None:
+        settings = {**SETTINGS, "claude_session": {"auth_token_env": token_env, "sentry_token_env": sentry_env}}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        worker = {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings}
+        self.config(self.worker, {**worker, **({"secrets.command": worker_command} if worker_command else {})})
 
-    def test_worker_secrets_helper_behind_a_root_secret_source_is_silent(self) -> None:
-        self.secrets(
-            {"enabled": True, "command": f"{self.root}/bin/factory-secrets"},
-            {"enabled": True, "command": f"python3 {self.worker}/scripts/worker-secrets"},
-        )
+    def helper(self) -> dict:
+        return {"enabled": True, "command": f"python3 {self.worker}/scripts/worker-secrets"}
+
+    def test_worker_that_loads_its_proxy_token_through_the_helper_is_silent(self) -> None:
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
 
         self.assertEqual(self.check(), (0, ""))
 
-    def test_worker_secrets_command_that_is_not_the_worker_helper(self) -> None:
+    def test_worker_with_a_proxy_token_and_another_secret_source(self) -> None:
         drift = (
             f"config secrets.command in {self.worker}: "
-            f"is not the worker helper python3 {self.worker}/scripts/worker-secrets (part 14)\n"
+            f"is not the worker helper python3 {self.worker}/scripts/worker-secrets (part 5)\n"
         )
-        root = {"enabled": True, "command": f"{self.root}/bin/factory-secrets"}
         for worker in (
-            root,
+            {"enabled": True, "command": f"{self.root}/bin/factory-secrets"},
             {"enabled": True, "command": "env TOKEN=s3cr3t-value sh -c helper"},
-            {"enabled": False, "command": f"python3 {self.worker}/scripts/worker-secrets"},
+            {**self.helper(), "enabled": False},
             None,
         ):
             with self.subTest(worker=worker):
-                self.secrets(root, worker)
+                self.proxy("CLAUDE_PROXY_TOKEN", worker)
 
                 code, out = self.check()
 
                 self.assertEqual((code, out), (1, drift))
                 self.assertNotIn("s3cr3t-value", out)
 
-    def test_worker_secret_source_without_a_root_secret_source(self) -> None:
-        worker = {"enabled": True, "command": "env TOKEN=s3cr3t-value sh -c helper"}
-        for root in (None, {"enabled": False, "command": f"{self.root}/bin/factory-secrets"}):
-            with self.subTest(root=root):
-                self.secrets(root, worker)
+    def test_worker_without_a_proxy_token_loads_no_secret(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "secrets.command": {"enabled": True, "command": "s3cr3t-value"}})
 
-                code, out = self.check()
+        code, out = self.check()
 
-                self.assertEqual(
-                    (code, out),
-                    (1, f"config secrets.command in {self.worker}: is set while the root home has no secret source (part 14)\n"),
-                )
-                self.assertNotIn("s3cr3t-value", out)
+        self.assertEqual(
+            (code, out),
+            (1, f"config secrets.command in {self.worker}: is set, but a worker without a proxy token loads no secret (part 5)\n"),
+        )
+        self.assertNotIn("s3cr3t-value", out)
 
-    def test_worker_secret_source_disabled_with_the_root_one_is_silent(self) -> None:
-        self.secrets({"enabled": False, "command": "x"}, {"enabled": False, "command": "y"})
+    def test_worker_secret_source_disabled_without_a_proxy_token_is_silent(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "secrets.command": {"enabled": False, "command": "y"}})
 
         self.assertEqual(self.check(), (0, ""))
 
+    def test_secrets_only_the_gateway_holds_are_reported_in_the_worker_env_by_name_only(self) -> None:
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
+        self.install(self.worker, ".env", "\n".join([
+            "GH_CONFIG_DIR=/gh", "LINEAR_CLIENT_ID=s3cr3t-1", "export LINEAR_CLIENT_SECRET='s3cr3t-2'",
+            "FACTORY_INFISICAL_CLIENT_ID=s3cr3t-3", "FACTORY_INFISICAL_CLIENT_SECRET=s3cr3t-4",
+            "CLAUDE_PROXY_TOKEN=s3cr3t-5", "",
+        ]))
+
+        code, out = self.check()
+
+        held = "is set, but the worker holds no factory secret; remove it"
+        self.assertEqual((code, out), (1, "".join([
+            f"secret LINEAR_CLIENT_ID in {self.worker}/.env: {held} (part 8)\n",
+            f"secret LINEAR_CLIENT_SECRET in {self.worker}/.env: {held} (part 8)\n",
+            f"secret FACTORY_INFISICAL_CLIENT_ID in {self.worker}/.env: {held} (part 14)\n",
+            f"secret FACTORY_INFISICAL_CLIENT_SECRET in {self.worker}/.env: {held} (part 14)\n",
+            f"secret CLAUDE_PROXY_TOKEN in {self.worker}/.env: {held} (part 3)\n",
+        ])))
+        self.assertNotIn("s3cr3t", out)
+
+    def test_a_sentry_token_in_the_worker_env_is_reported_by_name_only(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "sentry_token_present": True}).encode() + b"\n"
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), "SENTRY_ACCESS_TOKEN")
+        self.install(self.worker, ".env", "SENTRY_ACCESS_TOKEN=s3cr3t-6\n")
+
+        code, out = self.check()
+
+        self.assertEqual((code, out), (
+            1,
+            f"secret SENTRY_ACCESS_TOKEN in {self.worker}/.env: is set, but the worker holds no factory secret; "
+            "remove it (part 3)\n",
+        ))
+        self.assertNotIn("s3cr3t", out)
+
+    def test_a_sentry_token_variable_hermes_would_pass_to_every_process(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "sentry_token_present": True}).encode() + b"\n"
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), "OTHER_SENTRY_TOKEN")
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config claude_session.sentry_token_env in {self.worker}: names OTHER_SENTRY_TOKEN, which "
+                "plugins/factory-secret-names/plugin.yaml does not declare, so every process a home starts "
+                "inherits it (part 3)\n"),
+        )
+
+    def test_a_proxy_token_variable_hermes_would_pass_to_every_process(self) -> None:
+        self.proxy("OTHER_PROXY_TOKEN", self.helper())
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config claude_session.auth_token_env in {self.worker}: names OTHER_PROXY_TOKEN, which "
+                "plugins/factory-secret-names/plugin.yaml does not declare, so every process a home starts "
+                "inherits it (part 3)\n"),
+        )
+
+    def test_worker_that_passes_variables_to_its_commands(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "terminal.env_passthrough": ["LINEAR_CLIENT_SECRET"]})
+
+        self.assertEqual(
+            self.check(), (1, f"config terminal.env_passthrough in {self.worker}: is not empty (part 5)\n")
+        )
+
     def test_missing_and_duplicated_cron_jobs(self) -> None:
-        self.cron(self.worker, [WORKER_JOBS[0], WORKER_JOBS[2]])
+        self.cron(self.worker, [job for job in WORKER_JOBS if job["name"] != "refresh-checkouts"])
         self.cron(self.root, [*ROOT_JOBS, *ROOT_JOBS])
 
         self.assertEqual(
             self.check(),
             (1, f"cron job refresh-checkouts in {self.worker}: is missing (part 12)\n"
-                f"cron job check-install in {self.root}: exists 2 times (part 12)\n"),
+                f"cron job check-install in {self.root}: exists 2 times (part 12)\n"
+                f"cron job {RETRY_SCRIPT} in {self.root}: exists 2 times (part 12)\n"),
         )
 
     def test_cron_job_changed_by_hand(self) -> None:
@@ -597,8 +751,10 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("refresh-gh-app-login", 30, enabled=False),
             cron_job("refresh-checkouts", 15, no_agent=False),
             cron_job("refresh-owned-refs", 1),
+            cron_job("reopen-conflicts", 5),
+            cron_job("dispatch-triage", 1),
         ])
-        self.cron(self.root, [{**cron_job("check-install", 60, "local"), "script": ALERT_SCRIPT}])
+        self.cron(self.root, [{**cron_job("check-install", 60, "local"), "script": ALERT_SCRIPT}, ROOT_JOBS[1]])
 
         self.assertEqual(
             self.check(),
@@ -620,6 +776,70 @@ class CheckInstallTest(unittest.TestCase):
                 f"cron job nightly-cleanup in {self.worker}: is not a job the setup runbook creates\n"),
         )
 
+    def test_failed_last_run_names_its_error_until_a_run_succeeds(self) -> None:
+        error = (
+            "Script exited with code 1\nstderr:\nrefresh-owned-refs: hermes kanban --board triage list failed: "
+            "kanban: board 'triage' does not exist.\nsecond line"
+        )
+        failed = cron_job("refresh-owned-refs", 1, last_status="error", last_error=error)
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-owned-refs in {self.worker}: last run failed: Script exited with code 1: "
+                "refresh-owned-refs: hermes kanban --board triage list failed: kanban: board 'triage' does not "
+                "exist. (part 12)\n"),
+        )
+
+        recovered = {**failed, "last_status": "ok", "last_error": None,
+                     "last_failure": {"at": "2026-10-17T22:31:26+07:00", "detail": error}}
+        self.cron(self.worker, [recovered if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_failed_last_run_masks_secrets_in_its_error(self) -> None:
+        self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C1\nSLACK_BOT_TOKEN=xoxb-short\n")
+        error = "Script exited with code 1\nstdout:\nrejected xoxb-short and ghs_16C7e42F292c6912E7710c838347Ae178B4a"
+        failed = cron_job("reopen-conflicts", 5, last_status="error", last_error=error)
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        code, out = self.check()
+
+        self.assertEqual(
+            (code, out),
+            (1, f"cron job reopen-conflicts in {self.worker}: last run failed: Script exited with code 1: "
+                "rejected [redacted] and [redacted] (part 12)\n"),
+        )
+
+    def test_failed_check_install_run_does_not_fail_a_clean_machine(self) -> None:
+        error = (
+            "Script exited with code 1\nstderr:\nprofile claude-worker: scripts/claude-session differs from main "
+            "at c02dda9 (part 12)"
+        )
+        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}, *ROOT_JOBS[1:]])
+
+        self.assertEqual(self.check(), (0, ""))
+
+        failed = cron_job("refresh-checkouts", 60, last_status="error", last_error="Script exited with code 1")
+        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-checkouts in {self.worker}: last run failed: Script exited with code 1 "
+                "(part 12)\n"),
+        )
+
+    def test_undelivered_last_run_names_its_delivery_error(self) -> None:
+        undelivered = {**ROOT_JOBS[0], "last_status": "delivery_failed", "last_error": None,
+                       "last_delivery_error": "slack: channel_not_found\nmore"}
+        self.cron(self.root, [undelivered, *ROOT_JOBS[1:]])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job check-install in {self.root}: last run's output was not delivered: "
+                "slack: channel_not_found (part 12)\n"),
+        )
+
     def test_check_install_job_left_in_the_worker_profile(self) -> None:
         self.cron(self.worker, [*WORKER_JOBS, cron_job("check-install", 60, "slack")])
 
@@ -634,6 +854,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job check-install in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"
+                f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -643,6 +865,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job check-install in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"
+                f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -654,7 +878,7 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_explicit_and_local_delivery_targets_need_no_home_channel(self) -> None:
         (self.root / ".env").unlink()
-        self.cron(self.root, [{**cron_job("check-install", 60, "slack:C0123"), "script": ALERT_SCRIPT}])
+        self.cron(self.root, [{**cron_job("check-install", 60, "slack:C0123"), "script": ALERT_SCRIPT}, cron_job(RETRY_SCRIPT, 10, "slack:C0123")])
 
         self.assertEqual(self.check(), (0, ""))
 
@@ -669,6 +893,40 @@ class CheckInstallTest(unittest.TestCase):
             (changed, missing),
             ((1, f"script {script}: differs from main at {self.sha} (part 12)\n"),
              (1, f"script {script}: is missing; install it from {ALERT_SOURCE} (part 12)\n")),
+        )
+
+    def test_retry_cron_job_missing_or_changed(self) -> None:
+        self.cron(self.root, ROOT_JOBS[:1])
+        missing = self.check()
+        self.cron(self.root, [ROOT_JOBS[0], cron_job(RETRY_SCRIPT, 30, "slack", enabled=False)])
+        changed = self.check()
+
+        self.assertEqual(
+            (missing, changed),
+            ((1, f"cron job {RETRY_SCRIPT} in {self.root}: is missing (part 12)\n"),
+             (1, f"cron job {RETRY_SCRIPT} in {self.root}: is disabled (part 12)\n"
+                 f"cron job {RETRY_SCRIPT} in {self.root}: runs every 30m, not every 10m (part 12)\n")),
+        )
+
+    def test_retry_wrapper_missing_or_changed(self) -> None:
+        script = self.root / "scripts" / RETRY_SCRIPT
+        script.write_text("old\n")
+        changed = self.check()
+        script.unlink()
+        missing = self.check()
+
+        self.assertEqual(
+            (changed, missing),
+            ((1, f"script {script}: differs from main at {self.sha} (part 12)\n"),
+             (1, f"script {script}: is missing; install it from {RETRY_SOURCE} (part 12)\n")),
+        )
+
+    def test_webhook_retry_installed_in_the_worker_home_is_reported(self) -> None:
+        self.install(self.worker, "plugins/webhook-retry/__init__.py", "retry\n")
+
+        self.assertEqual(
+            self.check(),
+            (1, f"plugin webhook-retry in {self.worker}: installed, but it runs only in the root home\n"),
         )
 
     def test_missing_owned_refs_file(self) -> None:
@@ -696,6 +954,77 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (0, ""))
 
+    def test_missing_or_stale_triage_refs_file(self) -> None:
+        triage_refs = self.root / "triage-refs.json"
+        stale = time.time() - 600
+        os.utime(triage_refs, (stale, stale))
+
+        self.assertEqual(
+            self.check(),
+            (1, f"owned refs {triage_refs}: is 10 minutes old; the refresh-owned-refs cron job is not running (part 12)\n"),
+        )
+        triage_refs.unlink()
+
+        self.assertEqual(
+            self.check(),
+            (1, f"owned refs {triage_refs}: is missing; create or run the refresh-owned-refs cron job (part 12)\n"),
+        )
+
+    def test_missing_triage_board(self) -> None:
+        self.boards(BOARDS[:1])
+
+        self.assertEqual(self.check(), (1, f"kanban board triage: is missing in {self.root} (part 10)\n"))
+
+    def default_repository(self) -> Path:
+        checkout = self.tmp / "app"
+        git(self.tmp, "init", "-q", str(checkout))
+        git(checkout, "commit", "-q", "--allow-empty", "-m", "init")
+        git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        settings = {**SETTINGS, "repositories": [{"full_name": "org/app", "path": str(checkout), "routing": "default"}]}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        return checkout
+
+    def test_triage_board_must_anchor_worktrees_at_the_default_repository(self) -> None:
+        checkout = self.default_repository()
+
+        self.assertEqual(self.check(), (1, f"kanban board triage: default_workdir is not {checkout} (part 10)\n"))
+        self.boards([BOARDS[0], {"slug": "triage", "default_workdir": str(checkout)}])
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_factory_checkout_without_the_triage_playbook(self) -> None:
+        (self.repo / TRIAGE_PLAYBOOK).unlink()
+
+        self.assertEqual(self.check("--no-fetch"), (
+            1,
+            f"triage playbook {self.repo}: has no {TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage "
+            "playbook; update the checkout to a commit that vendors it (part 10)\n",
+        ))
+
+    def test_triage_cap_that_is_unset_or_not_positive(self) -> None:
+        for value in (None, 0, -1, "2", True):
+            with self.subTest(value=value):
+                root = {k: v for k, v in ROOT_CONFIG.items() if k != MAX_RUNNING_KEY}
+                worker = {k: v for k, v in WORKER_CONFIG.items() if k != MAX_RUNNING_KEY}
+                if value is not None:
+                    root[MAX_RUNNING_KEY] = worker[MAX_RUNNING_KEY] = value
+                self.config(self.root, root)
+                self.config(self.worker, worker)
+
+                self.assertEqual(self.check(), (1, "".join(
+                    f"config {MAX_RUNNING_KEY} in {home}: is not a positive limit on running triage cards (part 10)\n"
+                    for home in (self.root, self.worker)
+                )))
+
+    def test_triage_cap_that_differs_between_homes(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, MAX_RUNNING_KEY: 3})
+
+        self.assertEqual(self.check(), (1, (
+            f"config {MAX_RUNNING_KEY}: differs between {self.root} and {self.worker} (part 10)\n"
+        )))
+
     def test_stale_owned_refs_file(self) -> None:
         stale = time.time() - 600
         os.utime(self.owned_refs, (stale, stale))
@@ -709,53 +1038,6 @@ class CheckInstallTest(unittest.TestCase):
         settings = {**SETTINGS, "repositories": [{"full_name": f"org/{p.name}", "path": str(p)} for p in paths]}
         self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
         self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
-
-    def mcp_repository(self, report: dict | str, code: int = 0, **fields) -> Path:
-        """One repository whose installed claude-session answers --mcp-status with `report`."""
-        checkout = self.checkout()
-        settings = {**SETTINGS, "repositories": [{"full_name": "org/checkout", "path": str(checkout), **fields}]}
-        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
-        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
-        self.install(self.worker, "scripts/claude-session", (
-            "import json, sys\n"
-            f"assert sys.argv[1:] == ['--mcp-status', '--repo', 'org/checkout'], sys.argv\n"
-            f"print({json.dumps(json.dumps(report))})\nsys.exit({code})\n"
-        ))
-        return checkout
-
-    def test_connected_and_left_out_mcp_servers_are_silent(self) -> None:
-        self.mcp_repository({"repo": "org/checkout", "left_out": {"sentry": "no service account"}, "servers": [
-            {"name": "linear", "status": "connected"}, {"name": "sentry", "status": "needs-auth"},
-        ]})
-
-        self.assertEqual(self.check(), (0, ""))
-
-    def test_an_mcp_server_that_is_not_connected_is_reported(self) -> None:
-        self.mcp_repository({"repo": "org/checkout", "left_out": {}, "servers": [
-            {"name": "linear", "status": "connected"}, {"name": "notion", "status": "needs-auth"},
-        ]})
-
-        self.assertEqual(self.check(), (1, "mcp notion in org/checkout: is needs-auth, not connected (part 10)\n"))
-
-    def test_a_failed_mcp_probe_is_reported_with_its_error(self) -> None:
-        self.mcp_repository({"error": "mcp_servers names FACTORY_MCP_X, which is not set"}, code=2)
-
-        self.assertEqual(self.check(), (1, (
-            "mcp org/checkout: cannot read the MCP server status: "
-            "mcp_servers names FACTORY_MCP_X, which is not set (part 10)\n"
-        )))
-
-    def test_an_mcp_secret_missing_from_the_env_passthrough_is_reported(self) -> None:
-        server = {"headers": {"Authorization": "Bearer ${FACTORY_MCP_A:-x}", "X": "${FACTORY_MCP_B}"}}
-        self.mcp_repository({"repo": "org/checkout", "left_out": {}, "servers": []}, mcp_servers={"notion": server})
-        self.config(self.worker, {
-            **json.loads((self.worker / "installed-config.json").read_text()),
-            "terminal.env_passthrough": ["FACTORY_MCP_A"],
-        })
-
-        self.assertEqual(self.check(), (1, (
-            f"mcp FACTORY_MCP_B in {self.worker}: is used by org/checkout but not in terminal.env_passthrough (part 10)\n"
-        )))
 
     def claude_session(self, **fields) -> None:
         settings = {**SETTINGS, "claude_session": fields}
@@ -815,6 +1097,58 @@ class CheckInstallTest(unittest.TestCase):
         self.repositories(self.checkout(), missing)
 
         self.assertEqual(self.check(), (1, f"checkout {missing}: does not exist (part 10)\n"))
+
+    def test_team_skills_directory_that_does_not_exist(self) -> None:
+        missing = self.tmp / "missing"
+        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(missing)})
+
+        self.assertEqual(self.check(), (1, f"team skills {missing}: does not exist (part 5)\n"))
+
+    def test_team_skills_directory_with_no_skill(self) -> None:
+        (self.tmp / "skills" / "not-a-skill").mkdir(parents=True)
+        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(self.tmp / "skills")})
+
+        self.assertEqual(self.check(), (1, f"team skills {self.tmp}/skills: holds no <name>/SKILL.md (part 5)\n"))
+
+    def test_team_skills_allow_naming_a_skill_the_directory_lacks(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: ["example-skill", "ghost", "alpha"]})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"team skills {TEAM_SKILLS}: lacks the allowed skill alpha (part 5)\n"
+                f"team skills {TEAM_SKILLS}: lacks the allowed skill ghost (part 5)\n"),
+        )
+
+    def test_team_skills_allow_that_is_not_a_list(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: "example-skill"})
+
+        self.assertEqual(
+            self.check(),
+            (1, "team skills plugins.entries.team.settings.allow: is not a list of skill names (part 5)\n"),
+        )
+
+    def test_team_skills_directory_holding_only_an_invalid_name(self) -> None:
+        skills = self.tmp / "skills"
+        (skills / "bad.name").mkdir(parents=True)
+        (skills / "bad.name" / "SKILL.md").write_text("---\nname: bad.name\n---\n")
+        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(skills)})
+
+        self.assertEqual(self.check(), (1, f"team skills {skills}: holds no <name>/SKILL.md (part 5)\n"))
+
+    def test_team_skills_with_a_matching_allow_is_silent(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: ["example-skill"]})
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_unset_team_skills_directory_is_reported_once_by_the_config_row(self) -> None:
+        config = dict(ROOT_CONFIG)
+        del config[TEAM_KEY]
+        self.config(self.root, config)
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config {TEAM_KEY} in {self.root}: is not set to the team skills directory (part 5)\n"),
+        )
 
     def test_a_merge_after_the_last_fetch_is_seen(self) -> None:
         seed = self.tmp / "seed"

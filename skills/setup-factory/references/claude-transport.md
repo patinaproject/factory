@@ -17,7 +17,9 @@ Configure the transport only through these settings in
 | `base_url` | Sets `ANTHROPIC_BASE_URL` |
 | `model` | Passes `--model` and sets `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_OPUS_MODEL`. The main agent runs on it. Any tier without a `tier_models` entry, and the subagent default, also use it |
 | `tier_models` | Optional map from `sonnet`, `haiku`, and `fable` to model ids the endpoint serves. Each sets that `ANTHROPIC_DEFAULT_<TIER>_MODEL`. When `sonnet` is set, `CLAUDE_CODE_SUBAGENT_MODEL` is the alias `sonnet`, so a subagent that names no model runs on the Sonnet model and an explicit `opus` still runs on `model`. Any other key or a non-string value refuses the run |
-| `auth_token_env` | Names a variable in `<worker>/.env`. `claude-session` copies its value into `ANTHROPIC_AUTH_TOKEN` |
+| `auth_token_env` | Names the variable that holds the proxy's token, `CLAUDE_PROXY_TOKEN`. Only the gateway holds its value. `claude-session` sets Claude Code's `apiKeyHelper` to `<worker>/scripts/proxy-token`, which asks the gateway's broker for the token. Claude Code keeps it in memory and sends it as the `Authorization` and `x-api-key` headers, so neither Claude Code's environment nor any process it starts holds it |
+| `sentry_token_env` | Optional. Names the Sentry token variable, `SENTRY_ACCESS_TOKEN`, for the run's read-only `sentry` MCP server. Only the gateway holds its value. The run's `sentry` server gets it through a `headersHelper`, `<worker>/scripts/sentry-headers`, which asks the broker for it. See [Sentry access](sentry.md) |
+| `disabled_mcp_servers` | Optional list of repository MCP server names. Sets `disabledMcpjsonServers` |
 
 `claude-session` writes these into a per-run `0600` file and passes it with
 `--settings`. Claude Code lets an `env` block in the user's
@@ -55,9 +57,12 @@ When the operator uses a proxy, all of these must hold:
   `curl -s http://127.0.0.1:<proxy port>/v1/models -H "x-api-key: <token or placeholder>"`.
 - The proxy listens only on `127.0.0.1`. If it has a management API, that API
   does not accept remote connections.
-- If the proxy requires a token, `env_has <worker>/.env <token variable>`
-  prints `1`, and `auth_token_env` holds the variable's name. The name does not
-  start with `ANTHROPIC_`.
+- If the proxy requires a token, `auth_token_env` is `CLAUDE_PROXY_TOKEN`, and
+  `env_has <home>/.env CLAUDE_PROXY_TOKEN` prints `1` or the Infisical folder
+  holds it. `env_has <worker>/.env CLAUDE_PROXY_TOKEN` prints `0`: the worker
+  gets the token from the gateway, as part 5 of the skill sets up. The
+  `factory-secret-names` plugin declares only that name, so Hermes strips it
+  from every process a home starts. `check-install` reports any other name.
 
 ## Install the proxy
 
@@ -74,9 +79,9 @@ When the operator uses a proxy, all of these must hold:
    Hermes' `config.yaml`, where it overrides `claude_session` and stops the
    DirectSDK provider.
 5. If the proxy issues a client token, store it with `env_set` in
-   `<worker>/.env` under a name such as `CLAUDE_PROXY_TOKEN`. When the
-   Infisical folder already exists, store it there with `infisical_set`
-   instead.
+   `<home>/.env` under the name `CLAUDE_PROXY_TOKEN`. When the Infisical
+   folder already exists, store it there with `infisical_set` instead. Never
+   store it in `<worker>/.env`.
 6. If the proxy has a management UI, record its paths. The tunnel routes them
    to the proxy behind Access in
    [`cloudflare-sst.md`](cloudflare-sst.md).

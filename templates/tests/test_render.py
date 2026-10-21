@@ -144,6 +144,21 @@ LINEAR_FILTERS = [
                     {"field": "data.id", "in_file": "owned-refs.json"},
                 ]
             },
+            {
+                "all": [
+                    {"field": "data.state.type", "equals": "triage"},
+                    {"any": [{"field": "action", "equals": "create"}, {"field": "updatedFrom.stateId", "exists": True}]},
+                ]
+            },
+            {"all": [{"field": "updatedFrom.stateId", "exists": True}, {"field": "data.id", "in_file": "triage-refs.json"}]},
+            {
+                "all": [
+                    {"field": "updatedFrom.labelIds", "exists": True},
+                    {"field": "data.delegateId", "equals": "00000000-0000-4000-8000-000000000001"},
+                    {"field": "data.labels", "regex": '"name": *"ready-for-agent"'},
+                    {"not": {"field": "data.id", "in_file": "owned-refs.json"}},
+                ]
+            },
         ]
     }
 ]
@@ -224,7 +239,11 @@ PROMPTED_EVENT = {
         "id": "00000000-0000-4000-8000-0000000000a1",
         "issue": {"id": "00000000-0000-4000-8000-0000000000b1", "identifier": "ABC-1"},
     },
-    "agentActivity": {"signal": None, "content": {"type": "prompt", "body": "close"}},
+    "agentActivity": {
+        "id": "00000000-0000-4000-8000-0000000000c1",
+        "signal": None,
+        "content": {"type": "prompt", "body": "close"},
+    },
 }
 
 
@@ -243,11 +262,69 @@ def render_like_hermes(template: str, payload: dict) -> str:
 
 
 class LinearPayloadTest(unittest.TestCase):
-    def test_a_prompted_reply_reaches_the_prompt(self):
-        prompt = render_like_hermes(render.build_routes(SETTINGS)["linear"]["prompt"], PROMPTED_EVENT)
+    def prompted(self, body):
+        event = {**PROMPTED_EVENT, "agentActivity": {**PROMPTED_EVENT["agentActivity"], "content": {"type": "prompt", "body": body}}}
+        return render_like_hermes(render.build_routes(SETTINGS)["linear"]["prompt"], event)
 
-        self.assertIn("- Activity body: close\n", prompt)
+    def test_a_prompted_reply_reaches_the_prompt(self):
+        prompt = self.prompted("close")
+
+        self.assertIn("\n<reply>\nclose\n</reply>\n", prompt)
         self.assertIn("- Activity signal: None\n", prompt)
+        self.assertIn("- Activity id: 00000000-0000-4000-8000-0000000000c1\n", prompt)
+
+    def test_a_one_word_reply_is_the_only_text_in_its_block(self):
+        prompt = self.prompted("yes")
+
+        self.assertIn("\n<reply>\nyes\n</reply>\n", prompt)
+        self.assertEqual(prompt.count("<reply>\n"), 1)
+        self.assertNotIn("Activity body", prompt)
+
+    def test_a_multi_line_reply_keeps_every_line_in_its_block(self):
+        prompt = self.prompted("yes\n\nbut only on main")
+
+        self.assertIn("\n<reply>\nyes\n\nbut only on main\n</reply>\n", prompt)
+
+    def test_an_event_without_an_activity_leaves_the_placeholders(self):
+        event = {key: value for key, value in PROMPTED_EVENT.items() if key != "agentActivity"}
+        prompt = render_like_hermes(render.build_routes(SETTINGS)["linear"]["prompt"], {**event, "action": "created"})
+
+        self.assertIn("\n<reply>\n{agentActivity.content.body}\n</reply>\n", prompt)
+        self.assertIn("- Activity id: {agentActivity.id}\n", prompt)
+
+    def test_a_reply_without_text_is_read_from_linear_before_it_is_called_missing(self):
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        for heading, end in (("## Prompt", "## Triage card reply"), ("## Triage card reply", "## Stop")):
+            with self.subTest(section=heading):
+                section = " ".join(prompt[prompt.index(f"{heading}\n") : prompt.index(f"{end}\n")].split())
+                self.assertLess(section.index("`linear_agent_activity_read`"), section.index("arrived without text"))
+                self.assertIn("When it returns `found: false` or an error", section)
+
+    def test_a_created_event_renders_who_opened_the_session(self):
+        template = render.build_routes(SETTINGS)["linear"]["prompt"]
+        cases = {"opened by the factory": (None, "None"), "opened by a person": ("user-1", "user-1")}
+        for case, (creator, rendered) in cases.items():
+            with self.subTest(case=case):
+                event = {**PROMPTED_EVENT, "action": "created", "agentSession": {**PROMPTED_EVENT["agentSession"], "creatorId": creator}}
+                self.assertIn(f"- Agent session creator: {rendered}\n", render_like_hermes(template, event))
+        self.assertIn(
+            "- Agent session creator: {agentSession.creatorId}\n", render_like_hermes(template, PROMPTED_EVENT)
+        )
+
+    def test_an_undelegated_session_no_person_opened_is_skipped_before_the_mention_answer(self):
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        created = " ".join(prompt[prompt.index("## Session created") : prompt.index("## Prompt")].split())
+        undelegated = created[created.index("2. If its `delegate`") : created.index('Otherwise apply "Delegation gate"')]
+        skip = undelegated.index("creator above is `None` or still a dotted name in braces")
+        self.assertLess(skip, undelegated.index("Post no activity, create no card, and stop."))
+        self.assertLess(skip, undelegated.index("`response`"))
+
+    def test_only_a_session_a_person_opened_defers_a_delegation_to_session_created(self):
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        change = " ".join(prompt[prompt.index("## Issue change") :].split())
+        check = change[change.index("- Compare the issue's newest") : change.index('- Apply "Delegation gate"')]
+        self.assertIn("whose `creatorId` is not null", check)
+        self.assertLess(check.index("whose `creatorId` is not null"), check.index("in the last five minutes"))
 
 
 class PromptSubstitutionTest(unittest.TestCase):
@@ -338,7 +415,7 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertIn("`changes requested on GitHub; see the card comments`", rules)
         self.assertIn("`feedback on GitHub; see the card comments`", rules)
         flat = " ".join(rules.split())
-        review_rule, comment_rule = flat.split("4. For a", 1)
+        review_rule, comment_rule = flat.split("5. For a", 1)
         self.assertIn("`blocked`, when the sender is a person (not a bot): unblock", review_rule)
         self.assertIn("when the sender is a person (not a bot) and the text asks for a change", comment_rule)
         self.assertIn(
@@ -352,10 +429,69 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertIn("A thanks, an approval, or a bare question is not actionable", comment_rule)
         self.assertNotIn("hermes kanban unblock", rules)
 
+    def test_the_github_prompt_resumes_a_triage_card_on_a_persons_approval(self):
+        prompt = self.prompts["github"]
+        rules = prompt.split("## Record the event", 1)[1].split("## Unblock a card", 1)[0]
+        flat = " ".join(rules.split())
+        approval_rule = flat.split("4. For", 1)[1].split("5. For", 1)[0]
+        self.assertIn("with review state `approved`", approval_rule)
+        self.assertIn(
+            "when the sender is a person (not a bot) and the card's status is `triage`, "
+            'resume it as "Resume a parked card" says, after step 1 has commented on the card',
+            approval_rule,
+        )
+        self.assertIn("When the sender is a bot, or the card is in any other status, the comment from step 1 is enough.", approval_rule)
+        self.assertNotIn("unblock", approval_rule)
+        self.assertNotIn("reopen-review", approval_rule)
+
     def test_the_linear_prompt_unblocks_through_the_shared_section_with_its_own_reason(self):
         prompt = self.prompts["linear"]
         self.assertIn("resumed from Linear; see the card comments", prompt)
         self.assertEqual(prompt.count("hermes kanban request-review <task id>"), 1)
+
+    def test_only_the_linear_prompt_carries_the_triage_inbox_and_delegation_gate_once(self):
+        for section in (render.triage_inbox_section(render.validate(SETTINGS)), render.delegation_gate_section()):
+            self.assertEqual(self.prompts["linear"].count(section), 1)
+            self.assertEqual(self.prompts["github"].count(section), 0)
+
+    def test_the_triage_inbox_fills_its_markers_from_the_settings(self):
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
+            section = render.triage_inbox_section(render.validate(SETTINGS))
+        self.assertNotRegex(section, r"<<[a-z_]+>>")
+        self.assertIn("`python3 /srv/hermes/profiles/claude-worker/scripts/archive_card.py --board triage <task id>`", section)
+        self.assertIn("- `example-org/app`: `--workspace worktree`", section)
+        self.assertIn("- `example-org/site`: `--workspace worktree:/srv/checkouts/site`", section)
+        self.assertIn("is `00000000-0000-4000-8000-000000000001`", section)
+
+    def test_a_triage_card_is_created_on_the_triage_board_without_an_assignee_or_contract(self):
+        section = render.triage_inbox_section(render.validate(SETTINGS))
+        create = section[section.index("hermes kanban --board triage create") : section.index("CARD\n   ````")]
+        self.assertNotIn("--assignee", create)
+        self.assertNotIn("--completion-contract", create)
+        self.assertIn("--idempotency-key 'linear-triage:<issue id>'", create)
+        self.assertIn("card: triage\n", create)
+
+    def test_every_event_that_can_create_an_implementation_card_passes_the_gate_first(self):
+        prompt = self.prompts["linear"]
+        created = prompt[prompt.index("## Session created") : prompt.index("## Prompt")]
+        self.assertLess(created.index('apply "Delegation gate"'), created.index("hermes kanban create"))
+        change = prompt[prompt.index("## Issue change") :]
+        self.assertLess(change.index('Apply "Delegation gate"'), change.index('follow "Session created" from step 3'))
+
+    def test_a_label_change_is_handled_before_the_five_minute_session_check(self):
+        change = " ".join(self.prompts["linear"][self.prompts["linear"].index("## Issue change") :].split())
+        self.assertLess(change.index("the previous labels above"), change.index("in the last five minutes"))
+
+    def test_the_gate_answers_ready_for_human_and_unready_issues_without_a_card(self):
+        gate = render.delegation_gate_section()
+        rules = [gate[gate.index(f"\n{n}. ") : gate.index(f"\n{n + 1}. ") if n < 3 else len(gate)] for n in (1, 2, 3)]
+        self.assertIn("`ready-for-human`", rules[0])
+        self.assertIn("`response`", rules[0])
+        self.assertIn("`ready-for-agent`", rules[1])
+        self.assertIn("`thought`", rules[1])
+        self.assertIn("`linear_issue_to_todo`", rules[2])
+        for rule in rules[:2]:
+            self.assertIn("Create no card and stop.", " ".join(rule.split()))
 
     def test_prompts_keep_only_hermes_placeholders(self):
         for name, prompt in self.prompts.items():
@@ -436,8 +572,14 @@ class MergedCardTest(unittest.TestCase):
             "hermes kanban assign <task id> claude-worker", rule[rule.index("Make the completion call.") :]
         )
 
+    def completion_call(self) -> str:
+        return self.section[self.section.index("The completion call is") :].split("\n\n")[0]
+
+    def failing_checks(self) -> str:
+        return self.section[self.section.index("### A refused merge") :]
+
     def test_the_completion_call_names_the_tool_and_its_arguments(self):
-        call = self.section[self.section.index("The completion call is") :]
+        call = self.completion_call()
         for needle in ("kanban_complete", "`task_id`", "`summary`", "`published_pr`", "linear_agent_activity", "`Pull request`"):
             self.assertIn(needle, call)
         self.assertNotIn("claude-worker", call)
@@ -455,9 +597,145 @@ class MergedCardTest(unittest.TestCase):
         promote = rule[rule.index("  5. ") : rule.index("  6. ")]
         self.assertIn("comment the refusal with the pull request URL and stop. Leave the card\n     unassigned", promote)
         self.assertNotIn("claude-worker", promote)
-        call = self.section[self.section.index("The completion call is") :]
-        self.assertIn("When it is refused, comment\nthe refusal with the pull request URL and stop.", call)
+        call = self.completion_call()
+        self.assertIn("Otherwise comment\nthe refusal with the pull request URL and stop.", call)
         self.assertIn("Never assign the card after\n`specify` succeeded.", call)
+
+    def test_only_a_failed_acceptance_routes_to_the_failing_checks_rule(self):
+        call = self.completion_call()
+        positions = self.positions(
+            call,
+            [
+                "When it is refused, run\n`gh pr view '<pull request URL>' --json headRefOid`",
+                "`hermes kanban show <task id> --json`",
+                "`pr_acceptance`",
+                "`pr_url` is the pull request URL",
+                "`head_sha` is that `headRefOid`",
+                "`classification` other than `success` or `pending`",
+                '"A refused merge"',
+                "Otherwise comment",
+            ],
+        )
+        self.assertEqual(positions, sorted(positions))
+
+    def test_a_missing_refusal_with_no_checks_routes_to_the_refused_merge_rule(self):
+        call = self.completion_call()
+        positions = self.positions(
+            call,
+            [
+                "`head_sha` is that `headRefOid`",
+                "its own\n`classification` is `missing` and its `checks` is empty",
+                '"A refused merge"',
+                "Otherwise comment",
+            ],
+        )
+        self.assertEqual(positions, sorted(positions))
+
+    def test_a_missing_refusal_skips_the_check_lookup_and_writes_the_marker(self):
+        rule = self.failing_checks()
+        merged = render.merged_checks_command(render.hermes_home())
+        positions = self.positions(
+            rule,
+            [
+                "own `classification` is `missing` and its `checks` is empty",
+                "Skip the check lookup below and go to step 1.",
+                f"{merged} '<pull request URL>'",
+                "1. Comment on the card",
+                "`Merge refused by Hermes: the base branch has no required checks.`",
+                "`linear_issue`",
+                "merged, but its base branch has no required checks",
+            ],
+        )
+        self.assertEqual(positions, sorted(positions))
+
+    def test_the_rule_sorts_the_refused_checks_before_it_writes_anything(self):
+        rule = self.failing_checks()
+        merged = render.merged_checks_command(render.hermes_home())
+        positions = self.positions(
+            rule,
+            [f"{merged} '<pull request URL>' '<name>'", "When `real` is not empty", "When `real` is empty", "1. Comment on the card"],
+        )
+        self.assertEqual(positions, sorted(positions))
+
+    def test_the_comment_and_reason_say_which_case_it_is(self):
+        rule = self.failing_checks()
+        self.assertIn("`Merge refused by Hermes: required checks failed: <names>.`", rule)
+        self.assertIn("Hermes counted failed runs that newer passing runs replaced: <names>.`", rule)
+        self.assertIn("merged, but required checks failed: <names>.", rule)
+        self.assertIn("passed on their newest runs", rule)
+        self.assertIn("If `head_sha` is not\nthe event's `head_sha`, comment the refusal", rule)
+
+    def test_failing_checks_archive_a_completed_issue_after_the_marker_comment(self):
+        rule = self.failing_checks()
+        archive = f"{render.archive_card_command(render.hermes_home())} <task id>"
+        positions = self.positions(
+            rule, ["Merge refused by Hermes:", "`linear_issue`", "`stateType` of `completed`", archive]
+        )
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("hermes kanban archive", rule)
+
+    def test_a_refused_merge_never_hands_off_or_assigns_the_card(self):
+        rule = self.failing_checks()
+        for needle in ("reopen-review", "request-review", "unblock", "assign claude-worker", "kanban_complete"):
+            self.assertNotIn(needle, rule)
+        assigns = re.findall(r"hermes kanban assign <task id> (\w+)", rule)
+        self.assertEqual(assigns, ["none"])
+
+    def test_a_refused_merge_unassigns_the_card_before_any_state_command(self):
+        rule = self.failing_checks()
+        unassign = "hermes kanban assign <task id> none"
+        self.assertEqual(rule.count(unassign), 1)
+        state_commands = re.findall(r"hermes kanban (?!assign|show)[a-z-]+", rule)
+        self.assertEqual(set(state_commands), {"hermes kanban block"})
+        self.assertLess(rule.index(unassign), rule.index("hermes kanban block"))
+        self.assertLess(rule.index(unassign), rule.index("`linear_agent_activity`"))
+
+    def test_a_review_card_stays_in_review_and_gets_the_elicitation_directly(self):
+        rule = self.failing_checks()
+        review = rule[rule.index("   - `review`") : rule.index("   - `blocked`")]
+        self.assertNotIn("hermes kanban", review)
+        self.assertIn("leave the card in `review`", review)
+        post = rule[rule.index("`review` or `blocked`, or the block command failed") :]
+        self.assertIn("`elicitation`", post)
+        self.assertIn("`linear_agent_activity`", post)
+
+    def test_failing_checks_block_a_ready_card_once_as_needs_input(self):
+        rule = self.failing_checks()
+        block = "hermes kanban block <task id> '<reason>' --kind needs_input"
+        ready = rule[rule.index("   - `ready`") : rule.index("   - `review`")]
+        self.assertIn(block, ready)
+        self.assertEqual(rule.count(block), 1)
+        blocked = rule[rule.index("   - `blocked`") :].split("\n\n")[0]
+        self.assertNotIn("hermes kanban", blocked.replace("`block_kind` is null, run the `ready` command", ""))
+        self.assertIn("`block_kind` is null, run the `ready` command", blocked)
+
+    def test_an_unreadable_issue_blocks_the_card_and_never_archives_it(self):
+        rule = self.failing_checks()
+        step = rule[rule.index("\n2. ") : rule.index("\n3. ")]
+        archive = f"{render.archive_card_command(render.hermes_home())} <task id>"
+        self.assertEqual(step.count(archive), 1)
+        positions = self.positions(
+            step,
+            ["Only a read that returns a `stateType` of `completed`", archive, "returns nothing", "never archive the\n   card", "Go to step 3 and block it"],
+        )
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("comment the error on the card and stop", step)
+
+    def test_linear_triage_archives_on_the_marker_the_github_route_writes(self):
+        marker = "Merge refused by Hermes:"
+        self.assertIn(f"`{marker} required checks failed: <names>.`", self.failing_checks())
+        change = self.linear[self.linear.index("## Issue change") :]
+        step = change[change.index("\n4. ") : change.index("\n5. ")]
+        positions = self.positions(step, ["merged", f"`{marker}`", 'archive it as "Rules" says', "Otherwise"])
+        self.assertEqual(positions, sorted(positions))
+
+    def test_a_linear_reply_never_resumes_a_card_merged_with_failing_checks(self):
+        prompt = self.linear[self.linear.index("## Prompt") : self.linear.index("## Stop")]
+        step = prompt[prompt.index("\n4. ") : prompt.index("\n5. ")]
+        positions = self.positions(
+            step, ["`Merge refused by Hermes:`", "Do not unblock, reopen, or resume it.", "and stop.", "unblock it as"]
+        )
+        self.assertEqual(positions, sorted(positions))
 
     def test_a_rewritten_card_is_never_completed(self):
         rule = self.bullet("triage")
@@ -905,6 +1183,13 @@ CARD_ISSUES = [f"00000000-0000-4000-8000-{n:012d}" for n in range(1, 5)]
 CARDLESS_ISSUES = [f"00000000-0000-4000-8000-{n:012d}" for n in range(101, 144)]
 
 
+def linear_issue_event(issue_id: str, state_type: str, *, action: str = "update", updated_from=None, **data) -> dict:
+    body = {"type": "Issue", "action": action, "data": {"id": issue_id, "state": {"type": state_type}, **data}}
+    if updated_from is not None:
+        body["updatedFrom"] = updated_from
+    return body
+
+
 def linear_closure(issue_id: str, state_type: str = "completed", changed: str = "stateId") -> dict:
     return {
         "type": "Issue",
@@ -922,6 +1207,7 @@ class LinearClosureReplayTest(HermesFiltersCase):
     def setUp(self):
         super().setUp()
         (self.home / "owned-refs.json").write_text(json.dumps([OWNED_BRANCH, *CARD_ISSUES]))
+        (self.home / "triage-refs.json").write_text("[]")
 
     def test_closures_of_issues_with_a_card_are_kept(self):
         kept = [i for i in CARD_ISSUES if self.matches("Issue", linear_closure(i))]
@@ -953,6 +1239,58 @@ class LinearClosureReplayTest(HermesFiltersCase):
             self.assertIs(self.matches("Issue", linear_closure(CARD_ISSUES[0])), False)
         session = {"type": "AgentSessionEvent", "action": "created"}
         self.assertIs(self.matches("AgentSessionEvent", session), True)
+
+
+APP_USER = SETTINGS["app_user_id"]
+READY = [{"id": "l1", "name": "ready-for-agent", "color": "#0e8a16", "parentId": None}]
+BUG = [{"id": "l2", "name": "bug", "color": "#d73a4a", "parentId": None}]
+
+
+class LinearTriageReplayTest(HermesFiltersCase):
+    route_name = "linear"
+
+    def setUp(self):
+        super().setUp()
+        (self.home / "owned-refs.json").write_text(json.dumps([CARD_ISSUES[0]]))
+        (self.home / "triage-refs.json").write_text(json.dumps([CARD_ISSUES[1]]))
+
+    def test_an_issue_created_in_or_moved_into_triage_is_kept(self):
+        new = CARDLESS_ISSUES[0]
+        self.assertIs(self.matches("Issue", linear_issue_event(new, "triage", action="create")), True)
+        moved = linear_issue_event(new, "triage", updated_from={"stateId": "s-backlog"})
+        self.assertIs(self.matches("Issue", moved), True)
+
+    def test_other_changes_of_an_issue_in_triage_are_dropped(self):
+        title = linear_issue_event(CARDLESS_ISSUES[0], "triage", updated_from={"title": "old"})
+        self.assertIs(self.matches("Issue", title), False)
+        self.assertIs(self.matches("Issue", linear_issue_event(CARDLESS_ISSUES[0], "backlog", action="create")), False)
+
+    def test_a_status_change_of_an_issue_with_a_triage_card_is_kept(self):
+        left = linear_issue_event(CARD_ISSUES[1], "unstarted", updated_from={"stateId": "s-triage"})
+        self.assertIs(self.matches("Issue", left), True)
+        cardless = linear_issue_event(CARDLESS_ISSUES[0], "unstarted", updated_from={"stateId": "s-triage"})
+        self.assertIs(self.matches("Issue", cardless), False)
+
+    def test_ready_for_agent_on_a_delegated_issue_without_a_card_is_kept(self):
+        passed = linear_issue_event(
+            CARDLESS_ISSUES[0], "unstarted", updated_from={"labelIds": ["l2"]}, delegateId=APP_USER, labels=READY + BUG,
+        )
+        self.assertIs(self.matches("Issue", passed), True)
+
+    def test_label_changes_that_start_no_implementation_card_are_dropped(self):
+        cases = {
+            "not delegated": dict(delegateId=None, labels=READY),
+            "delegated elsewhere": dict(delegateId="00000000-0000-4000-8000-0000000000ff", labels=READY),
+            "not ready": dict(delegateId=APP_USER, labels=BUG),
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                event = linear_issue_event(CARDLESS_ISSUES[0], "unstarted", updated_from={"labelIds": []}, **data)
+                self.assertIs(self.matches("Issue", event), False)
+        with_card = linear_issue_event(
+            CARD_ISSUES[0], "started", updated_from={"labelIds": []}, delegateId=APP_USER, labels=READY,
+        )
+        self.assertIs(self.matches("Issue", with_card), False)
 
 
 if __name__ == "__main__":

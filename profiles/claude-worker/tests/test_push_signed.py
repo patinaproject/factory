@@ -113,6 +113,14 @@ fail(f"unexpected call {args}")
 """
 
 
+def merge_refusal(sha: str, parents: int, why: str) -> str:
+    return (
+        f"commit {sha} has {parents} parents ({why}); push-signed replays single-parent commits "
+        "and merges whose parents are the branch head and the current head of main, in that order. "
+        "Merge origin/main into the branch again, or use gh pr update-branch"
+    )
+
+
 class PushSignedTest(GitFixture):
     def setUp(self) -> None:
         super().setUp()
@@ -293,13 +301,13 @@ class PushSignedTest(GitFixture):
         self.assertEqual(self.origin_branch(), remote)
         self.assertEqual(git(self.main, "rev-parse", "HEAD"), local)
 
-    def assert_refused_before_any_write(self, error: str) -> None:
+    def assert_refused_before_any_write(self, error: str, branch: str = "feature", reads_base: bool = False) -> None:
         status, report = self.push()
 
         self.assertEqual(status, 2)
         self.assertEqual(report, {"error": error})
-        self.assertEqual(self.gh_argv(), [self.ref_get()])
-        self.assertIsNone(self.origin_branch())
+        self.assertEqual(self.gh_argv(), [self.ref_get(branch)] + ([self.ref_get("main")] if reads_base else []))
+        self.assertIsNone(self.origin_branch(branch))
 
     def test_merge_commit_is_refused(self) -> None:
         git(self.main, "checkout", "-q", "-b", "side")
@@ -310,8 +318,7 @@ class PushSignedTest(GitFixture):
         merge = git(self.main, "rev-parse", "HEAD")
 
         self.assert_refused_before_any_write(
-            f"commit {merge} has 2 parents; push-signed replays only single-parent commits. "
-            "Bring the base branch in with gh pr update-branch, whose merges GitHub signs"
+            merge_refusal(merge, 2, "its second parent is not the current head of main"), reads_base=True
         )
 
     def remote_entry(self, path: str) -> str:
@@ -511,3 +518,140 @@ class PushSignedTest(GitFixture):
         self.assertEqual(report, {"error": f"remote commit {remote} does not match the tree of {local}; the local branch was left unchanged"})
         self.assertEqual(git(self.main, "rev-parse", "HEAD"), local)
         self.assertEqual((self.main / "one.txt").read_text(), "one\n")
+
+    def advance_main(self, name: str, files: dict) -> str:
+        other = self.tmp / f"other-{name}"
+        git(self.tmp, "clone", "-q", str(self.origin), str(other))
+        for path, content in files.items():
+            (other / path).write_text(content)
+        git(other, "add", "-A")
+        git(other, "commit", "-q", "-m", name)
+        git(other, "push", "-q", "origin", "HEAD:refs/heads/main")
+        return git(other, "rev-parse", "HEAD")
+
+    def merge_main(self, resolved: dict) -> str:
+        """Merge the fetched default branch, expect a conflict, resolve it by hand, and commit."""
+        git(self.main, "fetch", "-q", "origin")
+        proc = subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "--no-edit", "origin/main"],
+            cwd=self.main, capture_output=True, text=True,
+        )
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        for path, content in resolved.items():
+            (self.main / path).write_text(content)
+        git(self.main, "add", "-A")
+        git(self.main, "commit", "-q", "-m", "Merge main")
+        return git(self.main, "rev-parse", "HEAD")
+
+    def conflicted_branch(self) -> tuple:
+        """A pushed feature branch whose README conflicts with a base that moved twice."""
+        git(self.main, "checkout", "-q", "-b", "feature")
+        self.commit("README.md", "feature\n", "Edit the readme")
+        self.push()
+        pushed = self.origin_branch()
+        self.advance_main("mid", {"mid.txt": "mid\n"})
+        base = self.advance_main("tail", {"README.md": "main\n", "tail.txt": "tail\n"})
+        self.log.unlink()
+        return pushed, base
+
+    def parents_of(self, oid: str) -> list:
+        return self.origin_git("rev-list", "--parents", "-n", "1", oid).split()[1:]
+
+    def test_a_resolved_merge_of_the_current_base_publishes_one_two_parent_commit(self) -> None:
+        pushed, base = self.conflicted_branch()
+        merge = self.merge_main({"README.md": "resolved\n"})
+
+        status, report = self.push()
+
+        self.assertEqual(status, 0, report)
+        head = self.origin_branch()
+        self.assertEqual(report["published"], [{"local": merge, "remote": head}])
+        self.assertEqual(self.parents_of(head), [pushed, base])
+        self.assertEqual(self.origin_git("rev-parse", f"{head}^{{tree}}"), git(self.main, "rev-parse", f"{merge}^{{tree}}"))
+        self.assertEqual(self.origin_git("show", f"{head}:README.md"), "resolved")
+        self.assertEqual(self.requests("commits"), [
+            {"message": "Merge main", "tree": git(self.main, "rev-parse", f"{merge}^{{tree}}"), "parents": [pushed, base]},
+        ])
+        self.assertEqual(self.requests("blobs"), [{"content": base64.b64encode(b"resolved\n").decode(), "encoding": "base64"}])
+        self.assertEqual(
+            sorted((entry["path"], entry["sha"]) for entry in self.requests("trees")[0]["tree"]),
+            sorted([
+                ("README.md", git(self.main, "rev-parse", f"{merge}:README.md")),
+                ("mid.txt", git(self.main, "rev-parse", f"{merge}:mid.txt")),
+                ("tail.txt", git(self.main, "rev-parse", f"{merge}:tail.txt")),
+            ]),
+        )
+        self.assertEqual(self.gh_argv()[:2], [self.ref_get(), self.ref_get("main")])
+        self.assertEqual([patch["force"] for patch in self.requests("refs/heads/feature")], [False])
+        self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)
+
+    def test_a_commit_after_the_merge_publishes_too(self) -> None:
+        pushed, base = self.conflicted_branch()
+        merge = self.merge_main({"README.md": "resolved\n"})
+        after = self.commit("after.txt", "after\n", "Add after")
+
+        status, report = self.push()
+
+        self.assertEqual(status, 0, report)
+        head = self.origin_branch()
+        signed_merge = self.origin_git("rev-parse", f"{head}^")
+        self.assertEqual(report["published"], [{"local": merge, "remote": signed_merge}, {"local": after, "remote": head}])
+        self.assertEqual(self.parents_of(signed_merge), [pushed, base])
+        self.assertEqual(self.parents_of(head), [signed_merge])
+        self.assertEqual(self.origin_git("show", f"{head}:after.txt"), "after")
+
+    def test_a_merge_of_a_base_that_moved_again_is_refused(self) -> None:
+        pushed, base = self.conflicted_branch()
+        merge = self.merge_main({"README.md": "resolved\n"})
+        self.advance_main("newer", {"newer.txt": "newer\n"})
+
+        status, report = self.push()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": merge_refusal(merge, 2, "its second parent is not the current head of main")})
+        self.assertEqual(self.origin_branch(), pushed)
+        self.assertEqual(self.gh_argv(), [self.ref_get(), self.ref_get("main")])
+        self.assertEqual(git(self.main, "rev-parse", "HEAD"), merge)
+
+    def test_an_octopus_merge_is_refused(self) -> None:
+        for name in ("left", "right"):
+            git(self.main, "checkout", "-q", "-b", name, self.seed)
+            self.commit(f"{name}.txt", f"{name}\n", f"Add {name}")
+        git(self.main, "checkout", "-q", "-b", "feature", self.seed)
+        self.commit("one.txt", "one\n", "Add one")
+        git(self.main, "merge", "-q", "--no-ff", "-m", "Merge both", "left", "right")
+        merge = git(self.main, "rev-parse", "HEAD")
+
+        self.assert_refused_before_any_write(merge_refusal(merge, 3, "an octopus merge"), reads_base=True)
+
+    def test_a_merge_with_the_base_as_first_parent_is_refused(self) -> None:
+        git(self.main, "checkout", "-q", "-b", "side", self.seed)
+        self.commit("side.txt", "side\n", "Add side")
+        git(self.main, "checkout", "-q", "-b", "reversed", self.seed)
+        git(self.main, "merge", "-q", "--no-ff", "-m", "Merge side", "side")
+        merge = git(self.main, "rev-parse", "HEAD")
+
+        self.assert_refused_before_any_write(
+            merge_refusal(merge, 2, "its first parent is on main"), branch="reversed", reads_base=True
+        )
+
+    def test_a_rerun_resumes_after_a_partial_publish_that_holds_a_merge(self) -> None:
+        pushed, base = self.conflicted_branch()
+        merge = self.merge_main({"README.md": "resolved\n"})
+        after = self.commit("after.txt", "after\n", "Add after")
+        status, report = self.push(env={"FAKE_GH_FAIL_TREE_NUMBER": "2"})
+        self.assertEqual(status, 1, report)
+        signed_merge = self.origin_branch()
+        self.assertEqual(self.parents_of(signed_merge), [pushed, base])
+        self.assertEqual(git(self.main, "rev-parse", "HEAD"), after)
+        self.log.unlink()
+
+        status, report = self.push()
+
+        self.assertEqual(status, 0, report)
+        head = self.origin_branch()
+        self.assertEqual(report["published"], [{"local": after, "remote": head}])
+        self.assertEqual(self.parents_of(head), [signed_merge])
+        self.assertEqual([commit["parents"] for commit in self.requests("commits")], [[signed_merge]])
+        self.assertEqual(self.gh_argv()[0], self.ref_get())
+        self.assertEqual(git(self.main, "rev-parse", "HEAD"), head)

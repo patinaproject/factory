@@ -89,6 +89,7 @@ your task notes, not in the repository.
 | Model alias for Hermes' own agent loop, for example `sonnet` | Model provider |
 | Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
 | `kanban.max_in_progress` | Kanban |
+| `triage.max_running`, how many triage cards may run at once | Kanban |
 | Factory hostname, Cloudflare account, and zone | Ingress |
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
 | Whether people SSH into the machine through Access, and if so the SSH hostname and each person's email | Ingress, host exposure |
@@ -98,7 +99,7 @@ your task notes, not in the repository.
 | Linear workspace, and whether the operator already has an agent app | Linear app |
 | The GitHub organization or account that owns the repositories, and a name for the factory's GitHub App | GitHub App |
 | A path outside every repository for the GitHub App's private key, for example `~/.config/factory/github-app.pem` | GitHub App |
-| Whether secrets live in Infisical, and if so the project ID, environment, folder, and the two machine identities, one per home | Infisical |
+| Whether secrets live in Infisical, and if so the project ID, environment, folder, and the machine identity the default home signs in as | Infisical |
 | Whether the operator keeps operator-only credentials in 1Password, and if so the vault and the service account name | 1Password |
 | Slack workspace and the channels the agent joins | Slack |
 | Where the factory's private configuration record lives, and the credentials on the machine that Hermes agents must never receive | Agent instructions |
@@ -112,23 +113,26 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 
 | Value | Location |
 | --- | --- |
-| `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` and `<worker>/.env` |
+| `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` only. The gateway's broker gives the worker a Linear access token on request, so the worker never holds the app's credentials |
 | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
 | `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
-| The token variable that `claude_session.auth_token_env` names | `<worker>/.env`. Never name it `ANTHROPIC_*` |
-| `FACTORY_INFISICAL_CLIENT_ID` and `FACTORY_INFISICAL_CLIENT_SECRET`, when the factory uses Infisical | `<home>/.env` holds the default home's machine identity and `<worker>/.env` the worker's, which reads only the worker's three keys. Claude Code receives neither: `claude-session` starts it from an allowlist of variable names |
+| `CLAUDE_PROXY_TOKEN`, the proxy's token that `claude_session.auth_token_env` names | `<home>/.env`. The worker's `worker-secrets` asks the gateway's broker for it when a worker process starts, because the worker's own agent loop sends it to the proxy, and Claude Code gets it through `apiKeyHelper`. Never store it in `<worker>/.env`, and never name it `ANTHROPIC_*` |
+| `SENTRY_ACCESS_TOKEN`, the Sentry token that `claude_session.sentry_token_env` names, when workers read Sentry | `<home>/.env`. The run's `sentry` server gets it through `sentry-headers`, which asks the gateway's broker. Never store it in `<worker>/.env`. See [Sentry access](references/sentry.md) |
+| `FACTORY_INFISICAL_CLIENT_ID` and `FACTORY_INFISICAL_CLIENT_SECRET`, when the factory uses Infisical | `<home>/.env` only. The worker has no Infisical identity. Claude Code never receives it: `claude-session` starts it from an allowlist of variable names |
+| The factory's secret names that Hermes strips from every process a home starts | `plugins/factory-secret-names/plugin.yaml`, installed in both homes |
 | Cloudflare tunnel token | The `cloudflared` system service only |
 | `CLOUDFLARE_API_TOKEN` | The SST app's own secret storage or environment |
 | `OP_SERVICE_ACCOUNT_TOKEN`, when the factory uses 1Password | The factory's Infisical folder only, never a Hermes `.env`. It is for the operator only. The helper drops it, so Hermes agents never receive it, and the operator's `op` wrapper reads it |
 | `plugins.entries.linear-agent-session.settings` | `config.yaml` of both homes, same JSON |
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
-| `GITHUB_UPLOAD_TOKEN`, the operator's upload-only token | The factory's Infisical folder only, entered by the operator. The gateway loads it. Neither `.env` holds it, and the worker's `worker-secrets` drops it |
+| `GITHUB_UPLOAD_TOKEN`, the operator's upload-only token | The factory's Infisical folder only, entered by the operator. The gateway loads it. Neither `.env` holds it, and the broker never hands it out |
 | `platforms.factory_uploads.enabled` and `platforms.factory_uploads.extra.repositories` | `<home>/config.yaml` only |
+| `plugins.entries.team.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
 | `kanban.max_in_progress`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
-| The `default` board's `default_workdir` | Kanban board metadata, not `config.yaml` |
+| The `default` and `triage` boards' `default_workdir` | Kanban board metadata, not `config.yaml` |
 
 When the factory uses Infisical, part 14 moves the Linear credentials, both
 webhook secrets, and the proxy token from `.env` into one Infisical folder. On
@@ -361,9 +365,10 @@ hermes config get providers.<proxy provider>.transport  # anthropic_messages
 hermes config get providers.<proxy provider>.key_env    # <token variable>
 ```
 
-When the proxy requires a token, `env_has <home>/.env <token variable>` and
-`env_has <worker>/.env <token variable>` each print `1`, or the Infisical
-folder holds the variable. The name does not start with `ANTHROPIC_`.
+When the proxy requires a token, `<token variable>` is `CLAUDE_PROXY_TOKEN`,
+and `env_has <home>/.env CLAUDE_PROXY_TOKEN` prints `1` or the Infisical folder
+holds it. The worker home reads the same variable, which `worker-secrets` gets
+from the gateway's broker when a worker process starts, as part 5 sets up.
 
 **Configure** whatever the check found missing, in each home:
 
@@ -376,8 +381,7 @@ hermes config set model.default <alias>
 ```
 
 Skip the `key_env` line when the proxy needs no token. Part 3 stores the token
-in the Infisical folder or in `<worker>/.env`. Without Infisical, also store it
-in `<home>/.env` with `env_set`.
+in `<home>/.env` or the Infisical folder, never in `<worker>/.env`.
 
 **Verify** with the same `PONG` chats and `sqlite3` queries as DirectSDK. Each
 latest session names the alias and the billing provider `custom`, with non-zero
@@ -421,8 +425,9 @@ hermes plugins list
 hermes -p claude-worker plugins list
 ```
 
-Both list `linear-agent-session` and `pr-ready-gate`, enabled. The root home
-also lists `factory-uploads`, enabled, and the worker home does not. On a fresh
+Both list `linear-agent-session`, `pr-ready-gate`, and `factory-secret-names`,
+enabled. The root home also lists `factory-uploads`, `team`, and
+`webhook-retry`, enabled, and the worker home lists none of them. On a fresh
 machine, install both now and skip the content check.
 
 On a re-run, `<worker>` already exists, and a listed plugin can still be
@@ -447,16 +452,35 @@ hermes plugins install "file://<repo>#plugins/linear-agent-session" --enable --y
 hermes plugins install "file://<repo>#plugins/pr-ready-gate" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/linear-agent-session" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/pr-ready-gate" --enable --yes-deps </dev/null
+hermes plugins install "file://<repo>#plugins/factory-secret-names" --enable --yes-deps </dev/null
+hermes -p claude-worker plugins install "file://<repo>#plugins/factory-secret-names" --enable --yes-deps </dev/null
 ```
+
+`factory-secret-names` runs no code. Its manifest declares the factory's
+secret variables, and Hermes strips each one from every process the home
+starts: a terminal command, a background process, a cron script, or a
+`claude-session` run. Without it, any process on the machine could read the
+Linear client secret, the webhook secrets, or the proxy token from such a
+process's environment with `ps eww`. Hermes reads the manifest at each spawn,
+so it takes effect without a restart.
+
+The strip has two gaps. Hermes runs a `secrets.command` helper without it,
+so `factory-secrets` holds the gateway's Infisical identity (#176). A plugin
+hook that starts a subprocess without its own `env` passes the home's
+process environment on, so `pr-ready-gate`'s `git` and `gh` calls in the
+worker hold the proxy token.
 
 To install from GitHub instead of a local checkout, use
 `<owner>/<repo>#plugins/<name> --ref <40-character commit SHA>`. Add `--force`
 only to reinstall a plugin at a newer commit.
 
-**Gateway uploads, root home only.** The `factory-uploads` plugin runs inside
-the gateway and uploads evidence images with `GITHUB_UPLOAD_TOKEN`, so the
-worker never holds the token. Install it in the root home and never in the
-worker's home. `check-install` reports an install in the worker home.
+**Gateway broker, root home only.** The `factory-uploads` plugin runs inside
+the gateway. Its broker uploads evidence images with `GITHUB_UPLOAD_TOKEN`, and
+it gives the worker the two credentials the worker may use: a Linear access
+token, minted with the gateway's Linear app credentials, and the proxy token.
+The worker home holds no factory secret of its own. Install the plugin in the
+root home and never in the worker's home. `check-install` reports an install
+in the worker home.
 
 1. **Operator, in their own terminal.** Enter `GITHUB_UPLOAD_TOKEN` in the
    factory's Infisical folder, as in [`references/infisical.md`](references/infisical.md).
@@ -477,20 +501,63 @@ worker's home. `check-install` reports an install in the worker home.
    hermes config set platforms.factory_uploads.extra.repositories '["<owner>/<repo>"]'
    ```
 
-4. > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
-   > from a shell outside Hermes. Hermes loads platform plugins only when the
-   > gateway starts.
+4. > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
+   > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes. Hermes loads
+   > platform plugins only when the gateway starts.
 
 5. **Check.** `<home>/gateway_state.json` lists `factory_uploads` as
    `connected`, and `<home>/factory-uploads.sock` exists with mode `srw-------`.
    `check-install` also checks the platform's config keys and sends the socket
-   `{"op":"status"}`. It reports a socket nobody listens on and a broker with
-   `token_present` false, and it never uploads.
+   `{"op":"status"}`. It reports a socket nobody listens on, and a broker
+   whose `token_present`, `linear_ready`, or, with a proxy token,
+   `proxy_token_present` is false. It never uploads and asks for no token.
    `python3 <home>/plugins/factory-uploads/upload_token.py --probe --repo <owner>/<repo>`
    is for the operator's own terminal: it prints the HTTP status and the
    attachment URL, never the token. The platform is not a chat platform, so
    `hermes status` lists it without any channel and it is not a cron
    `--deliver` or `send_message` target.
+
+**Team skills, root home only.** The `team` plugin registers the skills in a
+directory on the machine as `team:<name>` skills. It reads the directory in
+place and copies nothing, so no skill content enters this repository. Install
+it in the root home and never in the worker's home. `check-install` reports an
+install in the worker home.
+
+1. Install and enable the plugin in the root home:
+
+   ```sh
+   hermes plugins install "file://<repo>#plugins/team" --enable --yes-deps </dev/null
+   ```
+
+2. Point it at the team skills directory. Each subdirectory that holds a
+   `SKILL.md` is one skill. The real path goes in Hermes config and the
+   private record only:
+
+   ```sh
+   hermes config set plugins.entries.team.settings.skills_dir <team skills directory>
+   ```
+
+   To register only some skills, set `plugins.entries.team.settings.allow` to
+   a list of skill names. An empty or unset `allow` registers every skill. A
+   name the directory lacks stops the plugin from loading.
+3. **Check.** `check-install` reports a `skills_dir` that is unset, missing,
+   or empty, and an `allow` name the directory lacks. It prints no skill
+   content.
+
+Adding, renaming, or removing a skill, or changing its description, takes
+effect at the next gateway restart. An edit to the content of an existing
+skill is served at once.
+
+**Webhook retry, root home only.** The `webhook-retry` plugin runs inside the
+gateway. It records each webhook delivery, queues one whose agent turn fails on
+a usage limit, and clears it when the turn finishes. The `retry-failed-webhooks`
+cron job in part 12 reruns the queued deliveries. Install and enable the plugin
+in the root home and never in the worker's home. `check-install` reports an
+install in the worker home. It takes effect at the next gateway restart.
+
+```sh
+hermes plugins install "file://<repo>#plugins/webhook-retry" --enable --yes-deps </dev/null
+```
 
 **Worker profile.** If `<worker>` does not exist, install it. If it exists,
 update it. An update keeps the installed `config.yaml`. Pass `--force-config`
@@ -512,6 +579,23 @@ It stays under the 420 second limit Hermes puts on every tool call:
 ```sh
 hermes -p claude-worker config set terminal.timeout 400 </dev/null
 ```
+
+When the proxy needs a token, point the worker home at the gateway's copy.
+`worker-secrets` asks the broker for the token that `auth_token_env` names and
+prints it to Hermes, so the worker's own agent loop can reach the proxy. It
+reads no Infisical folder and holds no identity. The broker answers in
+milliseconds and the helper gives up after 30 seconds:
+
+```sh
+value="$(python3 -c 'import json, sys; print(json.dumps({"enabled": True, "helper_timeout_seconds": 40, "command": sys.argv[1]}))' "python3 <worker>/scripts/worker-secrets")"
+hermes -p claude-worker config set secrets.command "$value" </dev/null
+```
+
+`check-install` reports a worker with a proxy token and any other
+`secrets.command`, a worker without one that loads secrets, a
+`terminal.env_passthrough` that is not empty, and each factory secret left in
+`<worker>/.env`. A worker set up before it gave up its own identity follows
+[Retire the worker's identity](references/infisical.md#retire-the-workers-identity).
 
 **Verify.**
 
@@ -596,7 +680,8 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
-  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "max_turns": 0}
+  "triage": {"max_running": <n>},
+  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "sentry_token_env": "", "disabled_mcp_servers": [], "max_turns": 0}
 }
 ```
 
@@ -613,6 +698,8 @@ it to the prefix. `claude_session.max_turns`
 caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
 one run can finish a whole task. A positive limit pauses a long task, such as
 a dependency upgrade, and the worker resumes it in a second run.
+`claude_session.sentry_token_env` and `disabled_mcp_servers` stay empty unless
+workers read Sentry, as [Sentry access](references/sentry.md) describes.
 
 A card that waits in review leaves its Claude session idle past the 5-minute
 prompt cache, and a resumed large session re-writes its whole context at the
@@ -643,12 +730,12 @@ host cannot verify. Claude Code gets `JAVA_HOME`, `ANDROID_HOME`,
 ]
 ```
 
-A repository whose `.mcp.json` names third-party MCP servers sets
-`mcp_servers` and `mcp_left_out` on its entry, so each server connects under
-the factory's own identity or is left out with a reason. Follow
-[`references/mcp-identities.md`](references/mcp-identities.md) for each
-server. `check-install` reports each server that a worker run would not
-connect.
+`triage.max_running` caps how many triage cards run at once. It is a positive
+integer from the operator's input, and its value belongs in the private
+record. Hermes caps workers per host and per profile, but has no per-board
+cap, so the factory applies this one itself: triage creates each triage card
+with no assignee, and the `dispatch-triage` cron job from part 12 assigns
+waiting cards only while fewer than `max_running` run or wait assigned.
 
 `kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
@@ -657,16 +744,20 @@ empty to post no link. Set `github.login` to the App's
 in `[bot]`, and `claude-session` refuses a run that checks a branch for
 adoption without one.
 
-**Check**, for each home:
+**Check** both homes:
 
 ```sh
-diff <(hermes config get plugins.entries.linear-agent-session.settings --json --raw | python3 -m json.tool --sort-keys) \
-     <(python3 -m json.tool --sort-keys <settings.json>)
-diff <(hermes -p claude-worker config get plugins.entries.linear-agent-session.settings --json --raw | python3 -m json.tool --sort-keys) \
-     <(python3 -m json.tool --sort-keys <settings.json>)
+python3 <repo>/skills/setup-factory/scripts/check-settings <settings.json>
 ```
 
-**Set** the settings in both homes when a diff is not empty:
+It exits `0` and prints nothing when both homes match. Otherwise it prints one
+line per home and differing key, such as
+`claude-worker: claude_session.model differs`, and never a value. The installed
+settings can hold `${...}` references, so do not compare them by printing
+them. Without the argument, it compares the worker home with the
+root home, which is how a deploy runs it.
+
+**Set** the settings in both homes when the check prints a line:
 
 ```sh
 hermes config set plugins.entries.linear-agent-session.settings "$(cat <settings.json>)"
@@ -769,7 +860,27 @@ hermes config set kanban.max_in_progress <n>
 hermes config set kanban.review_dispatch false
 hermes config set kanban.auto_decompose false
 hermes kanban boards set-default-workdir default <path of the default repository>
+hermes kanban boards create triage --name Triage --default-workdir <path of the default repository>
 ```
+
+The `triage` board holds only triage cards. Every issue that lands in the
+Linear Triage inbox gets one there, delegated or not, and its worker runs the
+readiness check. The gateway's dispatcher serves every board that is not
+archived on each tick, so the board needs no restart. Its worktrees anchor at
+the same default repository. `boards create` leaves an existing board as it
+is, so when the board exists, run
+`hermes kanban boards set-default-workdir triage <path of the default repository>`
+instead. An implementation card starts only when its Linear issue carries
+`ready-for-agent`, which triage applies.
+
+A triage card follows patina-mode's triage playbook from the factory checkout
+that the worker home was installed from, the checkout that
+`check-install --print-source` prints. That checkout vendors it as
+`.agents/skills/patina-mode/playbooks/triage.md`, so a triage card follows the
+same playbook in every repository, whatever that repository vendors.
+`claude-session` refuses a triage card when the file is missing, and
+`check-install` reports it. Update the checkout to the factory's default
+branch to restore it.
 
 A worker hands a card with a merge-ready pull request to the `review` lane.
 With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,
@@ -794,8 +905,11 @@ and a default assignee would route the unassigned card to a worker first.
 `hermes config get kanban.default_assignee` prints nothing or an empty string.
 
 `default_workdir` is board metadata, so `hermes config get` does not show it.
-Read the board metadata with `hermes kanban boards --help` to find the listing
-command, and confirm the path.
+`hermes kanban boards list --json` lists the `default` and `triage` boards,
+each with the default repository's path as its `default_workdir`.
+`check-install` reports a missing `triage` board, another `default_workdir`,
+a default repository without the triage playbook, and a `triage.max_running`
+that is not a positive integer or differs between the homes.
 
 ## 11. Webhook routes
 
@@ -861,10 +975,11 @@ belongs to the worker profile.
 `refresh-checkouts`. `cron create` does not remove duplicates. If more than one
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
-jobs: `refresh-checkouts`, `refresh-owned-refs`, and `refresh-gh-app-login`.
+jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`, and
+`refresh-gh-app-login`, and `dispatch-triage`.
 A copy there runs without the worker's scripts and settings, so remove it the
-same way. The default home holds exactly one job, `check-install`, described
-below. A second setup session runs this check before it
+same way. The default home holds two jobs, `check-install` and
+`retry-failed-webhooks`, described below. A second setup session runs this check before it
 creates anything.
 
 **Create** the job only when the list has none:
@@ -896,6 +1011,37 @@ is missing or older than 5 minutes. Create the job when `cron list` has no
 hermes -p claude-worker cron create "every 1m" --name refresh-owned-refs --no-agent --script refresh-owned-refs </dev/null
 ```
 
+The same job writes `<home>/triage-refs.json` with the `linear_issue_id` of
+every card on the `triage` board. The `linear` route keeps a status change of
+an issue listed there, so a triage card is archived when a person moves its
+issue out of Triage or closes it. `check-install` reports this file the same
+way.
+
+**Triage dispatch job.** Triage creates triage cards with no assignee, so the
+dispatcher skips them. `dispatch-triage` runs every minute. It assigns
+`claude-worker` to waiting triage cards, highest priority and then oldest
+first, while fewer than `triage.max_running` cards on the `triage` board run or
+wait assigned. A reply that resumes a blocked triage card also leaves it
+unassigned, so this job is the only one that starts triage work. Create the
+job when `cron list` has no `dispatch-triage` job:
+
+```sh
+hermes -p claude-worker cron create "every 1m" --name dispatch-triage --no-agent --script dispatch-triage </dev/null
+```
+
+**Conflict job.** GitHub sends no webhook when a pull request starts to
+conflict because its base branch moved. `reopen-conflicts` lists the App's
+open pull requests for every `review` or `blocked` card every 5 minutes. For
+each one GitHub reports as `CONFLICTING`, it comments on the card and hands
+the card back to its worker. The worker merges the base branch, resolves the
+conflicts, and publishes the merge with `push-signed`. A card is sent back
+once per pull request head, so a worker that blocks on the same head stays
+blocked. Create the job when `cron list` has no `reopen-conflicts` job:
+
+```sh
+hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null
+```
+
 **Install drift job.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
 `origin/HEAD` of the checkout the profile was installed from. It also checks
@@ -904,8 +1050,11 @@ machine changes this runbook cannot reproduce: a `config.yaml` key from parts
 4, 6, 10, or 13 that differs from what the part sets, a cron job that is
 missing, duplicated, changed, not created by the runbook, or in the wrong
 profile, a cron job that delivers to a platform with no home channel in its
-profile, the root home's `scripts/check-install-alert` when it is missing or
-differs from the repository, and, on macOS, a launchd service from part 7 or 15
+profile, a cron job whose last run failed or was not delivered, with the first
+line of its error and secrets masked (a failed run of the `check-install` job
+itself is not reported, because that failure is the previous run's report), the
+root home's `scripts/check-install-alert` and `scripts/retry-failed-webhooks`
+when one is missing or differs from the repository, and, on macOS, a launchd service from part 7 or 15
 that is not installed, does not run at load, or is not running, and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never
 prints a config value. It prints one line per difference and nothing when the
@@ -939,6 +1088,28 @@ The job exits non-zero while drift exists, so its failure notice goes to the
 same platform. A factory that created this job in the worker profile earlier
 removes that copy with `hermes -p claude-worker cron remove <job id>`, with the
 operator's approval, after the root job exists.
+
+**Webhook retry job.** The `webhook-retry` plugin from part 5 keeps a queue in
+`<root>/webhook-retry/`. A delivery whose triage turn fails on a usage limit
+waits there until the limit resets. This job reruns the due deliveries every 10
+minutes, oldest first and one at a time, and stops at the first usage limit.
+It prints a line only when something happened, so Hermes delivers nothing on a
+quiet run. It belongs to the root profile for the same reason as
+`check-install`. Install the wrapper and create the job when `hermes cron list`
+for the root profile has no `retry-failed-webhooks` job:
+
+```sh
+install -m 0644 skills/setup-factory/scripts/retry-failed-webhooks <root>/scripts/retry-failed-webhooks
+hermes cron create "every 10m" --name retry-failed-webhooks --no-agent --script retry-failed-webhooks --deliver <platform> </dev/null
+```
+
+To inspect the queue, run the command from the root home:
+`HERMES_HOME=<root> python3 <root>/plugins/webhook-retry/retry.py --list`
+prints one line per delivery and never its prompt. Add `--now` to retry every
+queued delivery at once, or `--drop <delivery>` to remove one. A delivery that
+is older than 48 hours or has failed 8 retries is given up and stays listed
+until dropped. A retry that a crash or timeout cut short is marked failed and
+never run again, because its turn may already have changed a card.
 
 **Verify.** Run each job through Hermes once, then read its status:
 
@@ -989,12 +1160,20 @@ factory, do these before the restart:
   factory's cards, set `kanban.dispatch_profiles` to `[claude-worker]`. Confirm
   with `hermes kanban dispatch --dry-run --json`: `spawned` lists only
   `claude-worker` cards.
-- `hermes gateway restart` waits for running work, including in-process cron
-  jobs, before it restarts, and the gateway refuses webhooks while it waits.
-  Restart when no long cron job is running.
+- `hermes gateway restart` waits for chat work and in-process cron jobs, and
+  the gateway refuses webhooks while it waits. It does not wait for Kanban
+  workers. They run inside the gateway's launchd job, so a bare restart kills
+  every running card. Restart only with `restart-gateway`, which waits until
+  no board has a `running` card, then holds new cards with `hermes pause`
+  while it restarts, and lifts the pause afterwards. When the wait expires, it
+  names the running cards, exits 1, and does not restart. `--timeout` sets
+  the wait in seconds, 3600 by default. An operator's own `hermes pause` stays
+  in place. Restart when no long cron job is running.
 
-> **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart` from
-> a shell outside Hermes, not from a Hermes session or tool.
+> **HUMAN CHECKPOINT.** Ask the operator to run
+> `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, not from a Hermes session or tool.
+> When it exits 1, wait for the named cards or ask the operator whether to
+> run it again with a longer `--timeout`.
 
 If the gateway does not run as a service yet, install it as one with the
 Hermes CLI's gateway service command (see `hermes gateway --help`), so it
@@ -1065,13 +1244,30 @@ shell outside Hermes, and run the forged lines again.
 **External checks.** Run the checks at the end of
 [`references/cloudflare-sst.md`](references/cloudflare-sst.md).
 
+**Confirm a delegation became a card.** Cards live in the worker home, so
+list them with that home as `HERMES_HOME`. Replace `PAT-123` with the issue's
+identifier:
+
+```sh
+HERMES_HOME=<worker> hermes kanban list --json 2>/dev/null \
+  | python3 -c 'import json, sys; [print(t["id"], t["status"], t["title"]) for t in json.load(sys.stdin) if t["title"].startswith(sys.argv[1] + ":")]' PAT-123
+```
+
+Each line is one card: its ID, its status, such as `ready`, `running`,
+`review`, or `blocked`, and its title. No line means no card exists yet. Wait
+a minute and run it again, then read the gateway log for the delivery. An
+archived card appears only with `--archived`. The command's secret helper
+writes a status line to standard error, so the command discards it to keep
+the JSON clean.
+
 **End-to-end checks.** Use a test issue in the operator's Linear workspace for
 each check. Report each result.
 
-1. Delegate an issue that routes to the `default` repository. Linear shows the
-   acknowledgement within 10 seconds, then the "queued" activity. The new card
-   has that repository as its `completion_contract`.
-2. Delegate an issue synced from a `synced_github` repository. Its card has that
+1. Delegate an issue that routes to the `default` repository and carries
+   `ready-for-agent`. Linear shows the acknowledgement within 10 seconds, then
+   the "queued" activity. The new card has that repository as its
+   `completion_contract`. When the issue was in Triage, it moves to Todo.
+2. Delegate a `ready-for-agent` issue synced from a `synced_github` repository. Its card has that
    repository's contract, and its worktree starts from that repository's
    default branch.
 3. The worker moves the issue to In Progress through the repository's own
@@ -1121,9 +1317,11 @@ each check. Report each result.
     with `action` `closed`, the original is closed with a comment that links
     the replacement, and the replacement's description ends with
     `Supersedes #<number>`. If the person pushed commits that the replacement lacks
-    after it opened, the line reports `left` with `person pushed after takeover`
-    and the original stays open. The original's branch is unchanged. Run the card
-    again and the line reports `left`, with no second comment.
+    after it opened, whatever the commits' dates, or built on the replacement's
+    head, or opened the original from a fork, the line reports `left` with
+    `person pushed after takeover` and the original stays open. The original's
+    branch is unchanged. Run the card again and the line reports `left`, with
+    no second comment.
 18. Once a card's pull request is open, send a Linear `stop`, then reply in
     the same agent session. In `hermes kanban show <task id> --json`, the
     events after `blocked` are `unblocked`, `review_requested`, and
@@ -1143,7 +1341,10 @@ each check. Report each result.
     `hermes kanban show <task id> --json`, the events after the review are the
     same as in check 19: `assigned` with no assignee, `specified`, `edited`,
     and `assigned` to `claude-worker`, with the title and body unchanged. A
-    card in `review` still gets `review_reopened`.
+    card in `review` still gets `review_reopened`. Repeat with an `approved`
+    review from a person: the events are the same, and the worker hands the
+    approved pull request off. An approval from a bot, or on a card in any
+    other status, adds only the card comment.
 21. Merge a card's pull request while the card is in `triage`, with no worker
     running it. In `hermes kanban show <task id> --json`, the events after the
     merge include, in this order, `assigned` with no assignee, `specified`,
@@ -1176,6 +1377,57 @@ each check. Report each result.
     follows. Repeat with an actionable inline comment from a person. A review
     or comment from a bot, an approval, a thanks, and a bare question leave the
     card `blocked`.
+
+24. Merge a card's pull request while Hermes still holds a failed check run
+    against it, with the card in `review` and its Linear issue In Progress.
+    First merge past a check whose newest run failed. The card's comments
+    include `Merge refused by Hermes: required checks failed:` with the check
+    names, the card is unassigned and `blocked` with block kind `needs_input` (a
+    `review` card stays in `review`, unassigned),
+    and the Linear agent session gets one `elicitation` that says the pull
+    request merged and asks whether the issue is done. A reply in the session
+    leaves the card `blocked`. Mark the Linear issue Done, and the card is
+    archived. Then repeat with a check that failed once and passed on a newer
+    run (re-run it before the merge). The comment is
+    `Merge refused by Hermes: Hermes counted failed runs that newer passing runs replaced:`
+    and the elicitation says the checks passed on their newest runs. Repeat
+    either case with the issue already Done before the merge: the card is
+    archived with the same comment, and the session gets no post. Then merge a
+    pull request into a base branch with no required checks, so Hermes refuses
+    it as `missing`. The comment is
+    `Merge refused by Hermes: the base branch has no required checks.`, and the
+    elicitation asks whether the issue is done. Repeat it with the issue
+    already Done before the merge, and with the issue marked Done after the
+    refusal: the card is archived both times. In every case the card stays
+    unassigned.
+
+25. Create an issue in the team's Triage status. Within a minute the
+    `triage` board has one card for it, with no assignee until
+    `dispatch-triage` assigns it, and Linear shows a "Queued for triage"
+    activity on an agent session the factory opened, and no other activity on
+    that session. Edit the issue's title: no second card appears. Move a
+    second issue into Triage from Backlog: it gets its own card. Move the
+    first issue out of Triage: its triage card is archived. Label the second
+    issue `ready-for-agent` and delegate it to the agent while it is still in
+    Triage: it gets an implementation card and moves to Todo.
+26. Delegate an issue without `ready-for-agent`. No implementation card
+    appears, and the session gets a `thought` that the work starts once the
+    issue passes the readiness check. Delegate an issue with
+    `ready-for-human`: no card appears, and the session gets a `response`.
+    Mark the first issue `ready-for-agent`: the `Issue` webhook creates its
+    implementation card on the same session and moves the issue to Todo when
+    it is in Triage. Start a card by hand on an issue without the label:
+    `claude-session` refuses it before Claude starts.
+27. Let a triage card block on a question. Its session gets one
+    `elicitation` that starts with the AI-generated disclaimer, and one reply
+    in the session's thread mentions each person the questions name. Each of
+    them gets one Linear notification. A reply from a teammate
+    who did not delegate the issue raises `prompted` on the session the
+    factory created, unblocks the card, and `dispatch-triage` assigns it
+    again.
+28. No more than `triage.max_running` cards on the `triage` board run at
+    once, and the triage card's run never pushes a branch or opens a pull
+    request.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate
@@ -1315,14 +1567,22 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    branch with no uncommitted changes. Never touch the worker-owned
    checkouts, which are the configured repository checkouts the worker profile
    uses. They change only through a Kanban card or `refresh-checkouts`.
-2. List what is out of date:
+2. List what is out of date. Run the copy in the source checkout, not the
+   installed one. The installed copy predates the change, so it cannot report
+   a board, config key, or cron job that the change adds:
 
    ```sh
-   HERMES_HOME=<worker> python3 <worker>/scripts/check-install
+   HERMES_HOME=<worker> python3 <source checkout>/profiles/claude-worker/scripts/check-install
    ```
 
-3. Install each item it names, with the profile first and the route last. The
-   `linear` route drops a completed or canceled `Issue` update unless its
+3. Install each item it names in this order: the part 10 `kanban board` and
+   `config` lines, then the profile, then the part 12 `cron job` lines, and
+   the route last. The new profile's cron jobs read the boards and settings on
+   their first run, one minute after the profile update. `refresh-owned-refs`
+   lists the `triage` board and fails on each run until the board exists.
+   `dispatch-triage` reads `triage.max_running`. A cron job runs a profile
+   script, so create a missing job only after the profile update installs its
+   script. The `linear` route drops a completed or canceled `Issue` update unless its
    issue id is in `<root>/owned-refs.json`. Update the profile, run
    `refresh-owned-refs` once, confirm the file holds issue UUIDs, and only then
    re-render the route. Find the job id with `hermes -p claude-worker cron list`
@@ -1331,9 +1591,20 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    cards to close. The reverse order drops every closure until the next
    cron run. `check-install` reports a route that filters on issue ids while
    the file holds none.
+   - A `kanban board <name>` line: run the part 10 Kanban commands before the
+     profile update. For a missing `triage` board, run
+     `hermes kanban boards create triage --name Triage --default-workdir <path of the default repository>`.
+     When the line names another `default_workdir`, run
+     `hermes kanban boards set-default-workdir <name> <path of the default repository>`.
+   - A `config plugins.entries.linear-agent-session.settings.triage.max_running`
+     line: add `"triage": {"max_running": <n>}` to the factory settings and set
+     them in both homes as in part 10, before the profile update.
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.
+   - A `team skills` line: the team skills directory is missing, empty, or
+     lacks a skill that `allow` names. Fix the directory or the part 5
+     setting.
    - A `webhook config <key>` line: run the part 11 install for that key.
    - A `webhook route <name>: <n> rejected with HTTP 429` line: the gateway
      dropped deliveries in the last hour. Check that
@@ -1346,18 +1617,38 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      When the line gives a `git merge --ff-only` command, run it as written,
      then run `check-install` again. Otherwise the checkout is ahead, diverged,
      on another branch, or dirty. Fix that by hand before you deploy.
-   - An `mcp` line: a repository's MCP server would not connect in a worker
-     run, or the worker home does not pass through a `FACTORY_MCP_` name. Give
-     the server the factory's identity, or list it in `mcp_left_out`, as in
-     [`references/mcp-identities.md`](references/mcp-identities.md).
+   - `plugin` lines for the root home's `factory-uploads` or
+     `linear-agent-session` together with a `plugin factory-secret-names in
+     <worker>` line: the worker is moving to the gateway's broker for its
+     tokens. Two orders break every worker run. A worker on the new scripts
+     before the gateway runs the new broker gets each token request refused.
+     The worker's `factory-secret-names` before its new scripts makes the old
+     `claude-session` lose `CLAUDE_PROXY_TOKEN` and refuse the run. Deploy in
+     this order. First, install the root home's plugins and run
+     `restart-gateway`, then confirm that `{"op":"status"}` reports
+     `linear_ready` and `proxy_token_present` true. Second, run `hermes pause`.
+     Update the profile, install the worker's `linear-agent-session` and
+     `factory-secret-names`, and set the worker's `terminal.env_passthrough`
+     to `[]`, all together. Third, retire the worker's identity as the next
+     line says, run `check-install` until it is clean, and then run
+     `hermes resume`.
+   - A `secret <name> in <worker>/.env` line: the worker holds a secret only
+     the gateway may hold. Follow
+     [Retire the worker's identity](references/infisical.md#retire-the-workers-identity),
+     which also applies to a factory without Infisical.
    - A `checkout` line: the checkout is missing or has no `origin/HEAD`. Clone
      it as in part 10, or run `git -C <path> remote set-head origin -a`.
    - A `dashboard sign-in` line: follow step 6 of
      [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
      or allow the `refresh_tokens` grant on the `saas` Access application when
      the line names the issuer. Then restart the dashboard service.
-   - A `script <root>/scripts/check-install-alert` line: install the wrapper
-     again with the part 12 `install` commands, which create `<root>/scripts` first.
+   - A `script <root>/scripts/check-install-alert` or
+     `<root>/scripts/retry-failed-webhooks` line: install the wrapper again
+     with the part 12 `install` commands, which create `<root>/scripts` first.
+   - A `cron job retry-failed-webhooks` line: create the job in the root
+     profile as in part 12.
+   - A `cron job dispatch-triage` line: after the profile update, create the
+     job with the part 12 `cron create` command.
    - A `cron job check-install` line: the job is missing, in the wrong
      profile, or delivers to a platform with no home channel. Create it in the
      root profile as in part 12, and remove a leftover copy in the worker
@@ -1367,13 +1658,29 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      If the machine is right, change the part and its row in `check-install`
      in one pull request, as the replicability rule in `AGENTS.md` requires.
 4. Run `check-install` again. It prints nothing.
-5. If step 3 changed a plugin or a webhook config key:
+5. Check that the worker home's factory settings match the root home's:
 
-   > **HUMAN CHECKPOINT.** Ask the operator to run `hermes gateway restart`
-   > from a shell outside Hermes. Then confirm that
+   ```sh
+   python3 <source checkout>/skills/setup-factory/scripts/check-settings
+   ```
+
+   With no argument, it uses the root home's installed settings as the
+   reference, so a deploy needs no settings file and no `--raw` read. It
+   exits `0` and prints nothing when the homes match. Otherwise it prints one
+   line per differing key, such as
+   `claude-worker: claude_session.model differs`, and never a value. It does
+   not prove that the root home holds what the operator intended; part 10's
+   check against the settings file does. When it prints a line, find which
+   home is right with the operator, and set that home's settings in the other
+   as in part 10.
+6. If step 3 changed a plugin, a webhook config key, or a team skills setting:
+
+   > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
+   > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes. Then confirm
+   > that
    > `~/.hermes/logs/gateway.log` shows a startup after the install.
 
-6. Record the deployed commit in the private configuration record.
+7. Record the deployed commit in the private configuration record.
 
 ## Report
 
