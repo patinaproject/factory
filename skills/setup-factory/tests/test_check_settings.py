@@ -132,7 +132,50 @@ class CheckSettingsTest(unittest.TestCase):
         )
         self.assertNotIn(SECRET, proc.stdout + proc.stderr)
 
-    def test_refuses_without_a_settings_file(self) -> None:
+    def run_against_root(self) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT)], env=self.env, capture_output=True, text=True
+        )
+
+    def test_without_a_file_a_worker_matching_the_root_exits_zero(self) -> None:
+        self.install("default", {**SETTINGS, "app_user_id": "${SECRET_VALUE}"})
+        self.install("claude-worker", {**SETTINGS, "app_user_id": "${SECRET_VALUE}"})
+
+        proc = self.run_against_root()
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+
+    def test_without_a_file_names_each_worker_key_that_differs_from_the_root(self) -> None:
+        self.install("default", {**SETTINGS, "app_user_id": "${SECRET_VALUE}"})
+        worker = json.loads(json.dumps(SETTINGS))
+        worker["claude_session"]["model"] = "other-model"
+        self.install("claude-worker", worker)
+
+        proc = self.run_against_root()
+
+        self.assertEqual(
+            (proc.returncode, proc.stdout),
+            (1, "claude-worker: app_user_id differs\nclaude-worker: claude_session.model differs\n"),
+        )
+        self.assertNotIn(SECRET, proc.stdout + proc.stderr)
+
+    def test_without_a_file_reports_a_root_without_settings(self) -> None:
+        self.install("claude-worker", SETTINGS)
+
+        proc = self.run_against_root()
+
+        self.assertEqual((proc.returncode, proc.stdout), (1, "default: `hermes config get` exited 1\n"))
+        self.assertNotIn(SECRET, proc.stdout + proc.stderr)
+
+    def test_refuses_more_than_one_settings_file(self) -> None:
+        proc = self.run_check(str(self.expected), str(self.expected))
+
+        self.assertEqual(
+            (proc.returncode, proc.stdout, proc.stderr),
+            (2, "", "usage: check-settings [<settings.json>]\n"),
+        )
+
+    def test_refuses_a_settings_file_it_cannot_read(self) -> None:
         proc = self.run_check(str(self.root / "missing.json"))
 
         self.assertEqual(
