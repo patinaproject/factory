@@ -411,6 +411,38 @@ class InstallTest(unittest.TestCase):
 
         self.assertNotIn(f"--- {LAYOUT.home / '.env'}", shown)
 
+    def test_control_characters_in_a_diff_are_shown_escaped(self):
+        machine = self.installed()
+        target = LAYOUT.lib / "factory_uploads" / "broker.py"
+        machine.entries[target] = setup.Entry(0, 0, 0o644, b"keep\tthis\n\x1b[2A\x1b[2Kold\r\x1bc\x7f\xc2\x85\xff\n")
+
+        _, _, shown, _ = self.install(machine, "no")
+
+        self.assertEqual([c for c in shown if (c < " " and c not in "\n\t") or "\x7f" <= c <= "\x9f"], [])
+        self.assertIn("-keep\tthis\n", shown)
+        for escaped in ("\\x1b[2A", "\\x1b[2Kold", "\\x0d", "\\x1bc", "\\x7f", "\\x85", "\\xff"):
+            self.assertIn(escaped, shown)
+
+    def test_control_characters_in_the_factory_user_are_shown_escaped(self):
+        name = "fac\x1b[2Jtory"
+        machine = Machine()
+        machine.users = {name: person(name, 501)}
+
+        _, _, shown, _ = self.install(machine, "no", data={**INPUT, "factory_user": name})
+
+        self.assertNotIn("\x1b", shown)
+        self.assertIn("fac\\x1b[2Jtory joins _factorybroker", shown)
+        self.assertIn("-a 'fac\\x1b[2Jtory'", shown)
+
+    def test_a_refusal_shows_control_characters_escaped(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = setup.main(["plan", "--input", "/missing\x1b[2J.json"])
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("\x1b", stderr.getvalue())
+        self.assertIn("/missing\\x1b[2J.json", stderr.getvalue())
+
 
 INFISICAL = {"api_url": "https://app.infisical.com", "project_id": "p", "environment": "e", "paths": ["/f"]}
 
@@ -464,6 +496,24 @@ class InputTest(unittest.TestCase):
         self.assertEqual(self.read(data), data)
         with self.assertRaises(setup.Refuse):
             self.read({**INPUT, "infisical": {**INFISICAL, "api_url": "http://secrets.example.com", "self_hosted_host": "secrets.example.com"}})
+
+    def test_an_infisical_url_with_a_control_character_is_refused_even_for_a_confirmed_host(self):
+        for url in ("https://app.infisical.com\x1bc", "https://app.infisical.com\n", "https://app.infisical.com:\x1bc"):
+            for host in (None, url.split("//")[1].split(":")[0]):
+                with self.subTest(url=url, host=host), self.assertRaises(setup.Refuse):
+                    self.read({**INPUT, "infisical": {**INFISICAL, "api_url": url, "self_hosted_host": host}})
+
+    def test_an_infisical_url_must_use_the_https_port(self):
+        data = {**INPUT, "infisical": {**INFISICAL, "api_url": "https://app.infisical.com:443"}}
+        self.assertEqual(self.read(data), data)
+        for url in ("https://app.infisical.com:8443", "https://app.infisical.com:80", "https://app.infisical.com:x"):
+            with self.subTest(url=url), self.assertRaises(setup.Refuse):
+                self.read({**INPUT, "infisical": {**INFISICAL, "api_url": url}})
+
+    def test_a_malformed_infisical_url_is_refused_cleanly(self):
+        for url in ("https://[app.infisical.com", "https://[::1", "https://app.infisical.com]"):
+            with self.subTest(url=url), self.assertRaises(setup.Refuse):
+                self.read({**INPUT, "infisical": {**INFISICAL, "api_url": url}})
 
 
 class SetSecretTest(unittest.TestCase):

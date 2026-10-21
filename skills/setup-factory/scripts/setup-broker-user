@@ -69,6 +69,10 @@ class Refuse(Exception):
     pass
 
 
+def visible(text: str) -> str:
+    return "".join(f"\\x{ord(c):02x}" if (c < " " and c not in "\n\t") or "\x7f" <= c <= "\x9f" else c for c in text)
+
+
 @dataclass(frozen=True)
 class Layout:
     base: Path = BASE
@@ -114,7 +118,7 @@ class Run:
     argv: tuple
 
     def __str__(self) -> str:
-        return "run    " + " ".join(_quote(arg) for arg in self.argv)
+        return visible("run    " + " ".join(_quote(arg) for arg in self.argv))
 
 
 @dataclass(frozen=True)
@@ -125,7 +129,7 @@ class Directory:
     mode: int
 
     def __str__(self) -> str:
-        return f"dir    {self.path} {self.owner}:{self.group} {self.mode:04o}"
+        return visible(f"dir    {self.path} {self.owner}:{self.group} {self.mode:04o}")
 
 
 @dataclass(frozen=True)
@@ -137,7 +141,7 @@ class File:
     mode: int
 
     def __str__(self) -> str:
-        return f"write  {self.path} {self.owner}:{self.group} {self.mode:04o}"
+        return visible(f"write  {self.path} {self.owner}:{self.group} {self.mode:04o}")
 
 
 Step = Union[Run, Directory, File]
@@ -238,9 +242,19 @@ def read_input(path: Path) -> dict:
 
 
 def check_infisical_url(api_url: str, self_hosted_host: Optional[str]) -> None:
-    url = urllib.parse.urlsplit(api_url)
-    if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment or url.path not in ("", "/"):
-        raise Refuse("infisical.api_url must be https://<host> with no credentials, path, or query")
+    message = "infisical.api_url must be https://<host> with no credentials, port other than 443, path, or query"
+    if not isinstance(api_url, str) or not re.fullmatch(r"[\x21-\x7e]+", api_url):
+        raise Refuse(message)
+    try:
+        url = urllib.parse.urlsplit(api_url)
+        port = url.port
+    except ValueError:
+        raise Refuse(message) from None
+    if (
+        url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment
+        or url.path not in ("", "/") or port not in (None, 443)
+    ):
+        raise Refuse(message)
     if url.hostname not in INFISICAL_CLOUD and url.hostname != self_hosted_host:
         raise Refuse(
             f"{url.hostname} is not Infisical Cloud; for a self-hosted server, set infisical.self_hosted_host to {url.hostname}"
@@ -501,7 +515,7 @@ def describe_infisical(data: dict) -> str:
     infisical = data.get("infisical")
     if not infisical:
         return "The broker reads its secrets from its .env file only."
-    url = infisical["api_url"]
+    url = visible(infisical["api_url"])
     if urllib.parse.urlsplit(url).hostname in INFISICAL_CLOUD:
         return f"The broker sends its Infisical identity to Infisical Cloud at {url}."
     return f"The broker sends its Infisical identity to the self-hosted Infisical at {url}."
@@ -517,18 +531,18 @@ def confirm_changes(
             continue
         found = entry(step.path)
         before = found.content if found is not None and found.content is not None else b""
-        print("".join(difflib.unified_diff(
-            before.decode(errors="replace").splitlines(keepends=True),
-            step.content.decode(errors="replace").splitlines(keepends=True),
+        print(visible("".join(difflib.unified_diff(
+            before.decode(errors="backslashreplace").splitlines(keepends=True),
+            step.content.decode(errors="backslashreplace").splitlines(keepends=True),
             f"{step.path} (installed)", f"{step.path} (new)",
-        )))
+        ))))
     installed = entry(layout.commit_file)
     if installed is not None and installed.content and commit is not None:
-        before = installed.content.decode().strip()
+        before = visible(installed.content.decode(errors="backslashreplace").strip())
         print(f"Installed commit {before}. Review the change with: git diff {before}..{commit} -- {' '.join(REVIEWED_SOURCES)}")
     else:
         print("No installed commit is recorded, so the diffs above are the whole change.")
-    print(f"{data['factory_user']} joins {layout.group} and is the only user the broker answers.")
+    print(visible(f"{data['factory_user']} joins {layout.group} and is the only user the broker answers."))
     print(describe_infisical(data))
     if ask("Install these changes as root? Type yes: ").strip() != "yes":
         raise Refuse("the operator did not confirm the changes")
@@ -572,7 +586,7 @@ def main(argv=None) -> int:
             if broker is None:
                 raise Refuse(f"{layout.user} does not exist; run apply first")
             set_env_value(layout.home / ".env", args.name, getpass.getpass(f"{args.name}: "), broker.pw_uid, broker.pw_gid)
-            print(f"set {args.name} in {layout.home / '.env'}")
+            print(visible(f"set {args.name} in {layout.home / '.env'}"))
             if system.loaded(layout.label):
                 subprocess.run([LAUNCHCTL, "kickstart", "-k", f"system/{layout.label}"], check=True)
                 print(f"restarted {layout.label}")
@@ -591,7 +605,7 @@ def main(argv=None) -> int:
         print("no change" if not applied else f"applied {len(applied)} changes")
         return 0
     except Refuse as refusal:
-        print(f"setup-broker-user: refused: {refusal}", file=sys.stderr)
+        print(f"setup-broker-user: refused: {visible(str(refusal))}", file=sys.stderr)
         return 1
 
 
