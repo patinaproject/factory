@@ -130,6 +130,9 @@ Everything written through this server shows the app as its author.
 
 **Check.** In a checkout of this repository, run `claude mcp list` as the
 gateway's user. Expect `linear: https://mcp.linear.app/mcp (HTTP) - ✔ Connected`.
+That is a person's interactive view. A worker run's view is what
+`claude-session --mcp-status` reports, as [MCP server
+identities](mcp-identities.md) describes.
 
 There is nothing to install. If the check reports `Needs authentication`,
 confirm that `<home>/plugins/linear-agent-session` exists and that

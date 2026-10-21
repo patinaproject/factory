@@ -76,8 +76,8 @@ def stub_hermes(home: Path, secrets: dict, config: dict | None = None) -> dict:
     }
 
 
-def factory_settings(auth_token_env: str, sentry_token_env: str = "") -> dict:
-    session = {"claude_session": {"auth_token_env": auth_token_env, "sentry_token_env": sentry_token_env}}
+def factory_settings(auth_token_env: str, mcp_servers: dict | None = None) -> dict:
+    session = {"claude_session": {"auth_token_env": auth_token_env, "mcp_servers": mcp_servers or {}}}
     return {"plugins": {"entries": {"linear-agent-session": {"settings": session}}}}
 
 
@@ -122,13 +122,16 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         writer.close()
         return reply
 
-    async def request(self, op: str) -> dict:
+    async def request(self, op: str, **fields) -> dict:
         reader, writer = await asyncio.open_unix_connection(str(self.home / "factory-uploads.sock"))
-        writer.write(json.dumps({"op": op}).encode() + b"\n")
+        writer.write(json.dumps({"op": op, **fields}).encode() + b"\n")
         await writer.drain()
         reply = json.loads(await reader.readline())
         writer.close()
         return reply
+
+    async def mcp_token(self, server: str) -> dict:
+        return await self.request("mcp_token", server=server)
 
     async def connected(self):
         adapter = self.make_adapter()
@@ -172,13 +175,30 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply["state"], "unavailable")
         self.assertNotIn("proxy-FAKE-token", json.dumps(reply))
 
-    async def test_the_sentry_token_is_the_variable_the_factory_settings_name(self):
-        self.settings.update(factory_settings("EXAMPLE_PROXY_TOKEN", "EXAMPLE_SENTRY_TOKEN"))
+    async def test_an_mcp_token_is_the_variable_the_factory_settings_name_for_that_server(self):
+        self.settings.update(factory_settings("EXAMPLE_PROXY_TOKEN", {
+            "sentry": {"url": "https://mcp.example/sentry", "token_env": "EXAMPLE_SENTRY_TOKEN"},
+            "posthog": {"url": "https://mcp.example/posthog", "token_env": "EXAMPLE_POSTHOG_KEY"},
+        }))
         await self.connected()
 
-        self.assertEqual(await self.request("sentry_token"), {"ok": True, "token": "sntryu_FAKE", "expires_at": None})
+        self.assertEqual(await self.mcp_token("sentry"), {"ok": True, "token": "sntryu_FAKE", "expires_at": None})
+        self.assertEqual((await self.mcp_token("posthog"))["state"], "unavailable")
+        self.assertEqual((await self.request("status"))["mcp_tokens_present"], {"posthog": False, "sentry": True})
         self.secrets.pop("EXAMPLE_SENTRY_TOKEN")
-        self.assertEqual((await self.request("sentry_token"))["state"], "unavailable")
+        self.assertEqual((await self.mcp_token("sentry"))["state"], "unavailable")
+
+    async def test_a_request_never_names_the_variable_it_gets(self):
+        self.settings.update(factory_settings("EXAMPLE_PROXY_TOKEN", {
+            "sentry": {"url": "https://mcp.example/sentry", "token_env": "EXAMPLE_SENTRY_TOKEN"},
+        }))
+        await self.connected()
+
+        for server in ("EXAMPLE_SENTRY_TOKEN", "EXAMPLE_PROXY_TOKEN", "GITHUB_UPLOAD_TOKEN"):
+            with self.subTest(server=server):
+                reply = await self.mcp_token(server)
+                self.assertEqual(reply["state"], "unavailable")
+                self.assertNotIn(self.secrets[server], json.dumps(reply))
 
     async def test_a_token_op_never_serves_the_upload_token_or_an_app_credential(self):
         for name in (
@@ -186,23 +206,28 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
             "FACTORY_INFISICAL_CLIENT_SECRET", "LINEAR_WEBHOOK_SECRET", "GITHUB_WEBHOOK_SECRET",
         ):
             with self.subTest(name=name):
-                self.settings.update(factory_settings(name, name))
+                self.settings.update(factory_settings(name, {"sentry": {"url": "https://mcp.example", "token_env": name}}))
                 adapter = await self.connected()
 
-                replies = [await self.request("proxy_token"), await self.request("sentry_token")]
+                replies = [await self.request("proxy_token"), await self.mcp_token("sentry")]
 
                 self.assertEqual([reply["state"] for reply in replies], ["unavailable", "unavailable"])
                 self.assertNotIn(self.secrets[name], json.dumps(replies))
                 await adapter.disconnect()
 
-    async def test_settings_without_a_sentry_variable_serve_no_secret_as_the_sentry_token(self):
-        await self.connected()
+    async def test_settings_without_mcp_servers_serve_no_mcp_token(self):
+        for servers in (None, [], "sentry", {"sentry": "EXAMPLE_SENTRY_TOKEN"}, {"sentry": {"url": "https://mcp.example"}}):
+            with self.subTest(servers=servers):
+                self.settings.clear()
+                self.settings.update(factory_settings("EXAMPLE_PROXY_TOKEN"))
+                self.settings["plugins"]["entries"]["linear-agent-session"]["settings"]["claude_session"]["mcp_servers"] = servers
+                adapter = await self.connected()
 
-        reply = await self.request("sentry_token")
+                reply = await self.mcp_token("sentry")
 
-        self.assertEqual(reply["state"], "unavailable")
-        self.assertNotIn("sntryu_FAKE", json.dumps(reply))
-        self.assertFalse((await self.request("status"))["sentry_token_present"])
+                self.assertEqual(reply["state"], "unavailable")
+                self.assertNotIn("sntryu_FAKE", json.dumps(reply))
+                await adapter.disconnect()
 
     async def test_status_reports_which_credentials_the_gateway_holds(self):
         await self.connected()

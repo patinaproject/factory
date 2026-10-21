@@ -463,23 +463,23 @@ class BrokerLinearClient(LinearClient):
         return {"client_id": "", "access_token": reply["token"], "expires_at": float(reply["expires_at"])}
 
 
-def broker_request(socket_path: str, op: str, *, timeout: float = BROKER_TIMEOUT_SECONDS) -> dict:
+def broker_request(socket_path: str, op: str, *, timeout: float = BROKER_TIMEOUT_SECONDS, **fields) -> dict:
     for delay in (*BROKER_RETRY_DELAYS, None):
         try:
-            return _broker_attempt(socket_path, op, timeout)
+            return _broker_attempt(socket_path, {"op": op, **fields}, timeout)
         except BrokerUnavailable as error:
             if delay is None or not error.retry:
                 raise
             time.sleep(delay)
 
 
-def _broker_attempt(socket_path: str, op: str, timeout: float) -> dict:
+def _broker_attempt(socket_path: str, request: dict, timeout: float) -> dict:
     reply = b""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout)
             client.connect(socket_path)
-            client.sendall(json.dumps({"op": op}).encode() + b"\n")
+            client.sendall(json.dumps(request).encode() + b"\n")
             while not reply.endswith(b"\n") and len(reply) < BROKER_REPLY_LIMIT:
                 chunk = client.recv(4096)
                 if not chunk:
@@ -497,10 +497,10 @@ def _broker_attempt(socket_path: str, op: str, timeout: float) -> dict:
     except ValueError:
         raise BrokerUnavailable(f"the gateway's broker at {socket_path} closed the connection without an answer") from None
     if isinstance(document, dict) and document.get("state") == "busy":
-        raise BrokerUnavailable(f"the gateway's broker is busy and refused {op}")
+        raise BrokerUnavailable(f"the gateway's broker is busy and refused {request['op']}")
     if not isinstance(document, dict) or document.get("ok") is not True:
         message = document.get("message") if isinstance(document, dict) else None
-        raise LinearError(f"the gateway's broker refused {op}: {message or 'no reason given'}")
+        raise LinearError(f"the gateway's broker refused {request['op']}: {message or 'no reason given'}")
     return document
 
 

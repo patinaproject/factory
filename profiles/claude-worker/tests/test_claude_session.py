@@ -64,6 +64,10 @@ LINEAR_MCP_CONFIG = (
     '{"mcpServers": {"linear": {"type": "http", "url": "https://mcp.linear.app/mcp", '
     '"headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"}}}}'
 )
+MCP_SERVERS = {
+    "sentry": {"url": "https://mcp.sentry.dev/mcp?skills=inspect", "token_env": "EXAMPLE_SENTRY_TOKEN", "scheme": "Sentry-Bearer"},
+    "posthog": {"url": "https://mcp.posthog.com/mcp", "token_env": "EXAMPLE_POSTHOG_KEY", "headers": {"x-posthog-read-only": "true"}},
+}
 DEFAULT_ENTRY = (
     "Work Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) in example-org/example-repo "
     "on branch abc-123-fix. First start the issue through this repository's own issue-start workflow, "
@@ -1210,49 +1214,62 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(self.claude_call()["settings"]["content"]["env"]["ENABLE_TOOL_SEARCH"], "true")
 
-    def test_claude_gets_the_sentry_token_from_the_servers_headers_helper_and_never_in_an_environment(self) -> None:
-        self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
-        self.broker.answers["status"] = [{"ok": True, "sentry_token_present": True}]
-        self.broker.answers["sentry_token"] = [granted("sntryu_example", None)]
+    def test_each_factory_mcp_server_gets_its_token_from_mcp_headers_and_never_in_an_environment(self) -> None:
+        self.settings = self.write_settings([self.repository], {"mcp_servers": MCP_SERVERS})
+        self.broker.answers["status"] = [{"ok": True, "mcp_tokens_present": {"sentry": True, "posthog": True}}]
+        self.broker.answers["mcp_token"] = [granted("sntryu_example", None)]
 
         self.run_session(env={"EXAMPLE_SENTRY_TOKEN": "sntryu_from_the_environment"})
 
         call = self.claude_call()
         argv = call["argv"]
         servers = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
-        self.assertEqual(sorted(servers), ["linear", "sentry"])
+        self.assertEqual(sorted(servers), ["linear", "posthog", "sentry"])
         self.assertEqual(
-            {key: servers["sentry"][key] for key in ("type", "url")},
-            {"type": "http", "url": "https://mcp.sentry.dev/mcp?skills=inspect"},
+            {name: {key: value for key, value in servers[name].items() if key != "headersHelper"} for name in ("sentry", "posthog")},
+            {
+                "sentry": {"type": "http", "url": "https://mcp.sentry.dev/mcp?skills=inspect"},
+                "posthog": {"type": "http", "url": "https://mcp.posthog.com/mcp", "headers": {"x-posthog-read-only": "true"}},
+            },
         )
-        self.assertNotIn("headers", servers["sentry"])
         self.assertEqual(self.broker.requests, ["linear_token", "status"])
-        printed = subprocess.run(servers["sentry"]["headersHelper"], shell=True, env=call["env"], capture_output=True, text=True)
-        self.assertEqual((printed.returncode, json.loads(printed.stdout)), (0, {"Authorization": "Sentry-Bearer sntryu_example"}))
+        printed = [
+            subprocess.run(servers[name]["headersHelper"], shell=True, env=call["env"], capture_output=True, text=True)
+            for name in ("sentry", "posthog")
+        ]
+        self.assertEqual(
+            [(each.returncode, json.loads(each.stdout)) for each in printed],
+            [(0, {"Authorization": "Sentry-Bearer sntryu_example"}), (0, {"Authorization": "Bearer sntryu_example"})],
+        )
+        self.assertEqual(self.broker.bodies[-2:], [
+            {"op": "mcp_token", "server": "sentry"}, {"op": "mcp_token", "server": "posthog"},
+        ])
         self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true"})
         self.assertNotIn("sntryu_", json.dumps([call["env"], call["settings"]["content"], argv]))
+        self.assertNotIn("EXAMPLE_SENTRY_TOKEN", json.dumps([call["settings"]["content"], argv]))
 
-    def test_a_sentry_token_the_broker_does_not_hold_refuses_before_claude_starts(self) -> None:
-        self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
+    def test_an_mcp_token_the_broker_does_not_hold_refuses_before_claude_starts(self) -> None:
+        self.settings = self.write_settings([self.repository], {"mcp_servers": MCP_SERVERS})
         for status, error in (
-            ({"ok": True, "sentry_token_present": False}, "the gateway's broker reports sentry_token_present false"),
+            ({"ok": True, "mcp_tokens_present": {"sentry": True, "posthog": False}}, "the gateway's broker holds no token for posthog"),
+            ({"ok": True}, "the gateway's broker holds no token for posthog, sentry"),
             ({"ok": False, "message": "busy"}, "the gateway's broker refused status: busy"),
         ):
             with self.subTest(status=status):
                 self.broker.answers["status"] = [status]
 
-                code, report = self.run_session(env={"EXAMPLE_SENTRY_TOKEN": "sntryu_from_the_environment"})
+                code, report = self.run_session()
 
-                self.assertEqual((code, report), (2, {"error": f"Sentry token: {error}"}))
+                self.assertEqual((code, report), (2, {"error": f"MCP tokens: {error}"}))
                 self.assertFalse(self.log.exists())
-        self.assertNotIn("sentry_token", self.broker.requests)
+        self.assertNotIn("mcp_token", self.broker.requests)
 
-    def test_without_sentry_token_env_the_run_has_only_the_linear_server(self) -> None:
-        for claude_session in ({}, {"sentry_token_env": ""}):
+    def test_without_mcp_servers_the_run_has_only_the_linear_server(self) -> None:
+        for claude_session in ({}, {"mcp_servers": {}}):
             with self.subTest(claude_session=claude_session):
                 self.settings = self.write_settings([self.repository], claude_session)
 
-                self.run_session(env={"EXAMPLE_SENTRY_TOKEN": "sntryu_example"})
+                self.run_session()
 
                 call = self.claude_call()
                 argv = call["argv"]
@@ -1260,6 +1277,37 @@ class ClaudeSessionTest(GitFixture):
                 self.assertEqual(argv[argv.index("--mcp-config") + 1], LINEAR_MCP_CONFIG)
                 self.assertEqual(call["settings"]["content"]["env"], {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true"})
                 self.assertNotIn("disabledMcpjsonServers", call["settings"]["content"])
+
+    def test_invalid_mcp_servers_are_refused_before_the_broker_is_asked(self) -> None:
+        sentry = MCP_SERVERS["sentry"]
+        for value, error in (
+            (["sentry"], "claude_session.mcp_servers ['sentry'] must map server names to servers"),
+            ({"linear": sentry}, "claude_session.mcp_servers.linear: the factory owns the linear server"),
+            ({"sentry": "SENTRY_ACCESS_TOKEN"}, "claude_session.mcp_servers.sentry must be an object with only headers, scheme, token_env, url"),
+            ({"sentry": {**sentry, "env": {}}}, "claude_session.mcp_servers.sentry must be an object with only headers, scheme, token_env, url"),
+            ({"sentry": {**sentry, "url": "http://mcp.sentry.dev/mcp"}}, "claude_session.mcp_servers.sentry.url must be an https URL"),
+            ({"sentry": {**sentry, "token_env": ""}}, "claude_session.mcp_servers.sentry.token_env must name the gateway's variable that holds the token"),
+            ({"sentry": {**sentry, "scheme": "Bearer x"}}, "claude_session.mcp_servers.sentry.scheme must be one Authorization scheme word, such as Bearer"),
+            ({"sentry": {**sentry, "headers": {"x": 1}}}, "claude_session.mcp_servers.sentry.headers must map header names to fixed strings"),
+            ({"sentry": {**sentry, "scheme": 7}}, "claude_session.mcp_servers.sentry.scheme must be one Authorization scheme word, such as Bearer"),
+            *(
+                ({"sentry": {**sentry, "headers": {header: "x"}}}, "claude_session.mcp_servers.sentry.headers must hold no credential; mcp-headers sends the token as Authorization")
+                for header in ("authorization", "X-API-Key", "x-access-token", "Cookie")
+            ),
+        ):
+            with self.subTest(value=value):
+                self.settings = self.write_settings([self.repository], {"mcp_servers": value})
+
+                self.assertEqual(self.run_session(), (2, {"error": error}))
+                self.assertFalse(self.log.exists())
+        self.assertEqual(self.broker.requests, [])
+
+    def test_a_leftover_sentry_token_env_is_refused(self) -> None:
+        self.settings = self.write_settings([self.repository], {"sentry_token_env": "SENTRY_ACCESS_TOKEN"})
+
+        self.assertEqual(self.run_session(), (2, {
+            "error": "claude_session.sentry_token_env is replaced by claude_session.mcp_servers.sentry",
+        }))
 
     def test_disabled_mcp_servers_reach_the_settings_file(self) -> None:
         names = ["mongodb-production-reader", "sentry-local"]
@@ -1281,6 +1329,63 @@ class ClaudeSessionTest(GitFixture):
                     f"claude_session.disabled_mcp_servers {value!r} must be a list of MCP server names"
                 )})
                 self.assertFalse(self.log.exists())
+
+    def run_probe(self, timeout: float = 20) -> tuple:
+        command, env = self.session_command()
+        command = [command[0], "--mcp-status", "--repo", REPO, "--settings-json", str(self.settings), "--timeout", str(timeout)]
+        env.pop("HERMES_KANBAN_WORKSPACE")
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
+        return proc.returncode, json.loads(proc.stdout)
+
+    def test_mcp_status_reads_each_servers_status_from_a_run_that_never_reaches_the_model(self) -> None:
+        self.settings = self.write_settings([self.repository], {
+            "mcp_servers": MCP_SERVERS, "disabled_mcp_servers": ["figma"], "base_url": "https://proxy.example",
+            "auth_token_env": "CLAUDE_PROXY_TOKEN",
+        })
+        self.broker.answers["status"] = [{"ok": True, "mcp_tokens_present": {"sentry": True, "posthog": True}}]
+        init = [{"name": "linear", "status": "connected"}, {"name": "sentry", "status": "connected"},
+                {"name": "figma", "status": "needs-auth"}]
+        self.configure_fake_claude(init=init)
+
+        started = time.monotonic()
+        code, report = self.run_probe()
+
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual((code, report), (0, {"repo": REPO, "servers": init, "disabled": ["figma"]}))
+        call = self.claude_call()
+        argv, content = call["argv"], call["settings"]["content"]
+        self.assertEqual(call["cwd"], str(self.main.resolve()))
+        self.assertEqual(sorted(json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]), ["linear", "posthog", "sentry"])
+        self.assertEqual(content["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:9")
+        self.assertNotIn("apiKeyHelper", content)
+        self.assertEqual(content["disabledMcpjsonServers"], ["figma"])
+        self.assertEqual(call["settings"]["mode"], "0o600")
+        self.assertNotIn("mcp_token", self.broker.requests)
+
+    def test_mcp_status_redacts_the_linear_token_when_claude_ends_without_an_init_event(self) -> None:
+        self.configure_fake_claude(stderr_env="LINEAR_API_KEY")
+
+        code, report = self.run_probe()
+
+        self.assertEqual(code, 1)
+        self.assertRegex(report["error"], r"^claude exited 0 without an init event: token \[redacted\]$")
+        self.assertNotIn("cached-token", json.dumps(report))
+
+    def test_mcp_status_refuses_like_a_run_when_the_gateway_lacks_a_token(self) -> None:
+        self.settings = self.write_settings([self.repository], {"mcp_servers": MCP_SERVERS})
+        self.broker.answers["status"] = [{"ok": True, "mcp_tokens_present": {"sentry": True}}]
+
+        self.assertEqual(self.run_probe(), (2, {"error": "MCP tokens: the gateway's broker holds no token for posthog"}))
+        self.assertFalse(self.log.exists())
+
+    def test_a_run_still_needs_its_card_and_issue_arguments(self) -> None:
+        command, env = self.session_command(omit_task_id=True)
+
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("the following arguments are required: --task-id", proc.stderr)
+        self.assertFalse(self.log.exists())
 
     def test_a_linear_that_rejects_every_token_refuses_before_claude_starts(self) -> None:
         (self.hermes_home / "linear-fake.json").write_text(json.dumps({"accepted": [], "reject_all": True}))
@@ -1400,23 +1505,23 @@ class ClaudeSessionTest(GitFixture):
         self.assertRegex(report["error"], r"^Linear token: the gateway's broker is busy")
         self.assertFalse(self.log.exists())
 
-    def test_a_busy_broker_is_asked_again_for_the_sentry_status(self) -> None:
-        self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
-        self.broker.answers["status"] = [BUSY, {"ok": True, "sentry_token_present": True}]
+    def test_a_busy_broker_is_asked_again_for_the_mcp_token_status(self) -> None:
+        self.settings = self.write_settings([self.repository], {"mcp_servers": MCP_SERVERS})
+        self.broker.answers["status"] = [BUSY, {"ok": True, "mcp_tokens_present": {"sentry": True, "posthog": True}}]
 
         self.run_session()
 
         self.assertEqual(self.broker.requests.count("status"), 2)
         self.assertTrue(self.log.exists())
 
-    def test_a_sentry_status_that_stays_busy_sends_the_card_back_to_the_queue(self) -> None:
-        self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
+    def test_an_mcp_token_status_that_stays_busy_sends_the_card_back_to_the_queue(self) -> None:
+        self.settings = self.write_settings([self.repository], {"mcp_servers": MCP_SERVERS})
         self.broker.answers["status"] = [BUSY]
 
         status, report = self.run_session()
 
         self.assertEqual((status, report.get("transient")), (2, True))
-        self.assertRegex(report["error"], r"^Sentry token: the gateway's broker is busy")
+        self.assertRegex(report["error"], r"^MCP tokens: the gateway's broker is busy")
         self.assertFalse(self.log.exists())
 
     def test_missing_plugin_refuses_before_claude_starts(self) -> None:
