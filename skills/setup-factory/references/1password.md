@@ -139,7 +139,8 @@ Change it so the output passes through the filter:
 ```
 
 The script still checks that the export is not empty before it prints, so a
-failed export still fails the helper. The worker's helper,
+failed export still fails the helper. This line is the same in the helper that calls Infisical's REST API
+with `curl`, after the render step fills `<api url>`. The worker's helper,
 `<worker>/scripts/worker-secrets`, needs no change: it reads no Infisical
 folder and prints only the proxy token it gets from the gateway's broker.
 

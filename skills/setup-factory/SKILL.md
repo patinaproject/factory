@@ -68,7 +68,7 @@ below first, and ask only when it prints nothing:
 | Installation ID and private key path | `github.installation_id` and `github.private_key_path` in the settings |
 | Bot user ID | `gh api '/users/<app-slug>[bot]' --jq .id` |
 | Repositories the installation covers | `GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --jq '.repositories[].full_name'` |
-| Infisical project ID, environment, and folder | `grep -oE -e '--projectId[= ][^ ]+' -e '--env[= ][^ ]+' -e '--path[= ][^ ]+' <file>`, where `<file>` holds the `command` that `hermes config get secrets.command --json` prints: the script it names, or a file with that command line |
+| Infisical URL, project ID, environment, and folder | `grep -e '^api_url=' -e '^project=' -e '^environment=' -e '^folder=' <file>`, where `<file>` is the script that the `command` of `hermes config get secrets.command --json` names. A helper rendered before the REST API change has no `api_url` line and names the rest with `--projectId`, `--env`, and `--path` flags, which `grep -oE -e '--projectId[= ][^ ]+' -e '--env[= ][^ ]+' -e '--path[= ][^ ]+' <file>` prints |
 | Proxy base URL, model alias, and token variable | A loopback listener in `lsof -nP -iTCP -sTCP:LISTEN`, the proxy's own configuration file, and its `/v1/models` list |
 | SST app, stage, Cloudflare account, and zone | `find ~ -maxdepth 4 -name 'sst.config.ts' -not -path '*/node_modules/*'`, then the stage configuration in that app. `dig +short <hostname>` shows whether the hostname already points at Cloudflare |
 | Existing tunnel | The `cloudflared` system service. On macOS, find its plist with `ls /Library/LaunchDaemons/*cloudflared*` and read only `Label` and `Program` with `plutil -extract <key> raw <plist>`, falling back to `ProgramArguments.0` when `Program` is absent. Never print full `launchctl print` output or any `ProgramArguments` entry after index 0, which can hold the tunnel token. Use the filtered check in [`references/cloudflare-sst.md`](references/cloudflare-sst.md) |
@@ -1689,6 +1689,12 @@ worker sessions read the same `<config>/CLAUDE.md` as the operator, where
 A merged change to `plugins/`, `profiles/`, or `templates/` is not live until
 it is installed. Hermes loads plugins and webhook routes only when the gateway
 starts. The worker reads `SOUL.md` and its scripts on each run.
+
+A merged change to `skills/setup-factory/scripts/factory-secrets` is live only
+after the render steps in
+[Configure both homes](references/infisical.md#configure-both-homes) install
+it at `<home>/bin/factory-secrets`. Hermes runs the new helper the next time a
+Hermes process starts.
 
 1. Find the source checkout. It is the checkout `<worker>/distribution.yaml`
    points at, and this command prints it:
