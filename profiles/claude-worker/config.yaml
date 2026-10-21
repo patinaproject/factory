@@ -41,7 +41,7 @@ plugins:
           model: ""
           tier_models: {}
           auth_token_env: ""
-          sentry_token_env: ""
+          mcp_servers: {}
           disabled_mcp_servers: []
           max_turns: 0
     pr-ready-gate:

@@ -20,11 +20,11 @@ and the worker, never receive them. The design has four pieces:
   runs the real `op`.
 
 The strip keeps the token out of the environment that Hermes gives its agents.
-The worker's own helper, `<worker>/scripts/worker-secrets`, keeps only the
-three keys the worker loads, and the worker's machine identity can read only
-those, as [`infisical.md`](infisical.md) explains. The default home's identity
-can read the whole folder, and both homes run as one user, so the strip is not
-a hard boundary there. Keep the vault small, read-only, and limited to what
+The worker home reads nothing from Infisical: its helper,
+`<worker>/scripts/worker-secrets`, gets only the proxy token from the
+gateway's broker, as [`infisical.md`](infisical.md) explains. The default
+home's identity can read the whole folder, and both homes run as one user, so
+the strip is not a hard boundary there. Keep the vault small, read-only, and limited to what
 the operator needs.
 
 ## Inputs
@@ -139,9 +139,10 @@ Change it so the output passes through the filter:
 ```
 
 The script still checks that the export is not empty before it prints, so a
-failed export still fails the helper. The worker's helper,
-`<worker>/scripts/worker-secrets`, needs no change: it passes through only
-`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, and the proxy token variable.
+failed export still fails the helper. This line is the same in the helper that calls Infisical's REST API
+with `curl`, after the render step fills `<api url>`. The worker's helper,
+`<worker>/scripts/worker-secrets`, needs no change: it reads no Infisical
+folder and prints only the proxy token it gets from the gateway's broker.
 
 Hermes now reports one fewer secret than the folder holds:
 `Command helper: applied <n> secrets`, where `<n>` is the folder's count minus

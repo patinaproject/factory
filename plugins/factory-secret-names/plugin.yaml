@@ -1,0 +1,33 @@
+manifest_version: 2
+name: factory-secret-names
+label: Factory secret names
+kind: platform
+version: "0.1.0"
+description: >-
+  Declares no platform and runs no code. Install it in both homes. Hermes strips
+  every variable a home's platform plugins declare as a secret from each
+  process that home starts, such as a terminal command, a background process,
+  or a cron script. These are the factory's secrets that Hermes does not
+  already strip, so no command a worker or the gateway runs can read them from
+  another process's environment.
+optional_env:
+  - name: LINEAR_CLIENT_SECRET
+    description: The Linear agent app's client secret. Only the gateway holds it.
+  - name: LINEAR_WEBHOOK_SECRET
+    description: The Linear webhook signing secret. Only the gateway holds it.
+  - name: GITHUB_WEBHOOK_SECRET
+    description: The GitHub webhook signing secret. Only the gateway holds it.
+  - name: GITHUB_UPLOAD_TOKEN
+    description: The operator's upload-only token for evidence images. Only the gateway holds it.
+  - name: FACTORY_INFISICAL_CLIENT_SECRET
+    description: The client secret of the machine identity that the gateway signs in to Infisical as.
+  - name: CLAUDE_PROXY_TOKEN
+    description: >-
+      The model proxy's token, the variable that claude_session.auth_token_env
+      names. The gateway and the worker's own agent loop send it; Claude Code
+      gets it through apiKeyHelper.
+  - name: SENTRY_ACCESS_TOKEN
+    description: >-
+      The read-only Sentry token, the variable that
+      claude_session.mcp_servers.sentry.token_env names. Only the gateway
+      holds it; the run's sentry server gets it through mcp-headers.

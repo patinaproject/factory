@@ -126,8 +126,11 @@ loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
 check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(check_install)
 
+SECRET_NAMES = "plugin.yaml"
+SECRET_NAMES_MANIFEST = "kind: platform\noptional_env:\n  - name: LINEAR_CLIENT_SECRET\n  - name: CLAUDE_PROXY_TOKEN\n  - name: SENTRY_ACCESS_TOKEN\n"
 TRIAGE_PLAYBOOK = ".agents/skills/patina-mode/playbooks/triage.md"
 REPO_FILES = {
+    f"plugins/factory-secret-names/{SECRET_NAMES}": SECRET_NAMES_MANIFEST,
     TRIAGE_PLAYBOOK: "playbook\n",
     "profiles/claude-worker/SOUL.md": "soul\n",
     "profiles/claude-worker/config.yaml": "model: repo\n",
@@ -175,7 +178,8 @@ class FakeBroker:
         self.server.close()
 
 
-OK_STATUS = json.dumps({"ok": True, "token_present": True, "last_state": None}).encode() + b"\n"
+STATUS = {"ok": True, "token_present": True, "linear_ready": True, "proxy_token_present": True, "last_state": None}
+OK_STATUS = json.dumps(STATUS).encode() + b"\n"
 
 
 class CheckInstallTest(unittest.TestCase):
@@ -202,6 +206,7 @@ class CheckInstallTest(unittest.TestCase):
         self.worker = self.root / "profiles" / "claude-worker"
         for home in (self.root, self.worker):
             self.install(home, "plugins/p1/__init__.py", "plugin\n")
+            self.install(home, f"plugins/factory-secret-names/{SECRET_NAMES}", SECRET_NAMES_MANIFEST)
         self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
         self.install(self.root, "plugins/team/__init__.py", "team\n")
         self.install(self.root, "plugins/webhook-retry/__init__.py", "retry\n")
@@ -495,7 +500,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_a_token(self) -> None:
-        self.uploads.reply = json.dumps({"ok": True, "token_present": False}).encode() + b"\n"
+        self.uploads.reply = json.dumps({**STATUS, "token_present": False}).encode() + b"\n"
 
         self.assertEqual(
             self.check(),
@@ -504,6 +509,51 @@ class CheckInstallTest(unittest.TestCase):
                 f"upload broker {self.root}/factory-uploads.sock: "
                 "reports token_present false: the gateway holds no upload token (part 5)\n",
             ),
+        )
+
+    def test_broker_without_linear_credentials_leaves_every_worker_without_linear(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "linear_ready": False}).encode() + b"\n"
+
+        self.assertEqual(
+            self.check(),
+            (
+                1,
+                f"upload broker {self.root}/factory-uploads.sock: reports linear_ready false: the gateway holds no "
+                "Linear app credentials, so no worker reaches Linear (part 5)\n",
+            ),
+        )
+
+    def test_broker_without_the_proxy_token_matters_only_when_one_is_configured(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "proxy_token_present": False}).encode() + b"\n"
+        self.assertEqual(self.check(), (0, ""))
+
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
+
+        self.assertEqual(
+            self.check(),
+            (
+                1,
+                f"upload broker {self.root}/factory-uploads.sock: reports proxy_token_present false: the gateway "
+                "holds no CLAUDE_PROXY_TOKEN, so no worker reaches the proxy (part 5)\n",
+            ),
+        )
+
+    def test_broker_without_an_mcp_token_matters_only_for_a_configured_server(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True, "posthog": False}}).encode() + b"\n"
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "SENTRY_ACCESS_TOKEN"})
+        self.assertEqual(self.check(), (0, ""))
+
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "SENTRY_ACCESS_TOKEN", "posthog": "POSTHOG_MCP_KEY", "figma": "FIGMA_MCP_TOKEN"})
+
+        code, out = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertIn(
+            f"upload broker {self.root}/factory-uploads.sock: holds no token for the figma MCP server: the gateway "
+            "holds no FIGMA_MCP_TOKEN, so every worker run is refused (part 5)\n"
+            f"upload broker {self.root}/factory-uploads.sock: holds no token for the posthog MCP server: the gateway "
+            "holds no POSTHOG_MCP_KEY, so every worker run is refused (part 5)\n",
+            out,
         )
 
     def test_broker_that_does_not_answer_a_status_request_properly(self) -> None:
@@ -576,56 +626,117 @@ class CheckInstallTest(unittest.TestCase):
                 "(part 10)\n"),
         )
 
-    def secrets(self, root: dict | None, worker: dict | None) -> None:
-        self.config(self.root, {**ROOT_CONFIG, **({"secrets.command": root} if root else {})})
-        self.config(self.worker, {**WORKER_CONFIG, **({"secrets.command": worker} if worker else {})})
+    def proxy(self, token_env: str, worker_command: dict | None = None, mcp_envs: dict | None = None) -> None:
+        servers = {name: {"url": f"https://mcp.example/{name}", "token_env": env} for name, env in (mcp_envs or {}).items()}
+        settings = {**SETTINGS, "claude_session": {"auth_token_env": token_env, "mcp_servers": servers}}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        worker = {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings}
+        self.config(self.worker, {**worker, **({"secrets.command": worker_command} if worker_command else {})})
 
-    def test_worker_secrets_helper_behind_a_root_secret_source_is_silent(self) -> None:
-        self.secrets(
-            {"enabled": True, "command": f"{self.root}/bin/factory-secrets"},
-            {"enabled": True, "command": f"python3 {self.worker}/scripts/worker-secrets"},
-        )
+    def helper(self) -> dict:
+        return {"enabled": True, "command": f"python3 {self.worker}/scripts/worker-secrets"}
+
+    def test_worker_that_loads_its_proxy_token_through_the_helper_is_silent(self) -> None:
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
 
         self.assertEqual(self.check(), (0, ""))
 
-    def test_worker_secrets_command_that_is_not_the_worker_helper(self) -> None:
+    def test_worker_with_a_proxy_token_and_another_secret_source(self) -> None:
         drift = (
             f"config secrets.command in {self.worker}: "
-            f"is not the worker helper python3 {self.worker}/scripts/worker-secrets (part 14)\n"
+            f"is not the worker helper python3 {self.worker}/scripts/worker-secrets (part 5)\n"
         )
-        root = {"enabled": True, "command": f"{self.root}/bin/factory-secrets"}
         for worker in (
-            root,
+            {"enabled": True, "command": f"{self.root}/bin/factory-secrets"},
             {"enabled": True, "command": "env TOKEN=s3cr3t-value sh -c helper"},
-            {"enabled": False, "command": f"python3 {self.worker}/scripts/worker-secrets"},
+            {**self.helper(), "enabled": False},
             None,
         ):
             with self.subTest(worker=worker):
-                self.secrets(root, worker)
+                self.proxy("CLAUDE_PROXY_TOKEN", worker)
 
                 code, out = self.check()
 
                 self.assertEqual((code, out), (1, drift))
                 self.assertNotIn("s3cr3t-value", out)
 
-    def test_worker_secret_source_without_a_root_secret_source(self) -> None:
-        worker = {"enabled": True, "command": "env TOKEN=s3cr3t-value sh -c helper"}
-        for root in (None, {"enabled": False, "command": f"{self.root}/bin/factory-secrets"}):
-            with self.subTest(root=root):
-                self.secrets(root, worker)
+    def test_worker_without_a_proxy_token_loads_no_secret(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "secrets.command": {"enabled": True, "command": "s3cr3t-value"}})
 
-                code, out = self.check()
+        code, out = self.check()
 
-                self.assertEqual(
-                    (code, out),
-                    (1, f"config secrets.command in {self.worker}: is set while the root home has no secret source (part 14)\n"),
-                )
-                self.assertNotIn("s3cr3t-value", out)
+        self.assertEqual(
+            (code, out),
+            (1, f"config secrets.command in {self.worker}: is set, but a worker without a proxy token loads no secret (part 5)\n"),
+        )
+        self.assertNotIn("s3cr3t-value", out)
 
-    def test_worker_secret_source_disabled_with_the_root_one_is_silent(self) -> None:
-        self.secrets({"enabled": False, "command": "x"}, {"enabled": False, "command": "y"})
+    def test_worker_secret_source_disabled_without_a_proxy_token_is_silent(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "secrets.command": {"enabled": False, "command": "y"}})
 
         self.assertEqual(self.check(), (0, ""))
+
+    def test_secrets_only_the_gateway_holds_are_reported_in_the_worker_env_by_name_only(self) -> None:
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
+        self.install(self.worker, ".env", "\n".join([
+            "GH_CONFIG_DIR=/gh", "LINEAR_CLIENT_ID=s3cr3t-1", "export LINEAR_CLIENT_SECRET='s3cr3t-2'",
+            "FACTORY_INFISICAL_CLIENT_ID=s3cr3t-3", "FACTORY_INFISICAL_CLIENT_SECRET=s3cr3t-4",
+            "CLAUDE_PROXY_TOKEN=s3cr3t-5", "",
+        ]))
+
+        code, out = self.check()
+
+        held = "is set, but the worker holds no factory secret; remove it"
+        self.assertEqual((code, out), (1, "".join([
+            f"secret LINEAR_CLIENT_ID in {self.worker}/.env: {held} (part 8)\n",
+            f"secret LINEAR_CLIENT_SECRET in {self.worker}/.env: {held} (part 8)\n",
+            f"secret FACTORY_INFISICAL_CLIENT_ID in {self.worker}/.env: {held} (part 14)\n",
+            f"secret FACTORY_INFISICAL_CLIENT_SECRET in {self.worker}/.env: {held} (part 14)\n",
+            f"secret CLAUDE_PROXY_TOKEN in {self.worker}/.env: {held} (part 3)\n",
+        ])))
+        self.assertNotIn("s3cr3t", out)
+
+    def test_an_mcp_token_in_the_worker_env_is_reported_by_name_only(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True}}).encode() + b"\n"
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "SENTRY_ACCESS_TOKEN"})
+        self.install(self.worker, ".env", "SENTRY_ACCESS_TOKEN=s3cr3t-6\n")
+
+        code, out = self.check()
+
+        self.assertEqual((code, out), (
+            1,
+            f"secret SENTRY_ACCESS_TOKEN in {self.worker}/.env: is set, but the worker holds no factory secret; "
+            "remove it (part 3)\n",
+        ))
+        self.assertNotIn("s3cr3t", out)
+
+    def test_an_mcp_token_variable_hermes_would_pass_to_every_process(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True}}).encode() + b"\n"
+        self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "OTHER_SENTRY_TOKEN"})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config claude_session.mcp_servers.sentry.token_env in {self.worker}: names OTHER_SENTRY_TOKEN, which "
+                "plugins/factory-secret-names/plugin.yaml does not declare, so every process a home starts "
+                "inherits it (part 3)\n"),
+        )
+
+    def test_a_proxy_token_variable_hermes_would_pass_to_every_process(self) -> None:
+        self.proxy("OTHER_PROXY_TOKEN", self.helper())
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config claude_session.auth_token_env in {self.worker}: names OTHER_PROXY_TOKEN, which "
+                "plugins/factory-secret-names/plugin.yaml does not declare, so every process a home starts "
+                "inherits it (part 3)\n"),
+        )
+
+    def test_worker_that_passes_variables_to_its_commands(self) -> None:
+        self.config(self.worker, {**WORKER_CONFIG, "terminal.env_passthrough": ["LINEAR_CLIENT_SECRET"]})
+
+        self.assertEqual(
+            self.check(), (1, f"config terminal.env_passthrough in {self.worker}: is not empty (part 5)\n")
+        )
 
     def test_missing_and_duplicated_cron_jobs(self) -> None:
         self.cron(self.worker, [job for job in WORKER_JOBS if job["name"] != "refresh-checkouts"])
@@ -1198,6 +1309,83 @@ class Launchd:
 
     def states(self, states: dict) -> None:
         self.states_file.write_text(json.dumps(states))
+
+
+FAKE_SESSION = """import json, os, sys
+args = sys.argv[1:]
+reports = json.load(open(os.path.join(os.path.dirname(__file__), "reports.json")))
+assert args[:2] == ["--mcp-status", "--repo"] and os.environ["HERMES_HOME"] == os.path.dirname(os.path.dirname(__file__))
+code, report = reports[args[2]]
+print(json.dumps(report))
+sys.exit(code)
+"""
+
+
+class CheckMcpServersTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.worker = self.tmp / "worker"
+        (self.worker / "scripts").mkdir(parents=True)
+        (self.worker / "scripts" / "claude-session").write_text(FAKE_SESSION)
+        self.settings = {"repositories": [
+            {"full_name": "example-org/app", "path": str(self.tmp)},
+            {"full_name": "example-org/site", "path": str(self.tmp)},
+            {"full_name": "example-org/gone", "path": str(self.tmp / "missing")},
+        ]}
+
+    def check(self, reports: dict) -> list:
+        (self.worker / "scripts" / "reports.json").write_text(json.dumps(reports))
+        return [str(d) for d in check_install.check_mcp_servers(self.settings, self.worker)]
+
+    def test_reports_each_server_neither_connected_nor_disabled(self) -> None:
+        app = {"servers": [
+            {"name": "linear", "status": "connected"}, {"name": "figma", "status": "needs-auth"},
+            {"name": "cms", "status": "failed"}, {"name": "vercel", "status": "needs-auth"},
+        ], "disabled": ["vercel"]}
+
+        self.assertEqual(self.check({
+            "example-org/app": [0, app],
+            "example-org/site": [2, {"error": "MCP tokens: the gateway's broker holds no token for sentry"}],
+        }), [
+            "mcp figma in example-org/app: is needs-auth, not connected or disabled (part 10)",
+            "mcp cms in example-org/app: is failed, not connected or disabled (part 10)",
+            "mcp example-org/site: cannot read the MCP server status: MCP tokens: the gateway's broker holds no "
+            "token for sentry (part 10)",
+        ])
+
+    def test_every_server_connected_or_disabled_is_silent(self) -> None:
+        report = {"servers": [{"name": "linear", "status": "connected"}, {"name": "figma", "status": "needs-auth"}], "disabled": ["figma"]}
+
+        self.assertEqual(self.check({"example-org/app": [0, report], "example-org/site": [0, report]}), [])
+
+    def test_a_probe_without_a_report_is_named(self) -> None:
+        (self.worker / "scripts" / "claude-session").write_text("print('not json')\n")
+
+        self.assertEqual(self.check({}), [
+            "mcp example-org/app: cannot read the MCP server status: exited 0 without a report (part 10)",
+            "mcp example-org/site: cannot read the MCP server status: exited 0 without a report (part 10)",
+        ])
+
+    def test_a_leftover_sentry_token_env_is_reported(self) -> None:
+        self.settings["claude_session"] = {"sentry_token_env": "SENTRY_ACCESS_TOKEN"}
+        report = {"servers": [], "disabled": []}
+
+        self.assertEqual(self.check({"example-org/app": [0, report], "example-org/site": [0, report]}), [
+            "config claude_session.sentry_token_env: is replaced by mcp_servers.sentry, so every worker run is refused (part 10)",
+        ])
+
+    def test_a_report_that_is_not_an_object_is_named(self) -> None:
+        self.assertEqual(self.check({"example-org/app": [2, ["no"]], "example-org/site": [0, "no"]}), [
+            "mcp example-org/app: cannot read the MCP server status: exited 2 without a report (part 10)",
+            "mcp example-org/site: cannot read the MCP server status: exited 0 without a report (part 10)",
+        ])
+
+    def test_without_an_installed_claude_session_or_settings_nothing_runs(self) -> None:
+        (self.worker / "scripts" / "claude-session").unlink()
+
+        self.assertEqual(self.check({}), [])
+        self.assertEqual([str(d) for d in check_install.check_mcp_servers(None, self.worker)], [])
 
 
 class CheckServicesTest(unittest.TestCase):
