@@ -43,6 +43,11 @@ class CheckLinearClosesTest(unittest.TestCase):
 
         self.assertEqual(self.check("Closes #205")[0], 0)
 
+    def test_a_body_that_closes_nothing_needs_no_linear_line(self) -> None:
+        for body in ("", "chore: bump the release version", "<!-- Closes #204 -->\n`Closes #204`\n> Closes #204"):
+            with self.subTest(body):
+                self.assertEqual(self.check(body)[0], 0)
+
     def test_a_failed_read_fails_the_check(self) -> None:
         proc = subprocess.run(
             [sys.executable, str(SCRIPTS / "check_linear_closes.py")],

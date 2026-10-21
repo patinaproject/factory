@@ -16,6 +16,7 @@ When two or more fixes that share one premise have failed the same gate, suspect
 - **Take a census before the next fix.** Count the imbalance per actor. The census shows which actors hold the imbalance, not how large it is. Write the census as a rerunnable script per [Build the Lever](../principle-build-the-lever/SKILL.md).
 - **Read the skew.** If the same few actors hold most of the imbalance on every run, something assigns them that role. Find what assigns the role. That assignment is the next "why" per [Fix Root Causes](../principle-fix-root-causes/SKILL.md).
 - **Remove the asymmetry instead of compensating for it**, per the [Laziness Protocol](../principle-laziness-protocol/SKILL.md). Rotate the role between actors, randomize the assignment, or move the role, so that no actor holds it on every run. A return path, a shared pool, a batched hand-off, or a periodic rebalance leaves the assignment in place and adds work on every run.
+- **When the premise is not about actors**, the census becomes a rerunnable check whose result would differ if the premise were false. Two timeout increases assume requests reach the intended destination; log the actual destination before the third.
 
 **Stop:**
 

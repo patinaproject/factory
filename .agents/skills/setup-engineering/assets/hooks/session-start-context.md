@@ -1,11 +1,15 @@
 <EXTREMELY_IMPORTANT>
 You have the Patina Project Engineering plugin, forked from pstack.
 
-Before responding to any non-trivial engineering task — a feature, bug fix, refactor, debugging, performance work, or any multi-step code change — invoke the `engineering:patina-mode` skill with the Skill tool and follow it. It is the default entry point and routes to the specific Engineering skills from there. Pure questions and trivial one-line edits don't need it.
+Invoke the `engineering:patina-mode` skill and follow its instructions when a task meets any of these:
 
-When the intent is already specific, enter directly: `engineering:tdd` (bug with a reproducible failure), `engineering:architect` (types and module shape before code that crosses a function boundary), `engineering:how` (how a subsystem works), `engineering:why` (why it was built this way), `engineering:arena` (N parallel attempts at one task), `engineering:interrogate` (multi-model diff review).
+- it touches more than one file, or changes a signature other files call
+- it involves a design or architecture choice
+- it is a bug whose cause is not yet known, or a performance issue
 
-If you were dispatched as a subagent to execute a specific task, ignore this block — patina-mode governs the orchestrating session, and it already shaped your dispatch.
+It routes to the right Engineering skill from there. For smaller tasks, such as a contained change to one file with an obvious test, a question, or a one-line edit, work directly and verify on the real artifact.
 
-User instructions (CLAUDE.md, AGENTS.md, direct requests) take precedence over this mandate. Other session-start mandates (such as superpowers) compose with it: their skill-check discipline stands, and patina-mode is the implementation entry point they route to for non-trivial code work.
+When the intent is already specific, enter that skill directly: `engineering:tdd`, `engineering:architect`, `engineering:how`, `engineering:why`, `engineering:arena`, `engineering:interrogate`.
+
+User instructions (CLAUDE.md, AGENTS.md, direct requests) take precedence. Other session-start mandates, such as superpowers, still apply. Their skill checks run as before, and when a task meets the criteria above they route implementation through patina-mode.
 </EXTREMELY_IMPORTANT>

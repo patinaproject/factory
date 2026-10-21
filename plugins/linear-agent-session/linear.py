@@ -30,6 +30,24 @@ SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: A
   agentSessionUpdate(id: $id, input: $input) { success }
 }"""
 
+SESSION_THREAD_QUERY = """query AgentSessionThread($id: String!) {
+  agentSession(id: $id) { comment { id } issue { id } }
+}"""
+
+ACTIVITY_FIELDS = "id createdAt signal content { __typename ... on AgentActivityPromptContent { body } }"
+
+ACTIVITY_QUERY = f"""query AgentActivity($id: String!) {{
+  agentActivity(id: $id) {{ {ACTIVITY_FIELDS} }}
+}}"""
+
+SESSION_ACTIVITIES_QUERY = f"""query AgentSessionActivities($id: String!) {{
+  agentSession(id: $id) {{ activities(first: 50, orderBy: createdAt) {{ nodes {{ {ACTIVITY_FIELDS} }} }} }}
+}}"""
+
+COMMENT_CREATE_MUTATION = """mutation CommentCreate($input: CommentCreateInput!) {
+  commentCreate(input: $input) { success }
+}"""
+
 SESSION_CREATE_MUTATION = """mutation AgentSessionCreateOnIssue($input: AgentSessionCreateOnIssue!) {
   agentSessionCreateOnIssue(input: $input) { success agentSession { id } }
 }"""
@@ -42,8 +60,9 @@ ISSUE_QUERY = """query Issue($id: String!) {
     id identifier title url branchName priority
     state { name type }
     delegate { id }
+    labels { nodes { name } }
     attachments { nodes { url sourceType } }
-    agentSessions(first: 20) { nodes { id status createdAt appUser { id } } }
+    agentSessions(first: 20) { nodes { id status createdAt appUser { id } creator { id } } }
   }
 }"""
 
@@ -63,11 +82,41 @@ ISSUE_DELEGATE_QUERY = """query IssueDelegate($id: String!) {
   issue(id: $id) { id identifier delegate { id } }
 }"""
 
+ISSUE_LABELS_QUERY = """query IssueLabels($id: String!) {
+  issue(id: $id) { labels { nodes { name } } }
+}"""
+
+ISSUE_DOCUMENTS_QUERY = """query IssueDocuments($id: String!) {
+  viewer { id }
+  issue(id: $id) { identifier documents(first: 100) { nodes { id title creator { id } } } }
+}"""
+
+TRIAGE_PEOPLE_QUERY = """query TriagePeople($id: String!) {
+  issue(id: $id) {
+    assignee { url }
+    creator { url app }
+    team { triageResponsibility { currentUser { url } } }
+  }
+}"""
+
+DOCUMENT_UPDATE_MUTATION = """mutation DocumentUpdate($id: String!, $input: DocumentUpdateInput!) {
+  documentUpdate(id: $id, input: $input) { success }
+}"""
+
+ISSUE_STATES_QUERY = """query IssueStates($id: String!) {
+  issue(id: $id) {
+    id identifier
+    state { name type }
+    team { states { nodes { id name type position } } }
+  }
+}"""
+
 ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
 }"""
 
 CLOSED_STATE_TYPES = ("completed", "canceled")
+READY_STATE_NAME = "Todo"
 
 UrlOpen = Callable[..., Any]
 
@@ -134,6 +183,35 @@ class LinearClient:
         if not payload["success"]:
             raise LinearError("agentSessionUpdate reported success: false")
 
+    def reply_in_session(self, agent_session_id: str, body: str) -> None:
+        """Reply in the session's comment thread. Linear turns a mention in a comment into one that notifies,
+        but leaves a mention in an activity body as plain text or a link."""
+        session = self._graphql(SESSION_THREAD_QUERY, {"id": agent_session_id})["agentSession"]
+        payload = self._graphql(
+            COMMENT_CREATE_MUTATION,
+            {"input": {"issueId": session["issue"]["id"], "parentId": session["comment"]["id"], "body": body}},
+        )["commentCreate"]
+        if not payload["success"]:
+            raise LinearError("commentCreate reported success: false")
+
+    def read_prompt(self, *, agent_activity_id: Optional[str] = None, agent_session_id: Optional[str] = None) -> dict:
+        """A person's prompt by its activity id, or else the newest prompt in the session that is not a stop."""
+        if agent_activity_id:
+            prompts = [self._graphql(ACTIVITY_QUERY, {"id": agent_activity_id})["agentActivity"]]
+        else:
+            session = self._graphql(SESSION_ACTIVITIES_QUERY, {"id": agent_session_id})["agentSession"]
+            prompts = sorted(session["activities"]["nodes"], key=lambda n: n["createdAt"], reverse=True)
+        for node in prompts:
+            if node and node["content"]["__typename"] == "AgentActivityPromptContent" and node["signal"] != "stop":
+                return {
+                    "found": True,
+                    "id": node["id"],
+                    "createdAt": node["createdAt"],
+                    "signal": node["signal"],
+                    "body": node["content"]["body"],
+                }
+        return {"found": False}
+
     def create_session_on_issue(self, id_or_identifier: str) -> str:
         payload = self._graphql(SESSION_CREATE_MUTATION, {"input": {"issueId": id_or_identifier}})[
             "agentSessionCreateOnIssue"
@@ -152,15 +230,72 @@ class LinearClient:
             "priorityName": priority_name,
             "cardPriority": card_priority,
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
+            "labels": _label_names(issue),
             "agentSessions": sorted(
                 (
-                    {"id": n["id"], "status": n["status"], "createdAt": n["createdAt"], "appUserId": n["appUser"]["id"]}
+                    {
+                        "id": n["id"],
+                        "status": n["status"],
+                        "createdAt": n["createdAt"],
+                        "appUserId": n["appUser"]["id"],
+                        "creatorId": n["creator"]["id"] if n["creator"] else None,
+                    }
                     for n in issue["agentSessions"]["nodes"]
                 ),
                 key=lambda n: n["createdAt"],
                 reverse=True,
             ),
         }
+
+    def issue_labels(self, id_or_identifier: str) -> list:
+        return _label_names(self._graphql(ISSUE_LABELS_QUERY, {"id": id_or_identifier})["issue"])
+
+    def issue_documents(self, id_or_identifier: str) -> dict:
+        data = self._graphql(ISSUE_DOCUMENTS_QUERY, {"id": id_or_identifier})
+        viewer = data["viewer"]["id"]
+        return {
+            "identifier": data["issue"]["identifier"],
+            "documents": [
+                {"id": n["id"], "title": n["title"], "own": (n["creator"] or {}).get("id") == viewer}
+                for n in data["issue"]["documents"]["nodes"]
+            ],
+        }
+
+    def triage_people(self, id_or_identifier: str) -> dict:
+        """Profile URLs of the people a triage question can go to. An app that created the issue is not a reporter."""
+        issue = self._graphql(TRIAGE_PEOPLE_QUERY, {"id": id_or_identifier})["issue"]
+        if issue is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        creator = issue["creator"]
+        responsibility = issue["team"]["triageResponsibility"]
+        on_triage = responsibility and responsibility["currentUser"]
+        return {
+            "assignee": issue["assignee"]["url"] if issue["assignee"] else None,
+            "creator": creator["url"] if creator and not creator["app"] else None,
+            "triage": on_triage["url"] if on_triage else None,
+        }
+
+    def rename_document(self, document_id: str, title: str) -> None:
+        payload = self._graphql(DOCUMENT_UPDATE_MUTATION, {"id": document_id, "input": {"title": title}})
+        if not payload["documentUpdate"]["success"]:
+            raise LinearError("documentUpdate reported success: false")
+
+    def move_to_todo(self, id_or_identifier: str) -> dict:
+        """Move an issue from the Triage status to its team's Todo status, and leave any other issue as it is."""
+        issue = self._graphql(ISSUE_STATES_QUERY, {"id": id_or_identifier})["issue"]
+        result = {"identifier": issue["identifier"], "moved": False, "state": issue["state"]["name"]}
+        if issue["state"]["type"] != "triage":
+            return result
+        unstarted = sorted(
+            (s for s in issue["team"]["states"]["nodes"] if s["type"] == "unstarted"), key=lambda s: s["position"]
+        )
+        if not unstarted:
+            raise LinearError(f"{issue['identifier']}'s team has no unstarted status to move it to")
+        target = next((s for s in unstarted if s["name"] == READY_STATE_NAME), unstarted[0])
+        payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": {"stateId": target["id"]}})
+        if not payload["issueUpdate"]["success"]:
+            raise LinearError("issueUpdate reported success: false")
+        return {**result, "moved": True, "state": target["name"]}
 
     def list_delegated_issues(self, *, include_closed: bool = False) -> list:
         issue_filter: dict = {"delegate": {"isMe": {"eq": True}}}
@@ -174,6 +309,13 @@ class LinearClient:
             if not page["pageInfo"]["hasNextPage"]:
                 return issues
             after = page["pageInfo"]["endCursor"]
+
+    def delegated_to_self(self, id_or_identifier: str) -> bool:
+        data = self._graphql(ISSUE_DELEGATE_QUERY, {"id": id_or_identifier})
+        if data["issue"] is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        delegate = data["issue"]["delegate"]
+        return delegate is not None and delegate["id"] == data["viewer"]["id"]
 
     def undelegate_self(self, id_or_identifier: str) -> dict:
         data = self._graphql(ISSUE_DELEGATE_QUERY, {"id": id_or_identifier})
@@ -310,6 +452,10 @@ def _issue_summary(issue: dict) -> dict:
         "stateType": issue["state"]["type"],
         "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]],
     }
+
+
+def _label_names(issue: dict) -> list:
+    return sorted(label["name"] for label in issue["labels"]["nodes"])
 
 
 def _parse_json(body: bytes, status: int) -> dict:

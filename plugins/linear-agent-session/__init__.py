@@ -49,6 +49,13 @@ def register(ctx: Any) -> None:
         description=tools.ACTIVITY_SCHEMA["description"],
     )
     ctx.register_tool(
+        name="linear_agent_activity_read",
+        toolset=TOOLSET,
+        schema=tools.ACTIVITY_READ_SCHEMA,
+        handler=lambda args, **_: tools.run_activity_read(get_client, args),
+        description=tools.ACTIVITY_READ_SCHEMA["description"],
+    )
+    ctx.register_tool(
         name="linear_issue",
         toolset=TOOLSET,
         schema=tools.ISSUE_SCHEMA,
@@ -75,6 +82,13 @@ def register(ctx: Any) -> None:
         schema=tools.UNDELEGATE_SCHEMA,
         handler=lambda args, **_: tools.run_undelegate(get_client, args),
         description=tools.UNDELEGATE_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="linear_issue_to_todo",
+        toolset=TOOLSET,
+        schema=tools.TO_TODO_SCHEMA,
+        handler=lambda args, **_: tools.run_to_todo(get_client, args),
+        description=tools.TO_TODO_SCHEMA["description"],
     )
     ctx.register_hook(
         "pre_gateway_dispatch",

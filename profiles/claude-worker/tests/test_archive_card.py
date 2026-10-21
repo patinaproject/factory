@@ -16,6 +16,10 @@ import json, os, sys
 path = os.environ["FAKE_HERMES_STATE"]
 state = json.load(open(path))
 argv = sys.argv[1:]
+if argv[1:3] == ["--board", state.get("board")]:
+    argv = argv[:1] + argv[3:]
+elif state.get("board"):
+    sys.exit("not on board " + state["board"] + ": " + repr(argv))
 if argv[:2] == ["kanban", "show"]:
     print(json.dumps({"task": state["task"]}))
 elif argv[:2] == ["kanban", "archive"]:
@@ -59,9 +63,9 @@ class ArchiveCardTest(unittest.TestCase):
     def save(self) -> None:
         self.state_path.write_text(json.dumps(self.state))
 
-    def archive(self) -> tuple[int, dict]:
+    def archive(self, *extra: str) -> tuple[int, dict]:
         env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path)}
-        proc = subprocess.run([sys.executable, str(SCRIPTS / "archive_card.py"), "t_old"],
+        proc = subprocess.run([sys.executable, str(SCRIPTS / "archive_card.py"), "t_old", *extra],
                               capture_output=True, text=True, env=env)
         return proc.returncode, json.loads(proc.stdout)
 
@@ -104,6 +108,13 @@ class ArchiveCardTest(unittest.TestCase):
         code, out = self.archive()
         self.assertEqual((code, out), (0, {"archived": "t_old", "freed_worktree": None}))
         self.assertEqual(git(self.old, "branch", "--show-current"), "feature")
+
+    def test_a_card_on_another_board_is_read_and_archived_there(self) -> None:
+        self.state["board"] = "triage"
+        self.save()
+        code, out = self.archive("--board", "triage")
+        self.assertEqual((code, out), (0, {"archived": "t_old", "freed_worktree": str(self.old)}))
+        self.assertEqual(json.loads(self.state_path.read_text())["task"]["status"], "archived")
 
     def test_a_failed_archive_reports_the_error_and_keeps_the_worktree_on_its_branch(self) -> None:
         self.state["archive_fails"] = True
