@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import json
 import os
+import socket
 import stat
 import tempfile
 import unittest
@@ -473,3 +474,68 @@ class NamedPathTest(BrokerTestCase):
         self.assertTrue(reply["ok"])
         self.assertEqual(self.uploads.requests[0]["body"], PNG)
         self.assertFalse([path for path in opened if "secret-image" in path], opened)
+
+
+class CallerTest(BrokerTestCase):
+
+    allowed: frozenset = frozenset()
+
+    async def asyncSetUp(self):
+        self.credentials = FakeCredentials()
+        self.run_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.run_dir.cleanup)
+        await super().asyncSetUp()
+
+    def make_broker(self, repositories=(REPO,)):
+        return broker_module.Broker(
+            self.home, list(repositories), lambda: self.token, base_url=self.uploads.base,
+            clock=lambda: self.now, credentials=self.credentials,
+            socket_path=Path(self.run_dir.name) / "broker.sock", state_dir=self.home / "state",
+            socket_mode=0o660, allowed_uids=self.allowed,
+        )
+
+    def audit(self) -> list:
+        return [json.loads(line) for line in (self.home / "state" / "log.jsonl").read_text().splitlines()]
+
+
+class AllowedCallerTest(CallerTest):
+    allowed = frozenset({os.getuid()})
+
+    async def test_the_socket_is_at_the_named_path_with_the_named_mode(self):
+        self.assertEqual(self.broker.socket_path, Path(self.run_dir.name) / "broker.sock")
+        self.assertEqual(stat.S_IMODE(os.stat(self.broker.socket_path).st_mode), 0o660)
+        self.assertFalse((self.home / "factory-uploads.sock").exists())
+
+    async def test_an_allowed_uid_gets_its_credential_and_the_audit_lands_in_the_state_directory(self):
+        reply = await ask(self.broker.socket_path, {"op": "proxy_token"})
+
+        self.assertEqual(reply, {"ok": True, "token": "proxy-FAKE-token", "expires_at": None})
+        self.assertEqual([(e["op"], e["state"]) for e in self.audit()], [("proxy_token", "ok")])
+
+
+class RefusedCallerTest(CallerTest):
+    allowed = frozenset({os.getuid() + 1})
+
+    async def test_any_other_uid_is_refused_before_the_broker_reads_its_request(self):
+        for header in ({"op": "status"}, {"op": "proxy_token"}, {"op": "linear_token"}, upload_request()[0]):
+            with self.subTest(op=header["op"]):
+                reply = await ask(self.broker.socket_path, header)
+                self.assertEqual(reply, {"ok": False, "state": "refused", "message": broker_module.NOT_PERMITTED})
+
+        self.assertEqual(self.uploads.requests, [])
+        self.assertEqual({(e["op"], e["state"], e["uid"]) for e in self.audit()}, {("connect", "refused", os.getuid())})
+        self.assertNotIn("proxy-FAKE-token", json.dumps(self.audit()))
+
+
+class PeerUidTest(unittest.TestCase):
+    def test_the_peer_uid_is_the_connecting_process_uid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(path)
+                server.listen(1)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.connect(path)
+                    accepted, _ = server.accept()
+                    with accepted:
+                        self.assertEqual(broker_module.peer_uid(accepted), os.getuid())

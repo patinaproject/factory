@@ -496,7 +496,7 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(
             self.check(),
-            (1, f"upload broker {self.root}/factory-uploads.sock: is unreachable: the gateway is not listening on it (part 5)\n"),
+            (1, f"upload broker {self.root}/factory-uploads.sock: is unreachable: no broker is listening on it (part 5)\n"),
         )
 
     def test_broker_without_a_token(self) -> None:
@@ -507,7 +507,7 @@ class CheckInstallTest(unittest.TestCase):
             (
                 1,
                 f"upload broker {self.root}/factory-uploads.sock: "
-                "reports token_present false: the gateway holds no upload token (part 5)\n",
+                "reports token_present false: the broker holds no upload token (part 5)\n",
             ),
         )
 
@@ -518,7 +518,7 @@ class CheckInstallTest(unittest.TestCase):
             self.check(),
             (
                 1,
-                f"upload broker {self.root}/factory-uploads.sock: reports linear_ready false: the gateway holds no "
+                f"upload broker {self.root}/factory-uploads.sock: reports linear_ready false: the broker holds no "
                 "Linear app credentials, so no worker reaches Linear (part 5)\n",
             ),
         )
@@ -533,7 +533,7 @@ class CheckInstallTest(unittest.TestCase):
             self.check(),
             (
                 1,
-                f"upload broker {self.root}/factory-uploads.sock: reports proxy_token_present false: the gateway "
+                f"upload broker {self.root}/factory-uploads.sock: reports proxy_token_present false: the broker "
                 "holds no CLAUDE_PROXY_TOKEN, so no worker reaches the proxy (part 5)\n",
             ),
         )
@@ -549,7 +549,7 @@ class CheckInstallTest(unittest.TestCase):
             self.check(),
             (
                 1,
-                f"upload broker {self.root}/factory-uploads.sock: reports sentry_token_present false: the gateway "
+                f"upload broker {self.root}/factory-uploads.sock: reports sentry_token_present false: the broker "
                 "holds no SENTRY_ACCESS_TOKEN, so every worker run is refused (part 5)\n",
             ),
         )

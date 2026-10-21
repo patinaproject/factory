@@ -32,17 +32,25 @@ behind, on the default branch, and clean. --ref turns the line off, because
 the target is then not origin/HEAD. --print-source prints the checkout path
 and exits.
 
-LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd check at another file system
-root and launchctl, for tests.
+On macOS, when `setup-broker-user` has written the broker's config, it checks
+that the broker runs as its own user: the account and group, who owns each of
+its directories, that its root-owned copy of the code matches the commit, its
+LaunchDaemon, the root home's socket link, and that the gateway runs no broker
+of its own.
+
+LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd and broker user checks at
+another file system root and launchctl, for tests.
 """
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
 import glob
+import grp
 import json
 import os
 import plistlib
+import pwd
 import re
 import shutil
 import socket
@@ -201,6 +209,10 @@ CONFIG = (
     ConfigKey(5, "plugins.entries.team.settings.skills_dir", (ROOT,), declared("set to the team skills directory")),
     ConfigKey(13, "streaming.enabled", (ROOT,), equal(True)),
     ConfigKey(13, "platforms.slack.extra.native_task_cards", (ROOT,), equal(True)),
+)
+BROKER_USER_CONFIG = (
+    *(entry for entry in CONFIG if not entry.key.startswith("platforms.factory_uploads.")),
+    ConfigKey(5, "platforms.factory_uploads.enabled", (ROOT,), one_of(equal(False), unset())),
 )
 
 # Script-only jobs. A job belongs to the profile named by `home`: the worker for its own scripts, the root for a job
@@ -435,8 +447,8 @@ def config_value(home: Path, hermes: str, key: str):
     raise Refusal(f"hermes config get {key} failed in {home}: {proc.stderr.strip()}")
 
 
-def check_config(home_paths: dict, hermes: str) -> list:
-    reads = [(entry, home) for entry in CONFIG for home in entry.homes]
+def check_config(home_paths: dict, hermes: str, table: tuple = CONFIG) -> list:
+    reads = [(entry, home) for entry in table for home in entry.homes]
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         values = list(pool.map(lambda read: config_value(home_paths[read[1]], hermes, read[0].key), reads))
     drifts = []
@@ -446,7 +458,7 @@ def check_config(home_paths: dict, hermes: str) -> list:
             detail = f"is not {entry.want.text} (part {entry.part})"
             drifts.append(Drift("config", f"{entry.key} in {home_paths[home]}", detail))
         by_key.setdefault(entry.key, []).append(value)
-    for entry in CONFIG:
+    for entry in table:
         values = by_key[entry.key]
         if entry.same_in_homes and any(value != values[0] for value in values):
             between = " and ".join(str(home_paths[home]) for home in entry.homes)
@@ -477,7 +489,7 @@ def check_upload_broker(root: Path, token_env: str, sentry_env: str = "") -> lis
                     break
                 reply += chunk
     except OSError:
-        return drift("is unreachable: the gateway is not listening on it")
+        return drift("is unreachable: no broker is listening on it")
     try:
         status = json.loads(reply)
     except ValueError:
@@ -486,13 +498,13 @@ def check_upload_broker(root: Path, token_env: str, sentry_env: str = "") -> lis
         return drift("did not answer a status request with ok")
     drifts = []
     if status.get("token_present") is not True:
-        drifts += drift("reports token_present false: the gateway holds no upload token")
+        drifts += drift("reports token_present false: the broker holds no upload token")
     if status.get("linear_ready") is not True:
-        drifts += drift("reports linear_ready false: the gateway holds no Linear app credentials, so no worker reaches Linear")
+        drifts += drift("reports linear_ready false: the broker holds no Linear app credentials, so no worker reaches Linear")
     if token_env and status.get("proxy_token_present") is not True:
-        drifts += drift(f"reports proxy_token_present false: the gateway holds no {token_env}, so no worker reaches the proxy")
+        drifts += drift(f"reports proxy_token_present false: the broker holds no {token_env}, so no worker reaches the proxy")
     if sentry_env and status.get("sentry_token_present") is not True:
-        drifts += drift(f"reports sentry_token_present false: the gateway holds no {sentry_env}, so every worker run is refused")
+        drifts += drift(f"reports sentry_token_present false: the broker holds no {sentry_env}, so every worker run is refused")
     return drifts
 
 
@@ -717,6 +729,133 @@ def check_services(launchd_root: Path, launchctl: str) -> list:
     return drifts
 
 
+BROKER_CONFIG = "Library/Application Support/factory-broker/broker.json"
+BROKER_FILES = {
+    "factory_uploads/__init__.py": "plugins/factory-uploads/__init__.py",
+    "factory_uploads/broker.py": "plugins/factory-uploads/broker.py",
+    "factory_uploads/credentials.py": "plugins/factory-uploads/credentials.py",
+    "factory_uploads/service.py": "plugins/factory-uploads/service.py",
+    "factory_uploads/upload_token.py": "plugins/factory-uploads/upload_token.py",
+    "linear.py": "plugins/linear-agent-session/linear.py",
+}
+BROKER_KEYS = ("user", "group", "label", "lib", "socket", "home", "allowed_uids")
+NO_SHELL = "/usr/bin/false"
+
+
+class Accounts(NamedTuple):
+    user: Callable
+    group: Callable
+    me: str
+    root_uid: int = 0
+
+
+def live_accounts() -> Accounts:
+    def lookup(table):
+        def find(name):
+            try:
+                return table(name)
+            except KeyError:
+                return None
+        return find
+
+    return Accounts(lookup(pwd.getpwnam), lookup(grp.getgrnam), pwd.getpwuid(os.getuid()).pw_name)
+
+
+def broker_user_config(launchd_root: Path) -> dict | None:
+    path = launchd_root / BROKER_CONFIG
+    if not path.exists():
+        return None
+    try:
+        config = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise Refusal(f"cannot read {path}: {exc.__class__.__name__}") from None
+    missing = [key for key in BROKER_KEYS if key not in config]
+    if missing:
+        raise Refusal(f"{path} lacks {', '.join(missing)}; run setup-broker-user apply")
+    return config
+
+
+def broker_only_names(commit: Commit) -> tuple:
+    """The secrets only the broker user may hold, named once in credentials.py at the commit."""
+    [blob] = commit.files("plugins/factory-uploads/credentials.py").values()
+    names: dict = {}
+    exec(compile(commit.blob(blob), "credentials.py", "exec"), names)
+    return (names["UPLOAD_TOKEN"], *names["LINEAR_CREDENTIALS"])
+
+
+def check_broker_user(
+    commit: Commit, launchd_root: Path, root: Path, launchctl: str, config: dict, accounts: Accounts
+) -> list:
+    def drift(detail: str) -> Drift:
+        return Drift("broker user", config["user"], f"{detail} (part 5)")
+
+    def local(path: str) -> Path:
+        return launchd_root / path.lstrip("/")
+
+    drifts = []
+    user, group = accounts.user(config["user"]), accounts.group(config["group"])
+    if user is None:
+        drifts.append(drift("does not exist; run setup-broker-user apply"))
+    elif user.pw_shell != NO_SHELL:
+        drifts.append(drift(f"has the shell {user.pw_shell}, not {NO_SHELL}, so a person could sign in as it"))
+    if group is None:
+        drifts.append(drift(f"has no group {config['group']}"))
+    elif accounts.me not in group.gr_mem:
+        drifts.append(drift(f"group {config['group']} lacks {accounts.me}, so no factory process reaches the socket"))
+    if config.get("allowed_uids") != [os.getuid()]:
+        drifts.append(drift(f"allowed_uids is {config.get('allowed_uids')}, not only {accounts.me}'s uid"))
+
+    lib = local(config["lib"])
+    plist_path = launchd_root / "Library/LaunchDaemons" / f"{config['label']}.plist"
+    root_owned = [
+        lib.parent, launchd_root / BROKER_CONFIG, plist_path, lib, lib / "factory_uploads",
+        *(lib / name for name in BROKER_FILES),
+    ]
+    for path in root_owned:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            drifts.append(drift(f"{path} is missing"))
+            continue
+        if path.is_symlink() or info.st_uid != accounts.root_uid or info.st_mode & 0o022:
+            drifts.append(drift(f"{path} is not root-owned and closed to other writers, so a factory process could change the broker"))
+    if user is not None and group is not None:
+        for path, gid, mode in ((local(config["home"]), None, 0o700), (local(config["socket"]).parent, group.gr_gid, 0o750)):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                drifts.append(drift(f"{path} is missing"))
+                continue
+            if info.st_uid != user.pw_uid or (gid is not None and info.st_gid != gid) or info.st_mode & 0o7777 != mode:
+                drifts.append(drift(f"{path} is not {config['user']}'s with mode {mode:04o}"))
+
+    blobs = {**commit.files("plugins/factory-uploads"), **commit.files("plugins/linear-agent-session/linear.py")}
+    for target, source in BROKER_FILES.items():
+        installed = lib / target
+        if installed.is_file() and installed.read_bytes() != commit.blob(blobs[source]):
+            drifts.append(drift(f"{installed} differs from {commit.label} at {commit.short}; run setup-broker-user apply"))
+
+    try:
+        with open(plist_path, "rb") as handle:
+            plist = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException):
+        drifts.append(drift(f"has no readable LaunchDaemon at {plist_path}"))
+    else:
+        if plist.get("RunAtLoad") is not True or plist.get("UserName") != config["user"]:
+            drifts.append(drift(f"{plist_path} does not run at load as {config['user']}"))
+        state = launchd_state(launchctl, ("system",), config["label"])
+        if state != "running":
+            drifts.append(drift(f"{config['label']} is {state or 'not loaded'}, not running"))
+
+    link = root / UPLOAD_SOCKET
+    if not link.is_symlink() or os.readlink(link) != config["socket"]:
+        drifts.append(drift(f"{link} is not a link to {config['socket']}"))
+    for name in broker_only_names(commit):
+        if env_has(root, name):
+            drifts.append(drift(f"{root}/.env holds {name}, which only the broker user may hold"))
+    return drifts
+
+
 def check_owned_refs(root: Path) -> list:
     drifts = []
     for name in (OWNED_REFS, TRIAGE_REFS):
@@ -910,10 +1049,13 @@ def main() -> int:
         hermes = find_hermes()
         hermes = os.path.abspath(hermes)
         settings = config_value(worker, hermes, SETTINGS_KEY)
+        launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))
+        launchctl = os.environ.get("LAUNCHCTL_BIN", "launchctl")
+        broker = broker_user_config(launchd_root) if sys.platform == "darwin" else None
         drifts = [
             *check_profile(commit, worker),
             *check_plugins(commit, [root, worker]),
-            *check_config({ROOT: root, WORKER: worker}, hermes),
+            *check_config({ROOT: root, WORKER: worker}, hermes, CONFIG if broker is None else BROKER_USER_CONFIG),
             *check_worker_secrets(commit, worker, hermes, settings),
             *check_upload_broker(root, token_variable(settings), token_variable(settings, "sentry_token_env")),
             *check_cron(commit, root, worker, hermes),
@@ -931,8 +1073,9 @@ def main() -> int:
             *check_model_tiers(settings, worker),
         ]
         if sys.platform == "darwin":
-            launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))
-            drifts.extend(check_services(launchd_root, os.environ.get("LAUNCHCTL_BIN", "launchctl")))
+            drifts.extend(check_services(launchd_root, launchctl))
+        if broker is not None:
+            drifts.extend(check_broker_user(commit, launchd_root, root, launchctl, broker, live_accounts()))
         if drifts and args.ref is None:
             drifts.extend(check_source_checkout(commit))
     except Refusal as exc:

@@ -19,7 +19,7 @@
 │   └── wiki-index.md          # Planned wiki pages
 ├── plugins/
 │   ├── factory-secret-names/  # Manifest-only platform plugin: the secret names Hermes strips from every process a home starts
-│   ├── factory-uploads/       # Gateway platform plugin: Unix-socket broker that uploads evidence images and issues the worker its Linear and proxy tokens, upload_token.py
+│   ├── factory-uploads/       # Unix-socket broker that uploads evidence images and issues the worker its Linear and proxy tokens; runs in the gateway or, through service.py, as its own macOS user
 │   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, block and triage-park report hook, activity, issue, and session tools, cli.py
 │   ├── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
 │   ├── team/                  # Registers the skills in a configured directory as team:<name> skills
@@ -36,7 +36,7 @@
 ├── skills/
 │   └── setup-factory/         # Agent runbook that sets up a factory on a machine
 │       ├── SKILL.md
-│       ├── scripts/           # check-host-exposure, check-settings, linear-mcp-headers, pstack-include, retry-failed-webhooks, and the factory-secrets template
+│       ├── scripts/           # check-host-exposure, check-settings, linear-mcp-headers, pstack-include, retry-failed-webhooks, setup-broker-user, and the factory-secrets template
 │       └── references/        # Cloudflare and SST, Linear, GitHub, Slack, Claude transport, Infisical, 1Password, agent instructions, pstack model sheet template
 ├── templates/
 │   ├── render.py              # Builds the webhook routes and rate limit from settings
