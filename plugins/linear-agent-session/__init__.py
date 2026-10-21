@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, linear, tools
+from . import blocks, linear, missing_secret, tools
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,11 @@ def register(ctx: Any) -> None:
             route,
             variable,
         )
+    empty = missing_secret.worker_empty_key_env(load_config_readonly(), os.environ)
+    if empty is not None:
+        logger.error(
+            "linear-agent-session: %s is empty in this worker; a provider 401 or 403 requeues the card", empty
+        )
 
     client: Optional[linear.LinearClient] = None
 
@@ -41,6 +47,13 @@ def register(ctx: Any) -> None:
         schema=tools.ACTIVITY_SCHEMA,
         handler=lambda args, **_: tools.run_activity(get_client, args),
         description=tools.ACTIVITY_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="linear_agent_activity_read",
+        toolset=TOOLSET,
+        schema=tools.ACTIVITY_READ_SCHEMA,
+        handler=lambda args, **_: tools.run_activity_read(get_client, args),
+        description=tools.ACTIVITY_READ_SCHEMA["description"],
     )
     ctx.register_tool(
         name="linear_issue",
@@ -70,6 +83,13 @@ def register(ctx: Any) -> None:
         handler=lambda args, **_: tools.run_undelegate(get_client, args),
         description=tools.UNDELEGATE_SCHEMA["description"],
     )
+    ctx.register_tool(
+        name="linear_issue_to_todo",
+        toolset=TOOLSET,
+        schema=tools.TO_TODO_SCHEMA,
+        handler=lambda args, **_: tools.run_to_todo(get_client, args),
+        description=tools.TO_TODO_SCHEMA["description"],
+    )
     ctx.register_hook(
         "pre_gateway_dispatch",
         make_dispatch_hook(
@@ -77,6 +97,9 @@ def register(ctx: Any) -> None:
         ),
     )
     ctx.register_hook("kanban_task_blocked", blocks.make_blocked_hook(get_client))
+    ctx.register_hook(
+        "transform_api_error_classification", missing_secret.make_classification_hook(load_config_readonly, os.environ)
+    )
 
 
 def unresolved_routes(config: Mapping[str, Any]) -> dict[str, str]:

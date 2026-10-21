@@ -26,3 +26,8 @@ optional_env:
       The model proxy's token, the variable that claude_session.auth_token_env
       names. The gateway and the worker's own agent loop send it; Claude Code
       gets it through apiKeyHelper.
+  - name: SENTRY_ACCESS_TOKEN
+    description: >-
+      The read-only Sentry token, the variable that
+      claude_session.sentry_token_env names. Only the gateway holds it;
+      claude-session gets it from the broker for each run's settings file.

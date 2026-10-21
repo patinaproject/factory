@@ -18,6 +18,8 @@ Configure the transport only through these settings in
 | `model` | Passes `--model` and sets `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_OPUS_MODEL`. The main agent runs on it. Any tier without a `tier_models` entry, and the subagent default, also use it |
 | `tier_models` | Optional map from `sonnet`, `haiku`, and `fable` to model ids the endpoint serves. Each sets that `ANTHROPIC_DEFAULT_<TIER>_MODEL`. When `sonnet` is set, `CLAUDE_CODE_SUBAGENT_MODEL` is the alias `sonnet`, so a subagent that names no model runs on the Sonnet model and an explicit `opus` still runs on `model`. Any other key or a non-string value refuses the run |
 | `auth_token_env` | Names the variable that holds the proxy's token, `CLAUDE_PROXY_TOKEN`. Only the gateway holds its value. `claude-session` sets Claude Code's `apiKeyHelper` to `<worker>/scripts/proxy-token`, which asks the gateway's broker for the token. Claude Code keeps it in memory and sends it as the `Authorization` and `x-api-key` headers, so neither Claude Code's environment nor any process it starts holds it |
+| `sentry_token_env` | Optional. Names the Sentry token variable, `SENTRY_ACCESS_TOKEN`, for the run's read-only `sentry` MCP server. Only the gateway holds its value. The run's `sentry` server gets it through a `headersHelper`, `<worker>/scripts/sentry-headers`, which asks the broker for it. See [Sentry access](sentry.md) |
+| `disabled_mcp_servers` | Optional list of repository MCP server names. Sets `disabledMcpjsonServers` |
 
 `claude-session` writes these into a per-run `0600` file and passes it with
 `--settings`. Claude Code lets an `env` block in the user's

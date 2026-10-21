@@ -234,7 +234,10 @@ class StatusTest(BrokerTestCase):
         )
         self.assertEqual(
             set(after),
-            {"ok", "token_present", "linear_ready", "proxy_token_present", "last_state", "expires_at", "checked_at"},
+            {
+                "ok", "token_present", "linear_ready", "proxy_token_present", "sentry_token_present",
+                "last_state", "expires_at", "checked_at",
+            },
         )
 
     async def test_status_says_when_the_token_is_missing(self):
@@ -247,6 +250,7 @@ class FakeCredentials:
     def __init__(self):
         self.linear = {"access_token": "lin_oauth_FAKE_access", "expires_at": 1_900_000_000.0}
         self.proxy = "proxy-FAKE-token"
+        self.sentry = "sntryu_FAKE"
         self.failure = None
 
     def linear_ready(self):
@@ -259,6 +263,9 @@ class FakeCredentials:
 
     def proxy_token(self):
         return self.proxy
+
+    def sentry_token(self):
+        return self.sentry
 
 
 class CredentialTest(BrokerTestCase):
@@ -281,11 +288,15 @@ class CredentialTest(BrokerTestCase):
             await ask(self.broker.socket_path, {"op": "proxy_token"}),
             {"ok": True, "token": "proxy-FAKE-token", "expires_at": None},
         )
+        self.assertEqual(
+            await ask(self.broker.socket_path, {"op": "sentry_token"}),
+            {"ok": True, "token": "sntryu_FAKE", "expires_at": None},
+        )
 
     async def test_a_missing_credential_answers_unavailable(self):
-        self.credentials.linear = self.credentials.proxy = None
+        self.credentials.linear = self.credentials.proxy = self.credentials.sentry = None
 
-        for op in ("linear_token", "proxy_token"):
+        for op in ("linear_token", "proxy_token", "sentry_token"):
             with self.subTest(op=op):
                 reply = await ask(self.broker.socket_path, {"op": op})
                 self.assertEqual(reply, {"ok": False, "state": "unavailable", "message": broker_module.CREDENTIAL_MESSAGES[op]})
@@ -299,7 +310,7 @@ class CredentialTest(BrokerTestCase):
         self.assertEqual(reply, {"ok": False, "state": "error", "message": broker_module.LINEAR_FAILED})
 
     async def test_the_upload_token_is_never_handed_out(self):
-        replies = [await ask(self.broker.socket_path, {"op": op}) for op in ("linear_token", "proxy_token", "status")]
+        replies = [await ask(self.broker.socket_path, {"op": op}) for op in ("linear_token", "proxy_token", "sentry_token", "status")]
 
         self.assertNotIn(TOKEN, json.dumps(replies))
 
@@ -307,19 +318,28 @@ class CredentialTest(BrokerTestCase):
         await ask(self.broker.socket_path, {"op": "linear_token"})
         self.credentials.proxy = None
         await ask(self.broker.socket_path, {"op": "proxy_token"})
+        await ask(self.broker.socket_path, {"op": "sentry_token"})
 
         log = (self.home / "factory-uploads" / "log.jsonl").read_text()
         entries = [json.loads(line) for line in log.splitlines()]
-        self.assertEqual([(e["op"], e["state"]) for e in entries], [("linear_token", "ok"), ("proxy_token", "unavailable")])
+        self.assertEqual([(e["op"], e["state"]) for e in entries], [
+            ("linear_token", "ok"), ("proxy_token", "unavailable"), ("sentry_token", "ok"),
+        ])
         self.assertIsInstance(entries[0]["pid"], int)
         self.assertNotIn("lin_oauth_FAKE_access", log)
         self.assertNotIn("proxy-FAKE-token", log)
+        self.assertNotIn("sntryu_FAKE", log)
 
     async def test_status_reports_the_credentials_as_booleans(self):
         status = await ask(self.broker.socket_path, {"op": "status"})
 
-        self.assertEqual((status["linear_ready"], status["proxy_token_present"]), (True, True))
+        self.assertEqual(
+            (status["linear_ready"], status["proxy_token_present"], status["sentry_token_present"]), (True, True, True)
+        )
         self.assertNotIn("proxy-FAKE-token", json.dumps(status))
+        self.assertNotIn("sntryu_FAKE", json.dumps(status))
+        self.credentials.sentry = None
+        self.assertFalse((await ask(self.broker.socket_path, {"op": "status"}))["sentry_token_present"])
 
 
 class LifecycleTest(BrokerTestCase):

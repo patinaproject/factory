@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Callable
+from typing import Callable, Optional
 
 from .linear import ACTIVITY_TYPES, LinearClient, LinearError, activity_content
 
@@ -56,10 +56,32 @@ ISSUE_SCHEMA = {
         "Read the Linear issue named by `issue` (UUID or ABC-123). Reads as the agent app and returns "
         "id, identifier, title, url, gitBranchName, priority, priorityName, "
         "cardPriority (the Kanban card priority for this issue), "
-        "state, stateType, delegate (the delegate's user ID, or null), attachments, and agentSessions "
-        "(id, status, createdAt, appUserId; newest first)."
+        "state, stateType, delegate (the delegate's user ID, or null), labels (names), attachments, and agentSessions "
+        "(id, status, createdAt, appUserId, creatorId (null when no person opened it); newest first)."
     ),
     "parameters": ISSUE_PARAMETERS,
+}
+
+ACTIVITY_ID_NAMES = ("agent_activity_id", "activity_id", "id")
+SESSION_ID_NAMES = ("agent_session_id", "session_id")
+
+ACTIVITY_READ_SCHEMA = {
+    "name": "linear_agent_activity_read",
+    "description": (
+        "Read the prompt `agent_activity_id`, or else the newest prompt in `agent_session_id` that is not a "
+        "stop. Reads as the agent app and returns found, id, createdAt, signal, and body (the person's "
+        "reply text), or found: false when Linear has no such prompt."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "agent_activity_id": {"type": "string", "description": "Linear agent activity UUID of the prompt."},
+            "agent_session_id": {
+                "type": "string",
+                "description": "Linear agent session UUID, used when the activity id is unknown.",
+            },
+        },
+    },
 }
 
 
@@ -98,6 +120,16 @@ UNDELEGATE_SCHEMA = {
 }
 
 
+TO_TODO_SCHEMA = {
+    "name": "linear_issue_to_todo",
+    "description": (
+        "Move `issue` (UUID or ABC-123) from the Triage status to its team's Todo status. Leaves an issue in "
+        "any other status as it is. Returns identifier, moved, and the issue's state."
+    ),
+    "parameters": ISSUE_PARAMETERS,
+}
+
+
 def run_activity(client_factory: ClientFactory, args: dict) -> str:
     def run() -> dict:
         content = activity_content(
@@ -115,6 +147,17 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
             client.set_external_urls(session_id, args["external_urls"])
             result["external_urls"] = [u["url"] for u in args["external_urls"]]
         return result
+
+    return _tool_result_or_error(run)
+
+
+def run_activity_read(client_factory: ClientFactory, args: dict) -> str:
+    def run() -> dict:
+        activity_id = _first_argument(args, ACTIVITY_ID_NAMES)
+        session_id = _first_argument(args, SESSION_ID_NAMES)
+        if not activity_id and not session_id:
+            raise LinearError("pass agent_activity_id, or agent_session_id when the activity id is unknown")
+        return client_factory().read_prompt(agent_activity_id=activity_id, agent_session_id=session_id)
 
     return _tool_result_or_error(run)
 
@@ -139,11 +182,19 @@ def run_undelegate(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(lambda: client_factory().undelegate_self(_issue_argument(args)))
 
 
+def run_to_todo(client_factory: ClientFactory, args: dict) -> str:
+    return _tool_result_or_error(lambda: client_factory().move_to_todo(_issue_argument(args)))
+
+
 def _issue_argument(args: dict) -> str:
-    for name in ISSUE_ARGUMENT_NAMES:
-        if args.get(name):
-            return args[name]
-    raise LinearError("pass issue: the issue UUID or identifier such as ABC-123")
+    issue = _first_argument(args, ISSUE_ARGUMENT_NAMES)
+    if issue is None:
+        raise LinearError("pass issue: the issue UUID or identifier such as ABC-123")
+    return issue
+
+
+def _first_argument(args: dict, names: tuple) -> Optional[str]:
+    return next((args[name] for name in names if args.get(name)), None)
 
 
 def _tool_result_or_error(run: Callable[[], dict]) -> str:

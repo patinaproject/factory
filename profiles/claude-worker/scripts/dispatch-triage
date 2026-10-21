@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Start waiting triage cards while fewer than the factory's cap run on the Triage board.
+
+Hermes caps workers per host and per profile, never per board. So triage creates
+each triage card without an assignee, and the dispatcher skips it. Every minute
+a Hermes cron job runs this script. It counts the board's cards that are
+`running`, or `ready` with an assignee, and assigns `claude-worker` to waiting
+`ready` cards, highest priority and then oldest first, until that count reaches
+`triage.max_running` in the factory settings. It prints one `assigned <task id>`
+line per card. Exits 1 when a `hermes` call fails, or 2 when the settings or
+HERMES_HOME are wrong.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
+TRIAGE_BOARD = "triage"
+WORKER = "claude-worker"
+
+
+class Refusal(Exception):
+    def __init__(self, message: str, code: int = 2) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def find_hermes() -> str:
+    # A cron job's PATH can lack the installer's bin directory, so fall back to where it puts hermes.
+    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
+    for candidate in filter(None, candidates):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
+
+
+def hermes(binary: str, *args: str) -> str:
+    proc = subprocess.run([binary, *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refusal(f"hermes {' '.join(args[:4])} failed: {proc.stderr.strip()}", 1)
+    return proc.stdout
+
+
+def max_running(binary: str) -> int:
+    settings = json.loads(hermes(binary, "config", "get", SETTINGS_KEY, "--json"))
+    value = (settings.get("triage") or {}).get("max_running") if isinstance(settings, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise Refusal(f"triage.max_running {value!r} in {SETTINGS_KEY} must be a positive integer")
+    return value
+
+
+def to_assign(tasks: list, cap: int) -> list[str]:
+    busy = sum(1 for t in tasks if t["status"] == "running" or (t["status"] == "ready" and t["assignee"]))
+    waiting = sorted(
+        (t for t in tasks if t["status"] == "ready" and not t["assignee"]),
+        key=lambda t: (-(t["priority"] or 0), t["created_at"]),
+    )
+    return [t["id"] for t in waiting[: max(cap - busy, 0)]]
+
+
+def main() -> int:
+    if not os.environ.get("HERMES_HOME"):
+        print("dispatch-triage: HERMES_HOME is not set; point it at the claude-worker profile home", file=sys.stderr)
+        return 2
+    try:
+        binary = find_hermes()
+        cap = max_running(binary)
+        tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
+        for task_id in to_assign(tasks, cap):
+            hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)
+            print(f"assigned {task_id}")
+    except Refusal as exc:
+        print(f"dispatch-triage: {exc}", file=sys.stderr)
+        return exc.code
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

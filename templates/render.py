@@ -26,6 +26,8 @@ TOOLSETS = ["terminal", "kanban", "linear_agent_session"]
 LINEAR_EVENTS = ["AgentSessionEvent", "Issue"]
 # Hermes resolves a relative in_file path against the gateway's home.
 OWNED_REFS_FILE = "owned-refs.json"
+TRIAGE_REFS_FILE = "triage-refs.json"
+READY_LABEL = "ready-for-agent"
 FAILED_CONCLUSIONS = ["failure", "timed_out", "action_required", "startup_failure"]
 # A bot whose pull request comments repeat a result the route already keeps as a failed check_run or workflow_run, or
 # only announce a deploy. Triage records each of them on the card and changes nothing.
@@ -51,6 +53,39 @@ class GithubEvent(NamedTuple):
 
 def owned(field: str) -> dict:
     return {"field": field, "in_file": OWNED_REFS_FILE}
+
+
+def linear_filters(app_user_id: str) -> list:
+    return [
+        {
+            "any": [
+                {"field": "event", "equals": "AgentSessionEvent"},
+                {"field": "updatedFrom.delegateId", "exists": True},
+                {
+                    "all": [
+                        {"field": "updatedFrom.stateId", "exists": True},
+                        {"field": "data.state.type", "in": ["completed", "canceled"]},
+                        owned("data.id"),
+                    ]
+                },
+                {
+                    "all": [
+                        {"field": "data.state.type", "equals": "triage"},
+                        {"any": [{"field": "action", "equals": "create"}, {"field": "updatedFrom.stateId", "exists": True}]},
+                    ]
+                },
+                {"all": [{"field": "updatedFrom.stateId", "exists": True}, {"field": "data.id", "in_file": TRIAGE_REFS_FILE}]},
+                {
+                    "all": [
+                        {"field": "updatedFrom.labelIds", "exists": True},
+                        {"field": "data.delegateId", "equals": app_user_id},
+                        {"field": "data.labels", "regex": f'"name": *"{READY_LABEL}"'},
+                        {"not": owned("data.id")},
+                    ]
+                },
+            ]
+        }
+    ]
 
 
 def failed(event: str) -> dict:
@@ -244,6 +279,14 @@ def archive_card_command(home: Path) -> str:
     return f"python3 {shlex.quote(str(home / 'profiles' / 'claude-worker' / 'scripts' / 'archive_card.py'))}"
 
 
+def triage_card_flags(repositories: list) -> str:
+    return "\n".join(f"- `{repo['full_name']}`: `{_workspace_flag(repo)}`" for repo in repositories)
+
+
+def merged_checks_command(home: Path) -> str:
+    return f"python3 {shlex.quote(str(home / 'profiles' / 'claude-worker' / 'scripts' / 'merged_checks.py'))}"
+
+
 def _or_list(items: list) -> str:
     if len(items) <= 2:
         return " or ".join(items)
@@ -285,11 +328,26 @@ def triage_resume_section() -> str:
 
 
 def triage_merged_section() -> str:
-    return _read_template("triage-merged.md").rstrip("\n")
+    home = hermes_home()
+    values = {"archive_card": archive_card_command(home), "merged_checks": merged_checks_command(home)}
+    return render_prompt(_read_template("triage-merged.md"), values).rstrip("\n")
 
 
 def triage_unblock_section() -> str:
     return _read_template("triage-unblock.md").rstrip("\n")
+
+
+def triage_inbox_section(config: dict) -> str:
+    values = {
+        "app_user_id": config["app_user_id"],
+        "archive_card": archive_card_command(hermes_home()),
+        "triage_card_flags": triage_card_flags(config["repositories"]),
+    }
+    return render_prompt(_read_template("triage-inbox.md"), values).rstrip("\n")
+
+
+def delegation_gate_section() -> str:
+    return _read_template("triage-delegation-gate.md").rstrip("\n")
 
 
 def _exclude_events_sent_by(login: str) -> dict:
@@ -336,21 +394,7 @@ def build_routes(settings: Any) -> dict:
         config["webhook_route"]: {
             "events": LINEAR_EVENTS,
             "secret": LINEAR_SECRET,
-            "filters": [
-                {
-                    "any": [
-                        {"field": "event", "equals": "AgentSessionEvent"},
-                        {"field": "updatedFrom.delegateId", "exists": True},
-                        {
-                            "all": [
-                                {"field": "updatedFrom.stateId", "exists": True},
-                                {"field": "data.state.type", "in": ["completed", "canceled"]},
-                                owned("data.id"),
-                            ]
-                        },
-                    ]
-                }
-            ],
+            "filters": linear_filters(config["app_user_id"]),
             "toolsets": TOOLSETS,
             "prompt": render_prompt(
                 _read_template("triage-linear.md"),
@@ -362,6 +406,8 @@ def build_routes(settings: Any) -> dict:
                     "triage_unblock": triage_unblock_section(),
                     "archive_card": archive_card_command(hermes_home()),
                     "triage_resume": triage_resume_section(),
+                    "triage_inbox": triage_inbox_section(config),
+                    "delegation_gate": delegation_gate_section(),
                 },
             ),
         },

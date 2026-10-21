@@ -1,5 +1,5 @@
 """The gateway's broker: a Unix socket that turns image bytes into attachment URLs
-and hands the worker the two credentials it may hold.
+and hands the worker the three credentials it may hold.
 
 It imports nothing from Hermes, so its tests run without a gateway. The
 adapter owns its lifecycle. The broker never opens a path a caller names,
@@ -7,14 +7,16 @@ never returns the upload token, and never writes a token to a log.
 
 The worker home holds no factory secret of its own. It asks here for a Linear
 access token, minted with the gateway's Linear app credentials, which never
-leave the gateway, and for the proxy token that its own agent loop and Claude
-Code send to the model proxy.
+leave the gateway, for the proxy token that its own agent loop and Claude
+Code send to the model proxy, and for the Sentry token of the run's read-only
+sentry server.
 
 Wire protocol, one request per connection:
 
     {"op": "upload", "repo": "owner/repo", "name": "a.png", "size": 123}\\n<size raw bytes>
     {"op": "linear_token"}\\n
     {"op": "proxy_token"}\\n
+    {"op": "sentry_token"}\\n
     {"op": "status"}\\n
 
 Every reply is one JSON line.
@@ -56,6 +58,7 @@ FIXED_MESSAGES = {
 CREDENTIAL_MESSAGES = {
     "linear_token": "The gateway holds no Linear app credentials.",
     "proxy_token": "The gateway holds no proxy token.",
+    "sentry_token": "The gateway holds no Sentry token.",
 }
 LINEAR_FAILED = "The gateway could not issue a Linear token. The gateway log has the detail."
 BUSY = "The upload broker is busy. Try again in a moment."
@@ -80,6 +83,8 @@ class Credentials(Protocol):
 
     def proxy_token(self) -> str | None: ...
 
+    def sentry_token(self) -> str | None: ...
+
 
 class NoCredentials:
     def linear_ready(self) -> bool:
@@ -89,6 +94,9 @@ class NoCredentials:
         return None
 
     def proxy_token(self) -> str | None:
+        return None
+
+    def sentry_token(self) -> str | None:
         return None
 
 
@@ -202,6 +210,8 @@ class Broker:
     async def _credential_request(self, op: str, pid: int | None) -> dict:
         if op == "proxy_token":
             token, expires_at = self._credentials.proxy_token(), None
+        elif op == "sentry_token":
+            token, expires_at = self._credentials.sentry_token(), None
         else:
             try:
                 issued = await asyncio.to_thread(self._credentials.linear_token)
@@ -283,6 +293,7 @@ class Broker:
             "token_present": bool(self._get_token()),
             "linear_ready": self._credentials.linear_ready(),
             "proxy_token_present": bool(self._credentials.proxy_token()),
+            "sentry_token_present": bool(self._credentials.sentry_token()),
             "last_state": record.get("state"),
             "expires_at": record.get("expires_at"),
             "checked_at": record.get("checked_at"),

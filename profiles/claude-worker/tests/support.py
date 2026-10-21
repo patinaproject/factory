@@ -100,11 +100,15 @@ if options.get("leftover_pid_file"):
     leftover = subprocess.Popen(["sleep", "600"], start_new_session=bool(options.get("leftover_detached")))
     with open(options["leftover_pid_file"], "w") as pid_file:
         pid_file.write(str(leftover.pid))
+for line in options.get("transcript_lines", []):
+    with open(options["transcript"], "a") as transcript:
+        transcript.write(json.dumps(line) + "\\n")
 print(json.dumps({
+    **options.get("output", {}),
     "type": "result",
     "subtype": options.get("subtype", "success"),
     "is_error": False,
-    "result": "Opened the pull request.",
+    "result": options.get("result", "Opened the pull request."),
     "session_id": "ignored",
     "num_turns": 7,
 }), flush=True)
@@ -122,6 +126,10 @@ state = json.load(open(state_path))
 args = sys.argv[1:]
 with open(state_path + ".log", "a") as log:
     log.write(json.dumps(args) + "\\n")
+if state.get("errors"):
+    error = state["errors"].pop(0)
+    json.dump(state, open(state_path, "w"))
+    sys.exit(error)
 path, _, query = args[1].partition("?")
 parts = [unquote(part) for part in path.split("/")]
 prefix = "/".join(parts[:3])
@@ -132,25 +140,26 @@ if parts[3] == "branches":
         sys.exit("gh: Branch not found (HTTP 404)")
     print(json.dumps({"name": "/".join(parts[4:])}))
 elif parts[3] == "activity":
-    ref = parse_qs(query)["ref"][0].removeprefix("refs/heads/")
-    creators = state["branches"].get(ref, [])
-    print(json.dumps([
-        {"activity_type": "branch_creation", "ref": "refs/heads/" + ref, "actor": {"login": login}}
-        for login in reversed(creators)
-    ][:1]))
+    params = parse_qs(query)
+    ref = params["ref"][0].removeprefix("refs/heads/")
+    records = [
+        {"activity_type": "branch_creation", "actor": {"login": login}, "timestamp": f"2026-09-01T00:00:{i:02d}Z"}
+        for i, login in enumerate(state["branches"].get(ref, []))
+    ] + [{"activity_type": "push", "actor": {"login": "person"}, "timestamp": at} for at in state.get("pushes", {}).get(ref, [])]
+    records = [record for record in records if record["activity_type"] in params.get("activity_type", [record["activity_type"]])]
+    records.sort(key=lambda record: record["timestamp"], reverse=True)
+    print(json.dumps([{**record, "ref": "refs/heads/" + ref} for record in records][:int(params.get("per_page", ["30"])[0])]))
 elif parts[3] == "pulls" and len(parts) == 4:
-    head = parse_qs(query)["head"][0].partition(":")[2]
-    print(json.dumps([
+    params = parse_qs(query)
+    head = params["head"][0].partition(":")[2] if "head" in params else None
+    page = int(params.get("page", ["1"])[0])
+    print(json.dumps([] if page > 1 else [
         {**pull, "number": int(number)} for number, pull in state["pulls"].items()
-        if pull["state"] == "open" and pull["head"]["ref"] == head
+        if pull["state"] == "open" and head in (None, pull["head"]["ref"])
     ]))
 elif parts[3] == "compare":
     base, _, head = parts[4].partition("...")
     print(json.dumps({"status": state.get("compare", {}).get(parts[4], "diverged")}))
-elif parts[3] == "pulls" and len(parts) == 6 and parts[5] == "commits":
-    dates = state["commit_dates"][parts[4]]
-    page = int(parse_qs(query).get("page", ["1"])[0])
-    print(json.dumps([{"commit": {"committer": {"date": date}}} for date in dates[(page - 1) * 100:page * 100]]))
 elif parts[3] == "pulls":
     pull = state["pulls"][parts[4]]
     fields = {args[i + 1].partition("=")[0]: args[i + 1].partition("=")[2] for i, arg in enumerate(args) if arg == "-f"}
@@ -160,6 +169,8 @@ elif parts[3] == "pulls":
         pull.update(fields)
         json.dump(state, open(state_path, "w"))
     print(json.dumps({**pull, "number": int(parts[4])}))
+elif parts[3] == "issues" and parts[5:] == ["comments"] and "-X" not in args:
+    print(json.dumps(state.get("issue_comments", {}).get(parts[4], [])))
 elif parts[3] == "issues" and "-X" in args:
     if state.get("fail_writes"):
         sys.exit("gh: Resource not accessible by integration (HTTP 403)")
@@ -172,9 +183,10 @@ else:
 
 
 class FakeGithub:
-    """A gh that answers the branch, activity, and pull request reads that card_branch makes.
+    """A gh that answers the branch, activity, and pull request reads that card_branch and claude-session make.
 
     A branch maps to the actors of its `branch_creation` records, oldest first. An empty list is a branch with no record.
+    `push` adds a push record. Every creation record predates the pull requests' default `created_at`.
     """
 
     def __init__(self, directory: Path, repo: str) -> None:
@@ -194,15 +206,23 @@ class FakeGithub:
 
     def add_pull(self, number: int, head: str, *, state: str = "open", merged: bool = False,
                  head_repo: str | None = None, updated_at: str = "2026-10-01T00:00:00Z",
-                 author: str = "person", body: str = "", created_at: str = "2026-10-01T00:00:00Z",
-                 commit_dates: tuple = ("2026-09-30T00:00:00Z",)) -> None:
+                 author: str = "person", body: str = "", created_at: str = "2026-10-01T00:00:00Z") -> None:
         self.state["pulls"][str(number)] = {
             "state": state, "merged": merged, "updated_at": updated_at, "user": {"login": author}, "body": body,
             "html_url": f"https://github.com/{self.state['repo']}/pull/{number}",
-            "created_at": created_at, "commits": len(commit_dates),
+            "created_at": created_at,
             "head": {"ref": head, "sha": f"sha{number}", "repo": {"full_name": head_repo or self.state["repo"]}},
         }
-        self.state.setdefault("commit_dates", {})[str(number)] = list(commit_dates)
+        self.save()
+
+    def comment_on_issue(self, number: int, author: str, body: str) -> None:
+        self.state.setdefault("issue_comments", {}).setdefault(str(number), []).append(
+            {"user": {"login": author}, "body": body})
+        self.save()
+
+    def push(self, branch: str, at: str) -> None:
+        """A push record on `branch` in the repository's activity, at timestamp `at`."""
+        self.state.setdefault("pushes", {}).setdefault(branch, []).append(at)
         self.save()
 
     def set_compare(self, base: int, head: int, status: str) -> None:
@@ -218,6 +238,11 @@ class FakeGithub:
 
     def fail_writes(self) -> None:
         self.state["fail_writes"] = True
+        self.save()
+
+    def fail_next(self, *errors: str) -> None:
+        """Answer the next calls, one each, with these error lines and exit 1."""
+        self.state["errors"] = list(errors)
         self.save()
 
     def env(self) -> dict:

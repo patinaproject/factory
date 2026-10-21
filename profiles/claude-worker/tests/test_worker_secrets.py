@@ -122,5 +122,32 @@ class ProxyTokenTest(HelperTestCase):
         self.assertEqual(run_on_a_terminal([sys.executable, str(self.script)], self.env), (2, b""))
 
 
+class SentryHeadersTest(HelperTestCase):
+    script_name = "sentry-headers"
+
+    def sentry_broker(self, *replies: dict) -> FakeBroker:
+        broker = FakeBroker(self.root, sentry_token=list(replies))
+        self.addCleanup(broker.close)
+        return broker
+
+    def test_prints_the_sentry_bearer_header_for_claude_code(self) -> None:
+        broker = self.sentry_broker(granted("st", None))
+
+        self.assertEqual(self.run_script(), (0, '{"Authorization": "Sentry-Bearer st"}\n'))
+        self.assertEqual(broker.requests, ["sentry_token"])
+
+    def test_prints_nothing_when_the_broker_refuses_or_is_down(self) -> None:
+        broker = self.sentry_broker({"ok": False, "state": "unavailable", "message": "The gateway holds no Sentry token."})
+        self.assertEqual(self.run_script(), (1, ""))
+        broker.close()
+        self.assertEqual(self.run_script(), (1, ""))
+
+    def test_refuses_any_argument_or_a_terminal(self) -> None:
+        self.sentry_broker(granted("st", None))
+
+        self.assertEqual(self.run_script("--print"), (2, ""))
+        self.assertEqual(run_on_a_terminal([sys.executable, str(self.script)], self.env), (2, b""))
+
+
 if __name__ == "__main__":
     unittest.main()

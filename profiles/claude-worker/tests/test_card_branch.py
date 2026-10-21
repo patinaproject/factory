@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import shutil
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import SCRIPTS, FakeGithub
 
@@ -192,6 +194,79 @@ class OwnerTest(unittest.TestCase):
             card_branch.read_pulls(lambda endpoint: {}, REPO, ["https://github.com/someone/else/pull/1"])
 
 
+class ClosesTest(unittest.TestCase):
+    def test_each_closing_line_gives_its_reference(self) -> None:
+        cases = {
+            "Closes #204": {"#204"},
+            "fixes: #7 and resolved #8": {"#7", "#8"},
+            f"Closes {REPO}#9": {"#9"},
+            "Closes someone/else#9": set(),
+            f"Closes https://github.com/{REPO}/issues/10": {"#10"},
+            "Closes https://github.com/someone/else/issues/10": set(),
+            "Closes PAT-5348": {"PAT-5348"},
+            "closes pat-5348": {"PAT-5348"},
+            "Closes https://linear.app/example/issue/PAT-5325/report-usage": {"PAT-5325"},
+            "Closes #190, closes https://linear.app/example/issue/PAT-5325/x": {"#190", "PAT-5325"},
+            "Mentions #204 and PAT-5348": set(),
+            "`Closes #1`\n<!-- Closes #2 -->\n```\nCloses #3\n```\nCloses #4": {"#4"},
+            "~~Closes #1~~\n> Closes #2\n~~~\nCloses #3\n~~~\nCloses #4": {"#4"},
+        }
+        for body, expected in cases.items():
+            with self.subTest(body):
+                self.assertEqual(card_branch.closes(body, REPO), expected)
+
+    def test_a_closes_argument_is_read_as_one_reference(self) -> None:
+        self.assertEqual(card_branch.reference("PAT-12", REPO), "PAT-12")
+        self.assertEqual(card_branch.reference("#12", REPO), "#12")
+        self.assertEqual(card_branch.reference(f"https://github.com/{REPO.upper()}/issues/12", REPO), "#12")
+        with self.assertRaises(card_branch.GhFailed):
+            card_branch.reference("https://github.com/someone/else/issues/12", REPO)
+
+
+class RunGhTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.github = FakeGithub(self.tmp, REPO)
+        self.github.create_branch(X, APP)
+        for patcher in (mock.patch.dict(os.environ, self.github.env()), mock.patch.object(card_branch.time, "sleep")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_server_error_that_clears_returns_the_success(self) -> None:
+        self.github.fail_next("gh: Server Error (HTTP 500)", "gh: HTTP 502")
+
+        self.assertEqual(card_branch.run_gh(f"repos/{REPO}/branches/{X}"), {"name": X})
+        self.assertEqual(len(self.github.calls()), 3)
+
+    def test_a_server_error_that_persists_raises_gh_server_error(self) -> None:
+        self.github.fail_next(*["gh: Server Error (HTTP 500)"] * 3)
+
+        with self.assertRaises(card_branch.GhServerError) as raised:
+            card_branch.run_gh(f"repos/{REPO}/branches/{X}")
+        self.assertIn("HTTP 500", str(raised.exception))
+        self.assertEqual(len(self.github.calls()), 3)
+
+    def test_a_client_error_is_not_retried(self) -> None:
+        self.github.fail_next("gh: Resource not accessible by integration (HTTP 403)", "gh: HTTP 500")
+
+        with self.assertRaises(card_branch.GhFailed) as raised:
+            card_branch.run_gh(f"repos/{REPO}/branches/{X}")
+        self.assertNotIsInstance(raised.exception, card_branch.GhServerError)
+        self.assertEqual(len(self.github.calls()), 1)
+
+    def test_a_write_that_meets_a_server_error_is_not_retried(self) -> None:
+        for write in (("-X", "POST", "-f", "body=hi"), ("--method=PATCH",), ("-fstate=closed",)):
+            with self.subTest(write):
+                log = Path(str(self.github.state_path) + ".log")
+                log.unlink(missing_ok=True)
+                self.github.fail_next("gh: Server Error (HTTP 500)", "gh: Server Error (HTTP 500)")
+
+                with self.assertRaises(card_branch.GhServerError):
+                    card_branch.run_gh(f"repos/{REPO}/issues/7/comments", *write)
+                self.assertEqual(len(self.github.calls()), 1)
+
+
 class CommandTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp()).resolve()
@@ -247,6 +322,49 @@ class CommandTest(unittest.TestCase):
         status, report = self.run_command("--pull", URL.format(7), "--pull", URL.format(9))
 
         self.assertEqual((status, report), (0, {"branch": "goodyear/pat-4075-bot-recreated", "takeover_pr": None}))
+
+    def test_the_apps_pull_request_that_closes_the_github_issue_is_adopted(self) -> None:
+        self.github.create_branch("204-adopt-it", APP)
+        self.github.add_pull(11, "204-adopt-it", author=APP, body="Closes #204")
+        self.github.add_pull(12, "other", author=APP, body="Closes #205")
+
+        status, report = self.run_command("--closes", "PAT-12", "--closes", f"https://github.com/{REPO}/issues/204")
+
+        self.assertEqual((status, report), (0, {"branch": "204-adopt-it", "takeover_pr": None}))
+
+    def test_the_apps_pull_request_that_closes_the_linear_issue_is_adopted(self) -> None:
+        self.github.create_branch("pat-12-old-name", APP)
+        self.github.add_pull(11, "pat-12-old-name", author="app/factory-app", body="Fixes PAT-12")
+
+        status, report = self.run_command("--closes", "PAT-12")
+
+        self.assertEqual((status, report), (0, {"branch": "pat-12-old-name", "takeover_pr": None}))
+
+    def test_with_no_pull_request_closing_the_issue_the_card_keeps_its_git_branch(self) -> None:
+        self.github.create_branch("unrelated", APP)
+        self.github.add_pull(11, "unrelated", author=APP, body="Closes PAT-13")
+        self.github.add_pull(12, "merged-one", author=APP, body="Closes PAT-12", state="closed", merged=True)
+
+        self.assertEqual(self.run_command("--closes", "PAT-12"), (0, {"branch": X, "takeover_pr": None}))
+
+    def test_a_persons_pull_request_that_closes_the_issue_is_not_adopted_or_taken_over(self) -> None:
+        self.github.create_branch("person-branch", "tlmader")
+        self.github.add_pull(11, "person-branch", author="tlmader", body="Closes PAT-12")
+
+        self.assertEqual(self.run_command("--closes", "PAT-12"), (0, {"branch": X, "takeover_pr": None}))
+
+    def test_the_apps_pull_request_on_a_branch_a_person_created_is_not_taken_over(self) -> None:
+        self.github.create_branch("person-made", "tlmader")
+        self.github.add_pull(11, "person-made", author=APP, body="Closes PAT-12")
+
+        self.assertEqual(self.run_command("--closes", "PAT-12"), (0, {"branch": X, "takeover_pr": None}))
+
+    def test_a_closes_argument_of_another_repository_exits_1(self) -> None:
+        status, report = self.run_command("--closes", "https://github.com/someone/else/issues/1")
+
+        self.assertEqual(status, 1)
+        self.assertEqual(report, {"error": (
+            f"--closes https://github.com/someone/else/issues/1 is not a Linear identifier, #n, or an issue URL in {REPO}")})
 
     def test_a_blocked_card_exits_2_with_the_reason(self) -> None:
         self.github.create_branch(X, "tlmader")

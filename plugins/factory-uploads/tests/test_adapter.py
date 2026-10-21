@@ -76,8 +76,8 @@ def stub_hermes(home: Path, secrets: dict, config: dict | None = None) -> dict:
     }
 
 
-def factory_settings(auth_token_env: str) -> dict:
-    session = {"claude_session": {"auth_token_env": auth_token_env}}
+def factory_settings(auth_token_env: str, sentry_token_env: str = "") -> dict:
+    session = {"claude_session": {"auth_token_env": auth_token_env, "sentry_token_env": sentry_token_env}}
     return {"plugins": {"entries": {"linear-agent-session": {"settings": session}}}}
 
 
@@ -88,7 +88,7 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.home = Path(self.tmp.name)
         self.secrets = {
             "GITHUB_UPLOAD_TOKEN": TOKEN, "LINEAR_CLIENT_ID": "lin-id", "LINEAR_CLIENT_SECRET": "lin-secret",
-            "EXAMPLE_PROXY_TOKEN": "proxy-FAKE-token",
+            "EXAMPLE_PROXY_TOKEN": "proxy-FAKE-token", "EXAMPLE_SENTRY_TOKEN": "sntryu_FAKE",
         }
         self.settings = factory_settings("EXAMPLE_PROXY_TOKEN")
         plugin = self.home / "plugins" / "linear-agent-session"
@@ -169,6 +169,35 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(reply["state"], "unavailable")
         self.assertNotIn("proxy-FAKE-token", json.dumps(reply))
+
+    async def test_the_sentry_token_is_the_variable_the_factory_settings_name(self):
+        self.settings.update(factory_settings("EXAMPLE_PROXY_TOKEN", "EXAMPLE_SENTRY_TOKEN"))
+        await self.connected()
+
+        self.assertEqual(await self.request("sentry_token"), {"ok": True, "token": "sntryu_FAKE", "expires_at": None})
+        self.secrets.pop("EXAMPLE_SENTRY_TOKEN")
+        self.assertEqual((await self.request("sentry_token"))["state"], "unavailable")
+
+    async def test_a_token_op_never_serves_the_upload_token_or_an_app_credential(self):
+        for name in ("GITHUB_UPLOAD_TOKEN", "LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET"):
+            with self.subTest(name=name):
+                self.settings.update(factory_settings(name, name))
+                adapter = await self.connected()
+
+                replies = [await self.request("proxy_token"), await self.request("sentry_token")]
+
+                self.assertEqual([reply["state"] for reply in replies], ["unavailable", "unavailable"])
+                self.assertNotIn(self.secrets[name], json.dumps(replies))
+                await adapter.disconnect()
+
+    async def test_settings_without_a_sentry_variable_serve_no_secret_as_the_sentry_token(self):
+        await self.connected()
+
+        reply = await self.request("sentry_token")
+
+        self.assertEqual(reply["state"], "unavailable")
+        self.assertNotIn("sntryu_FAKE", json.dumps(reply))
+        self.assertFalse((await self.request("status"))["sentry_token_present"])
 
     async def test_status_reports_which_credentials_the_gateway_holds(self):
         await self.connected()

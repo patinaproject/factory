@@ -23,21 +23,28 @@ from .broker import Broker
 PLATFORM = "factory_uploads"
 LINEAR_PLUGIN = Path("plugins") / "linear-agent-session" / "linear.py"
 LINEAR_CREDENTIALS = ("LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET")
+GATEWAY_ONLY = frozenset({*LINEAR_CREDENTIALS, "GITHUB_UPLOAD_TOKEN"})
 
 
-def proxy_token_env(config: dict) -> str:
+def claude_session(config: dict) -> dict:
     entries = (config.get("plugins") or {}).get("entries") or {}
     settings = (entries.get("linear-agent-session") or {}).get("settings") or {}
-    return (settings.get("claude_session") or {}).get("auth_token_env") or ""
+    return settings.get("claude_session") or {}
+
+
+def worker_variable(name) -> str:
+    """A settings typo must not turn a token op into a way to read the upload token or an app credential."""
+    return name if isinstance(name, str) and name not in GATEWAY_ONLY else ""
 
 
 class GatewayCredentials:
     """Linear revokes every client credentials token of the app when a request asks for another scope set."""
 
-    def __init__(self, home: Path, get_secret: Callable[[str], str | None], proxy_env: str):
+    def __init__(self, home: Path, get_secret: Callable[[str], str | None], transport: dict):
         self._home = Path(home)
         self._get_secret = get_secret
-        self._proxy_env = proxy_env
+        self._proxy_env = worker_variable(transport.get("auth_token_env"))
+        self._sentry_env = worker_variable(transport.get("sentry_token_env"))
         self._lock = threading.Lock()
         self._client = None
         self._client_for: tuple | None = None
@@ -64,6 +71,9 @@ class GatewayCredentials:
     def proxy_token(self) -> str | None:
         return self._get_secret(self._proxy_env) if self._proxy_env else None
 
+    def sentry_token(self) -> str | None:
+        return self._get_secret(self._sentry_env) if self._sentry_env else None
+
     def _linear_module(self):
         spec = importlib.util.spec_from_file_location("factory_uploads_linear", self._home / LINEAR_PLUGIN)
         module = importlib.util.module_from_spec(spec)
@@ -80,7 +90,7 @@ class FactoryUploadsAdapter(BasePlatformAdapter):
             home,
             list(repositories),
             lambda: get_scoped_secret("GITHUB_UPLOAD_TOKEN"),
-            credentials=GatewayCredentials(home, get_scoped_secret, proxy_token_env(load_config_readonly())),
+            credentials=GatewayCredentials(home, get_scoped_secret, claude_session(load_config_readonly())),
         )
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
