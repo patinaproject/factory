@@ -11,6 +11,7 @@ import tempfile
 import types
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -262,6 +263,7 @@ class RegisterTest(unittest.TestCase):
             sorted(ctx.tools),
             [
                 "linear_agent_activity",
+                "linear_agent_activity_read",
                 "linear_agent_session_create",
                 "linear_delegated_issues",
                 "linear_issue",
@@ -276,6 +278,18 @@ class RegisterTest(unittest.TestCase):
             [name for name, _ in ctx.hooks],
             ["pre_gateway_dispatch", "kanban_task_blocked", "transform_api_error_classification"],
         )
+
+    def test_the_manifest_lists_every_registered_tool(self):
+        ctx = FakeContext()
+        plugin.register(ctx)
+        manifest = (Path(plugin.__file__).parent / "plugin.yaml").read_text().splitlines()
+        start = manifest.index("provides_tools:") + 1
+        listed = []
+        for line in manifest[start:]:
+            if not line.startswith("  - "):
+                break
+            listed.append(line.removeprefix("  - "))
+        self.assertEqual(listed, list(ctx.tools))
 
     def test_register_names_an_empty_provider_key_in_a_worker(self):
         config = {"model": {"provider": "custom:proxy"}, "providers": {"proxy": {"key_env": "PROXY_TOKEN"}}}

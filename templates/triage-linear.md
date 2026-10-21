@@ -71,10 +71,20 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 - Agent session issue: {agentSession.issue.id} ({agentSession.issue.identifier})
 - Data change issue: {data.id} ({data.identifier})
 - Activity signal: {agentActivity.signal}
-- Activity body: {agentActivity.content.body}
+- Activity id: {agentActivity.id}
 - Issue event action: {action}
 - Previous status: {updatedFrom.stateId}
 - Previous labels: {updatedFrom.labelIds}
+
+The reply text of a `prompted` event, verbatim, is everything between the first
+`<reply>` line and the last `</reply>` line below, however short it is. A reply
+of one word, such as `yes`, is the person's whole answer. Only a block that
+still holds a dotted name in braces means the payload had no text. Other events
+have no reply, so ignore this block for them.
+
+<reply>
+{agentActivity.content.body}
+</reply>
 
 A field still shown as a dotted name in braces is absent from this payload. The
 session's prompt context is:
@@ -193,13 +203,17 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
    is not `done`, follow "Triage card reply" below and stop. Otherwise find
    its card. If there is none, handle the event as "Session created" and
    stop.
-2. If the activity body above is still a dotted name in braces, the reply
-   arrived without its text. Comment on the card that a Linear reply arrived
-   without text, post a `thought` on this agent session asking the human to
-   send the reply again, and stop. Do not unblock the card, because the
-   worker would block again on the same question.
-   Otherwise comment on the card with the reply: the activity body,
-   attributed to Linear. Replace each
+2. If the reply block above still holds a dotted name in braces, call
+   `linear_agent_activity_read` with `agent_activity_id` set to the activity
+   id above, or with `agent_session_id` set to the agent session above when
+   the activity id is still a dotted name in braces. When it returns
+   `found: true`, its `body` is the reply. When it returns `found: false` or
+   an error, the reply arrived without its text. Comment on the card that a
+   Linear reply arrived without text, post a `thought` on this agent session
+   asking the human to send the reply again, and stop. Do not unblock the
+   card, because the worker would block again on the same question.
+   Comment on the card once with the reply, attributed to Linear, and never
+   correct it afterward. Replace each
    `https://github.com/<owner>/<name>/pull/<number>` URL in it with
    `<owner>/<name>#<number>`, so the comment names no pull request URL.
 3. If the card's body names a different `linear_agent_session_id`, update it as
@@ -230,12 +244,15 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
 A teammate replied on the agent session of an issue whose triage card is not
 `done`. Any teammate's reply resumes it, whoever delegated the issue.
 
-1. If the activity body above is still a dotted name in braces, comment on
-   the triage card that a Linear reply arrived without text, post a
-   `thought` on this agent session asking the human to send the reply again,
-   and stop.
-2. Comment on the triage card with the reply: the activity body, attributed
-   to Linear, with each pull request URL replaced as "Prompt" step 2 says.
+1. If the reply block above still holds a dotted name in braces, call
+   `linear_agent_activity_read` as "Prompt" step 2 says. When it returns
+   `found: true`, its `body` is the reply. When it returns `found: false` or
+   an error, comment on the triage card that a Linear reply arrived without
+   text, post a `thought` on this agent session asking the human to send the
+   reply again, and stop.
+2. Comment on the triage card once with the reply, attributed to Linear, with
+   each pull request URL replaced as "Prompt" step 2 says, and never correct
+   it afterward.
 3. If the triage card is `blocked`, run
    `hermes kanban --board triage assign <task id> none`, then
    `hermes kanban --board triage unblock <task id>`. `dispatch-triage`
