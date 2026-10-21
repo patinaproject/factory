@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests import FakeLinear, activity_ok, load_plugin
+from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin
 
 plugin = load_plugin()
 
@@ -374,6 +374,22 @@ class CliTest(unittest.TestCase):
         ), mock.patch("urllib.request.urlopen", fake), contextlib.redirect_stdout(out):
             code = cli.main(argv)
         return code, json.loads(out.getvalue())
+
+    def test_a_worker_command_waits_out_a_busy_broker(self):
+        fake = FakeLinear([(200, {"data": {"issue": None}})])
+        cli = _load_cli()
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.realpath(tmp)
+            worker = os.path.join(root, "profiles", "claude-worker")
+            os.makedirs(worker)
+            broker = FakeBroker(os.path.join(root, "factory-uploads.sock"), [BUSY, linear_token("brokered-1")])
+            self.addCleanup(broker.close)
+            with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": "", "LINEAR_CLIENT_SECRET": "", "HERMES_HOME": worker}), \
+                    mock.patch("urllib.request.urlopen", fake), mock.patch("time.sleep"), contextlib.redirect_stdout(out):
+                cli.main(["issue", "ABC-1"])
+        self.assertEqual(len(broker.requests), 2)
+        self.assertEqual(fake.graphql_requests[0]["authorization"], "Bearer brokered-1")
 
     def test_activity_command(self):
         fake = FakeLinear([activity_ok("activity-5"), (200, {"data": {"agentSessionUpdate": {"success": True}}})])

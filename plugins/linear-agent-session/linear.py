@@ -20,6 +20,8 @@ TOKEN_REFRESH_MARGIN_SECONDS = 60
 BROKER_SOCKET = "factory-uploads.sock"
 BROKER_TIMEOUT_SECONDS = 30
 BROKER_REPLY_LIMIT = 65536
+# A busy or restarting broker gets a few seconds; a card waits on it far longer in the queue.
+BROKER_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0)
 
 BODY_ACTIVITY_TYPES = ("thought", "response", "elicitation", "error")
 ACTIVITY_TYPES = BODY_ACTIVITY_TYPES + ("action",)
@@ -127,6 +129,14 @@ UrlOpen = Callable[..., Any]
 
 class LinearError(Exception):
     pass
+
+
+class BrokerUnavailable(LinearError):
+    """The broker was busy, unreachable, or slow, which a later run can outlast."""
+
+    def __init__(self, message: str, *, retry: bool = True) -> None:
+        super().__init__(message)
+        self.retry = retry
 
 
 def activity_content(
@@ -454,6 +464,16 @@ class BrokerLinearClient(LinearClient):
 
 
 def broker_request(socket_path: str, op: str, *, timeout: float = BROKER_TIMEOUT_SECONDS) -> dict:
+    for delay in (*BROKER_RETRY_DELAYS, None):
+        try:
+            return _broker_attempt(socket_path, op, timeout)
+        except BrokerUnavailable as error:
+            if delay is None or not error.retry:
+                raise
+            time.sleep(delay)
+
+
+def _broker_attempt(socket_path: str, op: str, timeout: float) -> dict:
     reply = b""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
@@ -465,12 +485,19 @@ def broker_request(socket_path: str, op: str, *, timeout: float = BROKER_TIMEOUT
                 if not chunk:
                     break
                 reply += chunk
+    except TimeoutError:
+        # A broker that accepted the request and then stalled would stall a retry the same way.
+        raise BrokerUnavailable(f"the gateway's broker at {socket_path} did not answer in {timeout}s", retry=False) from None
     except OSError as error:
-        raise LinearError(f"the gateway's broker at {socket_path} did not answer: {error.strerror or error}") from None
+        raise BrokerUnavailable(
+            f"the gateway's broker at {socket_path} did not answer: {error.strerror or error}"
+        ) from None
     try:
         document = json.loads(reply)
     except ValueError:
-        raise LinearError(f"the gateway's broker at {socket_path} closed the connection without an answer") from None
+        raise BrokerUnavailable(f"the gateway's broker at {socket_path} closed the connection without an answer") from None
+    if isinstance(document, dict) and document.get("state") == "busy":
+        raise BrokerUnavailable(f"the gateway's broker is busy and refused {op}")
     if not isinstance(document, dict) or document.get("ok") is not True:
         message = document.get("message") if isinstance(document, dict) else None
         raise LinearError(f"the gateway's broker refused {op}: {message or 'no reason given'}")

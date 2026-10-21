@@ -369,22 +369,40 @@ if __name__ == "__main__":
 
 
 class ConnectionCapTest(BrokerTestCase):
-    async def idle_clients(self, count: int):
+    async def idle_clients(self, count: int, header: dict | None = None):
         clients = [await asyncio.open_unix_connection(str(self.broker.socket_path)) for _ in range(count)]
+        if header is not None:
+            for _, writer in clients:
+                writer.write(json.dumps(header).encode() + b"\n")
+                await writer.drain()
         await asyncio.sleep(0.1)
         return clients
 
-    async def test_a_connection_past_the_cap_gets_a_fixed_refusal_and_a_freed_slot_works_again(self):
+    async def test_uploads_past_their_cap_are_busy_while_credential_requests_still_answer(self):
         self.assertLessEqual(broker_module.MAX_CONNECTIONS, 8)
-        clients = await self.idle_clients(broker_module.MAX_CONNECTIONS)
+        header, _ = upload_request()
+        clients = await self.idle_clients(broker_module.MAX_CONNECTIONS, header)
 
-        reply = await self.upload()
-
-        self.assertEqual(reply, {"ok": False, "state": "refused", "message": broker_module.BUSY})
+        self.assertEqual(await self.upload(), {"ok": False, "state": "busy", "message": broker_module.BUSY})
+        self.assertTrue((await ask(self.broker.socket_path, {"op": "status"}))["ok"])
         self.assertEqual(self.uploads.requests, [])
         clients[0][1].close()
         await asyncio.sleep(0.1)
         self.assertTrue((await self.upload())["ok"])
+        for _, writer in clients[1:]:
+            writer.close()
+
+    async def test_a_connection_past_the_total_cap_gets_a_fixed_refusal_and_a_freed_slot_works_again(self):
+        total = broker_module.MAX_CONNECTIONS + broker_module.MAX_CREDENTIAL_CONNECTIONS
+        self.assertLessEqual(total, 16)
+        clients = await self.idle_clients(total)
+
+        reply = await ask(self.broker.socket_path, {"op": "status"})
+
+        self.assertEqual(reply, {"ok": False, "state": "busy", "message": broker_module.BUSY})
+        clients[0][1].close()
+        await asyncio.sleep(0.1)
+        self.assertTrue((await ask(self.broker.socket_path, {"op": "status"}))["ok"])
         for _, writer in clients[1:]:
             writer.close()
 

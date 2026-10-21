@@ -46,6 +46,8 @@ HOURLY_QUOTA = 60
 QUOTA_WINDOW = 3600
 REQUEST_DEADLINE = 70
 MAX_CONNECTIONS = 4
+# An upload can hold its slot for REQUEST_DEADLINE, so worker credential requests get slots of their own.
+MAX_CREDENTIAL_CONNECTIONS = 4
 MAX_HEADER = 4096
 MAX_NAME = 200
 
@@ -137,6 +139,7 @@ class Broker:
         self._recent: list[float] = []
         self._server: asyncio.AbstractServer | None = None
         self._clients: dict[asyncio.Task, asyncio.StreamWriter] = {}
+        self._uploading = 0
 
     async def start(self) -> bool:
         """Listen on the socket. False when another gateway already listens on it."""
@@ -173,8 +176,8 @@ class Broker:
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
-        if len(self._clients) >= MAX_CONNECTIONS:
-            reply = self._failure("refused", BUSY)
+        if len(self._clients) >= MAX_CONNECTIONS + MAX_CREDENTIAL_CONNECTIONS:
+            reply = self._failure("busy", BUSY)
         else:
             self._clients[task] = writer
             try:
@@ -205,7 +208,13 @@ class Broker:
             return await self._credential_request(op, pid)
         if op != "upload":
             return self._failure("refused", BAD_REQUEST)
-        return await self._upload_request(request, reader, pid)
+        if self._uploading >= MAX_CONNECTIONS:
+            return self._failure("busy", BUSY)
+        self._uploading += 1
+        try:
+            return await self._upload_request(request, reader, pid)
+        finally:
+            self._uploading -= 1
 
     async def _credential_request(self, op: str, pid: int | None) -> dict:
         if op == "proxy_token":

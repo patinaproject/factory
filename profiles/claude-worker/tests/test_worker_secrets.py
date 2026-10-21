@@ -20,6 +20,7 @@ CONFIG = """plugins:
           auth_token_env: "CLAUDE_PROXY_TOKEN"
 """
 REFUSAL = {"ok": False, "state": "unavailable", "message": "The gateway holds no proxy token."}
+BUSY = {"ok": False, "state": "busy", "message": "The upload broker is busy. Try again in a moment."}
 
 
 def run_on_a_terminal(command: list, env: dict) -> tuple:
@@ -36,8 +37,12 @@ def run_on_a_terminal(command: list, env: dict) -> tuple:
 
 class HelperTestCase(unittest.TestCase):
     script_name = ""
+    op = "proxy_token"
+    printed = ""
 
     def setUp(self) -> None:
+        if not self.script_name:
+            self.skipTest("each helper's subclass runs these tests")
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         self.root = self.tmp / "root"
@@ -60,9 +65,24 @@ class HelperTestCase(unittest.TestCase):
         proc = subprocess.run([sys.executable, str(self.script), *args], env=self.env, capture_output=True, text=True)
         return proc.returncode, proc.stdout
 
+    def test_a_busy_broker_is_asked_again(self) -> None:
+        broker = FakeBroker(self.root, **{self.op: [BUSY, granted("t", None)]})
+        self.addCleanup(broker.close)
+
+        self.assertEqual(self.run_script(), (0, self.printed))
+        self.assertEqual(broker.requests, [self.op, self.op])
+
+    def test_a_broker_that_stays_busy_prints_nothing_after_a_bounded_wait(self) -> None:
+        broker = FakeBroker(self.root, **{self.op: [BUSY]})
+        self.addCleanup(broker.close)
+
+        self.assertEqual(self.run_script(), (1, ""))
+        self.assertGreater(len(broker.requests), 2)
+
 
 class WorkerSecretsTest(HelperTestCase):
     script_name = "worker-secrets"
+    printed = "CLAUDE_PROXY_TOKEN=t\n"
 
     def test_prints_only_the_proxy_token_from_the_gateways_broker(self) -> None:
         broker = self.broker(granted("t", None))
@@ -96,6 +116,7 @@ class WorkerSecretsTest(HelperTestCase):
 
 class ProxyTokenTest(HelperTestCase):
     script_name = "proxy-token"
+    printed = "t\n"
 
     def test_prints_the_bare_token_for_claude_code(self) -> None:
         broker = self.broker(granted("t", None))
@@ -124,6 +145,8 @@ class ProxyTokenTest(HelperTestCase):
 
 class SentryHeadersTest(HelperTestCase):
     script_name = "sentry-headers"
+    op = "sentry_token"
+    printed = '{"Authorization": "Sentry-Bearer t"}\n'
 
     def sentry_broker(self, *replies: dict) -> FakeBroker:
         broker = FakeBroker(self.root, sentry_token=list(replies))

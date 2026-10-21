@@ -464,6 +464,12 @@ Linear client secret, the webhook secrets, or the proxy token from such a
 process's environment with `ps eww`. Hermes reads the manifest at each spawn,
 so it takes effect without a restart.
 
+The strip has two gaps. Hermes runs a `secrets.command` helper without it,
+so `factory-secrets` holds the gateway's Infisical identity (#176). A plugin
+hook that starts a subprocess without its own `env` passes the home's
+process environment on, so `pr-ready-gate`'s `git` and `gh` calls in the
+worker hold the proxy token.
+
 To install from GitHub instead of a local checkout, use
 `<owner>/<repo>#plugins/<name> --ref <40-character commit SHA>`. Add `--force`
 only to reinstall a plugin at a newer commit.
@@ -1611,6 +1617,21 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
      When the line gives a `git merge --ff-only` command, run it as written,
      then run `check-install` again. Otherwise the checkout is ahead, diverged,
      on another branch, or dirty. Fix that by hand before you deploy.
+   - `plugin` lines for the root home's `factory-uploads` or
+     `linear-agent-session` together with a `plugin factory-secret-names in
+     <worker>` line: the worker is moving to the gateway's broker for its
+     tokens. Two orders break every worker run. A worker on the new scripts
+     before the gateway runs the new broker gets each token request refused.
+     The worker's `factory-secret-names` before its new scripts makes the old
+     `claude-session` lose `CLAUDE_PROXY_TOKEN` and refuse the run. Deploy in
+     this order. First, install the root home's plugins and run
+     `restart-gateway`, then confirm that `{"op":"status"}` reports
+     `linear_ready` and `proxy_token_present` true. Second, run `hermes pause`.
+     Update the profile, install the worker's `linear-agent-session` and
+     `factory-secret-names`, and set the worker's `terminal.env_passthrough`
+     to `[]`, all together. Third, retire the worker's identity as the next
+     line says, run `check-install` until it is clean, and then run
+     `hermes resume`.
    - A `secret <name> in <worker>/.env` line: the worker holds a secret only
      the gateway may hold. Follow
      [Retire the worker's identity](references/infisical.md#retire-the-workers-identity),

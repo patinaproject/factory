@@ -3,11 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import os
+import socket
 import stat
 import tempfile
 import unittest
 
-from tests import FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin, session_update_ok
+from unittest import mock
+
+from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin, session_update_ok
 
 plugin = load_plugin()
 linear = plugin.linear
@@ -300,6 +303,50 @@ class BrokerClientTest(unittest.TestCase):
             linear.LinearError, "refused linear_token: The gateway holds no Linear app credentials."
         ):
             client.access_token()
+
+    def test_a_busy_broker_is_asked_again_until_it_answers(self):
+        broker = self.broker(BUSY, BUSY, linear_token("brokered-1"))
+        client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()]))
+
+        with mock.patch("time.sleep") as sleep:
+            client.create_activity("session-1", {"type": "thought", "body": "x"})
+
+        self.assertEqual(len(broker.requests), 3)
+        self.assertEqual(len(sleep.call_args_list), 2)
+
+    def test_a_broker_that_stays_busy_or_down_is_unavailable_after_a_bounded_wait(self):
+        broker = self.broker(BUSY)
+        for case in ("busy", "down"):
+            with self.subTest(case=case), mock.patch("time.sleep") as sleep:
+                if case == "down":
+                    broker.close()
+                    os.unlink(self.socket)
+                with self.assertRaises(linear.BrokerUnavailable):
+                    linear.broker_request(self.socket, "proxy_token")
+                waited = sum(call.args[0] for call in sleep.call_args_list)
+                self.assertGreater(len(sleep.call_args_list), 1)
+                self.assertLessEqual(waited, 10)
+        self.assertEqual(len(broker.requests), len(sleep.call_args_list) + 1)
+
+    def test_a_broker_that_stalls_is_unavailable_without_a_retry(self):
+        stalled = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(stalled.close)
+        stalled.bind(self.socket)
+        stalled.listen()
+
+        with mock.patch("time.sleep") as sleep, self.assertRaisesRegex(linear.BrokerUnavailable, "did not answer in 0.2s"):
+            linear.broker_request(self.socket, "proxy_token", timeout=0.2)
+
+        self.assertEqual(sleep.call_args_list, [])
+
+    def test_a_refusal_is_not_retried_and_is_not_unavailability(self):
+        broker = self.broker({"ok": False, "state": "unavailable", "message": "The gateway holds no proxy token."})
+
+        with mock.patch("time.sleep") as sleep, self.assertRaises(linear.LinearError) as raised:
+            linear.broker_request(self.socket, "proxy_token")
+
+        self.assertNotIsInstance(raised.exception, linear.BrokerUnavailable)
+        self.assertEqual((len(broker.requests), sleep.call_args_list), (1, []))
 
     def test_the_broker_lives_in_the_root_home(self):
         self.assertEqual(linear.broker_socket_path({"HERMES_HOME": self.worker}), self.socket)

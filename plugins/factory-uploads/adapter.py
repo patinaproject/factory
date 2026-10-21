@@ -23,7 +23,14 @@ from .broker import Broker
 PLATFORM = "factory_uploads"
 LINEAR_PLUGIN = Path("plugins") / "linear-agent-session" / "linear.py"
 LINEAR_CREDENTIALS = ("LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET")
-GATEWAY_ONLY = frozenset({*LINEAR_CREDENTIALS, "GITHUB_UPLOAD_TOKEN"})
+GATEWAY_ONLY = frozenset({
+    *LINEAR_CREDENTIALS,
+    "GITHUB_UPLOAD_TOKEN",
+    "FACTORY_INFISICAL_CLIENT_ID",
+    "FACTORY_INFISICAL_CLIENT_SECRET",
+    "LINEAR_WEBHOOK_SECRET",
+    "GITHUB_WEBHOOK_SECRET",
+})
 
 
 def claude_session(config: dict) -> dict:

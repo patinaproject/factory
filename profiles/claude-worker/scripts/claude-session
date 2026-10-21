@@ -648,7 +648,7 @@ def linear_access() -> tuple:
         client = linear.client_from_env()
         return client, client.access_token()
     except linear.LinearError as error:
-        raise Refusal(f"Linear token: {error}") from None
+        raise Refusal(f"Linear token: {error}", transient=isinstance(error, linear.BrokerUnavailable)) from None
 
 
 def triage_playbook() -> Path:
@@ -776,7 +776,7 @@ def sentry_enabled(transport: dict) -> bool:
     try:
         status = linear.broker_request(linear.broker_socket_path(os.environ), "status")
     except linear.LinearError as error:
-        raise Refusal(f"Sentry token: {error}") from None
+        raise Refusal(f"Sentry token: {error}", transient=isinstance(error, linear.BrokerUnavailable)) from None
     if status.get("sentry_token_present") is not True:
         raise Refusal("Sentry token: the gateway's broker reports sentry_token_present false")
     return True

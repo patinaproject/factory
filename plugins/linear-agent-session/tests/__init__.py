@@ -100,10 +100,14 @@ class FakeBroker:
                         break
                     request += chunk
                 self.requests.append(json.loads(request))
-                client.sendall(json.dumps(self.replies.pop(0)).encode() + b"\n")
+                reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+                client.sendall(json.dumps(reply).encode() + b"\n")
 
     def close(self) -> None:
         self.server.close()
+
+
+BUSY = {"ok": False, "state": "busy", "message": "The upload broker is busy. Try again in a moment."}
 
 
 def linear_token(token: str, expires_at: float = 1e12) -> dict:

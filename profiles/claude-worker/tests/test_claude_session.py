@@ -16,6 +16,8 @@ from pathlib import Path
 
 from tests.support import BOT_LOGIN, REPO as FACTORY, SCRIPTS, FakeBroker, FakeGithub, GitFixture, git, granted
 
+BUSY = {"ok": False, "state": "busy", "message": "The upload broker is busy. Try again in a moment."}
+
 # A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
 ISSUE_ID = str(uuid.uuid4())
 SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}"))
@@ -1372,13 +1374,49 @@ class ClaudeSessionTest(GitFixture):
         })
         self.assertFalse(self.log.exists())
 
-    def test_a_gateway_that_is_down_refuses_before_claude_starts(self) -> None:
+    def test_a_gateway_that_is_down_sends_the_card_back_to_the_queue_before_claude_starts(self) -> None:
         self.broker.close()
 
         status, report = self.run_session()
 
-        self.assertEqual(status, 2)
+        self.assertEqual((status, report.get("transient")), (2, True))
         self.assertRegex(report["error"], r"^Linear token: the gateway's broker at .*/factory-uploads\.sock did not answer")
+        self.assertFalse(self.log.exists())
+
+    def test_a_busy_broker_is_asked_again_for_the_linear_token(self) -> None:
+        self.broker.answers["linear_token"] = [BUSY, granted("cached-token")]
+
+        self.run_session()
+
+        self.assertEqual(self.broker.requests.count("linear_token"), 2)
+        self.assertEqual(self.claude_call()["settings"]["content"]["env"]["LINEAR_API_KEY"], "cached-token")
+
+    def test_a_broker_that_stays_busy_sends_the_card_back_to_the_queue(self) -> None:
+        self.broker.answers["linear_token"] = [BUSY]
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report.get("transient")), (2, True))
+        self.assertRegex(report["error"], r"^Linear token: the gateway's broker is busy")
+        self.assertFalse(self.log.exists())
+
+    def test_a_busy_broker_is_asked_again_for_the_sentry_status(self) -> None:
+        self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
+        self.broker.answers["status"] = [BUSY, {"ok": True, "sentry_token_present": True}]
+
+        self.run_session()
+
+        self.assertEqual(self.broker.requests.count("status"), 2)
+        self.assertTrue(self.log.exists())
+
+    def test_a_sentry_status_that_stays_busy_sends_the_card_back_to_the_queue(self) -> None:
+        self.settings = self.write_settings([self.repository], {"sentry_token_env": "EXAMPLE_SENTRY_TOKEN"})
+        self.broker.answers["status"] = [BUSY]
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report.get("transient")), (2, True))
+        self.assertRegex(report["error"], r"^Sentry token: the gateway's broker is busy")
         self.assertFalse(self.log.exists())
 
     def test_missing_plugin_refuses_before_claude_starts(self) -> None:

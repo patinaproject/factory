@@ -288,10 +288,13 @@ A worker set up before it gave up its own Infisical identity still holds one.
 the proxy token variable, and the Sentry token variable the same way. Retire it after the gateway runs
 the broker from part 5, so the worker has a source for its tokens:
 
-1. Remove each reported key from `<worker>/.env`. Back up the file first.
+1. Remove each reported key from `<worker>/.env`. Back up the file first,
+   with mode `600`. The backup holds the identity, so delete it after step 4
+   passes. `umask 077` keeps the temporary file private while it exists.
    This prints nothing:
 
    ```sh
+   umask 077
    for key in FACTORY_INFISICAL_CLIENT_ID FACTORY_INFISICAL_CLIENT_SECRET LINEAR_CLIENT_ID LINEAR_CLIENT_SECRET CLAUDE_PROXY_TOKEN SENTRY_ACCESS_TOKEN; do
      grep -v "^${key}=" <worker>/.env > <worker>/.env.tmp; mv <worker>/.env.tmp <worker>/.env; chmod 600 <worker>/.env
    done
@@ -310,6 +313,7 @@ the broker from part 5, so the worker has a source for its tokens:
    > more.
 
 4. Run `check-install` again. It prints no `secret` line for `<worker>/.env`.
+   Then delete the backup from step 1.
 
 ## Verify
 
