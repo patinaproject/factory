@@ -11,7 +11,7 @@ The input file holds no secret:
 
     {"factory_user": "<account>", "repositories": {"<owner>/<repo>": <id>},
      "claude_session": {"auth_token_env": "<name>", "sentry_token_env": "<name>"},
-     "infisical": {"api_url": "...", "project_id": "...", "environment": "...",
+     "infisical": {"api_url": "https://app.infisical.com", "project_id": "...", "environment": "...",
                    "paths": ["/factory", "/factory/broker"]}}
 
 It runs on the macOS system Python, 3.9.
@@ -19,6 +19,7 @@ It runs on the macOS system Python, 3.9.
 from __future__ import annotations
 
 import argparse
+import difflib
 import getpass
 import grp
 import json
@@ -28,6 +29,7 @@ import pwd
 import re
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Union
@@ -58,6 +60,9 @@ PROTECTED = frozenset({
 })
 SECRET_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 INFISICAL_KEYS = ("api_url", "project_id", "environment", "paths")
+INFISICAL_CLOUD = frozenset({"app.infisical.com", "eu.infisical.com"})
+REVIEWED_SOURCES = ("plugins/factory-uploads", "plugins/linear-agent-session/linear.py", "skills/setup-factory/scripts/setup-broker-user")
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 class Refuse(Exception):
@@ -90,6 +95,14 @@ class Layout:
     @property
     def config(self) -> Path:
         return self.base / "broker.json"
+
+    @property
+    def script_copy(self) -> Path:
+        return self.base / "setup-broker-user"
+
+    @property
+    def commit_file(self) -> Path:
+        return self.base / "installed-commit"
 
     @property
     def plist(self) -> Path:
@@ -214,7 +227,18 @@ def read_input(path: Path) -> dict:
             raise Refuse(f"infisical needs {', '.join(INFISICAL_KEYS)}")
         if not isinstance(infisical["paths"], list):
             raise Refuse("infisical.paths must be a list of folders")
+        check_infisical_url(infisical["api_url"], infisical.get("self_hosted_host"))
     return data
+
+
+def check_infisical_url(api_url: str, self_hosted_host: Optional[str]) -> None:
+    url = urllib.parse.urlsplit(api_url)
+    if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment or url.path not in ("", "/"):
+        raise Refuse("infisical.api_url must be https://<host> with no credentials, path, or query")
+    if url.hostname not in INFISICAL_CLOUD and url.hostname != self_hosted_host:
+        raise Refuse(
+            f"{url.hostname} is not Infisical Cloud; for a self-hosted server, set infisical.self_hosted_host to {url.hostname}"
+        )
 
 
 def unsafe_paths(path: Path, entry: Callable[[Path], Optional[Entry]], *, link_ok: bool = False) -> list:
@@ -227,9 +251,20 @@ def unsafe_paths(path: Path, entry: Callable[[Path], Optional[Entry]], *, link_o
     return unsafe
 
 
+def source_paths(repo: Path = REPO, script: Path = SCRIPT) -> tuple:
+    return (script, repo / ".git" / "HEAD", *(repo / source for source in SERVICE_FILES.values()))
+
+
+def source_commit(repo: Path = REPO) -> str:
+    head = (repo / ".git" / "HEAD").read_text().strip()
+    if not COMMIT.match(head):
+        raise Refuse(f"{repo} is not a detached checkout of one commit; check out the commit to install with --detach")
+    return head
+
+
 def check_source(entry: Callable[[Path], Optional[Entry]], repo: Path = REPO, script: Path = SCRIPT) -> None:
     """Root runs this script and copies these files into the broker, so no factory process may be able to change them."""
-    for path in (script, *(repo / source for source in SERVICE_FILES.values())):
+    for path in source_paths(repo, script):
         unsafe = unsafe_paths(path, entry)
         if unsafe:
             raise Refuse(
@@ -317,7 +352,7 @@ def daemon_plist(layout: Layout, interpreter: Path = INTERPRETER) -> bytes:
     })
 
 
-def plan(data: dict, system: System, layout: Layout = Layout(), repo: Path = REPO) -> list:
+def plan(data: dict, system: System, layout: Layout = Layout(), repo: Path = REPO, commit: Optional[str] = None) -> list:
     if system.platform != "darwin":
         raise Refuse("the broker user is a macOS launchd service")
     check_interpreter(system)
@@ -362,6 +397,7 @@ def plan(data: dict, system: System, layout: Layout = Layout(), repo: Path = REP
         File(layout.lib / target, (repo / source).read_bytes(), "root", "wheel", 0o644)
         for target, source in SERVICE_FILES.items()
     ]
+    want_files.append(File(layout.script_copy, SCRIPT.read_bytes(), "root", "wheel", 0o644))
     config = json.dumps(broker_config(layout, data, person.pw_uid), indent=2, sort_keys=True).encode() + b"\n"
     want_files.append(File(layout.config, config, "root", "wheel", 0o644))
     plist = File(layout.plist, daemon_plist(layout), "root", "wheel", 0o644)
@@ -376,14 +412,20 @@ def plan(data: dict, system: System, layout: Layout = Layout(), repo: Path = REP
     if system.entry(env) is None:
         steps.append(File(env, b"", layout.user, layout.group, 0o600))
 
+    launch: list = []
     if not system.loaded(layout.label):
-        steps.append(Run((LAUNCHCTL, "bootstrap", "system", str(layout.plist))))
+        launch.append(Run((LAUNCHCTL, "bootstrap", "system", str(layout.plist))))
     elif plist in changed:
-        steps.append(Run((LAUNCHCTL, "bootout", f"system/{layout.label}")))
-        steps.append(Run((LAUNCHCTL, "bootstrap", "system", str(layout.plist))))
+        launch.append(Run((LAUNCHCTL, "bootout", f"system/{layout.label}")))
+        launch.append(Run((LAUNCHCTL, "bootstrap", "system", str(layout.plist))))
     elif changed:
-        steps.append(Run((LAUNCHCTL, "kickstart", "-k", f"system/{layout.label}")))
-    return steps
+        launch.append(Run((LAUNCHCTL, "kickstart", "-k", f"system/{layout.label}")))
+    if commit is not None and (steps or launch):
+        recorded = File(layout.commit_file, f"{commit}\n".encode(), "root", "wheel", 0o644)
+        found = system.entry(recorded.path)
+        if found is None or found.content != recorded.content:
+            steps.append(recorded)
+    return steps + launch
 
 
 def write_file(path: Path, content: bytes, uid: int, gid: int, mode: int) -> None:
@@ -432,20 +474,65 @@ def set_env_value(path: Path, name: str, value: str, uid: int, gid: int) -> None
         lines = []
     else:
         with os.fdopen(fd) as handle:
+            info = os.fstat(handle.fileno())
+            if info.st_nlink != 1 or info.st_uid != uid:
+                raise Refuse(f"{path} has another link or another owner; check it and remove it by hand")
             lines = handle.read().splitlines()
     kept = [line for line in lines if line.split("=", 1)[0].strip() != name]
     write_file(path, ("\n".join([*kept, f"{name}={value}"]) + "\n").encode(), uid, gid, 0o600)
 
 
-def confirm_config(steps: list, layout: Layout, factory_user: str, ask: Callable[[str], str] = input) -> None:
-    """The input file sits where a factory process can change it, so the operator reads what root will install."""
-    config = next((step for step in steps if isinstance(step, File) and step.path == layout.config), None)
-    if config is None:
-        return
-    print(config.content.decode())
-    print(f"{factory_user} joins {layout.group} and is the only user the broker answers.")
-    if ask("Install this broker config? Type yes: ").strip() != "yes":
-        raise Refuse("the operator did not confirm the config")
+def describe_infisical(data: dict) -> str:
+    infisical = data.get("infisical")
+    if not infisical:
+        return "The broker reads its secrets from its .env file only."
+    url = infisical["api_url"]
+    if urllib.parse.urlsplit(url).hostname in INFISICAL_CLOUD:
+        return f"The broker sends its Infisical identity to Infisical Cloud at {url}."
+    return f"The broker sends its Infisical identity to the self-hosted Infisical at {url}."
+
+
+def confirm_changes(
+    steps: list, layout: Layout, data: dict, entry: Callable[[Path], Optional[Entry]], commit: Optional[str], ask: Callable[[str], str],
+) -> None:
+    for step in steps:
+        print(step)
+    for step in steps:
+        if not isinstance(step, File) or step.owner != "root" or step.path == layout.commit_file:
+            continue
+        found = entry(step.path)
+        before = found.content if found is not None and found.content is not None else b""
+        print("".join(difflib.unified_diff(
+            before.decode(errors="replace").splitlines(keepends=True),
+            step.content.decode(errors="replace").splitlines(keepends=True),
+            f"{step.path} (installed)", f"{step.path} (new)",
+        )))
+    installed = entry(layout.commit_file)
+    if installed is not None and installed.content and commit is not None:
+        before = installed.content.decode().strip()
+        print(f"Installed commit {before}. Review the change with: git diff {before}..{commit} -- {' '.join(REVIEWED_SOURCES)}")
+    else:
+        print("No installed commit is recorded, so the diffs above are the whole change.")
+    print(f"{data['factory_user']} joins {layout.group} and is the only user the broker answers.")
+    print(describe_infisical(data))
+    if ask("Install these changes as root? Type yes: ").strip() != "yes":
+        raise Refuse("the operator did not confirm the changes")
+
+
+def install(
+    data: dict, system: System, layout: Layout, commit: str, ask: Callable[[str], str], write: Optional[Callable[[list], None]] = None,
+) -> list:
+    steps = plan(data, system, layout, commit=commit)
+    if steps:
+        confirm_changes(steps, layout, data, system.entry, commit, ask)
+        (write or apply)(steps)
+    return steps
+
+
+def terminal_ask(prompt: str) -> str:
+    if not sys.stdin.isatty():
+        raise Refuse("apply asks the operator to confirm its changes in a terminal")
+    return input(prompt)
 
 
 def main(argv=None) -> int:
@@ -476,8 +563,8 @@ def main(argv=None) -> int:
                 print(f"restarted {layout.label}")
             return 0
         data = read_input(args.input)
-        steps = plan(data, system, layout)
         if args.command == "plan":
+            steps = plan(data, system, layout)
             for step in steps:
                 print(step)
             print("no change" if not steps else f"{len(steps)} changes; apply them with sudo")
@@ -485,11 +572,8 @@ def main(argv=None) -> int:
         if system.euid != 0:
             raise Refuse("run apply with sudo")
         check_source(system.entry)
-        if steps and not sys.stdin.isatty():
-            raise Refuse("apply asks the operator to confirm the config in a terminal")
-        confirm_config(steps, layout, data["factory_user"])
-        apply(steps)
-        print("no change" if not steps else f"applied {len(steps)} changes")
+        applied = install(data, system, layout, source_commit(), terminal_ask)
+        print("no change" if not applied else f"applied {len(applied)} changes")
         return 0
     except Refuse as refusal:
         print(f"setup-broker-user: refused: {refusal}", file=sys.stderr)

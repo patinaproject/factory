@@ -31,6 +31,8 @@ INPUT = {
     "infisical": None,
 }
 ROOT_DIR = setup.Entry(0, 0, 0o755)
+COMMIT = "1" * 40
+NEXT_COMMIT = "2" * 40
 REAL_PYTHON = Path("/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3")
 
 
@@ -117,6 +119,7 @@ class PlanTest(unittest.TestCase):
             "write  /Library/Application Support/factory-broker/lib/factory_uploads/service.py root:wheel 0644",
             "write  /Library/Application Support/factory-broker/lib/factory_uploads/upload_token.py root:wheel 0644",
             "write  /Library/Application Support/factory-broker/lib/linear.py root:wheel 0644",
+            "write  /Library/Application Support/factory-broker/setup-broker-user root:wheel 0644",
             "write  /Library/Application Support/factory-broker/broker.json root:wheel 0644",
             "write  /Library/LaunchDaemons/local.factory-broker.plist root:wheel 0644",
             "write  /Library/Application Support/factory-broker/home/.env _factorybroker:_factorybroker 0600",
@@ -278,7 +281,7 @@ class RefusalTest(unittest.TestCase):
 class SourceTest(unittest.TestCase):
     def entries(self, owner_of_repo: int) -> dict:
         found = {}
-        for path in (setup.SCRIPT, *(setup.REPO / source for source in setup.SERVICE_FILES.values())):
+        for path in setup.source_paths():
             for parent in [path, *path.parents]:
                 inside = parent == setup.REPO or setup.REPO in parent.parents
                 found[parent] = setup.Entry(owner_of_repo if inside else 0, 0, 0o755)
@@ -287,23 +290,118 @@ class SourceTest(unittest.TestCase):
     def test_a_root_owned_clone_may_run_apply(self):
         setup.check_source(self.entries(0).get)
 
+    def test_the_commit_is_read_from_a_detached_checkout_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            head = Path(tmp) / ".git" / "HEAD"
+            head.parent.mkdir()
+            head.write_text(f"{COMMIT}\n")
+            self.assertEqual(setup.source_commit(Path(tmp)), COMMIT)
+            head.write_text("ref: refs/heads/main\n")
+            with self.assertRaises(setup.Refuse):
+                setup.source_commit(Path(tmp))
+
     def test_a_checkout_the_factory_user_owns_is_refused(self):
         with self.assertRaises(setup.Refuse) as caught:
             setup.check_source(self.entries(501).get)
         self.assertIn("root-owned clone", str(caught.exception))
 
 
-class ConfirmTest(unittest.TestCase):
-    def test_apply_installs_the_config_only_after_the_operator_types_yes(self):
-        steps = setup.plan(INPUT, Machine().system())
-        with contextlib.redirect_stdout(io.StringIO()) as shown:
-            setup.confirm_config(steps, LAYOUT, "factory", ask=lambda prompt: "yes")
-        self.assertIn('"allowed_uids": [', shown.getvalue())
-        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(setup.Refuse):
-            setup.confirm_config(steps, LAYOUT, "factory", ask=lambda prompt: "y")
+class InstallTest(unittest.TestCase):
+    def installed(self):
+        machine = Machine()
+        machine.converge(setup.plan(INPUT, machine.system(), commit=COMMIT))
+        return machine
 
-    def test_a_plan_without_a_new_config_asks_nothing(self):
-        setup.confirm_config([], LAYOUT, "factory", ask=lambda prompt: self.fail("asked"))
+    def install(self, machine, answer, commit=NEXT_COMMIT, data=INPUT):
+        asked, written = [], []
+
+        def ask(prompt):
+            asked.append(prompt)
+            return answer
+
+        refusal = None
+        with contextlib.redirect_stdout(io.StringIO()) as shown:
+            try:
+                setup.install(data, machine.system(), LAYOUT, commit, ask=ask, write=written.extend)
+            except setup.Refuse as caught:
+                refusal = str(caught)
+        return asked, lines(written), shown.getvalue(), refusal
+
+    def test_the_first_install_records_its_commit(self):
+        machine = Machine()
+        _, written, _, refusal = self.install(machine, "yes", commit=COMMIT)
+
+        self.assertIsNone(refusal)
+        self.assertIn(f"write  {LAYOUT.commit_file} root:wheel 0644", written)
+        machine.converge(setup.plan(INPUT, machine.system(), commit=COMMIT))
+        self.assertEqual(machine.entries[LAYOUT.commit_file].content, f"{COMMIT}\n".encode())
+
+    def test_a_code_only_change_shows_its_diff_and_installs_nothing_without_yes(self):
+        machine = self.installed()
+        target = LAYOUT.lib / "factory_uploads" / "broker.py"
+        machine.entries[target] = setup.Entry(0, 0, 0o644, b"older code\n")
+
+        asked, written, shown, refusal = self.install(machine, "y")
+
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(written, [])
+        self.assertIn("did not confirm", refusal)
+        self.assertIn(f"--- {target} (installed)", shown)
+        self.assertIn("-older code", shown)
+        self.assertIn(
+            f"git diff {COMMIT}..{NEXT_COMMIT} -- plugins/factory-uploads plugins/linear-agent-session/linear.py "
+            "skills/setup-factory/scripts/setup-broker-user",
+            shown,
+        )
+
+    def test_a_confirmed_code_change_installs_it_restarts_the_service_and_records_the_commit(self):
+        machine = self.installed()
+        target = LAYOUT.lib / "factory_uploads" / "broker.py"
+        machine.entries[target] = setup.Entry(0, 0, 0o644, b"older code\n")
+
+        _, written, _, refusal = self.install(machine, "yes")
+
+        self.assertIsNone(refusal)
+        self.assertEqual(written, [
+            f"write  {target} root:wheel 0644",
+            f"write  {LAYOUT.commit_file} root:wheel 0644",
+            "run    /bin/launchctl kickstart -k system/local.factory-broker",
+        ])
+
+    def test_a_changed_setup_script_needs_yes(self):
+        machine = self.installed()
+        machine.entries[LAYOUT.script_copy] = setup.Entry(0, 0, 0o644, b"older script\n")
+
+        asked, written, shown, refusal = self.install(machine, "no")
+
+        self.assertEqual((len(asked), written), (1, []))
+        self.assertIn("-older script", shown)
+        self.assertIsNotNone(refusal)
+
+    def test_no_change_asks_nothing_and_writes_nothing(self):
+        asked, written, _, refusal = self.install(self.installed(), "yes")
+
+        self.assertEqual((asked, written, refusal), ([], [], None))
+
+    def test_the_confirmation_names_the_factory_user_and_the_infisical_host(self):
+        data = {**INPUT, "infisical": {**INFISICAL, "api_url": "https://secrets.example.com", "self_hosted_host": "secrets.example.com"}}
+
+        _, _, shown, _ = self.install(Machine(), "no", data=data)
+
+        self.assertIn("factory joins _factorybroker", shown)
+        self.assertIn("self-hosted Infisical at https://secrets.example.com", shown)
+
+    def test_the_brokers_env_file_is_never_shown(self):
+        machine = self.installed()
+        machine.entries.pop(LAYOUT.home / ".env")
+        machine.entries[LAYOUT.lib / "linear.py"] = setup.Entry(0, 0, 0o644, b"older\n")
+
+        _, _, shown, _ = self.install(machine, "no")
+
+        self.assertNotIn(f"--- {LAYOUT.home / '.env'}", shown)
+
+
+INFISICAL = {"api_url": "https://app.infisical.com", "project_id": "p", "environment": "e", "paths": ["/f"]}
 
 
 class InputTest(unittest.TestCase):
@@ -325,6 +423,34 @@ class InputTest(unittest.TestCase):
         ):
             with self.subTest(broken=broken), self.assertRaises(setup.Refuse):
                 self.read(broken)
+
+    def test_infisical_cloud_hosts_are_accepted(self):
+        for url in ("https://app.infisical.com", "https://eu.infisical.com/"):
+            with self.subTest(url=url):
+                data = {**INPUT, "infisical": {**INFISICAL, "api_url": url}}
+                self.assertEqual(self.read(data), data)
+
+    def test_an_infisical_url_that_is_not_https_to_a_known_host_is_refused(self):
+        for url in (
+            "http://app.infisical.com",
+            "https://attacker.example",
+            "https://app.infisical.com.attacker.example",
+            "https://user:pass@app.infisical.com",
+            "https://app.infisical.com/elsewhere",
+            "https://app.infisical.com?x=1",
+        ):
+            with self.subTest(url=url), self.assertRaises(setup.Refuse):
+                self.read({**INPUT, "infisical": {**INFISICAL, "api_url": url}})
+
+    def test_a_self_hosted_infisical_host_needs_its_name_confirmed(self):
+        url = "https://secrets.example.com"
+        with self.assertRaises(setup.Refuse) as caught:
+            self.read({**INPUT, "infisical": {**INFISICAL, "api_url": url}})
+        self.assertIn("self_hosted_host", str(caught.exception))
+        data = {**INPUT, "infisical": {**INFISICAL, "api_url": url, "self_hosted_host": "secrets.example.com"}}
+        self.assertEqual(self.read(data), data)
+        with self.assertRaises(setup.Refuse):
+            self.read({**INPUT, "infisical": {**INFISICAL, "api_url": "http://secrets.example.com", "self_hosted_host": "secrets.example.com"}})
 
 
 class SetSecretTest(unittest.TestCase):
@@ -363,6 +489,23 @@ class SetSecretTest(unittest.TestCase):
         with self.assertRaises(OSError):
             setup.set_env_value(self.env, "NAME", "value", os.getuid(), os.getgid())
         self.assertEqual(victim.read_text(), "root's file\n")
+
+    def test_a_hard_link_the_broker_user_plants_is_refused(self):
+        victim = self.env.parent / "victim"
+        victim.write_text("ROOT_ONLY=secret\n")
+        os.link(victim, self.env)
+
+        with self.assertRaises(setup.Refuse):
+            setup.set_env_value(self.env, "NAME", "value", os.getuid(), os.getgid())
+        self.assertEqual(victim.read_text(), "ROOT_ONLY=secret\n")
+        self.assertEqual(self.env.read_text(), "ROOT_ONLY=secret\n")
+
+    def test_an_env_file_another_user_owns_is_refused(self):
+        self.env.write_text("OTHER=kept\n")
+
+        with self.assertRaises(setup.Refuse):
+            setup.set_env_value(self.env, "NAME", "value", os.getuid() + 1, os.getgid())
+        self.assertEqual(self.env.read_text(), "OTHER=kept\n")
 
 
 class ApplyTest(unittest.TestCase):

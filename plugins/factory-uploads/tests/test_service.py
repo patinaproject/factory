@@ -9,8 +9,11 @@ import stat
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from unittest import mock
 
 from tests.support import PLUGIN, TOKEN, QuickServer
 
@@ -28,7 +31,7 @@ SERVICE_FILES = (
 
 
 class FakeInfisical:
-    def __init__(self, folders: dict):
+    def __init__(self, folders: dict, imports: dict | None = None, failed_logins: int = 0):
         self.requests = []
         outer = self
 
@@ -36,16 +39,27 @@ class FakeInfisical:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 outer.requests.append(("POST", self.path, body))
+                if len([r for r in outer.requests if r[0] == "POST"]) <= failed_logins:
+                    self.reply({"message": "unavailable"}, status=503)
+                    return
                 self.reply({"accessToken": "inf-access"})
 
             def do_GET(self):
-                outer.requests.append(("GET", self.path, self.headers["Authorization"]))
-                folder = self.path.split("secretPath=")[1].replace("%2F", "/")
-                self.reply({"secrets": [{"secretKey": k, "secretValue": v} for k, v in folders[folder].items()]})
+                url = urllib.parse.urlsplit(self.path)
+                query = dict(urllib.parse.parse_qsl(url.query))
+                outer.requests.append(("GET", url.path, query, self.headers["Authorization"]))
+                folder = query["secretPath"]
+                self.reply({
+                    "secrets": [{"secretKey": k, "secretValue": v} for k, v in folders[folder].items()],
+                    "imports": [
+                        {"secretPath": source, "secrets": [{"secretKey": k, "secretValue": v} for k, v in values.items()]}
+                        for source, values in (imports or {}).get(folder, [])
+                    ],
+                })
 
-            def reply(self, document):
+            def reply(self, document, status=200):
                 body = json.dumps(document).encode()
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -128,10 +142,53 @@ class SecretsTest(ServiceTestCase):
         })
         login, first, second = infisical.requests
         self.assertEqual(login, ("POST", "/api/v1/auth/universal-auth/login", {"clientId": "inf-id", "clientSecret": "inf-secret"}))
-        self.assertEqual(first, (
-            "GET", "/api/v3/secrets/raw?workspaceId=proj&environment=development&secretPath=%2Ffactory", "Bearer inf-access",
-        ))
-        self.assertTrue(second[1].endswith("secretPath=%2Ffactory%2Fbroker"))
+        self.assertEqual(first, ("GET", "/api/v4/secrets", {
+            "projectId": "proj", "environment": "development", "secretPath": "/factory",
+            "includeImports": "true", "recursive": "false", "expandSecretReferences": "true",
+            "includePersonalOverrides": "true",
+        }, "Bearer inf-access"))
+        self.assertEqual(second[2]["secretPath"], "/factory/broker")
+
+    def infisical_config(self, infisical, paths=("/factory/broker",)):
+        (self.home / ".env").write_text("BROKER_INFISICAL_CLIENT_ID=inf-id\nBROKER_INFISICAL_CLIENT_SECRET=inf-secret\n")
+        return {**self.config, "infisical": {
+            "api_url": infisical.url, "project_id": "proj", "environment": "development", "paths": list(paths),
+        }}
+
+    def test_an_imported_secret_loads_only_where_the_folder_has_no_such_key(self):
+        infisical = FakeInfisical(
+            {"/factory/broker": {"LINEAR_CLIENT_ID": "own-id"}},
+            imports={"/factory/broker": [
+                ("/shared", {"LINEAR_CLIENT_ID": "imported-id", "GITHUB_UPLOAD_TOKEN": "first-import"}),
+                ("/later", {"GITHUB_UPLOAD_TOKEN": "later-import"}),
+            ]},
+        )
+        self.addCleanup(infisical.close)
+
+        self.assertEqual(service.load_secrets(self.infisical_config(infisical)), {
+            "LINEAR_CLIENT_ID": "own-id", "GITHUB_UPLOAD_TOKEN": "later-import",
+        })
+
+    def test_a_failed_attempt_is_tried_again(self):
+        infisical = FakeInfisical({"/factory/broker": {"LINEAR_CLIENT_ID": "lin-id"}}, failed_logins=2)
+        self.addCleanup(infisical.close)
+
+        with mock.patch.object(service, "INFISICAL_PAUSE", 0), self.assertLogs("factory_uploads.service", "WARNING") as logs:
+            secrets = service.load_secrets(self.infisical_config(infisical))
+
+        self.assertEqual(secrets, {"LINEAR_CLIENT_ID": "lin-id"})
+        self.assertEqual([r[0] for r in infisical.requests], ["POST", "POST", "POST", "GET"])
+        self.assertEqual(len(logs.records), 2)
+        self.assertNotIn("inf-secret", "".join(logs.output))
+
+    def test_three_failed_attempts_stop_the_start(self):
+        infisical = FakeInfisical({"/factory/broker": {}}, failed_logins=3)
+        self.addCleanup(infisical.close)
+
+        with mock.patch.object(service, "INFISICAL_PAUSE", 0), self.assertLogs("factory_uploads.service", "WARNING"):
+            with self.assertRaises(urllib.error.HTTPError):
+                service.load_secrets(self.infisical_config(infisical))
+        self.assertEqual([r[0] for r in infisical.requests], ["POST", "POST", "POST"])
 
     def test_infisical_without_the_brokers_identity_refuses_to_start(self):
         config = {**self.config, "infisical": {"api_url": "http://127.0.0.1:9", "project_id": "p", "environment": "e", "paths": ["/f"]}}

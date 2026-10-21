@@ -8,6 +8,7 @@ import json
 import logging
 import signal
 import sys
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -22,6 +23,8 @@ logger = logging.getLogger("factory_uploads.service")
 LINEAR_MODULE = Path(__file__).resolve().parent.parent / "linear.py"
 IDENTITY = ("BROKER_INFISICAL_CLIENT_ID", "BROKER_INFISICAL_CLIENT_SECRET")
 INFISICAL_TIMEOUT = 15
+INFISICAL_ATTEMPTS = 3
+INFISICAL_PAUSE = 2
 
 
 class ConfigError(Exception):
@@ -57,8 +60,7 @@ def read_env_file(path: Path) -> dict:
     return values
 
 
-def infisical_secrets(settings: dict, client_id: str, client_secret: str) -> dict:
-    api = settings["api_url"].rstrip("/")
+def _infisical_login(api: str, client_id: str, client_secret: str) -> str:
     login = urllib.request.Request(
         f"{api}/api/v1/auth/universal-auth/login",
         data=json.dumps({"clientId": client_id, "clientSecret": client_secret}).encode(),
@@ -66,19 +68,42 @@ def infisical_secrets(settings: dict, client_id: str, client_secret: str) -> dic
         method="POST",
     )
     with urllib.request.urlopen(login, timeout=INFISICAL_TIMEOUT) as response:
-        access_token = json.loads(response.read())["accessToken"]
+        return json.loads(response.read())["accessToken"]
+
+
+def _infisical_folder(api: str, access_token: str, settings: dict, folder: str) -> dict:
+    """The folder's own keys win over its imports, and a later import wins over an earlier one, as `infisical export` does."""
+    query = urllib.parse.urlencode({
+        "projectId": settings["project_id"], "environment": settings["environment"], "secretPath": folder,
+        "includeImports": "true", "recursive": "false", "expandSecretReferences": "true", "includePersonalOverrides": "true",
+    })
+    request = urllib.request.Request(f"{api}/api/v4/secrets?{query}", headers={"Authorization": f"Bearer {access_token}"})
+    with urllib.request.urlopen(request, timeout=INFISICAL_TIMEOUT) as response:
+        document = json.loads(response.read())
+    values = {secret["secretKey"]: secret["secretValue"] for secret in document["secrets"]}
+    for imported in reversed(document.get("imports") or []):
+        for secret in imported["secrets"]:
+            values.setdefault(secret["secretKey"], secret["secretValue"])
+    return values
+
+
+def _infisical_fetch(api: str, settings: dict, client_id: str, client_secret: str) -> dict:
+    access_token = _infisical_login(api, client_id, client_secret)
     values = {}
     for folder in settings["paths"]:
-        query = urllib.parse.urlencode({
-            "workspaceId": settings["project_id"], "environment": settings["environment"], "secretPath": folder,
-        })
-        request = urllib.request.Request(
-            f"{api}/api/v3/secrets/raw?{query}", headers={"Authorization": f"Bearer {access_token}"}
-        )
-        with urllib.request.urlopen(request, timeout=INFISICAL_TIMEOUT) as response:
-            for secret in json.loads(response.read())["secrets"]:
-                values[secret["secretKey"]] = secret["secretValue"]
+        values.update(_infisical_folder(api, access_token, settings, folder))
     return values
+
+
+def infisical_secrets(settings: dict, client_id: str, client_secret: str) -> dict:
+    api = settings["api_url"].rstrip("/")
+    for attempt in range(1, INFISICAL_ATTEMPTS):
+        try:
+            return _infisical_fetch(api, settings, client_id, client_secret)
+        except OSError as error:
+            logger.warning("factory-broker: Infisical attempt %d of %d failed: %s", attempt, INFISICAL_ATTEMPTS, type(error).__name__)
+            time.sleep(INFISICAL_PAUSE)
+    return _infisical_fetch(api, settings, client_id, client_secret)
 
 
 def load_secrets(config: dict) -> dict:

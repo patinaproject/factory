@@ -567,7 +567,11 @@ runs `/Library/Developer/CommandLineTools/usr/bin/python3`, not
                   "environment": "<environment>", "paths": ["<folder>", "<folder>/broker"]}}
    ```
 
-   Leave `infisical` out when the factory does not use Infisical.
+   Leave `infisical` out when the factory does not use Infisical. `api_url`
+   is `https://app.infisical.com` or `https://eu.infisical.com`. For a
+   self-hosted server, also set `"self_hosted_host"` to the URL's host name.
+   The script refuses any other URL, because the broker sends its Infisical
+   identity there.
 4. Print the plan. It changes nothing and needs no `sudo`:
 
    ```sh
@@ -583,23 +587,36 @@ runs `/Library/Developer/CommandLineTools/usr/bin/python3`, not
 5. > **HUMAN CHECKPOINT. Privileged step.** Show the operator the plan.
    > `<sha>` is the full 40-character commit to install. The operator checks on GitHub that it
    > is on the default branch, because a factory process can push other
-   > branches. Ask them to run, in their own terminal:
+   > branches. The factory's App can also merge to the default branch
+   > without a person's review, so the operator reads the broker's code
+   > before root installs it. On a first install, they read the files at
+   > `<sha>`. On an update, they read the change since the installed commit:
    >
    > ```sh
-   > sudo -H /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /bin/sh -ec 'g=/Library/Developer/CommandLineTools/usr/bin/git; d=/var/root/factory-src; [ -d "$d" ] || "$g" clone -q https://github.com/<owner>/<repo> "$d"; "$g" -C "$d" fetch -q origin; "$g" -C "$d" merge-base --is-ancestor <sha> origin/<default branch>; "$g" -C "$d" checkout -q --detach <sha>; test "$("$g" -C "$d" rev-parse HEAD)" = <sha>'
-   > sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Developer/CommandLineTools/usr/bin/python3 -I /var/root/factory-src/skills/setup-factory/scripts/setup-broker-user apply --input <scratch>/broker-input.json
-   > sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Developer/CommandLineTools/usr/bin/python3 -I /var/root/factory-src/skills/setup-factory/scripts/setup-broker-user set-secret BROKER_INFISICAL_CLIENT_ID
-   > sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Developer/CommandLineTools/usr/bin/python3 -I /var/root/factory-src/skills/setup-factory/scripts/setup-broker-user set-secret BROKER_INFISICAL_CLIENT_SECRET
+   > cat "/Library/Application Support/factory-broker/installed-commit"
+   > git diff <installed>..<sha> -- plugins/factory-uploads plugins/linear-agent-session/linear.py skills/setup-factory/scripts/setup-broker-user
+   > ```
+   >
+   > Then ask them to run, in their own terminal:
+   >
+   > ```sh
+   > /usr/bin/sudo -H /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /bin/sh -ec 'g=/Library/Developer/CommandLineTools/usr/bin/git; d=/var/root/factory-src; [ -d "$d" ] || "$g" clone -q https://github.com/<owner>/<repo> "$d"; "$g" -C "$d" fetch -q origin; "$g" -C "$d" merge-base --is-ancestor <sha> origin/<default branch>; "$g" -C "$d" checkout -q --detach <sha>; test "$("$g" -C "$d" rev-parse HEAD)" = <sha>'
+   > /usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Developer/CommandLineTools/usr/bin/python3 -I /var/root/factory-src/skills/setup-factory/scripts/setup-broker-user apply --input <scratch>/broker-input.json
+   > /usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Developer/CommandLineTools/usr/bin/python3 -I /var/root/factory-src/skills/setup-factory/scripts/setup-broker-user set-secret BROKER_INFISICAL_CLIENT_ID
+   > /usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Developer/CommandLineTools/usr/bin/python3 -I /var/root/factory-src/skills/setup-factory/scripts/setup-broker-user set-secret BROKER_INFISICAL_CLIENT_SECRET
    > ```
    >
    > The first line clones as root with no Git config from the factory
    > user's home, so no hook or URL rewrite of theirs runs, and it stops
    > unless `<sha>` is on the default branch. `env -i` keeps the factory
-   > user's `PATH` and variables out of every root process.
-   > `apply` prints the config it installs and asks the operator to type
-   > `yes`, because the input file sits where a factory process can change
-   > it. The operator checks the factory user, the repositories, and the
-   > Infisical URL. Without Infisical, the `set-secret` lines name
+   > user's `PATH` and variables out of every root process, and
+   > `/usr/bin/sudo` keeps the factory user's `PATH` from choosing `sudo`
+   > itself. `apply` prints the diff of every root-owned file it changes,
+   > against the installed copy, including its own copy of
+   > `setup-broker-user`. It asks the operator to type `yes` before any
+   > change, and records the commit in `installed-commit`. The operator
+   > checks the code, the factory user, the repositories, and the Infisical
+   > host. Without Infisical, the `set-secret` lines name
    > `GITHUB_UPLOAD_TOKEN`, `LINEAR_CLIENT_ID`, and `LINEAR_CLIENT_SECRET`
    > instead. `set-secret` reads the value from the terminal and never from
    > an argument. A second `apply` changes nothing.
@@ -1751,8 +1768,8 @@ starts. The worker reads `SOUL.md` and its scripts on each run.
    - A `broker user` line that says a file under `lib` differs: the broker
      runs a root-owned copy of its code, so a deploy cannot change it. Print
      the plan as in step 4 of "Broker user, macOS" in part 5, and ask the
-     operator to run step 5's clone and `apply` lines at the deployed commit.
-     Other `broker user` lines name the step of that section to repeat.
+     operator to read the `git diff` that step 5 shows and then run its
+     clone and `apply` lines at the deployed commit. Other `broker user` lines name the step of that section to repeat.
    - A `checkout` line: the checkout is missing or has no `origin/HEAD`. Clone
      it as in part 10, or run `git -C <path> remote set-head origin -a`.
    - A `dashboard sign-in` line: follow step 6 of
