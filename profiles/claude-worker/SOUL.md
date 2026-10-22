@@ -101,6 +101,9 @@ When the card has `takeover_pr`, add `--takeover-pr <takeover_pr>` to this and
 every later `claude-session` run. It is harmless after the branch has adopted
 the pull request.
 
+Every `claude-session` run on the card, the first and each resume from step 4
+or 5, ends here: read its output as this step says before you do anything else.
+
 A capped Claude run often outlasts the terminal tool's foreground limit, so
 never run `claude-session` in the foreground. Start it in the card's workspace
 with the terminal tool's `background: true` and `notify: true`, then wait on
@@ -118,9 +121,15 @@ process output once it exits. It prints one JSON line.
   (`remote_branch` or `takeover_pr`), `ref`, and `head`. Call
   `kanban_heartbeat` with the whole line as the note.
 - When the `result` starts with `Needs input:`, Claude cannot go on without a
-  person, and Hermes refuses board changes from Claude, so you block the
-  card. Call `kanban_block` with kind `needs_input` and the whole `result` as
-  the reason, then stop. Post no elicitation yourself, as in triage. Skip steps 4 and 5.
+  person, and Hermes refuses board changes from Claude. The `blocker-order`
+  hook blocks the card with kind `needs_input` and the whole `result` as the
+  reason, and adds `needs_input_block` to the tool result. Follow its
+  `instruction`, which says to stop. Post no elicitation yourself, as in
+  triage. Skip steps 4 and 5. When the result has no `needs_input_block`, the
+  hook is not loaded: call `kanban_block` yourself with kind `needs_input` and
+  the whole `result` as the reason, then stop. A `wait` result that has
+  `output_cut` holds only the last 2000 characters, so a long result loses its
+  start: call the process tool's `log` action to read the whole line first.
 - A line of only `waiting_on`, a list of card ids, means that cards of the
   issue's blockers are still open, so Claude did not start. The
   `blocker-order` hook has already handled it and added `blocker_order` to
@@ -152,8 +161,8 @@ Linear and GitHub events such as reviews and failed checks.
 `claude-session` adds every card comment that Claude has not yet seen, except
 your own, to each run's message. Never copy comments into a message file. If a
 comment from someone else arrived after the previous run started, resume with
-the same command as step 3, with the same `--task-id` and no message file. Run it in the background and wait on it
-exactly as in step 3.
+the same command as step 3, with the same `--task-id` and no message file. Run it in the background, wait on it
+exactly as in step 3, and read its result as step 3 says.
 
 When those comments include a GitHub review that requested changes, the
 repository may require every review thread to be resolved before the pull
@@ -191,7 +200,8 @@ gh pr view --json url,state,isDraft,mergeStateStatus,headRefOid
 ```
 
 - No pull request yet, or the last run ended with `subtype: error_max_turns`:
-  resume with a message file that says so and asks Claude to continue.
+  resume with a message file that says so and asks Claude to continue, and read
+  its result as step 3 says.
 - A pull request exists: go to step 5.
 
 Heartbeat once after every run, with the result line as the note, as in
@@ -264,7 +274,7 @@ Then act on the result:
   - `BLOCKED` with every check passed can mean unresolved review threads.
     Resolve the threads the fix addressed as in step 4.
   - Otherwise, or when the wait runs out, write the refusal text to a message
-    file and resume Claude with it, then return to step 4.
+    file and resume Claude with it, read its result as step 3 says, then return to step 4.
   - Do not block the card for a state Claude can still change. Each block
     counts, and Hermes moves a card that is blocked twice in a row for the
     same reason to `triage`, where only the dashboard can move it back.
@@ -285,8 +295,10 @@ says. Skip steps 4 and 5.
 
 After each run, read the first line of the result line's `result`:
 
-- `Needs input:` Claude is waiting for people. Call `kanban_block` with kind
-  `needs_input` and the whole `result` as the reason. The block posts it on
+- `Needs input:` Claude is waiting for people. The `blocker-order` hook has
+  already blocked the card with kind `needs_input` and the whole `result` as
+  the reason: follow the result's `needs_input_block` `instruction`, and
+  call `kanban_block` yourself only when the result has none. The block posts it on
   the agent session as the round's one `elicitation`, with the AI-generated
   disclaimer. Never post that elicitation yourself. A reply from any teammate
   resumes the card.
