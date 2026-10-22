@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import unittest
@@ -10,7 +11,9 @@ REPO = "example-org/example-repo"
 
 
 class CheckTitleClosesTest(unittest.TestCase):
-    def check(self, title: str, body: str, head_ref: str = "252-example", author: str = "someone") -> tuple[int, str]:
+    def check(self, title: str, body: str, head_ref: str = "252-example", author: str = "someone",
+              commits: list[tuple[str, str]] | None = None) -> tuple[int, str]:
+        lines = "\n".join(json.dumps({"sha": sha, "message": message}) for sha, message in commits or [])
         proc = subprocess.run(
             [sys.executable, str(SCRIPTS / "check_title_closes.py")],
             env={
@@ -20,6 +23,7 @@ class CheckTitleClosesTest(unittest.TestCase):
                 "PR_BODY": body,
                 "PR_HEAD_REF": head_ref,
                 "PR_AUTHOR": author,
+                "PR_COMMITS": lines,
             },
             capture_output=True, text=True, timeout=60,
         )
@@ -84,6 +88,38 @@ class CheckTitleClosesTest(unittest.TestCase):
                                  ("dependabot/npm_and_yarn/x", "dependabot[bot]")):
             with self.subTest(head_ref, author=author):
                 self.assertEqual(self.check("fix: #9 a", "Part of #9", head_ref, author)[0], 0)
+
+    def test_a_fix_commit_for_an_issue_the_body_does_not_close_fails_and_names_the_commit(self) -> None:
+        code, output = self.check("feat: #5 a", "Part of #177\n\nCloses #5",
+                                  commits=[("a24b147", "fix: #177 tweak")])
+        self.assertEqual(code, 1)
+        self.assertIn("a24b147", output)
+        self.assertIn("#177", output)
+        self.assertNotIn("#5 ", output)
+
+    def test_a_fix_commit_for_an_issue_the_body_closes_passes(self) -> None:
+        self.assertEqual(self.check("feat: #177 a", "Closes #177", commits=[("a24b147", "fix: #177 tweak")])[0], 0)
+
+    def test_a_closing_keyword_in_a_commit_body_fails(self) -> None:
+        code, output = self.check("feat: #5 a", "Closes #5",
+                                  commits=[("b1", "chore: #5 tidy\n\nResolves #8 as well")])
+        self.assertEqual(code, 1)
+        self.assertIn("b1", output)
+        self.assertIn("#8", output)
+
+    def test_a_commit_naming_an_issue_without_closing_it_passes(self) -> None:
+        self.assertEqual(self.check("feat: #5 a", "Closes #5", commits=[("c1", "feat: #5 more\n\nPart of #8")])[0], 0)
+
+    def test_every_commit_that_closes_a_missing_issue_is_named(self) -> None:
+        code, output = self.check("feat: #5 a", "Closes #5",
+                                  commits=[("e1", "fix: #8 a"), ("e2", "fix: #9 b"), ("e3", "fix: #5 c")])
+        self.assertEqual(code, 1)
+        for expected in ("e1", "e2", "#8", "#9"):
+            self.assertIn(expected, output)
+        self.assertNotIn("e3", output)
+
+    def test_exempt_pull_requests_skip_their_commits_too(self) -> None:
+        self.assertEqual(self.check("feat: #5 a", "", "bot/bump-1.2.3", commits=[("f1", "fix: #9 a")])[0], 0)
 
 
 if __name__ == "__main__":

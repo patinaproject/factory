@@ -94,14 +94,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 profiles/claude-worker/scripts/check_linear_closes.py
 
-      - name: Check that the title closes only issues the body closes
+      - name: Check that the title and commits close only issues the body closes
         if: "${{ github.event.pull_request.user.login != 'dependabot[bot]' }}"
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: python3 profiles/claude-worker/scripts/check_title_closes.py
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! PR_COMMITS="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" --jq '.[] | {sha: .sha[0:7], message: .commit.message} | tojson')"; then
+            echo "::error::Failed to list PR commits while checking closing keywords."
+            exit 1
+          fi
+          export PR_COMMITS
+          python3 profiles/claude-worker/scripts/check_title_closes.py
 
       - name: Compare title `!` with breaking-change markers
         env:
