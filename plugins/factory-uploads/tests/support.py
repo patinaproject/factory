@@ -32,6 +32,13 @@ PNG = upload_token.one_pixel_png()
 SHEBANG = "#!/usr/bin/env python3\n"
 
 
+REAL_MANIFEST = PLUGIN.parent / "factory-secret-names" / "plugin.yaml"
+
+
+def secret_names_manifest(*names: str) -> str:
+    return "optional_env:\n" + "".join(f"  - name: {name}\n    description: example\n" for name in names)
+
+
 def with_interpreter(script: str) -> str:
     """Pin a fake script to the interpreter running the tests.
 

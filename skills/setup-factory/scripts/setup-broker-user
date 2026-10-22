@@ -52,6 +52,7 @@ SERVICE_FILES = {
     "factory_uploads/credentials.py": "plugins/factory-uploads/credentials.py",
     "factory_uploads/service.py": "plugins/factory-uploads/service.py",
     "factory_uploads/upload_token.py": "plugins/factory-uploads/upload_token.py",
+    "factory_uploads/secret-names.yaml": "plugins/factory-secret-names/plugin.yaml",
     "linear.py": "plugins/linear-agent-session/linear.py",
 }
 PROTECTED = frozenset({
@@ -61,7 +62,7 @@ PROTECTED = frozenset({
 SECRET_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 INFISICAL_KEYS = ("api_url", "project_id", "environment", "paths")
 INFISICAL_CLOUD = frozenset({"app.infisical.com", "eu.infisical.com"})
-REVIEWED_SOURCES = ("plugins/factory-uploads", "plugins/linear-agent-session/linear.py", "skills/setup-factory/scripts/setup-broker-user")
+REVIEWED_SOURCES = ("plugins/factory-uploads", "plugins/factory-secret-names/plugin.yaml", "plugins/linear-agent-session/linear.py", "skills/setup-factory/scripts/setup-broker-user")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 

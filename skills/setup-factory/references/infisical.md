@@ -282,6 +282,16 @@ The script guards against a slow or failed run:
 - It prints the export only after an attempt succeeds with output. On failure
   it prints nothing to stdout and exits `1`, so Hermes never reads partial
   output.
+- It appends one line to `<home>/logs/factory-secrets.log`, mode `600`, for
+  each failed attempt and for the attempt that succeeds. A line holds the
+  time, the failed step (`login`, `export`, or `credentials`), the attempt
+  number, and an exit code, and never a value. The exit code is curl's, such
+  as `6` for a name that did not resolve, `7` for a refused connection, `22`
+  for an HTTP error, and `28` for a timeout. It is `65` when a response is not
+  the expected JSON. Hermes discards the helper's stderr, so this log is the
+  record of why a gateway started without its secrets. The helper cuts the file
+  to its last 200 lines once it passes 64 KB, and a log it cannot write never
+  fails the helper.
 - It prints a message without secret values to stderr for each failed
   attempt, such as `curl: (22) The requested URL returned error: 401`, and
   exits `1` before any request when either `FACTORY_INFISICAL_` variable is
@@ -295,6 +305,7 @@ machine:
 mkdir -p <home>/bin
 sed -e 's|<api url>|<infisical url>|g' -e 's|<project id>|<project id>|g' \
   -e 's|<environment>|<environment>|g' -e 's|<folder>|<folder>|g' \
+  -e 's|<log file>|<home>/logs/factory-secrets.log|g' \
   <repo>/skills/setup-factory/scripts/factory-secrets > <home>/bin/factory-secrets.new
 grep -c '<[a-z ]*>' <home>/bin/factory-secrets.new   # 0: every placeholder is rendered
 chmod 700 <home>/bin/factory-secrets.new
@@ -340,7 +351,9 @@ and starts with no secrets, and the forged-signature check below catches it.
 Keep `helper_timeout_seconds` above the 94-second worst case when you change
 the bound, the attempts, or the pause.
 
-Hermes discards the helper's stderr. To see why a run fails, run the script
+Hermes discards the helper's stderr, so read `<home>/logs/factory-secrets.log`
+first: its last lines name the step, attempt, and exit code of each failure.
+A cause the log does not explain needs a run of the script. Run it
 with the two `FACTORY_INFISICAL_` values from `.env`. These lines read only
 those two keys with `sed` and pass them in the script's environment, never as
 command arguments, which other users can see in the process list. Send stdout

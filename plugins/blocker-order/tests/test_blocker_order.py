@@ -18,6 +18,8 @@ sys.path.insert(0, str(PLUGIN.parents[1] / "profiles" / "claude-worker" / "scrip
 import blockers  # noqa: E402
 
 FINISHED = ("done", "archived")
+# A card waits and re-runs at most once per blocker in the chain, so a loop past this is a bug.
+MAX_RUNS_PER_CARD = 10
 
 
 class FakeBoard:
@@ -311,7 +313,7 @@ class Factory(Hooked):
         task = self.card[issue]
         self.board.start(task)
         ignore: list[str] = []
-        while issue not in self.started:
+        for _ in range(MAX_RUNS_PER_CARD):
             cards = blockers.waiting_on(
                 lambda: [blocker(b, self.state[b]) for b in self.blocked_by[issue]], self.board_list, ignore,
                 sleep=self.triage_meanwhile, clock=lambda: self.now,
@@ -323,6 +325,8 @@ class Factory(Hooked):
                 return
             self.notices.append(issue)
             ignore = outcome["ignore"]
+        else:
+            self.fail(f"{issue} was still waiting after {MAX_RUNS_PER_CARD} runs")
         self.started.add(issue)
         self.merged.append(issue)
         self.state[issue] = "completed"

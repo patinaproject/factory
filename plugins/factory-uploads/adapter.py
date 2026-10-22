@@ -20,6 +20,7 @@ from .credentials import UPLOAD_TOKEN, GatewayCredentials
 
 PLATFORM = "factory_uploads"
 LINEAR_PLUGIN = Path("plugins") / "linear-agent-session" / "linear.py"
+SECRET_NAMES = Path("plugins") / "factory-secret-names" / "plugin.yaml"
 
 
 def claude_session(config: dict) -> dict:
@@ -38,7 +39,8 @@ class FactoryUploadsAdapter(BasePlatformAdapter):
             list(repositories),
             lambda: get_scoped_secret(UPLOAD_TOKEN),
             credentials=GatewayCredentials(
-                get_scoped_secret, claude_session(load_config_readonly()), home / LINEAR_PLUGIN, home
+                get_scoped_secret, claude_session(load_config_readonly()), home / LINEAR_PLUGIN, home,
+                home / SECRET_NAMES,
             ),
         )
 

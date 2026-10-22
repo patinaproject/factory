@@ -36,21 +36,20 @@ import re
 import shlex
 import select
 import signal
-import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import closing
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlsplit
 
 import blockers
 import card_branch
 import factory_source
+import kanban_board
 
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_WORKER_ENTRY = (
@@ -189,8 +188,10 @@ LINEAR_MCP_SERVER = {
 MCP_SERVER_KEYS = frozenset({"url", "token_env", "scheme", "headers"})
 MCP_STATUS_SECONDS = 90.0
 UNREACHABLE_MODEL_URL = "http://127.0.0.1:9"
-# Fixed headers reach argv in --mcp-config, so a header that could carry a secret is refused.
-CREDENTIAL_HEADER = re.compile(r"auth|key|token|secret|cookie|password", re.IGNORECASE)
+# Fixed headers and the URL reach argv in --mcp-config, where ps shows them, so a name or value that could carry a secret is refused.
+CREDENTIAL_NAME = re.compile(r"auth|key|token|secret|cookie|password|cred|session|sig|pass|pwd|jwt|bearer|access", re.IGNORECASE)
+AUTHORIZATION_VALUE = re.compile(r"\s*(?:bearer|basic|token|sentry-bearer)(?:\s|$)", re.IGNORECASE)
+TOKEN_PREFIXES = ("ghp_", "gho_", "ghs_", "github_pat_", "sntrys_", "lin_api_", "xoxb-", "sk-")
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
@@ -213,7 +214,6 @@ ISSUE_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/([0-9]+)$")
 GITHUB_ISSUE_LINE = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
 CLOSING_KEYWORD = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:\[[^\]]*\]\()?"
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
-BOARD_QUERY = "SELECT id, title, body, branch_name, status FROM tasks WHERE status != 'archived'"
 
 
 class Refusal(Exception):
@@ -300,15 +300,12 @@ def kanban_cards() -> list[dict]:
     """The cards on this card's board, read from its database without writing.
 
     `hermes kanban list` first recomputes which cards are ready, a write that Hermes refuses from this fenced
-    process. A `mode=ro` open fails on a WAL database whose -wal and -shm files no connection has created, so
-    the connection opens read-write, never creates the file, and refuses every write statement."""
+    process, so the board database is read directly, through `kanban_board`, which reads one consistent
+    snapshot or raises, and never writes."""
     path = os.environ.get("HERMES_KANBAN_DB")
     if not path:
         raise Refusal("HERMES_KANBAN_DB is not set, so the board cannot be read")
-    with closing(sqlite3.connect(f"file:{quote(path)}?mode=rw", uri=True)) as board:
-        board.execute("PRAGMA query_only = ON")
-        board.row_factory = sqlite3.Row
-        return [dict(row) for row in board.execute(BOARD_QUERY)]
+    return kanban_board.cards(path)
 
 
 def blocker_wait(client, issue_id: str, ignored: list[str]) -> tuple[list[str], str | None]:
@@ -829,8 +826,19 @@ def factory_mcp_servers(transport: dict) -> dict:
         headers = server.get("headers", {})
         if not (isinstance(headers, dict) and all(isinstance(v, str) for v in headers.values())):
             raise Refusal(f"{where}.headers must map header names to fixed strings")
-        if any(CREDENTIAL_HEADER.search(header) for header in headers):
+        if any(CREDENTIAL_NAME.search(header) for header in headers):
             raise Refusal(f"{where}.headers must hold no credential; mcp-headers sends the token as Authorization")
+        url = urlsplit(server["url"])
+        if "@" in url.netloc:
+            raise Refusal(f"{where}.url must hold no userinfo; mcp-headers sends the token as Authorization")
+        query = parse_qsl(url.query, keep_blank_values=True)
+        if any(CREDENTIAL_NAME.search(key) for key, _ in query):
+            raise Refusal(f"{where}.url must hold no credential in its query string; mcp-headers sends the token as Authorization")
+        values = (*headers.values(), *(value for _, value in query))
+        if any(AUTHORIZATION_VALUE.match(value) for value in values):
+            raise Refusal(f"{where} must hold no Authorization scheme in a header value or URL query value; mcp-headers sends the token")
+        if any(value.lstrip().startswith(TOKEN_PREFIXES) for value in values):
+            raise Refusal(f"{where} must hold no known token prefix in a header value or URL query value; mcp-headers sends the token")
     return servers
 
 

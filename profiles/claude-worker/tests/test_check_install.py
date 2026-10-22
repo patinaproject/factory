@@ -8,6 +8,7 @@ import os
 import plistlib
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -225,6 +226,9 @@ class CheckInstallTest(unittest.TestCase):
         self.owned_refs = self.root / "owned-refs.json"
         self.install(self.root, "owned-refs.json", f'["goodyear/abc-1-fix", "{LINEAR_ID}"]\n')
         self.install(self.root, "triage-refs.json", "[]\n")
+        self.watch_state({"checked_at": time.time(), "state": "healthy", "restarts": []})
+        self.install(self.root, "gateway-heartbeat-url", "https://monitor.example/ping/id\n")
+        os.chmod(self.root / "gateway-heartbeat-url", 0o600)
         self.boards(BOARDS)
 
         self.issuer = self.tmp / "issuer"
@@ -245,6 +249,9 @@ class CheckInstallTest(unittest.TestCase):
     def install(self, home: Path, path: str, text: str) -> None:
         (home / path).parent.mkdir(parents=True, exist_ok=True)
         (home / path).write_text(text)
+
+    def watch_state(self, state: dict) -> None:
+        self.install(self.root, "gateway-watch.json", json.dumps(state))
 
     def boards(self, boards: list) -> None:
         self.install(self.root, "installed-boards.json", json.dumps(boards))
@@ -274,6 +281,84 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_matching_install_is_silent(self) -> None:
         self.assertEqual(self.check(), (0, ""))
+
+    def test_a_stale_or_missing_watch_state_is_reported(self) -> None:
+        self.watch_state({"checked_at": time.time() - 3600, "state": "healthy", "restarts": []})
+        self.assertEqual(self.check(), (1, (
+            f"gateway watch {self.root}/gateway-watch.json: was last written 60 minutes ago, "
+            "but watch-gateway runs every 5 (part 12)\n"
+        )))
+
+        (self.root / "gateway-watch.json").unlink()
+        self.assertEqual(self.check(), (1, (
+            f"gateway watch {self.root}/gateway-watch.json: is missing or unreadable, so watch-gateway has not run (part 12)\n"
+        )))
+
+    def test_a_spent_restart_budget_is_reported(self) -> None:
+        now = time.time()
+        self.watch_state({"checked_at": now, "state": "unresolved", "restarts": [now - 60, now - 600, now - 1200]})
+
+        self.assertEqual(self.check(), (1, (
+            f"gateway watch {self.root}/gateway-watch.json: restarted the gateway 3 times in the last hour and its "
+            "secrets stay unresolved: read the factory-secrets log (part 14)\n"
+        )))
+
+    def test_restarts_that_recovered_or_aged_out_are_not_reported(self) -> None:
+        now = time.time()
+        self.watch_state({"checked_at": now, "state": "healthy", "restarts": [now - 60, now - 600, now - 1200]})
+        self.assertEqual(self.check(), (0, ""))
+
+        self.watch_state({"checked_at": now, "state": "unresolved", "restarts": [now - 60, now - 4000, now - 5000]})
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_missing_or_open_heartbeat_file_is_reported_without_its_url(self) -> None:
+        beat = self.root / "gateway-heartbeat-url"
+        os.chmod(beat, 0o644)
+        code, out = self.check()
+        self.assertEqual((code, out), (1, f"gateway watch {beat}: has mode 644; it holds a URL, so use 600 (part 12)\n"))
+        self.assertNotIn("monitor.example", out)
+
+        beat.unlink()
+        self.assertEqual(self.check(), (1, (
+            f"gateway watch {beat}: is missing, so nothing alerts a person when the gateway, Slack, or the machine "
+            "is down (part 12)\n"
+        )))
+
+    def test_the_watch_scripts_are_compared_with_the_repository(self) -> None:
+        for name in ("watch-gateway", "restart-gateway"):
+            source = f"skills/setup-factory/scripts/{name}"
+            git(self.repo, "checkout", "-q", "-b", f"with-{name}")
+            self.install(self.repo, source, f"#!/usr/bin/env python3\n{name}\n")
+            git(self.repo, "add", ".")
+            git(self.repo, "commit", "-q", "-m", name)
+            self.install(self.root, f"scripts/{name}", f"#!/usr/bin/env python3\n{name}\n")
+        git(self.repo, "checkout", "-q", "-b", "both")
+        for name in ("watch-gateway", "restart-gateway"):
+            git(self.repo, "merge", "-q", "--no-edit", f"with-{name}")
+        sha = git(self.repo, "rev-parse", "--short=7", "HEAD")
+        self.assertEqual(self.check("--ref", "both", "--no-fetch"), (0, ""))
+
+        (self.root / "scripts" / "watch-gateway").unlink()
+        self.install(self.root, "scripts/restart-gateway", "stale\n")
+        self.assertEqual(self.check("--ref", "both", "--no-fetch"), (1, (
+            f"script {self.root}/scripts/watch-gateway: is missing; install it from "
+            "skills/setup-factory/scripts/watch-gateway (part 12)\n"
+            f"script {self.root}/scripts/restart-gateway: differs from both at {sha} (part 12)\n"
+        )))
+
+    def test_the_constants_equal_the_watch_script(self) -> None:
+        loader = importlib.machinery.SourceFileLoader(
+            "watch_gateway", str(SCRIPTS.parents[2] / "skills" / "setup-factory" / "scripts" / "watch-gateway")
+        )
+        watch = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(watch)
+
+        self.assertEqual(
+            (check_install.WATCH_STATE, check_install.HEARTBEAT_FILE, check_install.WATCH_INTERVAL, check_install.RESTARTS_PER_HOUR),
+            (watch.STATE_FILE, watch.HEARTBEAT_FILE, watch.INTERVAL_SECONDS, watch.RESTARTS_PER_HOUR),
+        )
+        launchd_name = Path(check_install.SERVICES[-1].plist).name
+        self.assertEqual(launchd_name, f"{watch.LABEL}.plist")
 
     def test_plugin_difference_names_the_home(self) -> None:
         self.install(self.worker, "plugins/p1/__init__.py", "old\n")
@@ -978,6 +1063,40 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (1, f"kanban board triage: is missing in {self.root} (part 10)\n"))
 
+    def kanban_database(self, path: Path, columns: str) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as board:
+            board.execute(f"CREATE TABLE tasks ({columns})")
+        board.close()
+        return path
+
+    def test_board_databases_that_hold_the_columns_the_blocker_check_reads_are_silent(self) -> None:
+        columns = "id, title, body, branch_name, status, assignee"
+        self.kanban_database(self.root / "kanban.db", columns)
+        self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", columns)
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_board_database_missing_a_column_the_blocker_check_reads(self) -> None:
+        triage = self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", "id, title, body, state")
+
+        self.assertEqual(self.check(), (1, (
+            f"kanban board database {triage}: has no tasks.branch_name, tasks.status, so a card cannot wait for "
+            "its blockers (part 15, check 29)\n"
+        )))
+
+    def test_a_board_database_that_cannot_be_read(self) -> None:
+        board = self.root / "kanban.db"
+        board.write_text("not a database")
+
+        code, output = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            output, f"kanban board database {board}: cannot be read for blockers: file is not a database "
+            "(part 15, check 29)\n",
+        )
+
     def default_repository(self) -> Path:
         checkout = self.tmp / "app"
         git(self.tmp, "init", "-q", str(checkout))
@@ -1262,7 +1381,11 @@ class CheckInstallTest(unittest.TestCase):
         home = self.tmp / "home"
         self.install(home, ".local/bin/hermes", with_interpreter(FAKE_HERMES))
         os.chmod(home / ".local" / "bin" / "hermes", 0o755)
-        self.launchd.plist(f"{str(home).lstrip('/')}/Library/LaunchAgents/ai.hermes.gateway.plist", "ai.hermes.gateway")
+        agents = f"{str(home).lstrip('/')}/Library/LaunchAgents"
+        self.launchd.plist(f"{agents}/ai.hermes.gateway.plist", "ai.hermes.gateway")
+        self.launchd.plist(
+            f"{agents}/ai.patinaproject.factory.gateway-watch.plist", "ai.patinaproject.factory.gateway-watch"
+        )
         env = {"PATH": "/usr/bin:/bin", **self.launchd.env, "HOME": str(home), "HERMES_HOME": str(self.worker)}
         proc = subprocess.run(
             ["/usr/bin/env", "python3", str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True
@@ -1292,8 +1415,15 @@ class Launchd:
         self.agent = self.plist(
             f"{str(self.home).lstrip('/')}/Library/LaunchAgents/ai.hermes.gateway.plist", "ai.hermes.gateway"
         )
+        self.watch = self.plist(
+            f"{str(self.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist",
+            "ai.patinaproject.factory.gateway-watch",
+        )
         uid = os.getuid()
-        self.states({"system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running"})
+        self.states({
+            "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+        })
         self.env = {
             "LAUNCHD_ROOT": str(self.root), "LAUNCHCTL_BIN": str(self.launchctl),
             "FAKE_LAUNCHD_STATES": str(self.states_file), "HOME": str(self.home),
@@ -1405,7 +1535,10 @@ class CheckServicesTest(unittest.TestCase):
 
     def test_agent_loaded_from_a_login_session(self) -> None:
         uid = os.getuid()
-        self.launchd.states({"system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running"})
+        self.launchd.states({
+            "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
+            f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+        })
 
         self.assertEqual(self.check(), [])
 
@@ -1427,6 +1560,14 @@ class CheckServicesTest(unittest.TestCase):
             "service cloudflared tunnel: does not run at load (part 7)",
             "service cloudflared tunnel: is waiting, not running (part 7)",
             "service Hermes gateway: is not loaded in launchd (part 15)",
+            "service gateway watch: is not loaded in launchd (part 12)",
+        ])
+
+    def test_a_missing_watch_job_is_reported(self) -> None:
+        self.launchd.watch.unlink()
+
+        self.assertEqual(self.check(), [
+            "service gateway watch: no plist matches ~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist (part 12)",
         ])
 
     def test_program_arguments_are_never_printed(self) -> None:

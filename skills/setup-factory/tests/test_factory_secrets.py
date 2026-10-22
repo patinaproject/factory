@@ -55,6 +55,7 @@ class FakeInfisical(ThreadingHTTPServer):
         self.requests: list = []
         self.login_status = 200
         self.secrets_status = 200
+        self.login_failures = 0
         self.secrets_body = json.dumps(SECRETS).encode()
         self.hold_method = ""
         self.held = threading.Event()
@@ -84,6 +85,9 @@ class Handler(BaseHTTPRequestHandler):
         self.server.requests.append(("POST", self.path, body))
         self.wait_if_held()
         ok = self.server.login_status == 200 and body == {"clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET}
+        if self.server.login_failures > 0:
+            self.server.login_failures -= 1
+            ok = False
         if self.path == "/api/v1/auth/universal-auth/login" and ok:
             self.reply(200, json.dumps({"accessToken": TOKEN, "expiresIn": 7200}).encode())
         else:
@@ -127,6 +131,8 @@ class FactorySecretsTest(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.log = self.tmp / "children.log"
+        self.helper_log = self.tmp / "logs" / "factory-secrets.log"
+        self.helper_log.parent.mkdir()
         self.helper = self.render(self.tmp / "factory-secrets", wrapped=True)
         self.env = {
             "PATH": "/usr/bin:/bin",
@@ -141,6 +147,7 @@ class FactorySecretsTest(unittest.TestCase):
             "<project id>": "proj1",
             "<environment>": "dev",
             "<folder>": "/factory",
+            "<log file>": str(self.helper_log),
         }
         if wrapped:
             for real in ("/usr/bin/curl", "/usr/bin/perl"):
@@ -258,6 +265,78 @@ class FactorySecretsTest(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout), (1, ""))
         self.assertEqual(self.server.requests, [])
         self.assertIn("FACTORY_INFISICAL_CLIENT_SECRET", result.stderr)
+
+    def log_steps(self) -> list:
+        """Each log line as (step, attempt, exit code), with the timestamp checked and dropped."""
+        steps = []
+        for line in self.helper_log.read_text().splitlines():
+            stamp, step, attempt, code = line.split(" ")
+            self.assertRegex(stamp, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+            steps.append((step, attempt, code))
+        return steps
+
+    def assert_log_holds_no_secret(self) -> None:
+        text = self.helper_log.read_text()
+        for value in (*VALUES.values(), "leaked-value", "import-a", "folder", "x=y"):
+            self.assertNotIn(value, text)
+        self.assertEqual(self.helper_log.stat().st_mode & 0o777, 0o600)
+
+    def test_logs_each_failed_login_with_curls_exit_code(self) -> None:
+        self.server.login_status = 401
+
+        self.run_helper()
+
+        self.assertEqual(
+            self.log_steps(),
+            [("login", "attempt=1/3", "exit=22"), ("login", "attempt=2/3", "exit=22"), ("login", "attempt=3/3", "exit=22")],
+        )
+        self.assert_log_holds_no_secret()
+
+    def test_logs_a_failed_export_as_the_export_step(self) -> None:
+        self.server.secrets_body = b'{"secrets": [{"secretKey": "K", "secretValue": "leaked-value"'
+
+        self.run_helper()
+
+        self.assertEqual(
+            self.log_steps(),
+            [("export", "attempt=1/3", "exit=65"), ("export", "attempt=2/3", "exit=65"), ("export", "attempt=3/3", "exit=65")],
+        )
+        self.assert_log_holds_no_secret()
+
+    def test_a_login_that_fails_once_then_succeeds_applies_the_secrets_and_logs_both(self) -> None:
+        self.server.login_failures = 1
+
+        result = self.run_helper()
+
+        self.assertEqual((result.returncode, result.stdout), (0, DOTENV))
+        self.assertEqual(self.log_steps(), [("login", "attempt=1/3", "exit=22"), ("ok", "attempt=2/3", "exit=0")])
+        self.assert_log_holds_no_secret()
+
+    def test_a_missing_identity_is_logged_as_the_credentials_step(self) -> None:
+        del self.env["FACTORY_INFISICAL_CLIENT_SECRET"]
+
+        self.run_helper()
+
+        self.assertEqual(self.log_steps(), [("credentials", "attempt=1/3", "exit=1")])
+
+    def test_an_existing_log_with_looser_mode_is_tightened_and_a_long_one_is_cut(self) -> None:
+        self.helper_log.write_text("old line\n" * 20000)
+        self.helper_log.chmod(0o644)
+
+        self.run_helper()
+
+        lines = self.helper_log.read_text().splitlines()
+        self.assertLess(len(lines), 400)
+        self.assertTrue(lines[-1].endswith(" ok attempt=1/3 exit=0"))
+        self.assertEqual(self.helper_log.stat().st_mode & 0o777, 0o600)
+
+    def test_an_unwritable_log_never_fails_the_helper(self) -> None:
+        self.helper_log.parent.chmod(0o500)
+        self.addCleanup(self.helper_log.parent.chmod, 0o700)
+
+        result = self.run_helper()
+
+        self.assertEqual((result.returncode, result.stdout), (0, DOTENV))
 
 
 if __name__ == "__main__":

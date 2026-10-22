@@ -11,9 +11,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import PLUGIN, PNG, TOKEN, UUID_URL, FakeUploads
+from tests.support import PLUGIN, PNG, REAL_MANIFEST, TOKEN, UUID_URL, FakeUploads, secret_names_manifest
 
 from factory_uploads import broker as broker_module
+from factory_uploads.credentials import GATEWAY_ONLY
 
 REPO = "example-org/example-repo"
 
@@ -96,6 +97,11 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         plugin = self.home / "plugins" / "linear-agent-session"
         plugin.mkdir(parents=True)
         (plugin / "linear.py").write_text(FAKE_LINEAR)
+        self.manifest = self.home / "plugins" / "factory-secret-names" / "plugin.yaml"
+        self.manifest.parent.mkdir(parents=True)
+        self.manifest.write_text(secret_names_manifest(
+            "EXAMPLE_PROXY_TOKEN", "EXAMPLE_SENTRY_TOKEN", "EXAMPLE_POSTHOG_KEY", *sorted(GATEWAY_ONLY),
+        ))
         patcher = mock.patch.dict(sys.modules, stub_hermes(self.home, self.secrets, self.settings))
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -214,6 +220,47 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([reply["state"] for reply in replies], ["unavailable", "unavailable"])
                 self.assertNotIn(self.secrets[name], json.dumps(replies))
                 await adapter.disconnect()
+
+    async def test_a_token_op_never_serves_a_variable_the_manifest_does_not_declare(self):
+        self.secrets.update({
+            "SLACK_BOT_TOKEN": "xoxb-FAKE", "OP_SERVICE_ACCOUNT_TOKEN": "ops-FAKE", "EXAMPLE_UNDECLARED_TOKEN": "undeclared-FAKE",
+        })
+        for name in ("SLACK_BOT_TOKEN", "OP_SERVICE_ACCOUNT_TOKEN", "EXAMPLE_UNDECLARED_TOKEN"):
+            with self.subTest(name=name):
+                self.settings.update(factory_settings(name, {"sentry": {"url": "https://mcp.example", "token_env": name}}))
+                adapter = await self.connected()
+
+                replies = [await self.request("proxy_token"), await self.mcp_token("sentry")]
+
+                self.assertEqual(replies, [{"ok": False, "state": "unavailable", "message": mock.ANY}] * 2)
+                self.assertNotIn(self.secrets[name], json.dumps(replies))
+                self.assertEqual((await self.request("status"))["mcp_tokens_present"], {"sentry": False})
+                await adapter.disconnect()
+
+    async def test_the_installed_manifest_makes_the_proxy_and_sentry_tokens_servable_and_nothing_else(self):
+        self.manifest.write_bytes(REAL_MANIFEST.read_bytes())
+        self.secrets.update({"CLAUDE_PROXY_TOKEN": "proxy-FAKE", "SENTRY_ACCESS_TOKEN": "sentry-FAKE", "SLACK_BOT_TOKEN": "xoxb-FAKE"})
+        self.settings.update(factory_settings("CLAUDE_PROXY_TOKEN", {
+            "sentry": {"url": "https://mcp.example/sentry", "token_env": "SENTRY_ACCESS_TOKEN"},
+            "slack": {"url": "https://mcp.example/slack", "token_env": "SLACK_BOT_TOKEN"},
+        }))
+        await self.connected()
+
+        self.assertEqual(await self.request("proxy_token"), {"ok": True, "token": "proxy-FAKE", "expires_at": None})
+        self.assertEqual(await self.mcp_token("sentry"), {"ok": True, "token": "sentry-FAKE", "expires_at": None})
+        self.assertEqual((await self.mcp_token("slack"))["state"], "unavailable")
+
+    async def test_a_gateway_without_the_manifest_does_not_start(self):
+        self.manifest.unlink()
+
+        with self.assertRaises(FileNotFoundError):
+            self.make_adapter()
+
+    async def test_a_gateway_whose_manifest_declares_nothing_servable_does_not_start(self):
+        self.manifest.write_text(secret_names_manifest("LINEAR_CLIENT_SECRET"))
+
+        with self.assertRaisesRegex(ValueError, str(self.manifest)):
+            self.make_adapter()
 
     async def test_settings_without_mcp_servers_serve_no_mcp_token(self):
         for servers in (None, [], "sentry", {"sentry": "EXAMPLE_SENTRY_TOKEN"}, {"sentry": {"url": "https://mcp.example"}}):
