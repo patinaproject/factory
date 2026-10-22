@@ -70,7 +70,7 @@ class OpWrapperTest(unittest.TestCase):
         text = template.read_text()
         for placeholder, value in replacements.items():
             text = text.replace(placeholder, value)
-        self.assertNotRegex(text, "<[a-z ]*>", "every placeholder is rendered")
+        self.assertNotRegex(text, "<[a-z ]*>")
         self.write(path, text)
         return path
 
@@ -95,7 +95,7 @@ class OpWrapperTest(unittest.TestCase):
         everything = children + self.op_log.read_text().splitlines()
         for value in (CLIENT_ID, CLIENT_SECRET, TOKEN, "FACTORY_INFISICAL", "INFISICAL_"):
             self.assertEqual([line for line in everything if value in line], [])
-        self.assertFalse(self.cli_log.exists(), "the Infisical CLI never ran")
+        self.assertFalse(self.cli_log.exists())
 
     def test_fails_with_one_line_when_sign_in_fails(self) -> None:
         self.server.login_status = 401

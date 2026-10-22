@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -34,7 +35,7 @@ class IdentitySecretsTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.server = FakeInfisical()
-        self.server.secrets_body = __import__("json").dumps(SECRETS).encode()
+        self.server.secrets_body = json.dumps(SECRETS).encode()
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -58,7 +59,7 @@ class IdentitySecretsTest(unittest.TestCase):
             replacements[real] = str(wrapper)
         for placeholder, value in replacements.items():
             rendered = rendered.replace(placeholder, value)
-        self.assertNotRegex(rendered, "<[a-z ]*>", "every placeholder is rendered")
+        self.assertNotRegex(rendered, "<[a-z ]*>")
         path = self.tmp / "identity-secrets"
         path.write_text(rendered)
         return path
