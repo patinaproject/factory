@@ -70,6 +70,7 @@ class OpWrapperTest(unittest.TestCase):
         text = template.read_text()
         for placeholder, value in replacements.items():
             text = text.replace(placeholder, value)
+        self.assertNotRegex(text, "<[a-z ]*>", "every placeholder is rendered")
         self.write(path, text)
         return path
 

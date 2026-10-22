@@ -58,6 +58,7 @@ class IdentitySecretsTest(unittest.TestCase):
             replacements[real] = str(wrapper)
         for placeholder, value in replacements.items():
             rendered = rendered.replace(placeholder, value)
+        self.assertNotRegex(rendered, "<[a-z ]*>", "every placeholder is rendered")
         path = self.tmp / "identity-secrets"
         path.write_text(rendered)
         return path

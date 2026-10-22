@@ -1,0 +1,19 @@
+#!/bin/sh
+set -u
+real_op='<bin dir>/op'
+. '<home>/bin/identity-secrets'
+
+fail() { echo "op wrapper: $1" >&2; exit 1; }
+
+token=$(identity_value '<home>/.env' '<environment>' '<folder>' OP_SERVICE_ACCOUNT_TOKEN 2>/dev/null)
+case $? in
+  0) ;;
+  2) fail "Infisical sign-in failed" ;;
+  *) fail "could not read OP_SERVICE_ACCOUNT_TOKEN" ;;
+esac
+[ -n "$token" ] || fail "could not read OP_SERVICE_ACCOUNT_TOKEN"
+
+OP_SERVICE_ACCOUNT_TOKEN=$token
+export OP_SERVICE_ACCOUNT_TOKEN
+unset token
+exec "$real_op" "$@"

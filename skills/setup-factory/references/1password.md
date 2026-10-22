@@ -167,54 +167,37 @@ environment variables, which every process the shell starts inherits.
 
 The wrapper does these things:
 
-- It reads the client ID and client secret from their owner-only files
-  without sourcing them, and passes them only to the `infisical login` call.
+- It reads the client ID and client secret from `<home>/.env` without
+  sourcing it, and passes them only to `/usr/bin/curl` and `/usr/bin/perl`, on
+  standard input, through `identity_value` from
+  [Check the identity's scope](infisical.md#check-the-identitys-scope). No
+  process holds them in its environment or its arguments, and the Infisical
+  CLI never runs.
 - It signs in to Infisical as the machine identity, the same way the Hermes
   helper does.
 - It reads only `OP_SERVICE_ACCOUNT_TOKEN`, exports it, and runs the real
   `op` with the same arguments.
-- It turns off the Infisical CLI's update check, which can hang.
-- Each Infisical call stops after 20 seconds.
+- Each Infisical request stops after 15 seconds.
 - It never prints the token. On failure it prints one line to standard error
   and exits `1`.
 
-Write this to `<wrapper dir>/op`, with mode `0755`. It holds no secret. Add
-`--domain <api url>` to both `infisical` calls when the operator does not use
-US Cloud.
+The wrapper is rendered from
+[`scripts/op-wrapper`](../scripts/op-wrapper). It holds no secret. It sources
+`<home>/bin/identity-secrets`, which the Infisical part renders in
+[Check the identity's scope](infisical.md#check-the-identitys-scope). Render
+it to `<wrapper dir>/op`, with mode `0755`:
 
 ```sh
-#!/bin/sh
-set -u
-export INFISICAL_DISABLE_UPDATE_CHECK=true
-real_op='<bin dir>/op'
-
-with_timeout() { perl -e 'alarm shift; exec @ARGV or die "exec failed\n"' 20 "$@"; }
-client_id() { sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' '<home>/.env' | head -n 1; }
-client_secret() { sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' '<home>/.env' | head -n 1; }
-fail() { echo "op wrapper: $1" >&2; exit 1; }
-
-t=$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$(client_id)" \
-  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$(client_secret)" \
-  with_timeout infisical login --method=universal-auth --silent --plain 2>/dev/null) \
-  && [ -n "$t" ] || fail "Infisical sign-in failed"
-
-token=$(INFISICAL_TOKEN="$t" with_timeout infisical secrets get OP_SERVICE_ACCOUNT_TOKEN \
-  --projectId='<project id>' --env='<environment>' --path='<folder>' \
-  --plain --silent 2>/dev/null) \
-  && [ -n "$token" ] || fail "could not read OP_SERVICE_ACCOUNT_TOKEN"
-
-OP_SERVICE_ACCOUNT_TOKEN=$token
-export OP_SERVICE_ACCOUNT_TOKEN
-unset t token
-exec "$real_op" "$@"
+sed -e 's|<bin dir>|<bin dir>|g' -e 's|<home>|<home>|g' \
+  -e 's|<environment>|<environment>|g' -e 's|<folder>|<folder>|g' \
+  <repo>/skills/setup-factory/scripts/op-wrapper > <wrapper dir>/op
+grep -c '<[a-z ]*>' <wrapper dir>/op   # 0: every placeholder is rendered
+chmod 755 <wrapper dir>/op
 ```
 
-`perl` keeps the timer through `exec`, so it works where `timeout` is not
-installed, as on macOS.
-
-When the credentials live in their own files, such as under
-`~/.config/infisical/`, change `client_id` and `client_secret` to read those
-files, for example `head -n 1 '<id file>'`. Keep each file at mode `0600`.
+To read the credentials from another file, change the first argument of the
+`identity_value` call to an env file that holds the two `FACTORY_INFISICAL_`
+keys, at mode `0600`.
 
 For the recommended setup, put `<wrapper dir>` ahead of `<bin dir>` on `PATH`
 in the login file of each shell the operator uses, such as `~/.zprofile` and

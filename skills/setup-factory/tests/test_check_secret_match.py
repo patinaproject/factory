@@ -39,7 +39,7 @@ printf '%s\\n' "$FAKE_FOLDER"
 FAKE_HELPER = """\
 #!/bin/sh
 [ "$FACTORY_INFISICAL_CLIENT_ID" = "{id}" ] && [ "$FACTORY_INFISICAL_CLIENT_SECRET" = "{secret}" ] || exit 1
-printf '%s\\n' "$FAKE_LOADED"
+cat "{loaded}"
 """
 
 
@@ -54,7 +54,7 @@ class CheckSecretMatchTest(unittest.TestCase):
         infisical = stubs / "infisical"
         infisical.write_text(FAKE_INFISICAL)
         self.helper = self.tmp / "helper"
-        self.helper.write_text(FAKE_HELPER.format(id=CLIENT_ID, secret=CLIENT_SECRET))
+        self.helper.write_text(FAKE_HELPER.format(id=CLIENT_ID, secret=CLIENT_SECRET, loaded=self.tmp / "loaded"))
         for path in (hermes, infisical, self.helper):
             path.chmod(0o755)
         self.env_file = self.tmp / ".env"
@@ -62,19 +62,22 @@ class CheckSecretMatchTest(unittest.TestCase):
             f"FACTORY_INFISICAL_CLIENT_ID={CLIENT_ID}\nFACTORY_INFISICAL_CLIENT_SECRET={CLIENT_SECRET}\n"
         )
         self.log = self.tmp / "hermes.log"
+        self.load(f"OTHER='x'\nLINEAR_WEBHOOK_SECRET='{FOLDER_VALUE}'\n")
         self.env = {
             **os.environ,
             "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
             "FAKE_LOG": str(self.log),
             "FAKE_HELPER": str(self.helper),
             "FAKE_FOLDER": json.dumps([{"key": "LINEAR_WEBHOOK_SECRET", "value": FOLDER_VALUE}]),
-            "FAKE_LOADED": f"OTHER='x'\nLINEAR_WEBHOOK_SECRET='{FOLDER_VALUE}'\n",
             "FAKE_ROUTE_SECRET": "${LINEAR_WEBHOOK_SECRET}",
         }
 
+    def load(self, text: str) -> None:
+        (self.tmp / "loaded").write_text(text)
+
     def check(self, **overrides: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [str(SCRIPT), str(self.env_file), "proj1", "dev", "/factory", "LINEAR_WEBHOOK_SECRET", "linear"],
+            [sys.executable, str(SCRIPT), str(self.env_file), "proj1", "dev", "/factory", "LINEAR_WEBHOOK_SECRET", "linear"],
             env={**self.env, **overrides},
             capture_output=True,
             text=True,
@@ -92,13 +95,15 @@ class CheckSecretMatchTest(unittest.TestCase):
         self.assert_quiet(result)
 
     def test_reports_a_mismatch(self) -> None:
-        result = self.check(FAKE_LOADED=f"LINEAR_WEBHOOK_SECRET='{OTHER_VALUE}'\n")
+        self.load(f"LINEAR_WEBHOOK_SECRET='{OTHER_VALUE}'\n")
+        result = self.check()
 
         self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
         self.assert_quiet(result)
 
     def test_reports_a_mismatch_when_the_helper_omits_the_key(self) -> None:
-        result = self.check(FAKE_LOADED="OTHER='x'\n")
+        self.load("OTHER='x'\n")
+        result = self.check()
 
         self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
 
