@@ -8,6 +8,7 @@ import os
 import plistlib
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -977,6 +978,40 @@ class CheckInstallTest(unittest.TestCase):
         self.boards(BOARDS[:1])
 
         self.assertEqual(self.check(), (1, f"kanban board triage: is missing in {self.root} (part 10)\n"))
+
+    def kanban_database(self, path: Path, columns: str) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as board:
+            board.execute(f"CREATE TABLE tasks ({columns})")
+        board.close()
+        return path
+
+    def test_board_databases_that_hold_the_columns_the_blocker_check_reads_are_silent(self) -> None:
+        columns = "id, title, body, branch_name, status, assignee"
+        self.kanban_database(self.root / "kanban.db", columns)
+        self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", columns)
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_board_database_missing_a_column_the_blocker_check_reads(self) -> None:
+        triage = self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", "id, title, body, state")
+
+        self.assertEqual(self.check(), (1, (
+            f"kanban board database {triage}: has no tasks.branch_name, tasks.status, so a card cannot wait for "
+            "its blockers (part 15, check 29)\n"
+        )))
+
+    def test_a_board_database_that_cannot_be_read(self) -> None:
+        board = self.root / "kanban.db"
+        board.write_text("not a database")
+
+        code, output = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            output, f"kanban board database {board}: cannot be read for blockers: file is not a database "
+            "(part 15, check 29)\n",
+        )
 
     def default_repository(self) -> Path:
         checkout = self.tmp / "app"

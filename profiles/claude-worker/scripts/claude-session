@@ -36,14 +36,12 @@ import re
 import shlex
 import select
 import signal
-import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import closing
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
@@ -51,6 +49,7 @@ from urllib.parse import quote
 import blockers
 import card_branch
 import factory_source
+import kanban_board
 
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_WORKER_ENTRY = (
@@ -213,7 +212,6 @@ ISSUE_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/([0-9]+)$")
 GITHUB_ISSUE_LINE = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
 CLOSING_KEYWORD = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:\[[^\]]*\]\()?"
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
-BOARD_QUERY = "SELECT id, title, body, branch_name, status FROM tasks WHERE status != 'archived'"
 
 
 class Refusal(Exception):
@@ -300,15 +298,12 @@ def kanban_cards() -> list[dict]:
     """The cards on this card's board, read from its database without writing.
 
     `hermes kanban list` first recomputes which cards are ready, a write that Hermes refuses from this fenced
-    process. A `mode=ro` open fails on a WAL database whose -wal and -shm files no connection has created, so
-    the connection opens read-write, never creates the file, and refuses every write statement."""
+    process, so the board database is read directly, through `kanban_board`, which reads one consistent
+    snapshot or raises, and never writes."""
     path = os.environ.get("HERMES_KANBAN_DB")
     if not path:
         raise Refusal("HERMES_KANBAN_DB is not set, so the board cannot be read")
-    with closing(sqlite3.connect(f"file:{quote(path)}?mode=rw", uri=True)) as board:
-        board.execute("PRAGMA query_only = ON")
-        board.row_factory = sqlite3.Row
-        return [dict(row) for row in board.execute(BOARD_QUERY)]
+    return kanban_board.cards(path)
 
 
 def blocker_wait(client, issue_id: str, ignored: list[str]) -> tuple[list[str], str | None]:
