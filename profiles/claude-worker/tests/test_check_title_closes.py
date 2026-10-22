@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+import unittest
+
+from tests.support import SCRIPTS
+
+REPO = "example-org/example-repo"
+
+
+class CheckTitleClosesTest(unittest.TestCase):
+    def check(self, title: str, body: str, head_ref: str = "252-example", author: str = "someone") -> tuple[int, str]:
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "check_title_closes.py")],
+            env={
+                "PATH": "/usr/bin:/bin",
+                "GITHUB_REPOSITORY": REPO,
+                "PR_TITLE": title,
+                "PR_BODY": body,
+                "PR_HEAD_REF": head_ref,
+                "PR_AUTHOR": author,
+            },
+            capture_output=True, text=True, timeout=60,
+        )
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def test_a_fix_title_for_an_issue_the_body_only_mentions_fails_and_names_both_remedies(self) -> None:
+        code, output = self.check("fix: #177 a", "Part of #177\n\nCloses #247")
+        self.assertEqual(code, 1)
+        self.assertIn("#177", output)
+        self.assertNotIn("#247", output)
+        self.assertIn("retitle to the issue this pull request completes", output)
+        self.assertIn("use another type", output)
+
+    def test_a_fix_title_for_an_issue_the_body_closes_passes(self) -> None:
+        self.assertEqual(self.check("fix: #247 a", "Closes #247")[0], 0)
+
+    def test_a_non_closing_type_passes_even_when_the_body_closes_the_issue(self) -> None:
+        self.assertEqual(self.check("feat: #177 a", "Closes #177")[0], 0)
+
+    def test_a_closing_keyword_inside_the_subject_fails_on_that_issue_only(self) -> None:
+        code, output = self.check("chore: #5 fix #7 typo", f"Closes {REPO}#5")
+        self.assertEqual(code, 1)
+        self.assertIn("#7", output)
+        self.assertNotIn("#5", output)
+
+    def test_every_closing_keyword_form_in_the_title_counts(self) -> None:
+        for subject in ("close #9", "closes #9", "closed #9", "fix #9", "fixes #9", "fixed #9",
+                        "resolve #9", "resolves #9", "resolved #9", "Resolves: #9",
+                        f"fixes {REPO}#9", f"closes https://github.com/{REPO}/issues/9"):
+            with self.subTest(subject):
+                self.assertEqual(self.check(f"chore: #5 {subject}", "Closes #5")[0], 1)
+
+    def test_a_title_issue_closed_by_any_body_form_passes(self) -> None:
+        for body in ("Closes #9", f"Fixes {REPO}#9", f"Resolves https://github.com/{REPO}/issues/9", "closes: #9"):
+            with self.subTest(body):
+                self.assertEqual(self.check("fix: #9 a", body)[0], 0)
+
+    def test_a_body_line_in_code_or_a_quote_closes_nothing(self) -> None:
+        for body in ("`Closes #9`", "> Closes #9", "<!-- Closes #9 -->", "~~Closes #9~~"):
+            with self.subTest(body):
+                self.assertEqual(self.check("fix: #9 a", body)[0], 1)
+
+    def test_an_issue_of_another_repository_is_not_checked(self) -> None:
+        self.assertEqual(self.check("chore: #5 fixes other-org/other-repo#9", "Closes #5")[0], 0)
+
+    def test_the_fix_type_with_a_scope_or_a_breaking_marker_still_names_its_issue(self) -> None:
+        for title in ("fix(api): #9 a", "fix!: #9 a"):
+            with self.subTest(title):
+                self.assertEqual(self.check(title, "Closes #5")[0], 1)
+
+    def test_a_title_naming_no_issue_passes(self) -> None:
+        self.assertEqual(self.check("docs: update the readme", "Closes #5")[0], 0)
+
+    def test_every_missing_issue_is_named(self) -> None:
+        code, output = self.check("fix: #9 a, closes #8", "Closes #5")
+        self.assertEqual(code, 1)
+        self.assertIn("#8", output)
+        self.assertIn("#9", output)
+
+    def test_exempt_pull_requests_skip_the_check(self) -> None:
+        for head_ref, author in (("release-please--branches--main", "someone"), ("bot/bump-1.2.3", "someone"),
+                                 ("dependabot/npm_and_yarn/x", "dependabot[bot]")):
+            with self.subTest(head_ref, author=author):
+                self.assertEqual(self.check("fix: #9 a", "Part of #9", head_ref, author)[0], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
