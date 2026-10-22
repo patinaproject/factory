@@ -532,14 +532,6 @@ class IssueTest(unittest.TestCase):
                         {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
                     ]
                 },
-                "relations": {
-                    "nodes": [
-                        {"type": "blocks", "relatedIssue": {"id": "uuid-b2", "identifier": "ABC-125", "branchName": "abc-125-later",
-                                                            "state": {"type": "unstarted"}, "delegate": {"id": "app-user-1"}}},
-                        {"type": "related", "relatedIssue": {"id": "uuid-r", "identifier": "ABC-130", "branchName": "abc-130-rel",
-                                                             "state": {"type": "started"}}},
-                    ]
-                },
                 "inverseRelations": {
                     "nodes": [
                         {"type": "blocks", "issue": {"id": "uuid-b1", "identifier": "ABC-122", "branchName": "abc-122-first",
@@ -585,10 +577,6 @@ class IssueTest(unittest.TestCase):
                     {"id": "uuid-b1", "identifier": "ABC-122", "gitBranchName": "abc-122-first", "stateType": "started",
                      "delegate": None}
                 ],
-                "blocks": [
-                    {"id": "uuid-b2", "identifier": "ABC-125", "gitBranchName": "abc-125-later", "stateType": "unstarted",
-                     "delegate": "app-user-1"}
-                ],
                 "agentSessions": [
                     {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1",
                      "creatorId": None},
@@ -613,6 +601,34 @@ class IssueTest(unittest.TestCase):
         response["data"]["issue"]["delegate"] = None
         fake = FakeLinear([(200, response)])
         self.assertIsNone(make_client(fake).get_issue("ABC-123")["delegate"])
+
+
+class BlockersTest(unittest.TestCase):
+    def test_returns_each_blocking_issue_and_whether_the_app_is_its_delegate(self):
+        relations = {"nodes": [
+            {"type": "blocks", "issue": {"id": "uuid-a", "identifier": "ABC-1", "branchName": "abc-1-first",
+                                         "state": {"type": "started"}, "delegate": {"id": "app-user-1"}}},
+            {"type": "blocks", "issue": {"id": "uuid-b", "identifier": "ABC-2", "branchName": "abc-2-second",
+                                         "state": {"type": "completed"}, "delegate": None}},
+            {"type": "related", "issue": {"id": "uuid-r", "identifier": "ABC-3", "branchName": "abc-3-rel",
+                                          "state": {"type": "started"}, "delegate": None}},
+        ]}
+        fake = FakeLinear([(200, {"data": {"viewer": {"id": "app-user-1"}, "issue": {"inverseRelations": relations}}})])
+
+        blockers = make_client(fake).blockers("ABC-9")
+
+        self.assertEqual(blockers, [
+            {"id": "uuid-a", "identifier": "ABC-1", "gitBranchName": "abc-1-first", "stateType": "started",
+             "delegate": "app-user-1", "delegatedToSelf": True},
+            {"id": "uuid-b", "identifier": "ABC-2", "gitBranchName": "abc-2-second", "stateType": "completed",
+             "delegate": None, "delegatedToSelf": False},
+        ])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-9"})
+
+    def test_an_issue_linear_does_not_return_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"viewer": {"id": "app-user-1"}, "issue": None}})])
+        with self.assertRaisesRegex(linear.LinearError, "no issue ABC-9"):
+            make_client(fake).blockers("ABC-9")
 
 
 class IssueLabelsTest(unittest.TestCase):

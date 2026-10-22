@@ -40,21 +40,6 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
   archive, and that worktree would hold the card's branch against the next card
   for the issue. The command also frees that branch. It prints one JSON line.
   When it prints `error`, post that error as one `thought` on this agent session.
-- Order a card behind the cards of the issues that block it only with
-  `<<link_blockers>>`, never with `hermes kanban link` or `block` by hand. It
-  reads the `blockedBy` and `blocks` lists of `linear_issue`. It prints one
-  JSON line. When it prints `error`, post that error as one `thought` on this
-  agent session. Hermes holds a linked card in `todo`, without a worker run,
-  until every parent card is `done` or archived, and a card is `done` when its
-  pull request merges.
-- A card created while a blocker is delegated but has no card yet waits with no
-  assignee, because the dispatcher skips an unassigned card. The blocker's own
-  card assigns it. When an issue gets no card from this event, because
-  "Delegation gate" stops, or the issue is un-delegated, completed, or
-  canceled, run `<<link_blockers>> --release` with the issue exactly as
-  `linear_issue` returned it, before you stop. It assigns the cards that wait for the issue, so each one
-  starts and its worker's blocker gate decides. When it prints `error`, post
-  that error as one `thought`.
 - Add free-text card comments with the `kanban_comment` tool, not the shell.
 - To unblock a card, follow "Unblock a card" below, with the reason
   `resumed from Linear; see the card comments`.
@@ -162,28 +147,9 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    Never write a pull request URL in a card comment. Hermes treats a card
    whose comments name a pull request as already having one.
 
-   Find the new card's parents, the cards of the issues that block the issue.
-   Give the command the issue exactly as `linear_issue` returned it:
-
-   ````sh
-   <<link_blockers>> --parents <<'BLOCKERS'
-   <linear_issue output>
-   BLOCKERS
-   ````
-
-   Add `--parent '<task id>'` once for each task id in its `parents`. A card
-   created with a parent waits in `todo` from its first moment, so the
-   dispatcher never claims it early. When it prints `error`, post that error
-   as one `thought`, create the card with no `--parent`, and go on: step 7
-   links it. When `unassigned` is true, a delegated blocker has no card yet, so
-   leave out `--assignee claude-worker`. The dispatcher skips an unassigned
-   card, and the blocker's card links and assigns it. Otherwise, and when the
-   command failed, keep `--assignee claude-worker`.
-
    Create the card with the chosen repository's card flags, the branch you
-   chose, one `--parent` for each parent, and a title made of the identifier,
-   a colon, and the issue title with every character except letters, digits,
-   spaces, `.` and `-` removed:
+   chose, and a title made of the identifier, a colon, and the issue title
+   with every character except letters, digits, spaces, `.` and `-` removed:
 
    ````sh
    hermes kanban create '<title>' \
@@ -191,7 +157,6 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
      --priority <cardPriority> \
      <card flags> \
      --branch '<branch>' \
-     <parent flags> \
      --idempotency-key 'linear:<issue id>' \
      --body-file - \
      --json <<'CARD'
@@ -225,26 +190,7 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
      again. The Kanban CLI has no command that moves a `done` card back to
      `ready`, so also post a `thought` on this agent session saying the card
      must be reopened from the Kanban dashboard.
-7. Order the card behind its blockers, whether this run created it or reused
-   it. The card of a blocker that is not done becomes its parent, and the card
-   becomes the parent of the card of each issue it blocks, so a chain
-   delegated in any order runs in order. Run:
-
-   ````sh
-   <<link_blockers>> --task '<task id>' <<'BLOCKERS'
-   <linear_issue output>
-   BLOCKERS
-   ````
-
-   It links nothing for a blocker that is not delegated, is archived, or is
-   finished, and it leaves a card whose worker already started as it is. A
-   blocker that is not delegated still reaches the worker's blocker gate. When
-   `cycle` is not null, the blockers form a cycle and the command linked
-   nothing. Post one `thought` on this agent session naming the issues in
-   `cycle`, and say that no card waits for another until a person removes the
-   cycle. The command never removes a link, and `released` lists the cards it
-   assigned, so a cycle is left to the worker's blocker gate.
-8. When the gate passed and the issue's `stateType` is `triage`, move it to
+7. When the gate passed and the issue's `stateType` is `triage`, move it to
    Todo as "Delegation gate" says.
    If this run created the card, unblocked it, or moved it to this agent
    session, post one `action` activity on this agent session with `action`
