@@ -256,6 +256,12 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FileNotFoundError):
             self.make_adapter()
 
+    async def test_a_gateway_whose_manifest_declares_nothing_servable_does_not_start(self):
+        self.manifest.write_text(secret_names_manifest("LINEAR_CLIENT_SECRET"))
+
+        with self.assertRaisesRegex(ValueError, str(self.manifest)):
+            self.make_adapter()
+
     async def test_settings_without_mcp_servers_serve_no_mcp_token(self):
         for servers in (None, [], "sentry", {"sentry": "EXAMPLE_SENTRY_TOKEN"}, {"sentry": {"url": "https://mcp.example"}}):
             with self.subTest(servers=servers):

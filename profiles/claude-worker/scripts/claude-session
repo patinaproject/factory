@@ -191,6 +191,7 @@ UNREACHABLE_MODEL_URL = "http://127.0.0.1:9"
 # Fixed headers and the URL reach argv in --mcp-config, where ps shows them, so a name or value that could carry a secret is refused.
 CREDENTIAL_NAME = re.compile(r"auth|key|token|secret|cookie|password|cred|session|sig|pass|pwd|jwt|bearer|access", re.IGNORECASE)
 AUTHORIZATION_VALUE = re.compile(r"\s*(?:bearer|basic|token|sentry-bearer)(?:\s|$)", re.IGNORECASE)
+TOKEN_PREFIXES = ("ghp_", "gho_", "ghs_", "github_pat_", "sntrys_", "lin_api_", "xoxb-", "sk-")
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
@@ -827,11 +828,17 @@ def factory_mcp_servers(transport: dict) -> dict:
             raise Refusal(f"{where}.headers must map header names to fixed strings")
         if any(CREDENTIAL_NAME.search(header) for header in headers):
             raise Refusal(f"{where}.headers must hold no credential; mcp-headers sends the token as Authorization")
-        query = parse_qsl(urlsplit(server["url"]).query, keep_blank_values=True)
+        url = urlsplit(server["url"])
+        if "@" in url.netloc:
+            raise Refusal(f"{where}.url must hold no userinfo; mcp-headers sends the token as Authorization")
+        query = parse_qsl(url.query, keep_blank_values=True)
         if any(CREDENTIAL_NAME.search(key) for key, _ in query):
             raise Refusal(f"{where}.url must hold no credential in its query string; mcp-headers sends the token as Authorization")
-        if any(AUTHORIZATION_VALUE.match(value) for value in (*headers.values(), *(value for _, value in query))):
+        values = (*headers.values(), *(value for _, value in query))
+        if any(AUTHORIZATION_VALUE.match(value) for value in values):
             raise Refusal(f"{where} must hold no Authorization scheme in a header value or URL query value; mcp-headers sends the token")
+        if any(value.lstrip().startswith(TOKEN_PREFIXES) for value in values):
+            raise Refusal(f"{where} must hold no known token prefix in a header value or URL query value; mcp-headers sends the token")
     return servers
 
 

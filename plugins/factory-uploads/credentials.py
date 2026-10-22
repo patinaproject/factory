@@ -27,9 +27,13 @@ DECLARED_NAME = re.compile(r"^\s*-\s*name:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", re.M
 def servable_names(manifest: Path) -> frozenset:
     """The names the factory-secret-names manifest declares, less the gateway-only ones.
 
-    A missing manifest raises: serving nothing silently would fail every card with no cause.
+    A missing manifest raises, and so does one that leaves nothing servable: serving nothing
+    silently would fail every card on the proxy token with no cause.
     """
-    return frozenset(DECLARED_NAME.findall(Path(manifest).read_text())) - GATEWAY_ONLY
+    names = frozenset(DECLARED_NAME.findall(Path(manifest).read_text())) - GATEWAY_ONLY
+    if not names:
+        raise ValueError(f"{manifest} declares no servable secret name")
+    return names
 
 
 def worker_variable(name, servable: frozenset) -> str:
