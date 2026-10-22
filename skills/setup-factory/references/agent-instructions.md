@@ -129,7 +129,9 @@ private record, never to the repository.
 - The worker profile `<worker>` owns the checkouts at
   <worker checkout paths>. Change them only through a Kanban card.
 - The gateway runs as a service. Restart it only when the operator asks,
-  from a shell outside Hermes.
+  from a shell outside Hermes. The one other restarter is `watch-gateway`,
+  a launchd job that restarts a gateway whose secrets did not resolve. Leave
+  it running.
 - A merged factory change is not live until it is deployed. Follow the
   setup-factory runbook's "Deploy a merged factory change" section.
   `HERMES_HOME=<worker> python3 <worker>/scripts/check-install` lists what is out of

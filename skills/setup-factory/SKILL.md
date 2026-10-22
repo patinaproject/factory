@@ -1192,9 +1192,13 @@ profile, a cron job that delivers to a platform with no home channel in its
 profile, a cron job whose last run failed or was not delivered, with the first
 line of its error and secrets masked (a failed run of the `check-install` job
 itself is not reported, because that failure is the previous run's report), the
-root home's `scripts/check-install-alert` and `scripts/retry-failed-webhooks`
-when one is missing or differs from the repository, and, on macOS, a launchd service from part 7 or 15
-that is not installed, does not run at load, or is not running, and
+root home's `scripts/check-install-alert`, `scripts/retry-failed-webhooks`,
+`scripts/watch-gateway`, and `scripts/restart-gateway`
+when one is missing or differs from the repository, that `watch-gateway` has run in the last 15 minutes
+without spending its restart budget, that `<root>/gateway-heartbeat-url` exists with mode `600`, and, on macOS, a
+launchd service from part 7, 12, or 15
+that is not installed, does not run at load, or is not running (the `watch-gateway` job runs
+only every 5 minutes, so it need only be loaded), and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never
 prints a config value. It prints one line per difference and nothing when the
 install is current. It fetches first, so a merge shows up within the hour.
@@ -1249,6 +1253,71 @@ queued delivery at once, or `--drop <delivery>` to remove one. A delivery that
 is older than 48 hours or has failed 8 retries is given up and stays listed
 until dropped. A retry that a crash or timeout cut short is marked failed and
 never run again, because its turn may already have changed a card.
+
+**Gateway watch.** Hermes reads the factory's secrets only when the gateway
+starts. When the secret source fails then, for example while the network is
+not up after a reboot, the gateway still serves, but every webhook route signs
+with its literal `${NAME}` reference and the upload broker holds no token. The
+`check-install` alert cannot report it, because the chat platform's token comes
+from the same failed source. `watch-gateway` is a launchd job outside the
+gateway. It runs every 5 minutes, never calls the secret source, and reads no
+secret. It reads one non-secret value, the Linear route's `webhook_route` name,
+from `<root>/config.yaml`. It sends each route a delivery signed with the
+route's literal reference, for an event the route does not list. Hermes checks
+the signature first, so `401` means the secret resolved, and any `2xx` or `429`
+means the gateway accepted a signature made from the literal reference, so the
+secret did not resolve. A listed event would get `202` and an unlisted one
+`200 ignored`, and the probe sends an unlisted one so no agent run starts.
+It also asks the broker for `token_present`. The broker's socket is
+`<root>/factory-uploads.sock`, or the `socket` that
+`/Library/Application Support/factory-broker/broker.json` names once the
+broker runs as its own user. An unresolved route secret runs
+`restart-gateway`, which waits for running cards, and the watcher gives up
+after 3 restarts in an hour. A missing broker token alone restarts nothing:
+the gateway works, and a restart does not fix a broker user's token. The
+heartbeat stays quiet instead, and `check-install` reports the broker. A
+gateway that does not answer is left to launchd, and nothing is restarted.
+Only a healthy gateway earns a ping to a heartbeat URL, so a monitor that
+alerts when pings stop reports a spent budget, a held lock, a missing broker
+token, a down gateway, and a down machine through a path that uses none of the
+helper's secrets. It needs no Infisical: it works for a factory whose secrets
+come from `.env`.
+
+**The gateway lock.** The watcher restarts nothing while `<root>/gateway.lock`
+exists. A person or an agent that deploys and restarts the gateway creates the
+file first, writing its purpose and the time, and removes it when the restart
+is done. A lock that outlives its deploy keeps the heartbeat quiet, which
+alerts a person. A machine whose deploys already hold another file passes
+`--lock <that file>` to `--print-plist`, and the plist then carries it. The
+real path stays in the private record.
+
+> **HUMAN CHECKPOINT.** Ask the operator to create a dead-man's-switch monitor
+> that expects a ping every 5 minutes, with a grace period of 15 minutes,
+> alerts them on a channel that does not depend on this machine, and gives a
+> ping URL. The URL is a credential. Ask them to store it with the `read -rs`
+> line from the skill, once, into `<root>/gateway-heartbeat-url`, mode `600`,
+> in their own terminal. Never ask for it in chat, and never print it. The file
+> holds only that URL.
+
+Install the scripts and the launchd job, from the factory checkout. Use the
+webhook port from part 6 in place of `8644` when it differs. This job needs no
+`sudo`, because it is a user agent:
+
+```sh
+install -d <root>/scripts
+install -m 0644 skills/setup-factory/scripts/watch-gateway <root>/scripts/watch-gateway
+install -m 0644 skills/setup-factory/scripts/restart-gateway <root>/scripts/restart-gateway
+python3 skills/setup-factory/scripts/watch-gateway --root <root> --port 8644 --print-plist \
+  > ~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist
+```
+
+Run `python3 <root>/scripts/watch-gateway --root <root>` once and read
+`<root>/gateway-watch.json` and `<root>/logs/gateway-watch.log`. The state is
+`healthy`, and the monitor shows the ping. The job logs a line only when the
+gateway is not healthy or has just become healthy. After a deploy that changes
+`watch-gateway` or `restart-gateway`, install the copies again and run
+`launchctl kickstart -k gui/$(id -u)/ai.patinaproject.factory.gateway-watch`.
 
 **Verify.** Run each job through Hermes once, then read its status:
 
@@ -1716,7 +1785,8 @@ A merged change to `skills/setup-factory/scripts/factory-secrets` is live only
 after the render steps in
 [Configure both homes](references/infisical.md#configure-both-homes) install
 it at `<home>/bin/factory-secrets`. Hermes runs the new helper the next time a
-Hermes process starts.
+Hermes process starts. The new helper also writes
+`<home>/logs/factory-secrets.log`, which needs no gateway restart.
 
 1. Find the source checkout. It is the checkout `<worker>/distribution.yaml`
    points at, and this command prints it:
@@ -1812,6 +1882,13 @@ Hermes process starts.
    - A `script <root>/scripts/check-install-alert` or
      `<root>/scripts/retry-failed-webhooks` line: install the wrapper again
      with the part 12 `install` commands, which create `<root>/scripts` first.
+   - A `script <root>/scripts/watch-gateway` or
+     `<root>/scripts/restart-gateway` line, a `service gateway watch` line, or
+     a `gateway watch` line: follow the part 12 "Gateway watch" steps. A
+     `gateway watch` line that says the restart budget is spent means the
+     gateway runs without its secrets. Read
+     `<root>/logs/factory-secrets.log` for the failing step, fix the cause, and
+     run `restart-gateway` as part 15 describes.
    - A `cron job retry-failed-webhooks` line: create the job in the root
      profile as in part 12.
    - A `cron job dispatch-triage` line: after the profile update, create the
