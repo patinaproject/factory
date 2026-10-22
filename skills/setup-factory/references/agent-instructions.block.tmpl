@@ -1,0 +1,96 @@
+<!-- factory:begin -->
+## Factory machine
+
+This machine runs a Hermes software factory. Its private configuration
+record is {{record}}.
+Read it before you change the machine's configuration, and update it in the
+same change.
+
+Keep the factory replicable. Every change to a factory environment also
+lands in the factory repository in the same change, as a runbook step,
+template, script, or check, so a fresh install reproduces it. A machine
+state the runbook cannot reproduce is a defect. Real values go only to the
+private record, never to the repository.
+
+### GitHub
+
+- Act on GitHub only as the factory's GitHub App, `{{app_slug}}[bot]`.
+  Run every `gh` command as
+  `GH_CONFIG_DIR={{worker}}/gh gh <command>`.
+- Never run `gh auth login`, never set `GH_TOKEN` or `GITHUB_TOKEN`, and
+  never ask the operator to sign in to GitHub.
+- Publish commits only with
+  `GH_CONFIG_DIR={{worker}}/gh python3 {{worker}}/scripts/push-signed`.
+  Never use `git push`.
+- One exception: a worker uploads images for pull requests with
+  `python3 {{worker}}/scripts/github-upload-image`. The gateway uploads them
+  with the operator's upload token. Never read, print, or use
+  `GITHUB_UPLOAD_TOKEN` yourself, never pass it to `gh`, and never upload
+  anything else through the broker.
+- `Resource not accessible by integration` means the App lacks a
+  permission. Report it to the operator. Do not switch identities.
+- The App cannot create linked branches, so `gh issue develop` fails with a
+  `createLinkedBranch` permission error. Derive the branch name with the
+  repository's issue-tracker rule instead, and create the branch from the
+  fetched default branch.
+
+### Tools
+
+- `gh` and the other tools setup installed live in `{{bin_dir}}`. A
+  non-login shell can lack that directory on `PATH`, so call a tool by its
+  full path when the bare name is not found. Do not install a second copy.
+
+### Secrets
+
+- Hermes loads the factory's secrets from {{secret_source}}, when it starts: the gateway through
+  `{{gateway_home}}/bin/factory-secrets`, and the worker through its own
+  `scripts/worker-secrets`, which keeps only the worker's three keys.
+  Never print, copy, or move a secret, and never ask for one in chat. When
+  a new secret is needed, ask the operator to enter it in their own
+  terminal.
+- Never run `hermes config get` with `--raw`, and never run a secrets
+  helper such as `factory-secrets`, `worker-secrets`, or `proxy-token` by
+  hand. Each prints secret values. To check a secret, compare it in memory and print a
+  boolean, or list variable names only.
+{{#operator_only}}- These credentials are for the operator only, and Hermes agents never
+  receive them: {{operator_only}}
+{{/operator_only}}{{#onepassword}}- Never run `op`, and never read the operator-only credentials, even when a
+  login shell puts an `op` wrapper on `PATH`.
+{{/onepassword}}
+### Remote access and ingress
+
+- The factory's tunnel routes and Cloudflare Access applications are code in
+  {{sst_app}}. {{deploy_step}} deploys them. Never change Cloudflare in the
+  dashboard or with the `cloudflared` CLI. The running tunnel's routes are in
+  the `cloudflared` service log, under "Updated to new configuration".
+{{#ssh_account}}- People SSH in as `{{ssh_account}}` at `{{ssh_hostname}}` through Cloudflare Access
+  short-lived certificates, or with a key. sshd never accepts a password. Do
+  not turn password login back on.
+- One list says who may SSH in: {{ssh_allowlist}}. The machine
+  mirrors it in `/etc/ssh/authorized_principals/{{ssh_account}}`, one email local
+  part per line. Change both in the same change.
+{{/ssh_account}}- After any change to SSH, sharing, or the firewall, run
+  `python3 {{factory_checkout}}/skills/setup-factory/scripts/check-host-exposure{{#ssh_account}} --ssh-users {{ssh_users}}{{/ssh_account}}`.
+  Every line must start with `PASS`.
+
+### Privileged steps
+
+- You cannot answer a `sudo` password prompt. Put the privileged commands
+  in one script in your scratch directory, make it refuse a change that
+  could lock someone out, and ask the operator to run it with `sudo` in
+  their own terminal. Name the terminal and the exact command, then wait.
+
+### Factory processes
+
+- The worker profile `{{worker}}` owns the checkouts at
+  {{worker_checkouts}}.
+  Change them only through a Kanban card.
+- The gateway runs as a service. Restart it only when the operator asks,
+  from a shell outside Hermes. The one other restarter is `watch-gateway`,
+  a launchd job that restarts a gateway whose secrets did not resolve. Leave
+  it running.
+- A merged factory change is not live until it is deployed. Follow the
+  setup-factory runbook's "Deploy a merged factory change" section.
+  `HERMES_HOME={{worker}} python3 {{worker}}/scripts/check-install` lists what is out of
+  date.
+<!-- factory:end -->
