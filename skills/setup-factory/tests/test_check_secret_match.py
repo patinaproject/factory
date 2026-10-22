@@ -27,7 +27,7 @@ if key == "secrets.command":
     print("Command helper: applied 1 secrets")
     print(json.dumps({"command": os.environ["FAKE_HELPER"]}))
 elif key.endswith(".secret"):
-    print(json.dumps(os.environ["FAKE_ROUTE_SECRET"]))
+    print(json.dumps(os.environ["FAKE_ROUTE_READ"]))
 else:
     sys.exit(1)
 """
@@ -70,8 +70,14 @@ class CheckSecretMatchTest(unittest.TestCase):
             "FAKE_LOG": str(self.log),
             "FAKE_HELPER": str(self.helper),
             "FAKE_FOLDER": json.dumps([{"key": "LINEAR_WEBHOOK_SECRET", "value": FOLDER_VALUE}]),
-            "FAKE_ROUTE_SECRET": "${LINEAR_WEBHOOK_SECRET}",
+            "FAKE_ROUTE_READ": "***",
         }
+        self.config("${LINEAR_WEBHOOK_SECRET}")
+
+    def config(self, secret: str) -> None:
+        (self.tmp / "config.yaml").write_text(
+            f"platforms:\n  webhook:\n    extra:\n      routes:\n        linear:\n          secret: {secret}\n"
+        )
 
     def load(self, text: str) -> None:
         (self.tmp / "loaded").write_text(text)
@@ -109,14 +115,22 @@ class CheckSecretMatchTest(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
 
     def test_reports_a_mismatch_when_the_route_reads_another_key(self) -> None:
-        result = self.check(FAKE_ROUTE_SECRET="${GITHUB_WEBHOOK_SECRET}")
+        self.config("${GITHUB_WEBHOOK_SECRET}")
+        result = self.check()
 
         self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
 
     def test_reports_a_mismatch_when_the_route_holds_a_literal(self) -> None:
-        result = self.check(FAKE_ROUTE_SECRET=OTHER_VALUE)
+        self.config(OTHER_VALUE)
+        result = self.check()
 
         self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
+        self.assert_quiet(result)
+
+    def test_reports_a_match_when_hermes_expands_the_route_secret(self) -> None:
+        result = self.check(FAKE_ROUTE_READ=FOLDER_VALUE)
+
+        self.assertEqual((result.returncode, result.stdout), (0, "1\n"))
         self.assert_quiet(result)
 
     def test_reports_a_mismatch_when_the_folder_has_no_such_key(self) -> None:
@@ -124,11 +138,25 @@ class CheckSecretMatchTest(unittest.TestCase):
 
         self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
 
+    def test_never_hands_the_identity_to_a_shell_found_on_path(self) -> None:
+        spy = self.tmp / "spy"
+        spy.mkdir()
+        sniffed = self.tmp / "sniffed"
+        fake_sh = spy / "sh"
+        fake_sh.write_text(f'#!/bin/sh\nenv >> "{sniffed}"\nexec /bin/sh "$@"\n')
+        fake_sh.chmod(0o755)
+        result = self.check(PATH=f"{spy}{os.pathsep}{self.env['PATH']}")
+
+        self.assertEqual((result.returncode, result.stdout), (0, "1\n"))
+        leaked = sniffed.read_text() if sniffed.exists() else ""
+        self.assertNotIn(CLIENT_ID, leaked)
+        self.assertNotIn(CLIENT_SECRET, leaked)
+
     def test_never_asks_hermes_for_a_raw_value(self) -> None:
         self.check()
 
         calls = self.log.read_text().splitlines()
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         self.assertEqual([call for call in calls if "--raw" in call], [])
 
 

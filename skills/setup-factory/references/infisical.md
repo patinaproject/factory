@@ -397,7 +397,7 @@ the value that Hermes loads matches the value in the folder, and `0` when it
 does not.
 [`scripts/check-secret-match`](../scripts/check-secret-match) compares the
 folder's value with the value that the `secrets.command` helper prints for the
-key, and checks that the route's `secret` setting still reads `${<key>}`. The
+key, and checks that the route's `secret` in `config.yaml` still reads `${<key>}`. The
 values stay inside the script, and it never runs `hermes config get --raw`:
 
 ```sh
