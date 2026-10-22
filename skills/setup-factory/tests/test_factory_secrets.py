@@ -54,6 +54,7 @@ class FakeInfisical(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
         self.requests: list = []
         self.login_status = 200
+        self.secrets_status = 200
         self.secrets_body = json.dumps(SECRETS).encode()
         self.hold_method = ""
         self.held = threading.Event()
@@ -92,7 +93,7 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         self.server.requests.append(("GET", url.path, parse_qs(url.query)))
         self.wait_if_held()
-        if url.path == "/api/v4/secrets" and self.headers["Authorization"] == f"Bearer {TOKEN}":
+        if url.path == "/api/v4/secrets" and self.headers["Authorization"] == f"Bearer {TOKEN}" and self.server.secrets_status == 200:
             self.reply(200, self.server.secrets_body)
         else:
             self.reply(403, b'{"message":"forbidden"}')
