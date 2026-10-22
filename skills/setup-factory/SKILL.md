@@ -425,7 +425,8 @@ hermes plugins list
 hermes -p claude-worker plugins list
 ```
 
-Both list `linear-agent-session`, `pr-ready-gate`, and `factory-secret-names`,
+Both list `linear-agent-session`, `pr-ready-gate`, `blocker-order`, and
+`factory-secret-names`,
 enabled. The root home also lists `factory-uploads`, `team`, and
 `webhook-retry`, enabled, and the worker home lists none of them. On a fresh
 machine, install both now and skip the content check.
@@ -452,6 +453,8 @@ hermes plugins install "file://<repo>#plugins/linear-agent-session" --enable --y
 hermes plugins install "file://<repo>#plugins/pr-ready-gate" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/linear-agent-session" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/pr-ready-gate" --enable --yes-deps </dev/null
+hermes plugins install "file://<repo>#plugins/blocker-order" --enable --yes-deps </dev/null
+hermes -p claude-worker plugins install "file://<repo>#plugins/blocker-order" --enable --yes-deps </dev/null
 hermes plugins install "file://<repo>#plugins/factory-secret-names" --enable --yes-deps </dev/null
 hermes -p claude-worker plugins install "file://<repo>#plugins/factory-secret-names" --enable --yes-deps </dev/null
 ```
@@ -1562,6 +1565,20 @@ each check. Report each result.
 28. No more than `triage.max_running` cards on the `triage` board run at
     once, and the triage card's run never pushes a branch or opens a pull
     request.
+29. Delegate two throwaway issues in a repository that has no real work
+    queued, where B is blocked by A in Linear. Delegate A, then B. Both
+    cards are created with `claude-worker` as the assignee. A's worker
+    starts Claude. B's worker run prints `{"waiting_on": [<A card>]}` and
+    starts no Claude run. `hermes kanban show <B card> --json` lists A's card
+    as a parent, and B is in `todo` after a `dependency_wait` event. Merge A's
+    pull request: A's card is `done`, B's card moves to `ready` through a
+    `promoted` event, and B's worker branches from a default branch that
+    holds A's merge. Delegate them again, B and then A within a minute: B's
+    run waits up to 5 minutes for A's card, then waits on it. An issue whose
+    blocker is not delegated runs at once, and its worker's blocker gate
+    decides. For two issues that block each other, the second card's run
+    links nothing, its session gets one `thought` naming the cycle, and its
+    Claude starts.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate

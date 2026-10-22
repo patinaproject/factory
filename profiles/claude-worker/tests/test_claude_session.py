@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -627,6 +628,90 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(argv_log.read_text().strip(), f"kanban show {TASK_ID} --json")
         self.assertIn("operator wrote:\n> From the card.", self.prompt())
+
+    def block_issue(self, *blockers: dict, board: list | None = None, board_fails: bool = False) -> None:
+        """Linear's blockers of the issue, and the card's board database holding `board`."""
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, "blocked_by": list(blockers)}))
+        database = self.tmp / "kanban.db"
+        database.unlink(missing_ok=True)
+        if not board_fails:
+            with sqlite3.connect(database) as db:
+                db.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, assignee TEXT, status TEXT, branch_name TEXT)")
+                db.executemany(
+                    "INSERT INTO tasks VALUES (:id, :title, :body, 'claude-worker', :status, :branch_name)", board or []
+                )
+            db.close()
+        self.board_env = {"HERMES_KANBAN_DB": str(database)}
+
+    BLOCKER = {"id": "uuid-a", "identifier": "ABC-122", "gitBranchName": "abc-122-first", "stateType": "started",
+               "delegate": "app-user"}
+    BLOCKER_CARD = {"id": "t_a", "title": "ABC-122: First", "body": "", "branch_name": "abc-122-first", "status": "todo"}
+
+    def test_a_card_whose_blocker_has_a_live_card_waits_on_it_without_starting_claude(self) -> None:
+        self.block_issue(self.BLOCKER, board=[self.BLOCKER_CARD])
+        head = git(self.worktree, "rev-parse", "HEAD")
+
+        status, report = self.run_session(env=self.board_env)
+
+        self.assertEqual((status, report), (0, {"waiting_on": ["t_a"]}))
+        self.assertFalse(self.log.exists())
+        self.assertEqual(git(self.worktree, "rev-parse", "HEAD"), head)
+
+    def test_a_card_whose_blockers_are_done_or_ignored_starts_claude(self) -> None:
+        done_card = {**self.BLOCKER_CARD, "status": "done"}
+        cases = (
+            ({**self.BLOCKER, "stateType": "completed"}, [self.BLOCKER_CARD], ()),
+            (self.BLOCKER, [done_card], ()),
+            ({**self.BLOCKER, "delegate": None}, [{**self.BLOCKER_CARD, "status": "archived"}], ()),
+            ({**self.BLOCKER, "delegate": None}, [], ()),
+            (self.BLOCKER, [self.BLOCKER_CARD], ("--ignore-blockers", "t_a,t_z")),
+        )
+        for blocker, board, extra in cases:
+            with self.subTest(blocker=blocker, board=board, extra=extra):
+                self.log.unlink(missing_ok=True)
+                self.block_issue(blocker, board=board)
+
+                status, report = self.run_session(*extra, env=self.board_env)
+
+                self.assertEqual((status, report["subtype"]), (0, "success"))
+                self.assertNotIn("blocker_error", report)
+                self.assertTrue(self.log.exists())
+
+    def test_a_failed_blocker_check_is_logged_and_claude_starts(self) -> None:
+        for linear_error, board_fails, message in (
+            ("rate limited", False, "LinearError: rate limited"),
+            (None, True, "OperationalError: unable to open database file"),
+        ):
+            with self.subTest(message=message):
+                self.log.unlink(missing_ok=True)
+                self.block_issue(self.BLOCKER, board_fails=board_fails)
+                self.set_linear_state(blockers_error=linear_error)
+                command, env = self.session_command(env=self.board_env)
+
+                proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
+
+                report = json.loads(proc.stdout)
+                self.assertEqual((proc.returncode, report["subtype"]), (0, "success"))
+                self.assertEqual(report["blocker_error"], message)
+                self.assertIn(f"claude-session: the blocker check failed, so the card runs: {message}", proc.stderr)
+                self.assertTrue(self.log.exists())
+
+    def test_only_a_cards_first_implementation_run_checks_its_blockers(self) -> None:
+        self.block_issue(self.BLOCKER, board=[self.BLOCKER_CARD])
+        for env, transcript in ((TRIAGE_ENV, False), ({}, True)):
+            with self.subTest(env=env, transcript=transcript):
+                self.log.unlink(missing_ok=True)
+                if transcript:
+                    self.write_transcript()
+
+                status, report = self.run_session(env={**self.board_env, **env})
+
+                self.assertEqual((status, report["subtype"]), (0, "success"))
+
+    def set_linear_state(self, **fields) -> None:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, **fields}))
 
     def test_refuses_without_a_task_id(self) -> None:
         command, env = self.session_command(omit_task_id=True)

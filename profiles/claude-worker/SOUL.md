@@ -117,6 +117,16 @@ process output once it exits. It prints one JSON line.
   names the existing work the unstarted branch was reset to: its `source`
   (`remote_branch` or `takeover_pr`), `ref`, and `head`. Call
   `kanban_heartbeat` with the whole line as the note.
+- A line of only `waiting_on`, a list of card ids, means that cards of the
+  issue's blockers are still open, so Claude did not start. The
+  `blocker-order` hook has already handled it and added `blocker_order` to
+  the tool result. Follow its `instruction`. It either says the card now
+  waits for those cards, and you stop, or it says to post one `thought` and
+  run `claude-session` again with `--ignore-blockers`. Keep that flag on every
+  later `claude-session` run of the card. When the result has no
+  `blocker_order`, the hook is not loaded: post an `error` activity that says
+  the `blocker-order` plugin is missing, call `kanban_block` with kind
+  `capability`, and stop.
 - A run whose process has exited without a JSON line crashed. Treat it as a
   failure with the exit code and the output's last lines as the message. A
   timeout is never a crash.

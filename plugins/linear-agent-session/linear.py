@@ -69,7 +69,13 @@ ISSUE_QUERY = """query Issue($id: String!) {
     labels { nodes { name } }
     attachments { nodes { url sourceType } }
     agentSessions(first: 20) { nodes { id status createdAt appUser { id } creator { id } } }
+    inverseRelations(first: 50) { nodes { type issue { id identifier branchName state { type } delegate { id } } } }
   }
+}"""
+
+ISSUE_BLOCKERS_QUERY = """query IssueBlockers($id: String!) {
+  viewer { id }
+  issue(id: $id) { inverseRelations(first: 50) { nodes { type issue { id identifier branchName state { type } delegate { id } } } } }
 }"""
 
 DELEGATED_ISSUES_QUERY = """query DelegatedIssues($filter: IssueFilter!, $after: String) {
@@ -245,6 +251,7 @@ class LinearClient:
             "cardPriority": card_priority,
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
             "labels": _label_names(issue),
+            "blockedBy": _blocking_issues(issue["inverseRelations"]),
             "agentSessions": sorted(
                 (
                     {
@@ -260,6 +267,16 @@ class LinearClient:
                 reverse=True,
             ),
         }
+
+    def blockers(self, id_or_identifier: str) -> list:
+        """The issues that block this one, each with `delegatedToSelf`: whether this app is its delegate."""
+        data = self._graphql(ISSUE_BLOCKERS_QUERY, {"id": id_or_identifier})
+        if data["issue"] is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        return [
+            {**blocker, "delegatedToSelf": blocker["delegate"] == data["viewer"]["id"]}
+            for blocker in _blocking_issues(data["issue"]["inverseRelations"])
+        ]
 
     def issue_labels(self, id_or_identifier: str) -> list:
         return _label_names(self._graphql(ISSUE_LABELS_QUERY, {"id": id_or_identifier})["issue"])
@@ -519,6 +536,21 @@ def _issue_summary(issue: dict) -> dict:
         "stateType": issue["state"]["type"],
         "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]],
     }
+
+
+def _blocking_issues(relations: dict) -> list:
+    """The issues on the far side of the `blocks` relations that Linear files under the blocked issue's `inverseRelations`."""
+    return [
+        {
+            "id": n["issue"]["id"],
+            "identifier": n["issue"]["identifier"],
+            "gitBranchName": n["issue"]["branchName"],
+            "stateType": n["issue"]["state"]["type"],
+            "delegate": n["issue"]["delegate"]["id"] if n["issue"]["delegate"] else None,
+        }
+        for n in relations["nodes"]
+        if n["type"] == "blocks"
+    ]
 
 
 def _label_names(issue: dict) -> list:
