@@ -1,0 +1,18 @@
+{
+  "record": "<where the private configuration record lives, with its link>",
+  "app_slug": "<app-slug>",
+  "worker": "<worker>",
+  "gateway_home": "<home>",
+  "bin_dir": "<bin dir>",
+  "secret_source": "<secret source>",
+  "operator_only": "<operator-only credentials, or empty>",
+  "onepassword": false,
+  "sst_app": "<sst app>",
+  "deploy_step": "<deploy step>",
+  "ssh_account": "<account, or empty when nobody SSHs in>",
+  "ssh_hostname": "<ssh-hostname>",
+  "ssh_allowlist": "<where the SSH allowlist lives>",
+  "ssh_users": "<emails>",
+  "factory_checkout": "<factory checkout>",
+  "worker_checkouts": "<worker checkout paths>"
+}

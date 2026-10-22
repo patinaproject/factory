@@ -27,146 +27,54 @@ this runbook. It never lives in this repository. If the operator has none yet,
 ask them to create one and record this run's inputs in it, with no secret
 values.
 
+## Values
+
+Write this factory's values to a JSON file in your scratch directory. The
+keys are in
+[`agent-instructions.values.example.json`](agent-instructions.values.example.json),
+which holds placeholders only. The real file holds this factory's paths and
+names, so it never goes in this repository. Keep its contents in the private
+configuration record.
+
+A value may span lines. Its continuation lines carry their own indent, so the
+render keeps the line breaks the live block has. `worker` and `gateway_home`
+are the paths from the runbook's "Where each value lives" section, written out
+as the block should show them.
+
+Set these to an empty string or `false` to leave a part out:
+
+- `operator_only`, when no credential is operator-only.
+- `onepassword`, when the factory does not use [1Password](1password.md).
+- `ssh_account`, when nobody SSHs into the machine. The SSH lines and
+  `--ssh-users` then drop out. The other `ssh_*` values stay in the file, empty.
+
 ## Check
 
-All of these must hold:
+The block between the markers is rendered from
+[`agent-instructions.block.tmpl`](agent-instructions.block.tmpl) and the values
+file, and from nothing else. Never edit the live block by hand: change the
+template and render it.
 
-- `grep -c '^<!-- factory:begin -->$' ~/.claude/CLAUDE.md` and
-  `grep -c '^<!-- factory:end -->$' ~/.claude/CLAUDE.md` each print `1`.
-- The text between the markers equals the [block](#block) below with every
-  placeholder filled in from this run's values. No unfilled placeholder,
-  such as `<worker>` or `<app-slug>`, is left.
-- The block contains no secret value.
-
-If all of them hold, skip to [Verify](#verify).
-
-## Block
-
-Fill in each placeholder. `<worker>` and `<home>` are the paths from the
-runbook's "Where each value lives" section, written out in full.
-
-```markdown
-<!-- factory:begin -->
-## Factory machine
-
-This machine runs a Hermes software factory. Its private configuration
-record is <record location>. Read it before you change the machine's
-configuration, and update it in the same change.
-
-Keep the factory replicable. Every change to a factory environment also
-lands in the factory repository in the same change, as a runbook step,
-template, script, or check, so a fresh install reproduces it. A machine
-state the runbook cannot reproduce is a defect. Real values go only to the
-private record, never to the repository.
-
-### GitHub
-
-- Act on GitHub only as the factory's GitHub App, `<app-slug>[bot]`. Run
-  every `gh` command as `GH_CONFIG_DIR=<worker>/gh gh <command>`.
-- Never run `gh auth login`, never set `GH_TOKEN` or `GITHUB_TOKEN`, and
-  never ask the operator to sign in to GitHub.
-- Publish commits only with
-  `GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/push-signed`.
-  Never use `git push`.
-- One exception: a worker uploads images for pull requests with
-  `python3 <worker>/scripts/github-upload-image`. The gateway uploads them
-  with the operator's upload token. Never read, print, or use
-  `GITHUB_UPLOAD_TOKEN` yourself, never pass it to `gh`, and never upload
-  anything else through the broker.
-- `Resource not accessible by integration` means the App lacks a
-  permission. Report it to the operator. Do not switch identities.
-- The App cannot create linked branches, so `gh issue develop` fails with a
-  `createLinkedBranch` permission error. Derive the branch name with the
-  repository's issue-tracker rule instead, and create the branch from the
-  fetched default branch.
-
-### Tools
-
-- `gh` and the other tools setup installed live in <bin dir>. A
-  non-login shell can lack that directory on `PATH`, so call a tool by its
-  full path when the bare name is not found. Do not install a second copy.
-
-### Secrets
-
-- Hermes loads the factory's secrets from <secret source> when it starts.
-  Never print, copy, or move a secret, and never ask for one in chat. When
-  a new secret is needed, ask the operator to enter it in their own
-  terminal.
-- Never run `hermes config get` with `--raw`, and never run a secrets
-  helper such as `factory-secrets`, `worker-secrets`, or `proxy-token` by
-  hand. Each prints secret values. To check a secret, compare it in memory and print a
-  boolean, or list variable names only.
-- These credentials are for the operator only, and Hermes agents never
-  receive them: <operator-only credentials>.
-- Never run `op`, and never read the operator-only credentials, even when a
-  login shell puts an `op` wrapper on `PATH`.
-
-### Remote access and ingress
-
-- The factory's tunnel routes and Cloudflare Access applications are code in
-  <sst app>. <deploy step> deploys them. Never change Cloudflare in the
-  dashboard or with the `cloudflared` CLI. The running tunnel's routes are in
-  the `cloudflared` service log, under "Updated to new configuration".
-- People SSH in as `<account>` at `<ssh-hostname>` through Cloudflare Access
-  short-lived certificates, or with a key. sshd never accepts a password. Do
-  not turn password login back on.
-- One list says who may SSH in: the SSH allowlist in <sst app>. The machine
-  mirrors it in `/etc/ssh/authorized_principals/<account>`, one email local
-  part per line. Change both in the same change.
-- After any change to SSH, sharing, or the firewall, run
-  `python3 <factory checkout>/skills/setup-factory/scripts/check-host-exposure --ssh-users <emails>`.
-  Every line must start with `PASS`.
-
-### Privileged steps
-
-- You cannot answer a `sudo` password prompt. Put the privileged commands
-  in one script in your scratch directory, make it refuse a change that
-  could lock someone out, and ask the operator to run it with `sudo` in
-  their own terminal. Name the terminal and the exact command, then wait.
-
-### Factory processes
-
-- The worker profile `<worker>` owns the checkouts at
-  <worker checkout paths>. Change them only through a Kanban card.
-- The gateway runs as a service. Restart it only when the operator asks,
-  from a shell outside Hermes. The one other restarter is `watch-gateway`,
-  a launchd job that restarts a gateway whose secrets did not resolve. Leave
-  it running.
-- A merged factory change is not live until it is deployed. Follow the
-  setup-factory runbook's "Deploy a merged factory change" section.
-  `HERMES_HOME=<worker> python3 <worker>/scripts/check-install` lists what is out of
-  date.
-<!-- factory:end -->
+```sh
+python3 <repo>/skills/setup-factory/scripts/agent-block --values <values file>
 ```
 
-Leave out the "Secrets" line about operator-only credentials when the input
-names none. Leave out the `op` line when the factory does not use
-[1Password](1password.md). When nobody SSHs into the machine, leave out the
-two SSH lines and drop `--ssh-users` from the check command.
+It prints `PASS` when the live block equals the render, byte for byte. Otherwise
+it prints `FAIL` and a diff of the live block against the render, and exits 1.
+A missing file, a missing or doubled marker, and a missing or unknown value are
+also `FAIL`. If it prints `PASS`, skip to [Verify](#verify).
 
 ## Write the block
 
-Write the filled-in block to a file in your scratch directory, then run this.
-It replaces an existing block in place, or appends the block when the file has
-none, and keeps the file's other lines.
+This replaces the block between the markers, or appends it when the file has
+none. It keeps every other line, and it backs up `CLAUDE.md` first when it
+changes anything. Then it runs the check.
 
 ```sh
-python3 -I - <block file> <<'EOF'
-import pathlib, re, sys
-block = pathlib.Path(sys.argv[1]).read_text().strip() + "\n"
-target = pathlib.Path.home() / ".claude" / "CLAUDE.md"
-target.parent.mkdir(parents=True, exist_ok=True)
-text = target.read_text() if target.exists() else ""
-pattern = re.compile(r"^<!-- factory:begin -->$.*?^<!-- factory:end -->$\n?", re.M | re.S)
-if pattern.search(text):
-    text = pattern.sub(lambda _: block, text, count=1)
-else:
-    text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + block
-target.write_text(text)
-EOF
+python3 <repo>/skills/setup-factory/scripts/agent-block --values <values file> --write
 ```
 
-Run the [Check](#check) again.
+`--print` writes the render to stdout and changes nothing.
 
 ## Verify
 
