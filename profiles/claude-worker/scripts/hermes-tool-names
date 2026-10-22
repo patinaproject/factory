@@ -1,0 +1,19 @@
+"""Print the names Hermes registers for its terminal toolset, as a JSON list.
+
+Run by check-install with Hermes' own Python: `python3 -I -B hermes-tool-names <checkout> <site-packages>`.
+It puts the checkout and the installed environment's site-packages on sys.path and imports the two tool
+modules that register the terminal toolset. It never launches Hermes, so it never rebuilds or leases an
+environment, and HERMES_HOME must name a scratch directory.
+"""
+import json
+import sys
+
+sys.dont_write_bytecode = True
+checkout, site_packages = sys.argv[1:3]
+sys.path[:0] = [checkout, site_packages]
+
+import tools.process_registry  # noqa: E402,F401
+import tools.terminal_tool  # noqa: E402,F401
+from tools.registry import registry  # noqa: E402
+
+print(json.dumps(sorted(name for name in registry.get_all_tool_names() if registry.get_toolset_for_tool(name) == "terminal")))

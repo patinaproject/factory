@@ -4,9 +4,7 @@ import importlib.util
 import itertools
 import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -369,27 +367,6 @@ class NeedsInputTest(Hooked):
             with self.subTest(name=name):
                 self.assertIsNone(self.call(process_result(*line.split("\n"))))
         self.assertEqual(self.board.calls, [])
-
-
-class ToolNameTest(unittest.TestCase):
-    def test_the_watched_names_cover_the_tools_hermes_registers(self):
-        hermes = Path(os.environ.get("HERMES_AGENT_DIR", "~/.hermes/hermes-agent")).expanduser()
-        if not hermes.is_dir():
-            self.skipTest(f"No Hermes checkout at {hermes}; set HERMES_AGENT_DIR to run this test.")
-        scratch = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
-        with mock.patch.dict(os.environ, {"HERMES_HOME": scratch}), mock.patch.object(sys, "path", [str(hermes), *sys.path]):
-            try:
-                import tools.process_registry  # noqa: F401
-                import tools.terminal_tool  # noqa: F401
-                from tools.registry import registry
-            except ImportError as error:
-                self.skipTest(f"Hermes at {hermes} is not importable with this Python ({error}); run with its interpreter.")
-            names = set(registry.get_all_tool_names())
-            terminal_tools = {name for name in names if registry.get_toolset_for_tool(name) == "terminal"}
-        self.assertIn("terminal", terminal_tools)
-        self.assertTrue(terminal_tools & {"process", "process_manage"}, sorted(terminal_tools))
-        self.assertLessEqual(terminal_tools & {"process", "process_manage", "terminal"}, set(order.WATCHED_TOOLS))
 
 
 def blocker(identifier: str, state: str = "started") -> dict:

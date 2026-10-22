@@ -113,7 +113,8 @@ timeout`, or a tool error that says the call timed out, means the run is still
 going: call `wait` again at once. Do not call `kanban_heartbeat`, `sleep`, `poll`, or `gh` between waits. Hermes
 keeps the claim while the run's process lives and records the worker's
 activity itself, and `wait` returns the moment the process exits. Read the
-process output once it exits. It prints one JSON line.
+process output once it exits, with `wait` or `log`, never only from the `notify` completion
+message, because the `blocker-order` hook sees tool results and not that message. It prints one JSON line.
 
 - On success the line holds `session_id`, `resumed`, `worktree`, `branch`,
   `adopted`, `subtype`, `num_turns`, and `result`. `adopted` is null, or it

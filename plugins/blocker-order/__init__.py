@@ -2,8 +2,11 @@
 
 `claude-session` runs fenced from the board. When the issue's blockers have live cards, it starts no
 Claude run and prints one line, `{"waiting_on": [task id, ...]}`. This hook reads that line in the
-worker's `process_manage` or `terminal` tool result. It runs in the worker process, which holds the card's
-identity, so it can link each card as this card's parent and then block this card with kind
+worker's `terminal` tool result and in the `output` of its process tool's `wait` and `log` results. It
+reads nothing from `poll`, whose `output_preview` it ignores, and nothing from the `notify: true`
+completion message, so a worker that never calls `wait` or `log` shows the hook no result.
+
+The hook runs in the worker process, which holds the card's identity, so it can link each card as this card's parent and then block this card with kind
 `dependency`. Hermes holds the card in `todo` until every parent is `done` or `archived`. The hook then
 rewrites the result so the worker stops.
 
@@ -23,8 +26,10 @@ from typing import Any, Callable, Optional
 
 # Hermes renames the `process` tool to `process_manage` before it runs hooks (`_LEGACY_TOOL_ALIASES` in
 # `model_tools.py`), so a hook sees `process_manage`. Older Hermes passes `process`.
+# `check-install` reads both lists and alerts when Hermes registers none of PROCESS_TOOLS or no REQUIRED_TOOLS.
 PROCESS_TOOLS = ("process_manage", "process")
-WATCHED_TOOLS = (*PROCESS_TOOLS, "terminal")
+REQUIRED_TOOLS = ("terminal",)
+WATCHED_TOOLS = (*PROCESS_TOOLS, *REQUIRED_TOOLS)
 CYCLE_REFUSAL = "would create a cycle"
 # Hermes' turn-end guard looks for a kanban_block call in the transcript, not on the board. Without this,
 # it would push the worker to block a card that this hook already moved to todo.
@@ -71,7 +76,7 @@ def needs_input(output: str) -> Optional[str]:
 
 
 def whole_output(payload: dict, tool_name: str, args: Any, dispatch: Dispatch) -> str:
-    """`process wait` and `poll` keep only the last 2000 characters of the output and say so in `output_cut`,
+    """`process wait` keeps only the last 2000 characters of the output and says so in `output_cut`,
     so a long report loses its start. The log has the whole report line, so read that instead."""
     session = args.get("session_id") if isinstance(args, dict) else None
     if not payload.get("output_cut") or tool_name not in PROCESS_TOOLS or not session:
