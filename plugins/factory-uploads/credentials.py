@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import threading
 from pathlib import Path
 from typing import Callable
@@ -19,26 +20,39 @@ GATEWAY_ONLY = frozenset({
 })
 
 
-def worker_variable(name) -> str:
-    """A settings typo must not turn a token op into a way to read the upload token or an app credential."""
-    return name if isinstance(name, str) and name not in GATEWAY_ONLY else ""
+# The pattern check-install uses on the same manifest.
+DECLARED_NAME = re.compile(r"^\s*-\s*name:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", re.MULTILINE)
+
+
+def servable_names(manifest: Path) -> frozenset:
+    """The names the factory-secret-names manifest declares, less the gateway-only ones.
+
+    A missing manifest raises: serving nothing silently would fail every card with no cause.
+    """
+    return frozenset(DECLARED_NAME.findall(Path(manifest).read_text())) - GATEWAY_ONLY
+
+
+def worker_variable(name, servable: frozenset) -> str:
+    """A settings typo must not turn a token op into a way to read a secret no worker may hold."""
+    return name if isinstance(name, str) and name in servable else ""
 
 
 class GatewayCredentials:
     """Linear revokes every client credentials token of the app when a request asks for another scope set."""
 
     def __init__(
-        self, get_secret: Callable[[str], "str | None"], transport: dict, linear_path: Path, cache_home: Path,
+        self, get_secret: Callable[[str], "str | None"], transport: dict, linear_path: Path, cache_home: Path, manifest: Path,
         github_app=None,
     ):
         self._get_secret = get_secret
         self._github_app = github_app
         self._linear_path = Path(linear_path)
         self._cache_home = Path(cache_home)
-        self._proxy_env = worker_variable(transport.get("auth_token_env"))
+        servable = servable_names(manifest)
+        self._proxy_env = worker_variable(transport.get("auth_token_env"), servable)
         servers = transport.get("mcp_servers")
         self._mcp_envs = {
-            name: worker_variable(spec.get("token_env"))
+            name: worker_variable(spec.get("token_env"), servable)
             for name, spec in (servers.items() if isinstance(servers, dict) else ())
             if isinstance(spec, dict)
         }

@@ -21,6 +21,7 @@ from .github_app import GitHubApp
 
 PLATFORM = "factory_uploads"
 LINEAR_PLUGIN = Path("plugins") / "linear-agent-session" / "linear.py"
+SECRET_NAMES = Path("plugins") / "factory-secret-names" / "plugin.yaml"
 
 
 def factory_settings(config: dict) -> dict:
@@ -40,6 +41,7 @@ class FactoryUploadsAdapter(BasePlatformAdapter):
             lambda: get_scoped_secret(UPLOAD_TOKEN),
             credentials=GatewayCredentials(
                 get_scoped_secret, settings.get("claude_session") or {}, home / LINEAR_PLUGIN, home,
+                home / SECRET_NAMES,
                 github_app=GitHubApp.from_settings(settings.get("github")),
             ),
         )

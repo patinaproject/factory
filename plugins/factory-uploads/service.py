@@ -22,6 +22,7 @@ from factory_uploads.github_app import GitHubApp  # noqa: E402
 logger = logging.getLogger("factory_uploads.service")
 
 LINEAR_MODULE = Path(__file__).resolve().parent.parent / "linear.py"
+SECRET_NAMES = Path(__file__).resolve().parent / "secret-names.yaml"
 IDENTITY = ("BROKER_INFISICAL_CLIENT_ID", "BROKER_INFISICAL_CLIENT_SECRET")
 INFISICAL_TIMEOUT = 15
 INFISICAL_ATTEMPTS = 3
@@ -132,7 +133,7 @@ def make_broker(config: dict, secrets: dict) -> Broker:
         lambda: secrets.get(UPLOAD_TOKEN),
         resolve_repository_id=ids.__getitem__,
         credentials=GatewayCredentials(
-            secrets.get, config.get("claude_session") or {}, LINEAR_MODULE, home,
+            secrets.get, config.get("claude_session") or {}, LINEAR_MODULE, home, SECRET_NAMES,
             github_app=GitHubApp.from_settings(config.get("github")),
         ),
         socket_path=Path(config["socket"]),

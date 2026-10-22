@@ -11,7 +11,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-from tests.support import QuickServer
+from tests.support import QuickServer, secret_names_manifest
 
 from factory_uploads import broker as broker_module
 from factory_uploads import credentials as credentials_module
@@ -181,8 +181,13 @@ class BrokerContainmentTest(GitHubAppTestCase, unittest.IsolatedAsyncioTestCase)
     async def asyncSetUp(self):
         self.home = self.tmp / "home"
         self.home.mkdir()
+        manifest = self.tmp / "secret-names.yaml"
+        manifest.write_text(secret_names_manifest("EXAMPLE_PROXY_TOKEN"))
+        self.asked = []
+        self.secrets = {"EXAMPLE_PROXY_TOKEN": "proxy-FAKE"}
         credentials = credentials_module.GatewayCredentials(
-            lambda name: None, {}, self.tmp / "linear.py", self.home, github_app=self.app(),
+            lambda name: (self.asked.append(name), self.secrets.get(name))[1],
+            {"auth_token_env": "EXAMPLE_PROXY_TOKEN"}, self.tmp / "linear.py", self.home, manifest, github_app=self.app(),
         )
         self.broker = broker_module.Broker(
             self.home, [], lambda: None, credentials=credentials, socket_path=self.tmp / "b.sock",
@@ -225,6 +230,24 @@ class BrokerContainmentTest(GitHubAppTestCase, unittest.IsolatedAsyncioTestCase)
         audit = (self.home / "factory-uploads" / "log.jsonl").read_text()
         self.assertEqual([json.loads(line)["state"] for line in audit.splitlines()], ["error"])
         self.assert_contained(json.dumps(reply) + audit + "\n".join(logs.output))
+
+    async def test_the_allowlist_neither_blocks_the_github_token_nor_widens_what_a_token_op_serves(self):
+        reply = await self.ask("github_token")
+        self.assertEqual(reply, {"ok": True, "token": TOKEN, "expires_at": EXPIRES_AT})
+        self.assertEqual(await self.ask("proxy_token"), {"ok": True, "token": "proxy-FAKE", "expires_at": None})
+        self.assertEqual(self.asked, ["EXAMPLE_PROXY_TOKEN"])
+
+    async def test_a_settings_typo_naming_an_app_variable_serves_neither_key_nor_jwt(self):
+        manifest = self.tmp / "secret-names.yaml"
+        for name in ("GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_JWT"):
+            self.secrets[name] = "app-secret-FAKE"
+            credentials = credentials_module.GatewayCredentials(
+                self.secrets.get, {"auth_token_env": name, "mcp_servers": {"app": {"token_env": name}}},
+                self.tmp / "linear.py", self.home, manifest, github_app=self.app(),
+            )
+            self.assertIsNone(credentials.proxy_token())
+            self.assertIsNone(credentials.mcp_token("app"))
+            self.assertEqual(credentials.github_token()["access_token"], TOKEN)
 
 
 if __name__ == "__main__":

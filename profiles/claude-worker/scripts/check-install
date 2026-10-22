@@ -766,6 +766,7 @@ BROKER_FILES = {
     "factory_uploads/github_app.py": "plugins/factory-uploads/github_app.py",
     "factory_uploads/service.py": "plugins/factory-uploads/service.py",
     "factory_uploads/upload_token.py": "plugins/factory-uploads/upload_token.py",
+    "factory_uploads/secret-names.yaml": "plugins/factory-secret-names/plugin.yaml",
     "linear.py": "plugins/linear-agent-session/linear.py",
 }
 BROKER_KEYS = ("user", "group", "label", "lib", "socket", "home", "allowed_uids")
@@ -859,7 +860,9 @@ def check_broker_user(
             if info.st_uid != user.pw_uid or (gid is not None and info.st_gid != gid) or info.st_mode & 0o7777 != mode:
                 drifts.append(drift(f"{path} is not {config['user']}'s with mode {mode:04o}"))
 
-    blobs = {**commit.files("plugins/factory-uploads"), **commit.files("plugins/linear-agent-session/linear.py")}
+    blobs = {
+        **commit.files("plugins/factory-uploads"), **commit.files(SECRET_NAMES), **commit.files("plugins/linear-agent-session/linear.py"),
+    }
     for target, source in BROKER_FILES.items():
         installed = lib / target
         if installed.is_file() and installed.read_bytes() != commit.blob(blobs[source]):
