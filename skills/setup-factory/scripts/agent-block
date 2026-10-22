@@ -7,7 +7,7 @@ Setup part 17 owns the text between the `<!-- factory:begin -->` and
 install reproduces the live block byte for byte. With no flag, or with `--check`, the
 command compares the live block with the render and prints PASS or FAIL, with a diff
 on a difference. A marker inside a line of other text, such as a code span,
-is not a block. `--write` replaces the block in place, keeps every other line,
+is not a block, but a marker line with extra whitespace or a CR is refused. `--write` replaces the block in place, keeps every other line,
 and backs up CLAUDE.md first. `--print` writes the render to stdout.
 
 Template syntax: `{{name}}` takes a value, and `{{#name}}...{{/name}}` keeps
@@ -58,6 +58,9 @@ def render(template: str, values: dict) -> str:
 
 
 def marker_problem(lines: list[str]) -> str | None:
+    near = [n for n, line in enumerate(lines, 1) if line.strip() in (BEGIN, END) and line not in (BEGIN, END)]
+    if near:
+        return f"line {near[0]} holds a marker with leading or trailing whitespace or a carriage return; put each marker alone at the start of its line"
     begins, ends = lines.count(BEGIN), lines.count(END)
     if begins != 1 or ends != 1:
         return f"expected one {BEGIN} and one {END}, found {begins} and {ends}"
@@ -70,8 +73,8 @@ def check(config: Path, template: str, values: dict) -> list[tuple[bool, str]]:
     claude_md = config / "CLAUDE.md"
     if not claude_md.is_file():
         return [(False, f"{claude_md} is missing; write the block with --write")]
-    text = claude_md.read_text()
-    problem = marker_problem(text.splitlines())
+    text = claude_md.read_text(newline="")
+    problem = marker_problem(text.split("\n"))
     if problem:
         return [(False, f"{claude_md}: {problem}")]
     live = BLOCK.search(text).group(0)
@@ -87,10 +90,10 @@ def check(config: Path, template: str, values: dict) -> list[tuple[bool, str]]:
 def write(config: Path, template: str, values: dict) -> str:
     claude_md = config / "CLAUDE.md"
     block = render(template, values)
-    text = claude_md.read_text() if claude_md.exists() else ""
+    text = claude_md.read_text(newline="") if claude_md.exists() else ""
     if text.strip():
-        lines = text.splitlines()
-        has_marker_line = BEGIN in lines or END in lines
+        lines = text.split("\n")
+        has_marker_line = any(line.strip() in (BEGIN, END) for line in lines)
         problem = marker_problem(lines) if has_marker_line else None
         if problem:
             raise ValueError(f"{claude_md}: {problem}")
@@ -106,7 +109,7 @@ def write(config: Path, template: str, values: dict) -> str:
         backup_path = claude_md.with_name(f"CLAUDE.md.bak-{time.strftime('%Y%m%d%H%M%S')}")
         shutil.copy2(claude_md, backup_path)
         backup = f"; backup at {backup_path}"
-    claude_md.write_text(new)
+    claude_md.write_text(new, newline="")
     return f"wrote the factory block{backup}"
 
 

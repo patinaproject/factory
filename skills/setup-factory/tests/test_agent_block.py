@@ -139,6 +139,30 @@ class FileTest(unittest.TestCase):
         self.assertEqual(self.claude_md.read_text(), f"{notes}\n{self.block}")
         self.assertEqual(self.failures(), [])
 
+    def near_miss_blocks(self) -> dict[str, str]:
+        stale = self.block.replace("Never use `git push`", "Never use `git pull`")
+        b, e = agent_block.BEGIN, agent_block.END
+        return {
+            "indented": stale.replace(b, "  " + b).replace(e, "  " + e),
+            "trailing spaces": stale.replace(b, b + " ").replace(e, e + " "),
+            "crlf": stale.replace("\n", "\r\n"),
+        }
+
+    def test_write_refuses_a_real_block_whose_markers_are_not_exact(self) -> None:
+        for name, text in self.near_miss_blocks().items():
+            with self.subTest(name):
+                self.claude_md.write_bytes(f"notes\n{text}".encode())
+                before = self.claude_md.read_bytes()
+                with self.assertRaises(ValueError):
+                    agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
+                self.assertEqual(self.claude_md.read_bytes(), before)
+
+    def test_check_fails_a_real_block_whose_markers_are_not_exact(self) -> None:
+        for name, text in self.near_miss_blocks().items():
+            with self.subTest(name):
+                self.claude_md.write_bytes(f"notes\n{text}".encode())
+                self.assertEqual(len(self.failures()), 1)
+
     def test_write_creates_the_file(self) -> None:
         agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
         self.assertEqual(self.claude_md.read_text(), self.block)
