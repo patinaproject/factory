@@ -48,8 +48,11 @@ def missing_from_commits(commits: list[dict[str, str]], body: str, repo: str) ->
     in_body = card_branch.closes(body, repo)
     return [
         f"Commit {commit['sha']} closes {ref} when it merges, but the body has no `Closes {ref}` line. "
-        f"Reword the commit so it does not close {ref} (for example `feat` or `refactor` instead of `fix`), "
-        f"or close {ref} in the body."
+        f"If this pull request completes {ref}, close it in the body. Otherwise the commit cannot be reworded, "
+        f"because it is published and push-signed only moves a branch forward. Publish the same tree as one "
+        f"new commit on a new branch: `git switch -c <new-branch> origin/main`, `git merge --squash <this-branch>`, "
+        f"commit it with a type that does not close {ref} (`feat` or `refactor`) and `Part of {ref}` in the "
+        f"message, run push-signed, open a pull request from the new branch, and close this one."
         for commit in commits
         for ref in sorted(title_closes(commit["message"], repo) - in_body, key=lambda ref: int(ref[1:]))
     ]

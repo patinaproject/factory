@@ -97,6 +97,15 @@ class CheckTitleClosesTest(unittest.TestCase):
         self.assertIn("#177", output)
         self.assertNotIn("#5 ", output)
 
+    def test_a_published_commit_error_names_the_recovery_push_signed_supports(self) -> None:
+        code, output = self.check("feat: #177 a", "Part of #177", commits=[("a24b147", "fix: #177 tweak")])
+
+        self.assertEqual(code, 1)
+        self.assertIn("push-signed", output)
+        self.assertIn("git switch -c <new-branch> origin/main", output)
+        self.assertIn("git merge --squash", output)
+        self.assertNotIn("Reword the commit", output)
+
     def test_a_fix_commit_for_an_issue_the_body_closes_passes(self) -> None:
         self.assertEqual(self.check("feat: #177 a", "Closes #177", commits=[("a24b147", "fix: #177 tweak")])[0], 0)
 

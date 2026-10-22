@@ -47,6 +47,13 @@ SYSTEM_PROMPT = (
     "not change, such as a timeout, run `gh run rerun <run-id> --failed` once for that run. Wait for the "
     "new run with `wait-for-checks` before you judge the ready gate. When a re-run fails again, stop, "
     "and make the first line of your final message `Needs input:` followed by both attempts' URLs.\n\n"
+    "A commit message closes an issue when its type is `fix` (`fix: #12 ...`) or it says `Closes #12`, and a "
+    "squash merge carries every commit message. Before your first commit, decide whether the pull request "
+    "completes each issue it names. When it completes the issue, close it in the body with `Closes #<n>`. When "
+    "it addresses only part of the issue, write `Part of #<n>` in the body and give every commit a type that "
+    "does not close it, such as `feat` or `refactor`, because `fix` is a closing keyword. push-signed cannot "
+    "reword a published commit. A hook refuses a push-signed call whose unpublished commits close an issue "
+    "the body does not, and tells you how to rewrite them.\n\n"
     "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
     "shows its observable result, such as rendered command output or a probe. Run "
     f"`python3 {(SCRIPTS / 'github-upload-image').resolve()} <file>...` on the images, then paste each `<img>` tag it "
@@ -1592,6 +1599,21 @@ class ClaudeSessionTest(GitFixture):
             input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status"}}),
         )
         self.assertEqual((refused.returncode, allowed.returncode), (2, 0))
+
+    def test_settings_register_the_commit_closing_guard_beside_the_ci_wait_guard(self) -> None:
+        self.run_session()
+
+        commands = [hook["command"] for hook in self.claude_call()["settings"]["content"]["hooks"]["PreToolUse"][0]["hooks"]]
+        self.assertEqual([command.rsplit("/", 1)[1].rstrip("'") for command in commands],
+                         ["guard-ci-wait", "guard-commit-closes"])
+
+    def test_the_system_prompt_tells_the_worker_to_choose_closing_before_its_first_commit(self) -> None:
+        self.run_session()
+
+        argv = self.claude_call()["argv"]
+        system = argv[argv.index("--append-system-prompt") + 1]
+        self.assertIn("`Part of #<n>`", system)
+        self.assertIn("`fix` is a closing keyword", system)
 
     def test_signal_mid_run_removes_the_settings_file_and_ends_claude(self) -> None:
         # Without the start hook, as when hooks are disabled, the file stays until claude-session removes it.
