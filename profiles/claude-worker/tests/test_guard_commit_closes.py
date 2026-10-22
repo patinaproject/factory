@@ -4,14 +4,17 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 from tests.support import SCRIPTS, GitFixture, git, with_interpreter
 
 REPO = "example-org/example-repo"
 
 FAKE_GH = """#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 args = sys.argv[1:]
+if os.environ.get("FAKE_GH_SLOW"):
+    time.sleep(float(os.environ["FAKE_GH_SLOW"]))
 if os.environ.get("FAKE_GH_DOWN"):
     sys.stderr.write("gh: connection refused\\n")
     sys.exit(1)
@@ -39,8 +42,8 @@ class GuardCommitClosesTest(GitFixture):
         git(self.tree, "commit", "-q", "-m", message)
 
     def guard(self, command: str = "python3 /w/scripts/push-signed", body: str | None = None,
-              gh_down: bool = False, tool: str = "Bash") -> subprocess.CompletedProcess:
-        env = {"PATH": os.environ["PATH"], "GH_BIN": str(self.gh)}
+              gh_down: bool = False, tool: str = "Bash", extra_env: dict | None = None) -> subprocess.CompletedProcess:
+        env = {"PATH": os.environ["PATH"], "GH_BIN": str(self.gh), **(extra_env or {})}
         if body is not None:
             env["FAKE_PR_BODY"] = body
         if gh_down:
@@ -107,3 +110,61 @@ class GuardCommitClosesTest(GitFixture):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("connection refused", result.stderr)
+
+    def test_a_local_merge_of_the_default_branch_does_not_count_the_commits_it_brought_in(self) -> None:
+        self.commit("feat: #177 published slice", "published")
+        git(self.tree, "push", "-q", "origin", "HEAD:refs/heads/275-example")
+        self.push_upstream_commit("fix: #50 other work (#51)")
+        git(self.tree, "fetch", "-q", "origin")
+        git(self.tree, "merge", "-q", "--no-edit", "origin/main")
+
+        self.assertEqual(self.guard(body="Part of #177").returncode, 0)
+
+    def test_a_commit_before_a_local_merge_is_refused_with_advice_that_keeps_the_merge(self) -> None:
+        self.commit("feat: #177 published slice", "published")
+        git(self.tree, "push", "-q", "origin", "HEAD:refs/heads/275-example")
+        self.commit("fix: #177 next slice", "next")
+        self.push_upstream_commit("fix: #50 other work (#51)")
+        git(self.tree, "fetch", "-q", "origin")
+        git(self.tree, "merge", "-q", "--no-edit", "origin/main")
+
+        result = self.guard(body="Part of #177")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("#177", result.stderr)
+        self.assertNotIn("#50", result.stderr)
+        self.assertNotIn("reset --soft", result.stderr)
+        self.assertIn("--rebase-merges", result.stderr)
+
+    def test_a_slow_github_refuses_within_the_time_limit(self) -> None:
+        self.commit("fix: #177 first slice")
+        started = time.monotonic()
+
+        result = self.guard(body="Part of #177", extra_env={"FAKE_GH_SLOW": "30", "GUARD_COMMIT_CLOSES_SECONDS": "2"})
+
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("time", result.stderr)
+
+    def test_only_a_call_that_runs_push_signed_publishes(self) -> None:
+        self.commit("fix: #177 first slice")
+        publishing = [
+            "python3 /w/scripts/push-signed",
+            "python3 -I /w/scripts/push-signed",
+            "GH_CONFIG_DIR=/x python3 /w/scripts/push-signed",
+            "GH_CONFIG_DIR=/x python3 -I /w/scripts/push-signed",
+            "cd /w && python3 /w/scripts/push-signed",
+            "/usr/bin/python3 /w/scripts/push-signed",
+            "env GH_CONFIG_DIR=/x python3 /w/scripts/push-signed",
+        ]
+        ignored = [
+            "grep push-signed README.md",
+            "cat /w/scripts/push-signed",
+            "git commit -m 'document push-signed'",
+            "git commit -m 'run python3 /w/scripts/push-signed'",
+            "echo python3 push-signed",
+        ]
+        for command in publishing:
+            self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 2, command)
+        for command in ignored:
+            self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 0, command)
