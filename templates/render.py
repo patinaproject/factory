@@ -279,6 +279,10 @@ def archive_card_command(home: Path) -> str:
     return f"python3 {shlex.quote(str(home / 'profiles' / 'claude-worker' / 'scripts' / 'archive_card.py'))}"
 
 
+def link_blockers_command(home: Path) -> str:
+    return f"python3 {shlex.quote(str(home / 'profiles' / 'claude-worker' / 'scripts' / 'link_blockers.py'))}"
+
+
 def triage_card_flags(repositories: list) -> str:
     return "\n".join(f"- `{repo['full_name']}`: `{_workspace_flag(repo)}`" for repo in repositories)
 
@@ -405,6 +409,7 @@ def build_routes(settings: Any) -> dict:
                     "card_branch": card_branch_command(hermes_home(), config["github_login"]),
                     "triage_unblock": triage_unblock_section(),
                     "archive_card": archive_card_command(hermes_home()),
+                    "link_blockers": link_blockers_command(hermes_home()),
                     "triage_resume": triage_resume_section(),
                     "triage_inbox": triage_inbox_section(config),
                     "delegation_gate": delegation_gate_section(),

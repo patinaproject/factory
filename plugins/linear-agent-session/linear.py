@@ -69,6 +69,8 @@ ISSUE_QUERY = """query Issue($id: String!) {
     labels { nodes { name } }
     attachments { nodes { url sourceType } }
     agentSessions(first: 20) { nodes { id status createdAt appUser { id } creator { id } } }
+    relations(first: 50) { nodes { type relatedIssue { id identifier branchName state { type } } } }
+    inverseRelations(first: 50) { nodes { type issue { id identifier branchName state { type } } } }
   }
 }"""
 
@@ -245,6 +247,8 @@ class LinearClient:
             "cardPriority": card_priority,
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
             "labels": _label_names(issue),
+            "blockedBy": _blocking_issues(issue["inverseRelations"], "issue"),
+            "blocks": _blocking_issues(issue["relations"], "relatedIssue"),
             "agentSessions": sorted(
                 (
                     {
@@ -519,6 +523,21 @@ def _issue_summary(issue: dict) -> dict:
         "stateType": issue["state"]["type"],
         "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]],
     }
+
+
+def _blocking_issues(relations: dict, side: str) -> list:
+    """The issues on the far side of this issue's `blocks` relations, which Linear files under `relations` for
+    the blocker and `inverseRelations` for the blocked issue."""
+    return [
+        {
+            "id": n[side]["id"],
+            "identifier": n[side]["identifier"],
+            "gitBranchName": n[side]["branchName"],
+            "stateType": n[side]["state"]["type"],
+        }
+        for n in relations["nodes"]
+        if n["type"] == "blocks"
+    ]
 
 
 def _label_names(issue: dict) -> list:

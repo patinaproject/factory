@@ -532,6 +532,22 @@ class IssueTest(unittest.TestCase):
                         {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
                     ]
                 },
+                "relations": {
+                    "nodes": [
+                        {"type": "blocks", "relatedIssue": {"id": "uuid-b2", "identifier": "ABC-125", "branchName": "abc-125-later",
+                                                            "state": {"type": "unstarted"}}},
+                        {"type": "related", "relatedIssue": {"id": "uuid-r", "identifier": "ABC-130", "branchName": "abc-130-rel",
+                                                             "state": {"type": "started"}}},
+                    ]
+                },
+                "inverseRelations": {
+                    "nodes": [
+                        {"type": "blocks", "issue": {"id": "uuid-b1", "identifier": "ABC-122", "branchName": "abc-122-first",
+                                                     "state": {"type": "started"}}},
+                        {"type": "duplicate", "issue": {"id": "uuid-d", "identifier": "ABC-131", "branchName": "abc-131-dup",
+                                                        "state": {"type": "started"}}},
+                    ]
+                },
                 "agentSessions": {
                     "nodes": [
                         {"id": "s-old", "status": "complete", "createdAt": "2026-01-01T00:00:00.000Z",
@@ -564,6 +580,12 @@ class IssueTest(unittest.TestCase):
                 "labels": ["bug", "ready-for-agent"],
                 "attachments": [
                     {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
+                ],
+                "blockedBy": [
+                    {"id": "uuid-b1", "identifier": "ABC-122", "gitBranchName": "abc-122-first", "stateType": "started"}
+                ],
+                "blocks": [
+                    {"id": "uuid-b2", "identifier": "ABC-125", "gitBranchName": "abc-125-later", "stateType": "unstarted"}
                 ],
                 "agentSessions": [
                     {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1",

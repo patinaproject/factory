@@ -56,7 +56,8 @@ ISSUE_SCHEMA = {
         "Read the Linear issue named by `issue` (UUID or ABC-123). Reads as the agent app and returns "
         "id, identifier, title, url, gitBranchName, priority, priorityName, "
         "cardPriority (the Kanban card priority for this issue), "
-        "state, stateType, delegate (the delegate's user ID, or null), labels (names), attachments, and agentSessions "
+        "state, stateType, delegate (the delegate's user ID, or null), labels (names), attachments, "
+        "blockedBy and blocks (each issue's id, identifier, gitBranchName, stateType), and agentSessions "
         "(id, status, createdAt, appUserId, creatorId (null when no person opened it); newest first)."
     ),
     "parameters": ISSUE_PARAMETERS,

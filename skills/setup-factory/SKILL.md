@@ -1562,6 +1562,18 @@ each check. Report each result.
 28. No more than `triage.max_running` cards on the `triage` board run at
     once, and the triage card's run never pushes a branch or opens a pull
     request.
+29. Delegate two throwaway issues in a repository that has no real work
+    queued, where B is blocked by A in Linear. The `blocks` relation shows on
+    both. Delegate B first: B's card is in `todo` with A's card absent and no
+    worker run, because A has no card yet and the command links nothing.
+    Delegate A: `hermes kanban show <B card> --json` lists A's card as a
+    parent, and B stays in `todo`. Merge A's pull request: A's card is `done`,
+    B's card moves to `ready` through a `promoted` event, and B's worker
+    branches from a default branch that holds A's merge. Delegate A and B in
+    the other order too: B's card is created in `todo` with A's card as its
+    parent. An issue whose blocker is not delegated runs at once, and its
+    worker's blocker gate decides. Two issues that block each other get no
+    link, and the session of the second gets one `thought` naming the cycle.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate
