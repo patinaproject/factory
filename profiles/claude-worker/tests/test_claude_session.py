@@ -69,6 +69,7 @@ MCP_SERVERS = {
     "sentry": {"url": "https://mcp.sentry.dev/mcp?skills=inspect", "token_env": "EXAMPLE_SENTRY_TOKEN", "scheme": "Sentry-Bearer"},
     "posthog": {"url": "https://mcp.posthog.com/mcp", "token_env": "EXAMPLE_POSTHOG_KEY", "headers": {"x-posthog-read-only": "true"}},
 }
+TOKEN_PREFIXES = ("ghp_", "gho_", "ghs_", "github_pat_", "sntrys_", "lin_api_", "xoxb-", "sk-")
 DEFAULT_ENTRY = (
     "Work Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) in example-org/example-repo "
     "on branch abc-123-fix. First start the issue through this repository's own issue-start workflow, "
@@ -1398,6 +1399,19 @@ class ClaudeSessionTest(GitFixture):
                     {"url": "https://mcp.example/mcp?scope=Token%20abc"},
                 )
             ),
+            *(
+                ({"sentry": {**sentry, "url": url}}, "claude_session.mcp_servers.sentry.url must hold no userinfo; mcp-headers sends the token as Authorization")
+                for url in (
+                    "https://user:pw@mcp.example/mcp", "https://user@mcp.example/mcp", "https://:pw@mcp.example/mcp",
+                )
+            ),
+            *(
+                ({"sentry": {**sentry, **changes}}, "claude_session.mcp_servers.sentry must hold no known token prefix in a header value or URL query value; mcp-headers sends the token")
+                for changes in (
+                    *({"headers": {"x-org": f"{prefix}EXAMPLE"}} for prefix in TOKEN_PREFIXES),
+                    *({"url": f"https://mcp.example/mcp?org={prefix}EXAMPLE"} for prefix in TOKEN_PREFIXES),
+                )
+            ),
         ):
             with self.subTest(value=value):
                 self.settings = self.write_settings([self.repository], {"mcp_servers": value})
@@ -1405,6 +1419,31 @@ class ClaudeSessionTest(GitFixture):
                 self.assertEqual(self.run_session(), (2, {"error": error}))
                 self.assertFalse(self.log.exists())
         self.assertEqual(self.broker.requests, [])
+
+    def test_the_live_settings_shapes_are_not_refused(self) -> None:
+        servers = {
+            "sentry": {"url": "https://mcp.sentry.dev/mcp?skills=inspect", "token_env": "EXAMPLE_SENTRY_TOKEN", "scheme": "Sentry-Bearer"},
+            "posthog": {
+                "url": "https://mcp.posthog.com/mcp?features=flags,insights", "token_env": "EXAMPLE_POSTHOG_KEY",
+                "headers": {"x-posthog-read-only": "true"},
+            },
+            "github": {
+                "url": "https://api.githubcopilot.com/mcp/", "token_env": "EXAMPLE_GITHUB_TOKEN",
+                "headers": {"X-MCP-Toolsets": "repos,issues,pull_requests", "X-MCP-Readonly": "true"},
+            },
+        }
+        self.settings = self.write_settings([self.repository], {"mcp_servers": servers})
+        self.broker.answers["status"] = [{"ok": True, "mcp_tokens_present": {name: True for name in servers}}]
+
+        code, _ = self.run_session()
+
+        self.assertEqual(code, 0)
+        argv = self.claude_call()["argv"]
+        built = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
+        self.assertEqual(
+            {name: (built[name]["url"], built[name].get("headers")) for name in servers},
+            {name: (spec["url"], spec.get("headers")) for name, spec in servers.items()},
+        )
 
     def test_a_leftover_sentry_token_env_is_refused(self) -> None:
         self.settings = self.write_settings([self.repository], {"sentry_token_env": "SENTRY_ACCESS_TOKEN"})
