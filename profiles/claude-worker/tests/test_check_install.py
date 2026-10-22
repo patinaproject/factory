@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from tests.support import SCRIPTS, git, with_interpreter
+from tests.support import REPO, SCRIPTS, git, with_interpreter
 
 ROUTE_KEY = "platforms.webhook.extra.routes.linear"
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
@@ -1531,6 +1531,126 @@ class CheckMcpServersTest(unittest.TestCase):
 
         self.assertEqual(self.check({}), [])
         self.assertEqual([str(d) for d in check_install.check_mcp_servers(None, self.worker)], [])
+
+
+FAKE_REGISTRY = """import json
+from pathlib import Path
+registered = json.loads((Path(__file__).parent / "registered.json").read_text())
+
+
+class Registry:
+    def get_all_tool_names(self):
+        return list(registered)
+
+    def get_toolset_for_tool(self, name):
+        return registered[name]
+
+
+registry = Registry()
+"""
+FAKE_TERMINAL_TOOL = """import json, os
+from pathlib import Path
+import fake_dependency
+(Path(__file__).parent / "seen.json").write_text(json.dumps({
+    "hermes_home": os.environ["HERMES_HOME"],
+    "no_bytecode": os.environ.get("PYTHONDONTWRITEBYTECODE"),
+}))
+"""
+PLUGIN = REPO / "plugins" / "blocker-order" / "__init__.py"
+
+
+class CheckHermesToolsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "root"
+        self.tree = self.root / "hermes-agent"
+        tools = self.tree / "tools"
+        tools.mkdir(parents=True)
+        for name, source in (("__init__", ""), ("registry", FAKE_REGISTRY), ("process_registry", ""),
+                             ("terminal_tool", FAKE_TERMINAL_TOOL)):
+            (tools / f"{name}.py").write_text(source)
+        self.register({"terminal": "terminal", "process_manage": "terminal", "read_file": "file"})
+        python = self.root / "tools" / "python-9" / "bin"
+        python.mkdir(parents=True)
+        (python / "python3").symlink_to(sys.executable)
+        (self.root / "tools" / "facts.json").write_text(json.dumps({"packages": {"python": {"entry": "python-9"}}}))
+        site = self.root / "installs" / "key" / "environments" / "env" / "venv" / "lib" / "python9.9" / "site-packages"
+        site.mkdir(parents=True)
+        (site / "fake_dependency.py").write_text("")
+        (self.root / "installs" / "key" / "facts.json").write_text(
+            json.dumps({"packages": {"venv": {"environment": str(site.parents[2])}}}))
+        self.plugin = self.tmp / "worker" / "plugins" / "blocker-order" / "__init__.py"
+        self.plugin.parent.mkdir(parents=True)
+        shutil.copy(PLUGIN, self.plugin)
+
+    def register(self, tools: dict) -> None:
+        (self.tree / "tools" / "registered.json").write_text(json.dumps(tools))
+
+    def check(self) -> list:
+        return [str(d) for d in check_install.check_hermes_tools(self.root, self.plugin)]
+
+    def test_a_hermes_that_registers_the_watched_tools_is_silent(self) -> None:
+        self.assertEqual(self.check(), [])
+
+    def test_the_legacy_process_name_alone_still_counts(self) -> None:
+        self.register({"terminal": "terminal", "process": "terminal"})
+
+        self.assertEqual(self.check(), [])
+
+    def test_a_renamed_process_tool_names_the_missing_tool(self) -> None:
+        self.register({"terminal": "terminal", "process_run": "terminal", "read_file": "file"})
+
+        self.assertEqual(self.check(), [
+            "hermes tool blocker-order: Hermes registers none of process_manage, process, which the plugin watches; "
+            "its terminal toolset registers process_run, terminal (PROCESS_TOOLS in plugins/blocker-order/__init__.py)",
+        ])
+
+    def test_a_missing_terminal_tool_is_named(self) -> None:
+        self.register({"process_manage": "terminal"})
+
+        self.assertEqual(self.check(), [
+            "hermes tool blocker-order: Hermes registers no terminal, which the plugin watches; "
+            "its terminal toolset registers process_manage (REQUIRED_TOOLS in plugins/blocker-order/__init__.py)",
+        ])
+
+    def test_the_probe_runs_in_a_scratch_home_and_writes_no_bytecode(self) -> None:
+        self.check()
+
+        seen = json.loads((self.tree / "tools" / "seen.json").read_text())
+        self.assertNotIn(seen["hermes_home"], {str(self.root), str(self.tmp / "worker")})
+        self.assertFalse(Path(seen["hermes_home"]).exists())
+        self.assertEqual(seen["no_bytecode"], "1")
+        self.assertEqual(list(self.tree.rglob("__pycache__")), [])
+        self.assertEqual(list((self.tmp / "worker").rglob("__pycache__")), [])
+
+    def test_a_hermes_that_cannot_be_imported_gives_a_row(self) -> None:
+        (self.tree / "tools" / "terminal_tool.py").write_text("raise ImportError('no module named fake')\n")
+
+        [row] = self.check()
+        self.assertTrue(row.startswith("hermes tool blocker-order: cannot read Hermes' tool names: "), row)
+        self.assertIn("no module named fake", row)
+
+    def test_a_missing_interpreter_or_environment_gives_a_row(self) -> None:
+        (self.root / "tools" / "facts.json").unlink()
+        self.assertEqual(self.check(), [
+            f"hermes tool blocker-order: cannot read Hermes' tool names: no Hermes Python in {self.root / 'tools' / 'facts.json'}",
+        ])
+        (self.root / "tools" / "facts.json").write_text(json.dumps({"packages": {"python": {"entry": "python-9"}}}))
+        (self.root / "installs" / "key" / "facts.json").unlink()
+        [row] = self.check()
+        self.assertTrue(row.startswith("hermes tool blocker-order: cannot read Hermes' tool names: no Hermes environment"), row)
+
+    def test_a_missing_checkout_gives_a_row(self) -> None:
+        shutil.rmtree(self.tree)
+
+        [row] = self.check()
+        self.assertTrue(row.startswith("hermes tool blocker-order: cannot read Hermes' tool names: no Hermes checkout"), row)
+
+    def test_without_the_installed_plugin_nothing_runs(self) -> None:
+        self.plugin.unlink()
+
+        self.assertEqual(self.check(), [])
 
 
 class CheckServicesTest(unittest.TestCase):

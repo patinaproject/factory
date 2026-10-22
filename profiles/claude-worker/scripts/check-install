@@ -47,6 +47,12 @@ LaunchDaemon, the root home's socket link, that it holds the GitHub App key
 and the factory user cannot read it, judged by ownership and mode only, and
 that the gateway runs no broker of its own.
 
+It also checks that Hermes still registers the tools the installed blocker-order plugin watches, so a
+Hermes upgrade that renames one trips the alert. It runs hermes-tool-names with the store Python on the
+checkout and the selected environment's site-packages, with a scratch HERMES_HOME and no bytecode, and
+never through the `hermes` launcher, which can rebuild environments. It prints a row when Hermes cannot be
+imported. HERMES_AGENT_DIR overrides the checkout, which defaults to <root home>/hermes-agent.
+
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd and broker user checks at
 another file system root and launchctl, for tests.
 """
@@ -56,6 +62,7 @@ import argparse
 import concurrent.futures
 import glob
 import grp
+import importlib.util
 import json
 import os
 import plistlib
@@ -1157,6 +1164,99 @@ def check_mcp_servers(settings, worker: Path) -> list:
     return drifts
 
 
+HERMES_TOOLS_SECONDS = 60
+HERMES_TOOL_NAMES = Path(__file__).resolve().parent / "hermes-tool-names"
+BLOCKER_ORDER = "plugins/blocker-order/__init__.py"
+
+
+def hermes_tool_names(root: Path) -> list:
+    """The terminal toolset's registered names, read from the installed Hermes without writing to it.
+
+    Runs the store Python on the checkout and the selected environment's site-packages directly, never
+    through the `hermes` launcher, which leases and can rebuild environments. HERMES_HOME is a scratch
+    directory and bytecode is off. Raises Refusal with the reason when it cannot answer.
+    """
+    python_facts = root / "tools" / "facts.json"
+    if not python_facts.is_file():
+        raise Refusal(f"no Hermes Python in {python_facts}")
+    entry = (json_file(python_facts).get("packages", {}).get("python") or {}).get("entry")
+    python = root / "tools" / str(entry) / "bin" / "python3"
+    if not entry or not python.is_file():
+        raise Refusal(f"no Hermes Python in {python_facts}")
+    checkout = Path(os.environ.get("HERMES_AGENT_DIR") or root / "hermes-agent")
+    if not (checkout / "tools" / "registry.py").is_file():
+        raise Refusal(f"no Hermes checkout at {checkout}")
+    environments = [
+        (json_file(facts).get("packages", {}).get("venv") or {}).get("environment")
+        for facts in sorted((root / "installs").glob("*/facts.json"))
+    ]
+    site = [path for env in environments if env for path in sorted(Path(env).glob("lib/python*/site-packages"))]
+    if len(site) != 1:
+        raise Refusal(f"no Hermes environment: {len(site)} selected under {root / 'installs'}")
+    with tempfile.TemporaryDirectory() as scratch:
+        try:
+            proc = subprocess.run(
+                [str(python), "-I", "-B", str(HERMES_TOOL_NAMES), str(checkout), str(site[0])],
+                env={"PATH": os.environ.get("PATH", ""), "HERMES_HOME": os.path.join(scratch, "home"), "PYTHONDONTWRITEBYTECODE": "1"},
+                cwd=scratch, capture_output=True, text=True, timeout=HERMES_TOOLS_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            raise Refusal(f"printed nothing within {HERMES_TOOLS_SECONDS} s") from None
+    if proc.returncode != 0:
+        lines = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
+        raise Refusal(lines[-1] if lines else f"exited {proc.returncode}")
+    try:
+        names = json.loads(proc.stdout)
+    except ValueError:
+        names = None
+    if not isinstance(names, list):
+        raise Refusal(f"exited {proc.returncode} without a list of names")
+    return names
+
+
+def json_file(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        raise Refusal(f"cannot read {path}: {error}") from None
+    return data if isinstance(data, dict) else {}
+
+
+def watched_tools(plugin: Path) -> tuple:
+    spec = importlib.util.spec_from_file_location("blocker_order_installed", plugin)
+    module = importlib.util.module_from_spec(spec)
+    sys.dont_write_bytecode = True
+    spec.loader.exec_module(module)
+    return module.PROCESS_TOOLS, module.REQUIRED_TOOLS
+
+
+def check_hermes_tools(root: Path, plugin: Path) -> list:
+    """Alert when Hermes no longer registers a tool the installed blocker-order plugin watches."""
+    if not plugin.is_file():
+        return []
+    try:
+        process_tools, required = watched_tools(plugin)
+        registered = hermes_tool_names(root)
+    except Refusal as error:
+        return [Drift("hermes tool", "blocker-order", f"cannot read Hermes' tool names: {error}")]
+    except Exception as error:
+        return [Drift("hermes tool", "blocker-order", f"cannot read Hermes' tool names: {type(error).__name__}: {error}")]
+    have = f"its terminal toolset registers {', '.join(registered) or 'nothing'}"
+    drifts = []
+    if not set(process_tools) & set(registered):
+        drifts.append(Drift(
+            "hermes tool", "blocker-order",
+            f"Hermes registers none of {', '.join(process_tools)}, which the plugin watches; {have} (PROCESS_TOOLS in {BLOCKER_ORDER})",
+        ))
+    for name in required:
+        if name not in registered:
+            drifts.append(Drift(
+                "hermes tool", "blocker-order",
+                f"Hermes registers no {name}, which the plugin watches; {have} (REQUIRED_TOOLS in {BLOCKER_ORDER})",
+            ))
+    return drifts
+
+
 def homes() -> tuple:
     if not os.environ.get("HERMES_HOME"):
         raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
@@ -1236,6 +1336,7 @@ def main() -> int:
             ),
             *check_model_tiers(settings, worker),
             *check_mcp_servers(settings, worker),
+            *check_hermes_tools(root, worker / "plugins" / "blocker-order" / "__init__.py"),
         ]
         if sys.platform == "darwin":
             drifts.extend(check_services(launchd_root, launchctl))
