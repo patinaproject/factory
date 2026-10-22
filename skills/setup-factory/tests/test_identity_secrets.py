@@ -8,7 +8,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from .test_factory_secrets import CLIENT_ID, CLIENT_SECRET, TOKEN, WRAPPER, FakeInfisical
+from .test_factory_secrets import CLIENT_ID, CLIENT_SECRET, TOKEN, WRAPPER, FakeInfisical, run_on_a_terminal
 
 LIBRARY = Path(__file__).resolve().parents[1] / "scripts" / "identity-secrets"
 
@@ -94,6 +94,12 @@ class IdentitySecretsTest(unittest.TestCase):
         self.assertEqual((code, out), (1, ""))
         self.assertNotIn("alpha-value", err)
         self.assertEqual(left, [])
+
+    def test_identity_value_refuses_a_terminal(self) -> None:
+        command = ["sh", "-c", CALL, "sh", str(self.library), "identity_value", str(self.env_file), "dev", "/factory", "ALPHA"]
+
+        self.assertEqual(run_on_a_terminal(command, {"PATH": "/usr/bin:/bin"}), (3, b""))
+        self.assertEqual(self.server.requests, [])
 
     def test_nothing_is_left_behind_when_sign_in_fails(self) -> None:
         self.server.login_status = 401
