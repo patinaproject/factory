@@ -2,8 +2,7 @@
 
 GitHub closes an issue when a squash commit message names it after a closing keyword, and the squash commit
 takes the pull request title. The `fix` type is itself a closing keyword, so `fix: #177 ...` closes #177 even
-when the body says `Part of #177`. The body's closing lines are the only record of what a pull request
-completes, so every issue the title closes must also appear there.
+when the body says `Part of #177`.
 
 Reads `PR_TITLE`, `PR_BODY`, `PR_HEAD_REF`, `PR_AUTHOR`, and `GITHUB_REPOSITORY`. Prints one line per issue the
 body does not close and exits 1 when any is missing. Release, bump, and dependabot pull requests are skipped.
