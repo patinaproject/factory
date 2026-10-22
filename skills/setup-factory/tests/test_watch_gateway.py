@@ -23,19 +23,39 @@ watch_gateway = importlib.util.module_from_spec(importlib.util.spec_from_loader(
 sys.modules[loader.name] = watch_gateway
 loader.exec_module(watch_gateway)
 
-REAL = {"linear": "real-linear-secret", "github": "real-github-secret"}
-LITERAL = {"linear": "${LINEAR_WEBHOOK_SECRET}", "github": "${GITHUB_WEBHOOK_SECRET}"}
+REAL = {"linear": "real-linear-secret", "github": "real-github-secret", "factory-linear": "real-linear-secret"}
+LITERAL = {
+    "linear": "${LINEAR_WEBHOOK_SECRET}",
+    "factory-linear": "${LINEAR_WEBHOOK_SECRET}",
+    "github": "${GITHUB_WEBHOOK_SECRET}",
+}
+LISTED = {
+    "linear": ["AgentSessionEvent", "Issue"],
+    "factory-linear": ["AgentSessionEvent", "Issue"],
+    "github": ["pull_request", "issue_comment", "check_run"],
+}
 HEARTBEAT_PATH = "/ping/9b1c-private-monitor-id"
+CONFIG = """\
+plugins:
+  entries:
+    linear-agent-session:
+      settings:
+        app_user_id: not-a-secret
+        webhook_route: {route}
+"""
 
 
 class FakeGateway(ThreadingHTTPServer):
-    """Answers a webhook delivery as Hermes does. A route signs with its real secret, or with the literal reference
-    when its variable did not resolve, and the plugin then drops the delivery after a 202."""
+    """Answers a webhook delivery in the order Hermes does (gateway/platforms/webhook.py `_handle_webhook`): `401` for
+    a bad signature, then `200 ignored` for an event outside the route's `events` list, then `202` for a listed
+    event. A route signs with its real secret, or with the literal reference when its variable did not resolve."""
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), GatewayHandler)
         self.unresolved: set[str] = set()
+        self.listed: dict[str, list[str]] = {name: list(events) for name, events in LISTED.items()}
         self.override: dict[str, int] = {}
+        self.garbage = False
         self.deliveries: list[str] = []
 
 
@@ -45,18 +65,32 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def log_message(self, *args) -> None:
         pass
 
+    def reply(self, status: int) -> None:
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self) -> None:
         route = self.path.rsplit("/", 1)[1]
         body = self.rfile.read(int(self.headers["Content-Length"]))
         self.server.deliveries.append(route)
-        header = "Linear-Signature" if route == "linear" else "X-Hub-Signature-256"
+        if self.server.garbage:
+            self.wfile.write(b"not http\r\n\r\n")
+            return
+        if route not in REAL:
+            return self.reply(404)
+        header = "X-Hub-Signature-256" if route == "github" else "Linear-Signature"
         secret = LITERAL[route] if route in self.server.unresolved else REAL[route]
         digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-        want = digest if route == "linear" else f"sha256={digest}"
-        status = 202 if self.headers.get(header) == want else 401
-        self.send_response(self.server.override.get(route, status))
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        want = f"sha256={digest}" if route == "github" else digest
+        if self.headers.get(header) != want:
+            return self.reply(401)
+        if route in self.server.override:
+            return self.reply(self.server.override[route])
+        event = self.headers.get("X-GitHub-Event") or json.loads(body).get("type", "unknown")
+        if event not in self.server.listed[route]:
+            return self.reply(200)
+        self.reply(202)
 
 
 class Heartbeat(ThreadingHTTPServer):
@@ -64,6 +98,7 @@ class Heartbeat(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), HeartbeatHandler)
         self.paths: list[str] = []
         self.status = 200
+        self.garbage = False
 
 
 class HeartbeatHandler(BaseHTTPRequestHandler):
@@ -74,6 +109,9 @@ class HeartbeatHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.server.paths.append(self.path)
+        if self.server.garbage:
+            self.wfile.write(b"not http\r\n\r\n")
+            return
         self.send_response(self.server.status)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -120,8 +158,11 @@ class WatchGatewayTest(unittest.TestCase):
         self.addCleanup(self.beat.server_close)
         self.addCleanup(self.beat.shutdown)
         (self.root / watch_gateway.HEARTBEAT_FILE).write_text(f"http://127.0.0.1:{beat_port}{HEARTBEAT_PATH}\n")
+        (self.root / "config.yaml").write_text(CONFIG.format(route="linear"))
         self.broker = FakeBroker(self.root / watch_gateway.UPLOAD_SOCKET)
         self.addCleanup(self.broker.close)
+        self.broker_config = self.root / "no-broker-user.json"
+        self.lock = self.root / watch_gateway.LOCK_FILE
         self.clock = 1_000_000.0
         self.restarts = 0
         self.restart_effect = lambda: None
@@ -134,7 +175,8 @@ class WatchGatewayTest(unittest.TestCase):
     def tick(self, advance: float = 300) -> str:
         self.clock += advance
         out = io.StringIO()
-        watch_gateway.watch(self.root, self.port, self.restart, now=lambda: self.clock, out=out)
+        target = watch_gateway.discover(self.root, self.port, self.broker_config, lock=None)
+        watch_gateway.watch(self.root, target, self.restart, now=lambda: self.clock, out=out)
         return out.getvalue()
 
     def state(self) -> dict:
@@ -155,13 +197,82 @@ class WatchGatewayTest(unittest.TestCase):
         self.assertIn("route github secret is its unresolved reference; restarting the gateway (1 of 3 this hour)", output)
         self.assertIn("restart-gateway exited 0", output)
 
-    def test_a_missing_broker_token_restarts_the_gateway(self) -> None:
-        self.broker.token_present = False
+    def test_a_signed_probe_for_an_event_the_route_does_not_list_still_shows_an_unresolved_secret(self) -> None:
+        self.gateway.unresolved = {"linear"}
+
+        output = self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths, self.gateway.deliveries), (1, [], ["linear", "github"]))
+        self.assertIn("route linear secret is its unresolved reference; restarting the gateway", output)
+
+    def test_a_listed_event_that_the_gateway_accepts_shows_an_unresolved_secret_too(self) -> None:
+        self.gateway.unresolved = {"github"}
+        self.gateway.listed["github"].append("ping")
+
+        self.tick()
+
+        self.assertEqual(self.restarts, 1)
+
+    def test_a_rate_limited_answer_means_the_signature_was_accepted(self) -> None:
+        self.gateway.unresolved = {"github"}
+        self.gateway.override = {"github": 429}
 
         output = self.tick()
 
         self.assertEqual((self.restarts, self.beat.paths), (1, []))
-        self.assertIn("the upload broker holds no token; restarting the gateway", output)
+        self.assertIn("route github secret is its unresolved reference", output)
+
+    def test_a_resolved_secret_answers_401_whatever_the_route_lists(self) -> None:
+        self.gateway.listed = {"linear": [], "github": ["ping"]}
+
+        self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths), (0, [HEARTBEAT_PATH]))
+
+    def test_a_missing_broker_token_alone_alerts_without_restarting_a_working_gateway(self) -> None:
+        self.broker.token_present = False
+
+        outputs = [self.tick() for _ in range(5)]
+
+        self.assertEqual((self.restarts, self.beat.paths), (0, []))
+        self.assertIn("the upload broker holds no token; a restart cannot fix it, so the heartbeat stays quiet", outputs[0])
+        self.assertEqual(self.state()["restarts"], [])
+
+    def test_a_missing_broker_token_with_an_unresolved_route_secret_still_restarts_once(self) -> None:
+        self.broker.token_present = False
+        self.gateway.unresolved = {"github"}
+
+        self.tick()
+
+        self.assertEqual(self.restarts, 1)
+
+    def test_the_broker_user_socket_named_by_its_config_is_the_one_probed(self) -> None:
+        self.broker.close()
+        (self.root / watch_gateway.UPLOAD_SOCKET).unlink()
+        run = self.root / "run"
+        run.mkdir()
+        service = FakeBroker(run / "factory-uploads.sock")
+        self.addCleanup(service.close)
+        self.broker_config.write_text(json.dumps({"socket": str(run / "factory-uploads.sock")}))
+
+        output = self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths, output), (0, [HEARTBEAT_PATH], ""))
+
+    def test_a_broker_user_without_a_token_is_never_restarted_for_it(self) -> None:
+        self.broker.close()
+        (self.root / watch_gateway.UPLOAD_SOCKET).unlink()
+        run = self.root / "run"
+        run.mkdir()
+        service = FakeBroker(run / "factory-uploads.sock")
+        service.token_present = False
+        self.addCleanup(service.close)
+        self.broker_config.write_text(json.dumps({"socket": str(run / "factory-uploads.sock")}))
+
+        output = self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths), (0, []))
+        self.assertIn("the upload broker holds no token", output)
 
     def test_a_restart_that_applies_the_secrets_makes_the_next_check_healthy_without_a_person(self) -> None:
         self.gateway.unresolved = {"linear", "github"}
@@ -208,12 +319,74 @@ class WatchGatewayTest(unittest.TestCase):
         self.assertIn("down: route linear does not answer", output)
 
     def test_an_unexpected_status_is_neither_restarted_nor_pinged(self) -> None:
-        self.gateway.override = {"github": 429}
+        self.gateway.override = {"github": 500}
+        self.gateway.unresolved = {"github"}
 
         output = self.tick()
 
         self.assertEqual((self.restarts, self.beat.paths), (0, []))
-        self.assertIn("unknown: route github answered 429, not 401", output)
+        self.assertIn("unknown: route github answered 500, not 401", output)
+
+    def test_a_listener_that_answers_something_other_than_http_is_down_and_the_state_is_still_written(self) -> None:
+        self.gateway.garbage = True
+
+        output = self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths), (0, []))
+        self.assertIn("down: route linear does not answer", output)
+        self.assertEqual(self.state()["state"], "down")
+
+    def test_a_heartbeat_that_answers_something_other_than_http_is_named_and_the_state_is_still_written(self) -> None:
+        self.beat.garbage = True
+
+        output = self.tick()
+
+        self.assertIn("the heartbeat ping failed: BadStatusLine", output)
+        self.assertEqual(self.state()["state"], "healthy")
+
+    def test_the_linear_route_is_the_one_settings_name(self) -> None:
+        (self.root / "config.yaml").write_text(CONFIG.format(route="factory-linear"))
+
+        output = self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths, output), (0, [HEARTBEAT_PATH], ""))
+        self.assertEqual(sorted(self.gateway.deliveries), ["factory-linear", "github"])
+
+    def test_a_missing_route_name_is_named_and_neither_restarts_nor_pings(self) -> None:
+        (self.root / "config.yaml").write_text("plugins: {}\n")
+
+        output = self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths), (0, []))
+        self.assertIn("unknown: config.yaml names no webhook_route for the Linear route", output)
+
+    def test_a_lock_holds_the_restart_back_without_spending_the_budget(self) -> None:
+        self.gateway.unresolved = {"linear"}
+        self.lock.write_text("deploy in progress\n")
+
+        output = self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths, self.state()["restarts"]), (0, [], []))
+        self.assertIn("gateway.lock exists, so the gateway is not restarted and the heartbeat stays quiet", output)
+
+        self.lock.unlink()
+        self.tick()
+
+        self.assertEqual(self.restarts, 1)
+
+    def test_a_dangling_lock_link_also_holds_the_restart_back(self) -> None:
+        self.gateway.unresolved = {"linear"}
+        self.lock.symlink_to(self.root / "nowhere")
+
+        self.tick()
+
+        self.assertEqual(self.restarts, 0)
+
+    def test_the_lock_defaults_to_one_file_in_the_root_home_and_a_named_lock_replaces_it(self) -> None:
+        default = watch_gateway.discover(self.root, self.port, self.broker_config, lock=None)
+        named = watch_gateway.discover(self.root, self.port, self.broker_config, lock=self.root / "elsewhere.lock")
+
+        self.assertEqual((default.lock, named.lock), (self.root / "gateway.lock", self.root / "elsewhere.lock"))
 
     def test_each_route_is_probed_once_per_check(self) -> None:
         self.tick()
@@ -261,6 +434,14 @@ class WatchGatewayTest(unittest.TestCase):
             job["ProgramArguments"],
             ["/usr/bin/python3", f"{self.root}/scripts/watch-gateway", "--root", str(self.root), "--port", "8644"],
         )
+
+    def test_the_plist_names_a_lock_only_when_one_is_given(self) -> None:
+        stdout = io.TextIOWrapper(io.BytesIO(), write_through=True)
+        with mock.patch.object(sys, "stdout", stdout):
+            watch_gateway.main(["--print-plist", "--root", str(self.root), "--lock", "/somewhere/gateway.lock"])
+        job = plistlib.loads(stdout.buffer.getvalue())
+
+        self.assertEqual(job["ProgramArguments"][-2:], ["--lock", "/somewhere/gateway.lock"])
 
 
 if __name__ == "__main__":

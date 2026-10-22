@@ -9,25 +9,36 @@ reports this cannot be delivered either, because the chat platform's token
 comes from the same failed source.
 
 This script runs from a launchd job outside the gateway, every 5 minutes. It
-reads no secret and no config file, and it never calls the secret source. It
-probes the running gateway the way a stranger would:
+reads no secret, never calls the secret source, and reads one non-secret value
+from `<root>/config.yaml`: the Linear route's name, `webhook_route`. It probes
+the running gateway the way a stranger would:
 
 - It sends each webhook route a delivery signed with the route's literal
-  reference. `401` means the route's secret resolved. `202` means it did not,
-  because the `linear-agent-session` plugin drops the delivery after the
-  gateway has accepted it.
-- It asks the upload broker for its status and reads `token_present`.
+  reference, for an event the route does not list, so no agent run starts.
+  Hermes checks the signature first. `401` means the route's secret resolved.
+  Any `2xx` or `429` means the gateway accepted a signature made from the
+  literal reference, so the secret did not resolve: a listed event gets `202`,
+  an unlisted one `200 ignored`, and a rate-limited route `429`.
+- It asks the upload broker for its status and reads `token_present`. The
+  broker's socket is `<root>/factory-uploads.sock`, or the `socket` that
+  `/Library/Application Support/factory-broker/broker.json` names when the
+  broker runs as its own user.
 
-When a route secret or the broker token is unresolved, it runs
-`restart-gateway`, which waits for running Kanban cards. Three restarts in an
-hour is the budget. A gateway that is not answering is launchd's to start, so
-the script restarts nothing then.
+An unresolved route secret runs `restart-gateway`, which waits for running
+Kanban cards. Three restarts in an hour is the budget. A missing broker token
+alone restarts nothing, because the gateway is working and a restart does not
+fix a broker user's token: the heartbeat stays quiet instead. A gateway that is
+not answering is launchd's to start, so the script restarts nothing then. It
+also restarts nothing while the lock file exists, `<root>/gateway.lock` unless
+`--lock` names another, because a person or an agent is deploying and holds the
+gateway.
 
 Only a healthy gateway earns a ping to the heartbeat URL, so a monitor that
-alerts when pings stop reports a spent budget, a down gateway, and a down
-machine alike, through a path that uses none of the gateway's secrets. The URL
-is the only line of `<root>/gateway-heartbeat-url`. It is the one value this
-script reads, and it is never printed.
+alerts when pings stop reports a spent budget, a held lock, a missing broker
+token, a down gateway, and a down machine alike, through a path that uses none
+of the gateway's secrets. The URL is the only line of
+`<root>/gateway-heartbeat-url`. It is the one secret this script reads, and it
+is never printed.
 
 `--print-plist` prints the launchd job that runs this script.
 """
@@ -36,9 +47,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import plistlib
+import re
 import socket
 import subprocess
 import sys
@@ -54,10 +67,14 @@ RESTARTS_PER_HOUR = 3
 RESTART_WAIT_SECONDS = 1800
 STATE_FILE = "gateway-watch.json"
 HEARTBEAT_FILE = "gateway-heartbeat-url"
+LOCK_FILE = "gateway.lock"
 UPLOAD_SOCKET = "factory-uploads.sock"
+BROKER_CONFIG = Path("/Library/Application Support/factory-broker/broker.json")
 PROBE_SECONDS = 10
+# The Linear route's name is the one value settings choose, and the pattern is templates/render.py's `ROUTE_NAME`.
+ROUTE_LINE = re.compile(r"^\s+webhook_route:\s*[\"']?([A-Za-z0-9_-]+)[\"']?\s*(#.*)?$", re.MULTILINE)
 
-HEALTHY, UNRESOLVED, DOWN, UNKNOWN = "healthy", "unresolved", "down", "unknown"
+HEALTHY, UNRESOLVED, NO_TOKEN, DOWN, UNKNOWN = "healthy", "unresolved", "no_token", "down", "unknown"
 
 
 class Route(NamedTuple):
@@ -67,11 +84,34 @@ class Route(NamedTuple):
     event: str
 
 
-# The routes and secret names that templates/render.py renders and the setup runbook's forged-signature check uses.
-ROUTES = (
-    Route("linear", "${LINEAR_WEBHOOK_SECRET}", "Linear-Signature", ""),
-    Route("github", "${GITHUB_WEBHOOK_SECRET}", "X-Hub-Signature-256", "ping"),
-)
+class Target(NamedTuple):
+    port: int
+    linear_route: str | None
+    broker_socket: Path
+    lock: Path
+
+
+def discover(root: Path, port: int, broker_config: Path, lock: Path | None) -> Target:
+    """What to probe. Reads only the Linear route's name from config.yaml, and only the socket path from the broker
+    user's world-readable config. Neither holds a secret."""
+    try:
+        route = ROUTE_LINE.search((root / "config.yaml").read_text())
+    except OSError:
+        route = None
+    socket_path = root / UPLOAD_SOCKET
+    try:
+        socket_path = Path(json.loads(broker_config.read_text())["socket"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return Target(port, route.group(1) if route else None, socket_path, lock or root / LOCK_FILE)
+
+
+def routes(linear_route: str) -> tuple[Route, ...]:
+    """The routes and secret names that templates/render.py renders and the setup runbook's forged-signature check uses."""
+    return (
+        Route(linear_route, "${LINEAR_WEBHOOK_SECRET}", "Linear-Signature", ""),
+        Route("github", "${GITHUB_WEBHOOK_SECRET}", "X-Hub-Signature-256", "ping"),
+    )
 
 
 class Finding(NamedTuple):
@@ -98,20 +138,20 @@ def probe_route(port: int, route: Route) -> Finding:
     except urllib.error.HTTPError as error:
         error.close()
         code = error.code
-    except OSError:
+    except (OSError, http.client.HTTPException):
         return Finding(DOWN, f"route {route.name} does not answer")
     if code == 401:
         return Finding(HEALTHY, "")
-    if code == 202:
+    if 200 <= code < 300 or code == 429:
         return Finding(UNRESOLVED, f"route {route.name} secret is its unresolved reference")
     return Finding(UNKNOWN, f"route {route.name} answered {code}, not 401")
 
 
-def probe_broker(root: Path) -> Finding:
+def probe_broker(socket_path: Path) -> Finding:
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(PROBE_SECONDS)
-            client.connect(str(root / UPLOAD_SOCKET))
+            client.connect(str(socket_path))
             client.sendall(b'{"op":"status"}\n')
             reply = b""
             while not reply.endswith(b"\n") and len(reply) < 65536:
@@ -128,15 +168,19 @@ def probe_broker(root: Path) -> Finding:
     if not isinstance(status, dict) or status.get("ok") is not True:
         return Finding(UNKNOWN, "the upload broker did not answer a status request with ok")
     if status.get("token_present") is not True:
-        return Finding(UNRESOLVED, "the upload broker holds no token")
+        return Finding(NO_TOKEN, "the upload broker holds no token")
     return Finding(HEALTHY, "")
 
 
-def observe(root: Path, port: int) -> Finding:
+def observe(target: Target) -> Finding:
     """One finding for the gateway. A gateway that does not answer outranks an unresolved secret, because only a
     running gateway can be restarted for its secrets."""
-    findings = [*(probe_route(port, route) for route in ROUTES), probe_broker(root)]
-    for state in (DOWN, UNRESOLVED, UNKNOWN):
+    if target.linear_route is None:
+        route_findings = [Finding(UNKNOWN, "config.yaml names no webhook_route for the Linear route")]
+    else:
+        route_findings = [probe_route(target.port, route) for route in routes(target.linear_route)]
+    findings = [*route_findings, probe_broker(target.broker_socket)]
+    for state in (DOWN, UNRESOLVED, NO_TOKEN, UNKNOWN):
         named = [finding.what for finding in findings if finding.state == state]
         if named:
             return Finding(state, "; ".join(named))
@@ -175,20 +219,20 @@ def ping(url: str) -> str | None:
     except urllib.error.HTTPError as error:
         error.close()
         return f"HTTP {error.code}"
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, http.client.HTTPException) as error:
         return type(error).__name__
 
 
 def watch(
     root: Path,
-    port: int,
+    target: Target,
     restart: Callable[[], int],
     now: Callable[[], float] = time.time,
     out=sys.stdout,
 ) -> None:
     state_path = root / STATE_FILE
     previous = read_state(state_path)
-    found = observe(root, port)
+    found = observe(target)
     stamp = now()
     restarts = [t for t in previous.get("restarts", []) if isinstance(t, (int, float)) and stamp - t < 3600]
     lines = []
@@ -203,6 +247,8 @@ def watch(
                 lines.append(f"healthy, but the heartbeat ping failed: {failure}")
         if previous.get("state") not in (None, HEALTHY):
             lines.append("healthy again")
+    elif found.state == UNRESOLVED and os.path.lexists(target.lock):
+        lines.append(f"{found.what}; {target.lock.name} exists, so the gateway is not restarted and the heartbeat stays quiet")
     elif found.state == UNRESOLVED and len(restarts) < RESTARTS_PER_HOUR:
         restarts.append(stamp)
         write_state(state_path, {"checked_at": stamp, "state": found.state, "restarts": restarts})
@@ -211,6 +257,8 @@ def watch(
         lines.append(f"restart-gateway exited {code}")
     elif found.state == UNRESOLVED:
         lines.append(f"{found.what}; {RESTARTS_PER_HOUR} restarts in the last hour did not fix it, so the heartbeat stays quiet")
+    elif found.state == NO_TOKEN:
+        lines.append(f"{found.what}; a restart cannot fix it, so the heartbeat stays quiet")
     else:
         lines.append(f"{found.state}: {found.what}; the heartbeat stays quiet")
 
@@ -219,12 +267,13 @@ def watch(
         print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(stamp))} watch-gateway: {line}", file=out, flush=True)
 
 
-def plist(root: Path, port: int) -> bytes:
+def plist(root: Path, port: int, lock: Path | None) -> bytes:
     log = str(root / "logs" / "gateway-watch.log")
     return plistlib.dumps({
         "Label": LABEL,
         "ProgramArguments": [
             "/usr/bin/python3", str(root / "scripts" / "watch-gateway"), "--root", str(root), "--port", str(port),
+            *(["--lock", str(lock)] if lock else []),
         ],
         "StartInterval": INTERVAL_SECONDS,
         "RunAtLoad": True,
@@ -245,12 +294,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes"))
     parser.add_argument("--port", type=int, default=8644, help="the webhook port (default 8644)")
+    parser.add_argument("--lock", type=Path, help="restart nothing while this file exists (default <root>/gateway.lock)")
+    parser.add_argument("--broker-config", type=Path, default=BROKER_CONFIG, help=argparse.SUPPRESS)
     parser.add_argument("--print-plist", action="store_true", help="print the launchd job that runs this script")
     args = parser.parse_args(argv)
     if args.print_plist:
-        sys.stdout.buffer.write(plist(args.root, args.port))
+        sys.stdout.buffer.write(plist(args.root, args.port, args.lock))
         return 0
-    watch(args.root, args.port, run_restart(Path(__file__).with_name("restart-gateway")))
+    target = discover(args.root, args.port, args.broker_config, args.lock)
+    watch(args.root, target, run_restart(Path(__file__).with_name("restart-gateway")))
     return 0
 
 

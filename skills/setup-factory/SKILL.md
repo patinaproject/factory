@@ -1258,16 +1258,36 @@ not up after a reboot, the gateway still serves, but every webhook route signs
 with its literal `${NAME}` reference and the upload broker holds no token. The
 `check-install` alert cannot report it, because the chat platform's token comes
 from the same failed source. `watch-gateway` is a launchd job outside the
-gateway. It runs every 5 minutes and reads no secret and no config file. It
-sends each route a delivery signed with the route's literal reference, where
-`401` means the secret resolved and `202` means it did not, and it asks the
-broker for `token_present`. When either shows an unresolved secret, it runs
-`restart-gateway`, which waits for running cards. It gives up after 3 restarts
-in an hour. A gateway that does not answer is left to launchd, and nothing is
-restarted. Only a healthy gateway earns a ping to a heartbeat URL, so a
-monitor that alerts when pings stop reports a spent budget, a down gateway,
-and a down machine through a path that uses none of the helper's secrets. It
-needs no Infisical: it works for a factory whose secrets come from `.env`.
+gateway. It runs every 5 minutes, never calls the secret source, and reads no
+secret. It reads one non-secret value, the Linear route's `webhook_route` name,
+from `<root>/config.yaml`. It sends each route a delivery signed with the
+route's literal reference, for an event the route does not list. Hermes checks
+the signature first, so `401` means the secret resolved, and any `2xx` or `429`
+means the gateway accepted a signature made from the literal reference, so the
+secret did not resolve. A listed event would get `202` and an unlisted one
+`200 ignored`, and the probe sends an unlisted one so no agent run starts.
+It also asks the broker for `token_present`. The broker's socket is
+`<root>/factory-uploads.sock`, or the `socket` that
+`/Library/Application Support/factory-broker/broker.json` names once the
+broker runs as its own user. An unresolved route secret runs
+`restart-gateway`, which waits for running cards, and the watcher gives up
+after 3 restarts in an hour. A missing broker token alone restarts nothing:
+the gateway works, and a restart does not fix a broker user's token. The
+heartbeat stays quiet instead, and `check-install` reports the broker. A
+gateway that does not answer is left to launchd, and nothing is restarted.
+Only a healthy gateway earns a ping to a heartbeat URL, so a monitor that
+alerts when pings stop reports a spent budget, a held lock, a missing broker
+token, a down gateway, and a down machine through a path that uses none of the
+helper's secrets. It needs no Infisical: it works for a factory whose secrets
+come from `.env`.
+
+**The gateway lock.** The watcher restarts nothing while `<root>/gateway.lock`
+exists. A person or an agent that deploys and restarts the gateway creates the
+file first, writing its purpose and the time, and removes it when the restart
+is done. A lock that outlives its deploy keeps the heartbeat quiet, which
+alerts a person. A machine whose deploys already hold another file passes
+`--lock <that file>` to `--print-plist`, and the plist then carries it. The
+real path stays in the private record.
 
 > **HUMAN CHECKPOINT.** Ask the operator to create a dead-man's-switch monitor
 > that expects a ping every 5 minutes, with a grace period of 15 minutes,
