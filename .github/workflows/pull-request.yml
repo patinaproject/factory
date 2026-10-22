@@ -95,6 +95,7 @@ jobs:
         run: python3 profiles/claude-worker/scripts/check_linear_closes.py
 
       - name: Check that the title closes only issues the body closes
+        if: "${{ github.event.pull_request.user.login != 'dependabot[bot]' }}"
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
