@@ -465,7 +465,9 @@ starts: a terminal command, a background process, a cron script, or a
 `claude-session` run. Without it, any process on the machine could read the
 Linear client secret, the webhook secrets, or the proxy token from such a
 process's environment with `ps eww`. Hermes reads the manifest at each spawn,
-so it takes effect without a restart.
+so it takes effect without a restart. The broker serves a worker only a name
+this manifest declares, less the gateway-only ones. The gateway reads its home's
+copy, and the broker user's `setup-broker-user` installs a root-owned copy.
 
 The strip has two gaps. Hermes runs a `secrets.command` helper without it,
 so `factory-secrets` holds the gateway's Infisical identity (#176). A plugin
