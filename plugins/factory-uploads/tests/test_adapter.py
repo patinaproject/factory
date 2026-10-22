@@ -239,6 +239,22 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
             {"token_present": True, "linear_ready": True, "proxy_token_present": True},
         )
 
+    async def test_the_github_app_is_the_one_the_factory_settings_name(self):
+        key = self.home / "github-app.pem"
+        github = {"app_id": "1", "installation_id": "2", "private_key_path": str(key)}
+        self.settings["plugins"]["entries"]["linear-agent-session"]["settings"]["github"] = github
+        adapter = await self.connected()
+
+        self.assertFalse((await self.request("status"))["github_app_ready"])
+        key.write_text("key")
+        self.assertTrue((await self.request("status"))["github_app_ready"])
+        self.assertEqual(adapter.broker._credentials._github_app.installation_id, "2")
+
+    async def test_settings_without_a_private_key_serve_no_github_token(self):
+        await self.connected()
+
+        self.assertEqual((await self.request("github_token"))["state"], "unavailable")
+
     async def test_connect_listens_in_the_hermes_home_and_disconnect_removes_the_socket(self):
         adapter = self.make_adapter()
 

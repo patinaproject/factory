@@ -179,7 +179,10 @@ class FakeBroker:
         self.server.close()
 
 
-STATUS = {"ok": True, "token_present": True, "linear_ready": True, "proxy_token_present": True, "last_state": None}
+STATUS = {
+    "ok": True, "token_present": True, "linear_ready": True, "proxy_token_present": True, "github_app_ready": True,
+    "last_state": None,
+}
 OK_STATUS = json.dumps(STATUS).encode() + b"\n"
 
 
@@ -521,6 +524,18 @@ class CheckInstallTest(unittest.TestCase):
                 1,
                 f"upload broker {self.root}/factory-uploads.sock: reports linear_ready false: the broker holds no "
                 "Linear app credentials, so no worker reaches Linear (part 5)\n",
+            ),
+        )
+
+    def test_broker_without_the_github_app_leaves_the_workers_gh_to_expire(self) -> None:
+        self.uploads.reply = json.dumps({**STATUS, "github_app_ready": False}).encode() + b"\n"
+
+        self.assertEqual(
+            self.check(),
+            (
+                1,
+                f"upload broker {self.root}/factory-uploads.sock: reports github_app_ready false: the broker cannot "
+                "mint the GitHub App installation token, so the worker's gh login expires within the hour (part 5)\n",
             ),
         )
 

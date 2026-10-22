@@ -117,7 +117,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
 | `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
-| GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository |
+| GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository. With the broker user, `/Library/Application Support/factory-broker/home/github-app.pem` instead, and neither home sets `github.private_key_path`. The broker mints the worker's installation tokens from it |
 | `CLAUDE_PROXY_TOKEN`, the proxy's token that `claude_session.auth_token_env` names | `<home>/.env`. The worker's `worker-secrets` asks the gateway's broker for it when a worker process starts, because the worker's own agent loop sends it to the proxy, and Claude Code gets it through `apiKeyHelper`. Never store it in `<worker>/.env`, and never name it `ANTHROPIC_*` |
 | Each MCP server token that `claude_session.mcp_servers.<name>.token_env` names, such as `SENTRY_ACCESS_TOKEN` | `<home>/.env`. The run's server of that name gets it through `mcp-headers`, which asks the gateway's broker. Never store it in `<worker>/.env`. See [MCP server identities](references/mcp-identities.md) |
 | `FACTORY_INFISICAL_CLIENT_ID` and `FACTORY_INFISICAL_CLIENT_SECRET`, when the factory uses Infisical | `<home>/.env` only. The worker has no Infisical identity. Claude Code never receives it: `claude-session` starts it from an allowlist of variable names |
@@ -534,7 +534,7 @@ user would start Claude Code there too.
 | --- | --- | --- |
 | `/Library/Application Support/factory-broker/lib` | `root:wheel`, `0755`, files `0644` | The broker's code, copied from this repository |
 | `/Library/Application Support/factory-broker/broker.json` | `root:wheel`, `0644` | Non-secret config: socket, allowed uid, repository ids, Infisical location |
-| `/Library/Application Support/factory-broker/home` | `_factorybroker`, `0700` | `.env`, the audit log, and the Linear token cache |
+| `/Library/Application Support/factory-broker/home` | `_factorybroker`, `0700` | `.env`, the GitHub App private key, the audit log, and the Linear token cache |
 | `/Library/Application Support/factory-broker/run` | `_factorybroker:_factorybroker`, `0750` | The socket, mode `0660` |
 | `/Library/LaunchDaemons/local.factory-broker.plist` | `root:wheel`, `0644` | The service, run as `_factorybroker` with the Command Line Tools' `python3` |
 
@@ -567,8 +567,12 @@ runs `/Library/Developer/CommandLineTools/usr/bin/python3`, not
     "repositories": {"<owner>/<repo>": <id>},
     "claude_session": {"auth_token_env": "<name>", "mcp_servers": {"<server>": {"token_env": "<name>"}}},
     "infisical": {"api_url": "<url>", "project_id": "<project id>",
-                  "environment": "<environment>", "paths": ["<folder>", "<folder>/broker"]}}
+                  "environment": "<environment>", "paths": ["<folder>", "<folder>/broker"]},
+    "github": {"app_id": <app id>, "installation_id": <installation id>, "private_key_path": "<key path>"}}
    ```
+
+   Leave `github` out until part 9 has stored the App's private key. Then
+   follow [Move the key to the broker user](references/github.md#move-the-key-to-the-broker-user).
 
    Leave `infisical` out when the factory does not use Infisical. `api_url`
    is `https://app.infisical.com` or `https://eu.infisical.com`. For a

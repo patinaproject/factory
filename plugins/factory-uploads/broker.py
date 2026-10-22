@@ -1,5 +1,5 @@
 """The gateway's broker: a Unix socket that turns image bytes into attachment URLs
-and hands the worker the three credentials it may hold.
+and hands the worker the credentials it may hold.
 
 It imports nothing from Hermes, so its tests run without a gateway. The
 adapter owns its lifecycle. The broker never opens a path a caller names,
@@ -11,6 +11,8 @@ leave the gateway, for the proxy token that its own agent loop and Claude
 Code send to the model proxy, and for the token of each MCP server that
 claude_session.mcp_servers gives the factory an identity on. The request names
 the server; the gateway's own settings name the variable that holds its token.
+It also hands out the GitHub App installation token, minted with the App's
+private key, which never leaves the broker.
 
 Wire protocol, one request per connection:
 
@@ -18,6 +20,7 @@ Wire protocol, one request per connection:
     {"op": "linear_token"}\\n
     {"op": "proxy_token"}\\n
     {"op": "mcp_token", "server": "sentry"}\\n
+    {"op": "github_token"}\\n
     {"op": "status"}\\n
 
 Every reply is one JSON line.
@@ -63,8 +66,12 @@ CREDENTIAL_MESSAGES = {
     "linear_token": "The gateway holds no Linear app credentials.",
     "proxy_token": "The gateway holds no proxy token.",
     "mcp_token": "The gateway holds no token for that MCP server.",
+    "github_token": "The gateway holds no GitHub App private key.",
 }
 LINEAR_FAILED = "The gateway could not issue a Linear token. The gateway log has the detail."
+GITHUB_FAILED = "The gateway could not issue a GitHub App token. The gateway log has the detail."
+# Ops whose token comes from a network request, each with the fixed reply to its failure.
+MINTED = {"linear_token": LINEAR_FAILED, "github_token": GITHUB_FAILED}
 BUSY = "The upload broker is busy. Try again in a moment."
 BAD_REQUEST = "The request is not a valid upload request."
 NOT_ALLOWED = "That repository is not on the upload allowlist."
@@ -91,6 +98,11 @@ class Credentials(Protocol):
 
     def mcp_token(self, server: str) -> str | None: ...
 
+    def github_ready(self) -> bool: ...
+
+    def github_token(self) -> dict | None:
+        """{"access_token", "expires_at"} of a GitHub App installation token, or None without a key. May block."""
+
 
 class NoCredentials:
     def linear_ready(self) -> bool:
@@ -106,6 +118,12 @@ class NoCredentials:
         return []
 
     def mcp_token(self, server: str) -> str | None:
+        return None
+
+    def github_ready(self) -> bool:
+        return False
+
+    def github_token(self) -> dict | None:
         return None
 
 
@@ -269,11 +287,11 @@ class Broker:
             token, expires_at = self._credentials.mcp_token(server), None
         else:
             try:
-                issued = await asyncio.to_thread(self._credentials.linear_token)
+                issued = await asyncio.to_thread(getattr(self._credentials, op))
             except Exception as error:
-                logger.warning("factory-uploads: Linear token for pid %s failed: %s", pid, error)
+                logger.warning("factory-uploads: %s for pid %s failed: %s", op, pid, error)
                 self._audit({**entry, "state": "error"})
-                return self._failure("error", LINEAR_FAILED)
+                return self._failure("error", MINTED[op])
             token, expires_at = (issued["access_token"], issued["expires_at"]) if issued else (None, None)
         if not token:
             self._audit({**entry, "state": "unavailable"})
@@ -351,6 +369,7 @@ class Broker:
             "mcp_tokens_present": {
                 server: bool(self._credentials.mcp_token(server)) for server in self._credentials.mcp_servers()
             },
+            "github_app_ready": self._credentials.github_ready(),
             "last_state": record.get("state"),
             "expires_at": record.get("expires_at"),
             "checked_at": record.get("checked_at"),

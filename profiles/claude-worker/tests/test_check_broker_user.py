@@ -22,6 +22,7 @@ CONFIG = {
     "user": "_factorybroker", "group": "_factorybroker", "label": "local.factory-broker",
     "lib": f"{BASE}/lib", "socket": f"{BASE}/run/factory-uploads.sock", "home": f"{BASE}/home",
     "allowed_uids": [os.getuid()],
+    "github": {"app_id": 11, "installation_id": 22, "private_key_path": f"{BASE}/home/github-app.pem"},
 }
 ME = pwd.getpwuid(os.getuid()).pw_name
 CREDENTIALS = "plugins/factory-uploads/credentials.py"
@@ -56,6 +57,10 @@ class CheckBrokerUserTest(unittest.TestCase):
         self.config_file.write_text(json.dumps(CONFIG))
         self.home = self.launchd / BASE.lstrip("/") / "home"
         self.home.mkdir(mode=0o700)
+        self.key = self.home / "github-app.pem"
+        self.key.write_text("key")
+        # The tests run as one user, so mode 0000 stands in for a file only the broker user reads.
+        os.chmod(self.key, 0o000)
         self.run_dir = self.launchd / BASE.lstrip("/") / "run"
         self.run_dir.mkdir()
         os.chmod(self.run_dir, 0o750)
@@ -164,6 +169,21 @@ class CheckBrokerUserTest(unittest.TestCase):
         ])
         self.assertNotIn("FAKE", "\n".join(lines))
 
+    def test_a_github_app_key_the_factory_user_can_read(self) -> None:
+        os.chmod(self.key, 0o400)
+
+        self.assertEqual(self.check(), [
+            f"broker user _factorybroker: {self.key} is readable by {ME}, so a factory process could read the GitHub App key (part 5)",
+        ])
+
+    def test_a_broker_without_the_github_app(self) -> None:
+        config = {key: value for key, value in CONFIG.items() if key != "github"}
+
+        self.assertEqual(self.check(config), [
+            "broker user _factorybroker: broker.json names no GitHub App, so the worker's gh gets no installation token; "
+            "add github to the input and run setup-broker-user apply (part 5)",
+        ])
+
     def test_a_broker_config_without_its_paths_cannot_be_checked(self) -> None:
         self.config_file.write_text(json.dumps({"user": "_factorybroker"}))
 
@@ -185,7 +205,14 @@ class BrokerUserConfigTableTest(unittest.TestCase):
 
         self.assertEqual([entry.key for entry in rows], ["platforms.factory_uploads.enabled"])
         self.assertEqual([rows[0].want.ok(value) for value in (False, None, True)], [True, True, False])
-        self.assertEqual(len(check_install.BROKER_USER_CONFIG), len(check_install.CONFIG) - 1)
+
+    def test_neither_home_may_still_name_the_github_app_key(self) -> None:
+        [row] = [entry for entry in check_install.BROKER_USER_CONFIG if entry.key.endswith(".github.private_key_path")]
+
+        self.assertEqual(row.key, f"{check_install.SETTINGS_KEY}.github.private_key_path")
+        self.assertEqual(row.homes, check_install.BOTH)
+        self.assertEqual([row.want.ok(value) for value in (None, "", "/Users/factory/app.pem")], [True, True, False])
+        self.assertEqual(len(check_install.BROKER_USER_CONFIG), len(check_install.CONFIG))
 
 
 class SharedFileListTest(unittest.TestCase):

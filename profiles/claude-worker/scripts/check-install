@@ -38,8 +38,9 @@ and exits.
 On macOS, when `setup-broker-user` has written the broker's config, it checks
 that the broker runs as its own user: the account and group, who owns each of
 its directories, that its root-owned copy of the code matches the commit, its
-LaunchDaemon, the root home's socket link, and that the gateway runs no broker
-of its own.
+LaunchDaemon, the root home's socket link, that it holds the GitHub App key
+and the factory user cannot read it, judged by ownership and mode only, and
+that the gateway runs no broker of its own.
 
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd and broker user checks at
 another file system root and launchctl, for tests.
@@ -218,6 +219,7 @@ CONFIG = (
 BROKER_USER_CONFIG = (
     *(entry for entry in CONFIG if not entry.key.startswith("platforms.factory_uploads.")),
     ConfigKey(5, "platforms.factory_uploads.enabled", (ROOT,), one_of(equal(False), unset())),
+    ConfigKey(5, f"{SETTINGS_KEY}.github.private_key_path", BOTH, unset()),
 )
 
 # Script-only jobs. A job belongs to the profile named by `home`: the worker for its own scripts, the root for a job
@@ -506,6 +508,11 @@ def check_upload_broker(root: Path, token_env: str, mcp_envs: dict) -> list:
         drifts += drift("reports token_present false: the broker holds no upload token")
     if status.get("linear_ready") is not True:
         drifts += drift("reports linear_ready false: the broker holds no Linear app credentials, so no worker reaches Linear")
+    if status.get("github_app_ready") is not True:
+        drifts += drift(
+            "reports github_app_ready false: the broker cannot mint the GitHub App installation token, "
+            "so the worker's gh login expires within the hour"
+        )
     if token_env and status.get("proxy_token_present") is not True:
         drifts += drift(f"reports proxy_token_present false: the broker holds no {token_env}, so no worker reaches the proxy")
     present = status.get("mcp_tokens_present") or {}
@@ -756,6 +763,7 @@ BROKER_FILES = {
     "factory_uploads/__init__.py": "plugins/factory-uploads/__init__.py",
     "factory_uploads/broker.py": "plugins/factory-uploads/broker.py",
     "factory_uploads/credentials.py": "plugins/factory-uploads/credentials.py",
+    "factory_uploads/github_app.py": "plugins/factory-uploads/github_app.py",
     "factory_uploads/service.py": "plugins/factory-uploads/service.py",
     "factory_uploads/upload_token.py": "plugins/factory-uploads/upload_token.py",
     "linear.py": "plugins/linear-agent-session/linear.py",
@@ -868,6 +876,17 @@ def check_broker_user(
         state = launchd_state(launchctl, ("system",), config["label"])
         if state != "running":
             drifts.append(drift(f"{config['label']} is {state or 'not loaded'}, not running"))
+
+    github = config.get("github")
+    if not isinstance(github, dict) or not github.get("private_key_path"):
+        drifts.append(drift(
+            "broker.json names no GitHub App, so the worker's gh gets no installation token; "
+            "add github to the input and run setup-broker-user apply"
+        ))
+    elif os.access(local(github["private_key_path"]), os.R_OK):
+        drifts.append(drift(
+            f"{local(github['private_key_path'])} is readable by {accounts.me}, so a factory process could read the GitHub App key"
+        ))
 
     link = root / UPLOAD_SOCKET
     if not link.is_symlink() or os.readlink(link) != config["socket"]:

@@ -42,7 +42,8 @@ config_schema:
     description: >-
       The factory's GitHub App. login is the App's <app-slug>[bot] login, whose own events the github
       route ignores. app_id, installation_id, and private_key_path (absolute, mode 0600) let
-      refresh-gh-app-login mint installation tokens for the worker's gh login.
+      the gateway's broker mint installation tokens for the worker's gh login. With the broker
+      user, its broker.json names the key instead, and these settings name none.
   triage:
     type: dict
     default: {}

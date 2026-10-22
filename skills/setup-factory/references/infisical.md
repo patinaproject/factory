@@ -36,7 +36,8 @@ These values stay in `.env`:
 - Settings that are not secrets: `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` and
   `GH_CONFIG_DIR`.
 
-The GitHub App private key stays a file at `github.private_key_path`.
+The GitHub App private key stays a file at `github.private_key_path`, or, with
+the broker user, in the broker's home.
 
 ## Inputs
 

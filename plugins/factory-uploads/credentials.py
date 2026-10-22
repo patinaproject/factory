@@ -27,8 +27,12 @@ def worker_variable(name) -> str:
 class GatewayCredentials:
     """Linear revokes every client credentials token of the app when a request asks for another scope set."""
 
-    def __init__(self, get_secret: Callable[[str], "str | None"], transport: dict, linear_path: Path, cache_home: Path):
+    def __init__(
+        self, get_secret: Callable[[str], "str | None"], transport: dict, linear_path: Path, cache_home: Path,
+        github_app=None,
+    ):
         self._get_secret = get_secret
+        self._github_app = github_app
         self._linear_path = Path(linear_path)
         self._cache_home = Path(cache_home)
         self._proxy_env = worker_variable(transport.get("auth_token_env"))
@@ -70,6 +74,12 @@ class GatewayCredentials:
     def mcp_token(self, server: str):
         name = self._mcp_envs.get(server)
         return self._get_secret(name) if name else None
+
+    def github_ready(self):
+        return self._github_app is not None and self._github_app.ready()
+
+    def github_token(self):
+        return self._github_app.installation_token() if self._github_app is not None else None
 
     def _linear_module(self):
         spec = importlib.util.spec_from_file_location("factory_uploads_linear", self._linear_path)

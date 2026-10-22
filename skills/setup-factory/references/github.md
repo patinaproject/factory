@@ -19,9 +19,12 @@ installation token in the `gh` login that `GH_CONFIG_DIR` names.
 the same login.
 
 An installation token expires after one hour. The worker profile's
-`refresh-gh-app-login` script mints a new token from the App's private key and
-stores it with `gh auth login`. A Hermes cron job runs the script every 30
-minutes.
+`refresh-gh-app-login` script asks the broker for a new token and stores it
+with `gh auth login`. The broker mints the token from the App's private key
+and never hands out the key. A Hermes cron job runs the script every 30
+minutes. When the broker runs as its own macOS user, the key lives in that
+user's home, and no process that runs as the factory user can read it.
+See [Move the key to the broker user](#move-the-key-to-the-broker-user).
 
 Run this reference in two passes. Part 9 runs [Create the App](#create-the-app),
 or [Reuse an existing App](#reuse-an-existing-app), through
@@ -39,11 +42,13 @@ checkouts as the App, and returns for
 All of these must hold:
 
 - `github.login` in the settings of both homes is `<app-slug>[bot]`, and
-  `github.app_id`, `github.installation_id`, and `github.private_key_path` have
-  values.
-- The file at `github.private_key_path` exists and prints `0o600` for
+  `github.app_id` and `github.installation_id` have values.
+- Without the broker user, `github.private_key_path` has a value, and the file
+  it names exists and prints `0o600` for
   `python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' <key path>`.
   The path is outside every configured checkout and outside this repository.
+- With the broker user, neither home sets `github.private_key_path`, and
+  `check-install` prints no `broker user` line about the GitHub App.
 - `grep '^GH_CONFIG_DIR=' <worker>/.env <home>/.env` prints
   `GH_CONFIG_DIR=<worker>/gh` for each file.
 - `hermes -p claude-worker cron list` shows exactly one job named
@@ -337,9 +342,52 @@ The count is the number of repositories the installation covers. It is at
 least the number of configured repositories.
 
 The script prints nothing on success. On failure it prints one line that names
-the failed step, such as `check private key` or `mint installation token`, and
-Hermes delivers the line. `gh api user` fails for an installation token, so do
+the failed step, such as `ask the broker` or `gh auth login`, and Hermes
+delivers the line. The existing login stays as it was. The broker's log has the
+detail of a failed mint: `<home>/logs/gateway.log` without the broker user, or
+`/Library/Application Support/factory-broker/home/broker.log` with it. `gh api user` fails for an installation token, so do
 not use it as the check.
+
+### Move the key to the broker user
+
+Run this on macOS when the broker runs as its own user, as "Broker user,
+macOS" in part 5 sets up. It moves the private key into the broker's home, so
+no process that Claude Code starts can read it.
+
+1. Add the `github` object to the broker's input file, with the values from
+   `hermes config get plugins.entries.linear-agent-session.settings.github --json`.
+   `private_key_path` names the factory user's key file. The file holds no
+   secret.
+
+   ```json
+   "github": {"app_id": <app id>, "installation_id": <installation id>, "private_key_path": "<key path>"}
+   ```
+
+2. Repeat steps 4 and 5 of "Broker user, macOS" in part 5. The plan shows a
+   `move` line for the key. `apply` copies the key into
+   `/Library/Application Support/factory-broker/home/github-app.pem`, reads
+   the copy back, and only then deletes the factory user's file. It refuses a
+   key that is a link, has another link, is another user's, or is open to
+   others, and a different key already in the broker's home. It prints the
+   command that puts the key back. A second `apply` changes nothing.
+3. Remove the key path from the settings of both homes, so no code looks for
+   the key there:
+
+   ```sh
+   hermes config set plugins.entries.linear-agent-session.settings.github.private_key_path ""
+   hermes -p claude-worker config set plugins.entries.linear-agent-session.settings.github.private_key_path ""
+   ```
+
+4. Run the `refresh-gh-app-login` job and check the login as in
+   [Sign the worker's `gh` in](#sign-the-workers-gh-in).
+   `check-install` prints no `broker user` line about the GitHub App and no
+   `github_app_ready` line.
+
+To roll back, run the command that `apply` printed, as root. It copies the key
+back to `<key path>` with the factory user as its owner. Then set
+`github.private_key_path` in both homes again, and either remove `github` from
+the broker's input and repeat steps 4 and 5 of "Broker user, macOS", or turn the
+gateway's own broker back on.
 
 ### Check the App's access
 
