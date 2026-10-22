@@ -127,36 +127,28 @@ project.
 
 Then sign in as the identity and try each other environment of the project.
 New projects have `dev`, `staging`, and `prod`. The project's settings page
-lists its environment slugs. Define `identity_keys` in the operator's shell
-first. It signs in as the identity in an env file, reads one folder, and
-prints the names of the secrets it can read. It makes the same REST calls as
-the helper in "Configure the default home", so the identity never sits in the
-environment or arguments of a process that another process of the same user
-can read with `ps eww`: only `/usr/bin/curl` and `/usr/bin/perl` receive it,
-on standard input, and macOS hides the environment of those platform binaries.
-The function reads only the two `FACTORY_INFISICAL_` keys of the file it
-names, and prints no value:
+lists its environment slugs. Render
+[`scripts/identity-secrets`](../scripts/identity-secrets) into
+`<home>/bin/identity-secrets` and source it in the operator's shell. It
+defines `identity_keys`, which signs in as the identity in an env file, reads
+one folder, and prints the names of the secrets it can read, and
+`identity_value`, which prints one secret's value. Both make the same REST
+calls as the helper in "Configure the default home", so the identity never
+sits in the environment or arguments of a process that another process of the
+same user can read with `ps eww`: only `/usr/bin/curl` and `/usr/bin/perl`
+receive it, on standard input, and macOS hides the environment of those
+platform binaries. Each function runs in a subshell, so no variable of it
+outlives the call, whether it succeeds or fails. They read only the two
+`FACTORY_INFISICAL_` keys of the file they name. `identity_keys` prints no
+value. Only the 1Password wrapper in [`1password.md`](1password.md) calls
+`identity_value`.
 
 ```sh
-identity_keys() { # <env file> <environment> <secret path>
-  _id=$(sed -n 's/^FACTORY_INFISICAL_CLIENT_ID=//p' "$1" | head -n 1)
-  _secret=$(sed -n 's/^FACTORY_INFISICAL_CLIENT_SECRET=//p' "$1" | head -n 1)
-  _tok=$(printf '%s\n%s\n' "$_id" "$_secret" |
-    /usr/bin/perl -MJSON::PP -e 'chomp(my @l = <STDIN>); print encode_json({clientId => $l[0], clientSecret => $l[1]})' |
-    /usr/bin/curl -q --silent --fail --max-time 15 -H 'Content-Type: application/json' --data-binary @- \
-      '<api url>/api/v1/auth/universal-auth/login' |
-    /usr/bin/perl -MJSON::PP -e 'print decode_json(do { local $/; <STDIN> })->{accessToken}' 2>/dev/null)
-  unset _id _secret
-  [ -n "$_tok" ] || { echo "identity_keys: sign-in failed" >&2; return 2; }
-  _out=$(printf 'Authorization: Bearer %s\n' "$_tok" |
-    /usr/bin/curl -q --silent --fail --max-time 15 -H @- --get \
-      --data-urlencode 'projectId=<project id>' --data-urlencode "environment=$2" \
-      --data-urlencode "secretPath=$3" --data-urlencode recursive=false \
-      '<api url>/api/v4/secrets') || { unset _tok; return 1; }
-  unset _tok
-  printf '%s' "$_out" |
-    /usr/bin/perl -MJSON::PP -e 'print "$_->{secretKey}\n" for @{decode_json(do { local $/; <STDIN> })->{secrets}}'
-}
+mkdir -p <home>/bin
+sed -e 's|<api url>|<infisical url>|g' -e 's|<project id>|<project id>|g' \
+  <repo>/skills/setup-factory/scripts/identity-secrets > <home>/bin/identity-secrets
+grep -c '<[a-z ]*>' <home>/bin/identity-secrets   # 0: every placeholder is rendered
+. <home>/bin/identity-secrets
 ```
 
 It returns `2` and prints `identity_keys: sign-in failed` when sign-in fails,
@@ -415,15 +407,16 @@ the broker from part 5, so the worker has a source for its tokens:
 ## Verify
 
 Run these before you remove anything from `.env`. Each line prints `1` when
-the value that Hermes loads matches the value in the folder:
+the value that Hermes loads matches the value in the folder, and `0` when it
+does not.
+[`scripts/check-secret-match`](../scripts/check-secret-match) compares the
+folder's value with the value that the `secrets.command` helper prints for the
+key, and checks that the route's `secret` in `config.yaml` still reads `${<key>}`. The
+values stay inside the script, and it never runs `hermes config get --raw`:
 
 ```sh
 match() {
-  a="$(infisical export --silent --projectId <project id> --env <environment> --path <folder> --format json \
-    | python3 -c 'import json, sys; print(next(s["value"] for s in json.load(sys.stdin) if s["key"] == sys.argv[1]))' "$1" \
-    | shasum)"
-  b="$(env -u "$1" hermes config get "platforms.webhook.extra.routes.$2.secret" --raw </dev/null 2>/dev/null | shasum)"
-  [ "$a" = "$b" ] && echo 1 || echo 0
+  python3 <repo>/skills/setup-factory/scripts/check-secret-match <home>/.env <project id> <environment> <folder> "$1" "$2"
 }
 match LINEAR_WEBHOOK_SECRET <webhook_route>
 match GITHUB_WEBHOOK_SECRET github
