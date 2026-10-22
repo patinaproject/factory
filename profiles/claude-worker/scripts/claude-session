@@ -129,6 +129,15 @@ CHECKS_RULE = (
     "new run with `wait-for-checks` before you judge the ready gate. When a re-run fails again, stop, "
     "and make the first line of your final message `Needs input:` followed by both attempts' URLs."
 )
+CLOSING_RULE = (
+    "A commit message closes an issue when its type is `fix` (`fix: #12 ...`) or it says `Closes #12`, and a "
+    "squash merge carries every commit message. Before your first commit, decide whether the pull request "
+    "completes each issue it names. When it completes the issue, close it in the body with `Closes #<n>`. When "
+    "it addresses only part of the issue, write `Part of #<n>` in the body and give every commit a type that "
+    "does not close it, such as `feat` or `refactor`, because `fix` is a closing keyword. push-signed cannot "
+    "reword a published commit. A hook refuses a push-signed call whose unpublished commits close an issue "
+    "the body does not, and tells you how to rewrite them."
+)
 EVIDENCE_RULE = (
     "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
     "shows its observable result, such as rendered command output or a probe. Run `python3 {upload_image} "
@@ -149,6 +158,7 @@ FINISH_RULE = STOP_RULE + (
     "watch`, and any sleep or polling loop that waits longer."
 )
 CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
+COMMIT_CLOSES_GUARD = Path(__file__).resolve().with_name("guard-commit-closes")
 PROXY_TOKEN_HELPER = Path(__file__).resolve().with_name("proxy-token")
 MCP_HEADERS_HELPER = Path(__file__).resolve().with_name("mcp-headers")
 TRIAGE_DOCUMENTS = ("Triage notes", "Agent brief")
@@ -177,7 +187,7 @@ TRIAGE_RULE = (
     "When triage ends, make the first line of your final message `Triage outcome: <role>`, where <role> is "
     "`ready-for-agent`, `ready-for-human`, or `wontfix` for a recommendation, and add a short summary."
 )
-SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
+SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{CLOSING_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 TRIAGE_SYSTEM_PROMPT = f"{TRIAGE_RULE}\n\n{LINEAR_RULE}\n\n{STOP_RULE}"
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
@@ -908,10 +918,14 @@ def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = Fa
     # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
     # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
-    guard = {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(CI_WAIT_GUARD))}"}
+    # A refused publish keeps a commit from closing an issue the pull request body does not; see guard-commit-closes.
+    guards = [
+        {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"}
+        for script in (CI_WAIT_GUARD, COMMIT_CLOSES_GUARD)
+    ]
     settings = {"env": env, "hooks": {
         "SessionStart": [{"hooks": [remove]}],
-        "PreToolUse": [{"matcher": "Bash", "hooks": [guard]}],
+        "PreToolUse": [{"matcher": "Bash", "hooks": guards}],
     }}
     if transport.get("auth_token_env"):
         settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)

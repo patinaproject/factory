@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Claude Code PreToolUse hook for a worker's Bash calls: never publish a commit that closes an issue the pull request body does not.
+
+Claude Code feeds the pending tool call as JSON on stdin. `push-signed` only moves a branch forward, so
+a published commit message cannot be reworded, and the `Validate pull request` check then fails the pull
+request for good. Before `push-signed` publishes, its commits are still local. This hook reads each
+commit that is not yet on the remote branch and, when the branch has an open pull request, refuses a
+commit that closes an issue (`fix: #N` does, as does `Closes #N`) which the body does not close, naming
+the local rewrite that fixes it. With no open pull request there is no body to compare, and the check
+in the pull request workflow decides.
+
+Exit 0 allows the call. Exit 2 refuses it and Claude Code shows stderr to the model.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+import card_branch
+import check_title_closes
+
+# Claude Code's PreToolUse hooks run for 60 s by default; the guard answers inside half of that, or refuses.
+BUDGET_SECONDS = float(os.environ.get("GUARD_COMMIT_CLOSES_SECONDS", "30"))
+# A command that runs push-signed: at the start of a shell command, optional `env` and VAR=value prefixes,
+# a python interpreter with optional -I, then the script. `grep push-signed` and `cat .../push-signed` do not run it.
+PUBLISH = re.compile(
+    r"(?:^|[;&|(]|\n)\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"\S*python[0-9.]*\s+(?:-I\s+)?\S*push-signed(?:\s|$|[;&|)])"
+)
+RECORD_END = "\x1e"
+FIELD = "\x1f"
+REFUSAL = (
+    "Refused: commit {sha} closes {ref} when it merges, but the pull request body has no `Closes {ref}` line. "
+    "push-signed cannot reword a commit once it publishes it, so fix the commit now, while it is local. "
+    "{fix} Reword it to a type that does not close {ref}, such as "
+    "`feat: {ref} ...` or `refactor: {ref} ...`, and run push-signed again. When this pull request "
+    "completes {ref}, add `Closes {ref}` to its body instead."
+)
+FLAT_FIX = "Run `git reset --soft {base}` and commit again."
+MERGE_FIX = (
+    "The branch holds a merge that a squash would flatten, so keep it: run "
+    "`GIT_SEQUENCE_EDITOR=\"sed -i.bak 's/^pick {sha}/reword {sha}/'\" git rebase --rebase-merges --interactive {base}`."
+)
+
+
+class Unreadable(Exception):
+    pass
+
+
+class Clock:
+    """One deadline for the whole guard, so the calls together never outlast BUDGET_SECONDS."""
+
+    def __init__(self) -> None:
+        self.end = time.monotonic() + BUDGET_SECONDS
+
+    def left(self) -> float:
+        remaining = self.end - time.monotonic()
+        if remaining <= 0:
+            raise Unreadable(f"it ran past its {BUDGET_SECONDS:g} s time limit")
+        return remaining
+
+
+def run(args: list[str], cwd: str, clock: Clock) -> str:
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=clock.left())
+    except subprocess.TimeoutExpired as failure:
+        raise Unreadable(f"{args[0]} ran past the {BUDGET_SECONDS:g} s time limit") from failure
+    except OSError as failure:
+        raise Unreadable(f"{args[0]} could not run: {failure.strerror or failure}") from failure
+    if proc.returncode != 0:
+        raise Unreadable(f"{' '.join(args[:3])} failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    return proc.stdout
+
+
+def unpublished(cwd: str, clock: Clock) -> tuple[str, str, list[tuple[str, str]], bool]:
+    """The branch, the ref its unpublished commits follow (the remote branch, else the default branch), those commits as (sha, message) pairs, and whether one is a merge.
+
+    Commits that the default branch holds came in through a local merge of it and are not the branch's own,
+    just as the pull request's commit list leaves out base commits.
+    """
+    branch = run(["git", "symbolic-ref", "--short", "HEAD"], cwd, clock).strip()
+    default = run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd, clock).strip()
+    remote = f"origin/{branch}"
+    try:
+        run(["git", "rev-parse", "--verify", "--quiet", remote], cwd, clock)
+        base = remote
+    except Unreadable as failure:
+        if "time limit" in str(failure):
+            raise
+        base = default
+    log = run(["git", "log", "--reverse", f"--format=%h{FIELD}%P{FIELD}%B{RECORD_END}", "HEAD", f"^{base}", f"^{default}"], cwd, clock)
+    records = [record.strip("\n").split(FIELD, 2) for record in log.split(RECORD_END) if record.strip()]
+    commits = [(sha, message) for sha, _, message in records]
+    return branch, base, commits, any(len(parents.split()) > 1 for _, parents, _ in records)
+
+
+def pull_request_body(branch: str, cwd: str, clock: Clock) -> tuple[str, str] | None:
+    gh = os.environ.get("GH_BIN", "gh")
+    repo = json.loads(run([gh, "repo", "view", "--json", "nameWithOwner"], cwd, clock))["nameWithOwner"]
+    pulls = json.loads(run([gh, "pr", "list", "--head", branch, "--state", "open", "--json", "body", "--limit", "1"], cwd, clock))
+    return (repo, pulls[0]["body"] or "") if pulls else None
+
+
+def refusals(cwd: str) -> list[str]:
+    clock = Clock()
+    branch, base, commits, merged = unpublished(cwd, clock)
+    if not commits:
+        return []
+    found = pull_request_body(branch, cwd, clock)
+    if found is None:
+        return []
+    repo, body = found
+    in_body = card_branch.closes(body, repo)
+    return [
+        REFUSAL.format(
+            sha=sha, ref=ref, fix=(MERGE_FIX if merged else FLAT_FIX).format(sha=sha, base=base),
+        )
+        for sha, message in commits
+        for ref in sorted(check_title_closes.title_closes(message, repo) - in_body, key=lambda ref: int(ref[1:]))
+    ]
+
+
+def decide(event: dict) -> tuple[int, str]:
+    if event.get("tool_name") != "Bash":
+        return 0, ""
+    if not PUBLISH.search((event.get("tool_input") or {}).get("command") or ""):
+        return 0, ""
+    try:
+        problems = refusals(event.get("cwd") or os.getcwd())
+    except (Unreadable, json.JSONDecodeError, KeyError) as failure:
+        return 2, f"Refused: the commit closing check could not read the branch or its pull request ({failure}). Run push-signed again."
+    return (2, "\n".join(problems)) if problems else (0, "")
+
+
+def main() -> int:
+    code, text = decide(json.load(sys.stdin))
+    if text:
+        print(text, file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
