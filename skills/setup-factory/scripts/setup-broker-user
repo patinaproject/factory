@@ -12,7 +12,18 @@ The input file holds no secret:
     {"factory_user": "<account>", "repositories": {"<owner>/<repo>": <id>},
      "claude_session": {"auth_token_env": "<name>", "mcp_servers": {"<server>": {"token_env": "<name>"}}},
      "infisical": {"api_url": "https://app.infisical.com", "project_id": "...", "environment": "...",
-                   "paths": ["/factory", "/factory/broker"]}}
+                   "paths": ["/factory", "/factory/broker"]},
+     "github": {"app_id": <id>, "installation_id": <id>, "private_key_path": "<the factory user's key file>"}}
+
+With `github`, apply moves the GitHub App private key into the broker's home,
+where no factory process can read it. It copies the key, reads the copy back,
+and only then removes the factory user's file. It refuses a key that is a link,
+has another link, is another user's, or is open to others, and a different key
+already in the broker's home. It never prints the key. A second apply finds the
+key in place and changes nothing. To put the key back, root copies it out
+with the command that apply prints:
+
+    /usr/bin/sudo /usr/bin/install -o <factory user> -m 0600 <broker home>/github-app.pem <private_key_path>
 
 It runs on the macOS system Python, 3.9.
 """
@@ -27,6 +38,7 @@ import os
 import plistlib
 import pwd
 import re
+import stat
 import subprocess
 import sys
 import urllib.parse
@@ -50,6 +62,7 @@ SERVICE_FILES = {
     "factory_uploads/__init__.py": "plugins/factory-uploads/__init__.py",
     "factory_uploads/broker.py": "plugins/factory-uploads/broker.py",
     "factory_uploads/credentials.py": "plugins/factory-uploads/credentials.py",
+    "factory_uploads/github_app.py": "plugins/factory-uploads/github_app.py",
     "factory_uploads/service.py": "plugins/factory-uploads/service.py",
     "factory_uploads/upload_token.py": "plugins/factory-uploads/upload_token.py",
     "factory_uploads/secret-names.yaml": "plugins/factory-secret-names/plugin.yaml",
@@ -110,6 +123,10 @@ class Layout:
         return self.base / "installed-commit"
 
     @property
+    def github_key(self) -> Path:
+        return self.home / "github-app.pem"
+
+    @property
     def plist(self) -> Path:
         return Path("/Library/LaunchDaemons") / f"{self.label}.plist"
 
@@ -145,7 +162,20 @@ class File:
         return visible(f"write  {self.path} {self.owner}:{self.group} {self.mode:04o}")
 
 
-Step = Union[Run, Directory, File]
+@dataclass(frozen=True)
+class MoveKey:
+    source: Path
+    path: Path
+    owner: str
+    group: str
+    source_uid: int
+    mode: int = 0o600
+
+    def __str__(self) -> str:
+        return visible(f"move   {self.source} -> {self.path} {self.owner}:{self.group} {self.mode:04o}")
+
+
+Step = Union[Run, Directory, File, MoveKey]
 
 
 def _quote(arg: str) -> str:
@@ -164,6 +194,17 @@ class Entry:
 UNREADABLE_WITHOUT_ROOT = Entry(-1, -1, 0)
 
 
+def _meta(path: Path) -> Optional[Entry]:
+    """Like _entry, but it never reads the file, for a file that holds a secret."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except PermissionError:
+        return UNREADABLE_WITHOUT_ROOT
+    return Entry(info.st_uid, info.st_gid, info.st_mode & 0o7777, link=stat.S_ISLNK(info.st_mode))
+
+
 @dataclass
 class System:
     user: Callable[[str], Optional[pwd.struct_passwd]]
@@ -174,6 +215,7 @@ class System:
     euid: int
     platform: str
     realpath: Callable[[Path], Path] = lambda path: Path(os.path.realpath(path))
+    meta: Callable[[Path], Optional[Entry]] = _meta
 
 
 def _lookup(table, name):
@@ -239,6 +281,17 @@ def read_input(path: Path) -> dict:
         if not isinstance(infisical["paths"], list):
             raise Refuse("infisical.paths must be a list of folders")
         check_infisical_url(infisical["api_url"], infisical.get("self_hosted_host"))
+    github = data.get("github")
+    if github is not None and (
+        not isinstance(github, dict)
+        or not all(
+            isinstance(github.get(key), (int, str)) and not isinstance(github[key], bool) and str(github[key]).isdigit()
+            for key in ("app_id", "installation_id")
+        )
+        or not isinstance(github.get("private_key_path"), str)
+        or not os.path.isabs(github["private_key_path"])
+    ):
+        raise Refuse("github needs a numeric app_id and installation_id and the absolute private_key_path of the factory user's key")
     return data
 
 
@@ -349,6 +402,10 @@ def broker_session(session: dict) -> dict:
 
 
 def broker_config(layout: Layout, data: dict, factory_uid: int) -> dict:
+    github = data.get("github")
+    app = {"github": {
+        "app_id": github["app_id"], "installation_id": github["installation_id"], "private_key_path": str(layout.github_key),
+    }} if github else {}
     return {
         "user": layout.user,
         "group": layout.group,
@@ -360,6 +417,7 @@ def broker_config(layout: Layout, data: dict, factory_uid: int) -> dict:
         "repositories": data["repositories"],
         "claude_session": broker_session(data.get("claude_session") or {}),
         "infisical": data.get("infisical"),
+        **app,
     }
 
 
@@ -380,6 +438,20 @@ def daemon_plist(layout: Layout, interpreter: Path = INTERPRETER) -> bytes:
         "StandardOutPath": str(layout.home / "broker.log"),
         "StandardErrorPath": str(layout.home / "broker.log"),
     })
+
+
+def key_move(layout: Layout, source: Path, factory_user: str, factory_uid: int, system: System) -> Optional[MoveKey]:
+    """Move the factory user's key once. After that its old path is empty and the broker's copy is the only one."""
+    if layout.base in source.parents:
+        raise Refuse(f"{source} is inside {layout.base}; name the factory user's copy of the key")
+    found = system.meta(source)
+    if found is None:
+        if system.meta(layout.github_key) is None:
+            raise Refuse(f"the GitHub App key is at neither {source} nor {layout.github_key}")
+        return None
+    if found.link or found.uid != factory_uid or found.mode & 0o077:
+        raise Refuse(f"{source} is not a file of {factory_user}'s with mode 0600; check it by hand")
+    return MoveKey(source, layout.github_key, layout.user, layout.group, factory_uid)
 
 
 def plan(data: dict, system: System, layout: Layout = Layout(), repo: Path = REPO, commit: Optional[str] = None) -> list:
@@ -441,6 +513,10 @@ def plan(data: dict, system: System, layout: Layout = Layout(), repo: Path = REP
     env = layout.home / ".env"
     if system.entry(env) is None:
         steps.append(File(env, b"", layout.user, layout.group, 0o600))
+    if data.get("github"):
+        move = key_move(layout, Path(data["github"]["private_key_path"]), factory_user, person.pw_uid, system)
+        if move is not None:
+            steps.append(move)
 
     launch: list = []
     if not system.loaded(layout.label):
@@ -470,7 +546,45 @@ def write_file(path: Path, content: bytes, uid: int, gid: int, mode: int) -> Non
         handle.write(content)
         os.fchown(handle.fileno(), uid, gid)
         os.fchmod(handle.fileno(), mode)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+def _read_key(path: Path, owner: int, name: Optional[str] = None, dir_fd: Optional[int] = None) -> tuple:
+    try:
+        fd = os.open(name or path, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise Refuse(f"{path} cannot be opened without following a link: {error.strerror}") from None
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != owner or info.st_mode & 0o077:
+            raise Refuse(f"{path} is not a file of uid {owner} with one link and mode 0600; check it by hand")
+        return handle.read(), info
+
+
+def move_key(step: MoveKey, uid: int, gid: int) -> None:
+    """Copy the key into the broker's home and read the copy back before the factory user's file goes."""
+    directory = os.open(step.source.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        key, read = _read_key(step.source, step.source_uid, step.source.name, directory)
+        if not key.startswith(b"-----BEGIN ") or b"PRIVATE KEY-----" not in key:
+            raise Refuse(f"{step.source} is not a PEM private key; check it by hand")
+        try:
+            installed, _ = _read_key(step.path, uid)
+        except FileNotFoundError:
+            write_file(step.path, key, uid, gid, step.mode)
+            installed, _ = _read_key(step.path, uid)
+        if installed != key:
+            raise Refuse(f"{step.path} holds a different key than {step.source}; keep the one GitHub accepts and remove the other by hand")
+        now = os.stat(step.source.name, dir_fd=directory, follow_symlinks=False)
+        if (now.st_dev, now.st_ino) != (read.st_dev, read.st_ino):
+            raise Refuse(f"{step.source} changed while it was copied; run apply again")
+        os.unlink(step.source.name, dir_fd=directory)
+    finally:
+        os.close(directory)
 
 
 def apply(steps: list, run: Callable = subprocess.run) -> None:
@@ -480,6 +594,9 @@ def apply(steps: list, run: Callable = subprocess.run) -> None:
             run(list(step.argv), check=True)
             continue
         uid, gid = pwd.getpwnam(step.owner).pw_uid, grp.getgrnam(step.group).gr_gid
+        if isinstance(step, MoveKey):
+            move_key(step, uid, gid)
+            continue
         if isinstance(step, File):
             write_file(step.path, step.content, uid, gid, step.mode)
             continue
@@ -543,6 +660,12 @@ def confirm_changes(
         print(f"Installed commit {before}. Review the change with: git diff {before}..{commit} -- {' '.join(REVIEWED_SOURCES)}")
     else:
         print("No installed commit is recorded, so the diffs above are the whole change.")
+    for step in steps:
+        if isinstance(step, MoveKey):
+            print(visible(
+                f"The GitHub App key moves out of {data['factory_user']}'s reach. To put the key back: "
+                f"/usr/bin/sudo /usr/bin/install -o {_quote(data['factory_user'])} -m 0600 {_quote(str(step.path))} {_quote(str(step.source))}"
+            ))
     print(visible(f"{data['factory_user']} joins {layout.group} and is the only user the broker answers."))
     print(describe_infisical(data))
     if ask("Install these changes as root? Type yes: ").strip() != "yes":

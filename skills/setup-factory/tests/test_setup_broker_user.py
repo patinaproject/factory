@@ -61,11 +61,16 @@ class Machine:
             user=self.users.get, group=self.groups.get, used_ids=lambda: set(self.ids),
             entry=self.entries.get, loaded=lambda label: label in self.loaded, euid=501, platform=platform,
             realpath=lambda path: REAL_PYTHON if path == setup.INTERPRETER else path,
+            meta=self.entries.get,
         )
 
     def converge(self, steps):
         for step in steps:
-            if isinstance(step, setup.Run):
+            if isinstance(step, setup.MoveKey):
+                del self.entries[step.source]
+                broker = self.users[step.owner]
+                self.entries[step.path] = setup.Entry(broker.pw_uid, broker.pw_gid, step.mode)
+            elif isinstance(step, setup.Run):
                 argv = step.argv
                 if argv[:3] == (setup.DSEDITGROUP, "-o", "create"):
                     self.groups[argv[-1]] = group(argv[-1], int(argv[6]))
@@ -116,6 +121,7 @@ class PlanTest(unittest.TestCase):
             "write  /Library/Application Support/factory-broker/lib/factory_uploads/__init__.py root:wheel 0644",
             "write  /Library/Application Support/factory-broker/lib/factory_uploads/broker.py root:wheel 0644",
             "write  /Library/Application Support/factory-broker/lib/factory_uploads/credentials.py root:wheel 0644",
+            "write  /Library/Application Support/factory-broker/lib/factory_uploads/github_app.py root:wheel 0644",
             "write  /Library/Application Support/factory-broker/lib/factory_uploads/service.py root:wheel 0644",
             "write  /Library/Application Support/factory-broker/lib/factory_uploads/upload_token.py root:wheel 0644",
             "write  /Library/Application Support/factory-broker/lib/factory_uploads/secret-names.yaml root:wheel 0644",
@@ -223,6 +229,188 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(step.argv[3], "/Users/_factorybroker")
             if isinstance(step, setup.Run) and step.argv[0] == setup.DSEDITGROUP:
                 self.assertEqual(step.argv[-1], "_factorybroker")
+
+
+FACTORY_KEY = Path("/Users/factory/.config/factory/github-app.pem")
+GITHUB = {"app_id": 11, "installation_id": 22, "private_key_path": str(FACTORY_KEY)}
+WITH_KEY = {**INPUT, "github": GITHUB}
+MOVE = f"move   {FACTORY_KEY} -> /Library/Application Support/factory-broker/home/github-app.pem _factorybroker:_factorybroker 0600"
+
+
+class KeyPlanTest(unittest.TestCase):
+    def machine(self, key=setup.Entry(501, 20, 0o600)):
+        machine = Machine()
+        if key is not None:
+            machine.entries[FACTORY_KEY] = key
+        return machine
+
+    def test_the_plan_moves_the_factory_users_key_into_the_brokers_home_before_the_service_starts(self):
+        steps = lines(setup.plan(WITH_KEY, self.machine().system()))
+
+        self.assertEqual(steps[-3:], [
+            "write  /Library/Application Support/factory-broker/home/.env _factorybroker:_factorybroker 0600",
+            MOVE,
+            "run    /bin/launchctl bootstrap system /Library/LaunchDaemons/local.factory-broker.plist",
+        ])
+
+    def test_the_config_names_the_brokers_copy_and_never_the_factory_users(self):
+        steps = setup.plan(WITH_KEY, self.machine().system())
+
+        [config] = [s for s in steps if isinstance(s, setup.File) and s.path == LAYOUT.config]
+        self.assertEqual(json.loads(config.content)["github"], {
+            "app_id": 11, "installation_id": 22,
+            "private_key_path": "/Library/Application Support/factory-broker/home/github-app.pem",
+        })
+
+    def test_a_second_run_changes_nothing(self):
+        machine = self.machine()
+        machine.converge(setup.plan(WITH_KEY, machine.system()))
+
+        self.assertNotIn(FACTORY_KEY, machine.entries)
+        self.assertEqual(setup.plan(WITH_KEY, machine.system()), [])
+
+    def test_a_planner_that_cannot_see_into_the_brokers_home_after_the_move_plans_nothing(self):
+        machine = self.machine()
+        machine.converge(setup.plan(WITH_KEY, machine.system()))
+        machine.entries[LAYOUT.github_key] = setup.UNREADABLE_WITHOUT_ROOT
+
+        self.assertEqual(setup.plan(WITH_KEY, machine.system()), [])
+
+    def test_a_key_that_is_at_neither_path_is_refused(self):
+        with self.assertRaises(setup.Refuse) as caught:
+            setup.plan(WITH_KEY, self.machine(key=None).system())
+
+        self.assertEqual(
+            str(caught.exception),
+            f"the GitHub App key is at neither {FACTORY_KEY} nor {LAYOUT.github_key}",
+        )
+
+    def test_a_key_that_is_a_link_another_users_or_open_to_others_is_refused(self):
+        for key in (
+            setup.Entry(501, 20, 0o600, link=True), setup.Entry(0, 0, 0o600),
+            setup.Entry(501, 20, 0o640), setup.UNREADABLE_WITHOUT_ROOT,
+        ):
+            with self.subTest(key=key), self.assertRaises(setup.Refuse):
+                setup.plan(WITH_KEY, self.machine(key=key).system())
+
+    def test_a_key_path_inside_the_brokers_directory_is_refused(self):
+        github = {**GITHUB, "private_key_path": str(LAYOUT.github_key)}
+
+        with self.assertRaises(setup.Refuse):
+            setup.plan({**INPUT, "github": github}, self.machine().system())
+
+    def test_the_confirmation_gives_the_rollback_and_never_the_key(self):
+        shown = io.StringIO()
+        with contextlib.redirect_stdout(shown), self.assertRaises(setup.Refuse):
+            setup.install(WITH_KEY, self.machine().system(), LAYOUT, COMMIT, ask=lambda prompt: "no")
+
+        self.assertIn(
+            "To put the key back: /usr/bin/sudo /usr/bin/install -o factory -m 0600 "
+            f"'{LAYOUT.github_key}' {FACTORY_KEY}",
+            shown.getvalue(),
+        )
+
+
+class KeyInputTest(unittest.TestCase):
+    def test_a_github_object_needs_numeric_ids_and_an_absolute_key_path(self):
+        for github in (
+            {**GITHUB, "app_id": "x11"}, {**GITHUB, "installation_id": True},
+            {**GITHUB, "private_key_path": "github-app.pem"}, {"app_id": 11}, "github",
+        ):
+            with self.subTest(github=github), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "input.json"
+                path.write_text(json.dumps({**INPUT, "github": github}))
+                with self.assertRaises(setup.Refuse):
+                    setup.read_input(path)
+
+
+PEM = b"-----BEGIN RSA PRIVATE KEY-----\nFAKEKEYBODY\n-----END RSA PRIVATE KEY-----\n"
+
+
+class MoveKeyTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.factory = Path(tmp.name) / "factory"
+        self.broker = Path(tmp.name) / "broker"
+        self.factory.mkdir()
+        self.broker.mkdir(mode=0o700)
+        self.source = self.factory / "github-app.pem"
+        self.target = self.broker / "github-app.pem"
+        self.write(self.source, PEM)
+        self.step = setup.MoveKey(self.source, self.target, "broker", "broker", os.getuid())
+
+    @staticmethod
+    def write(path, content, mode=0o600):
+        path.write_bytes(content)
+        os.chmod(path, mode)
+
+    def move(self):
+        setup.move_key(self.step, os.getuid(), os.getgid())
+
+    def test_the_key_lands_in_the_brokers_home_with_mode_0600_and_leaves_the_factory_users(self):
+        self.move()
+
+        self.assertEqual(self.target.read_bytes(), PEM)
+        self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o600)
+        self.assertFalse(self.source.exists())
+
+    def test_the_same_key_already_in_place_only_removes_the_factory_users_copy(self):
+        self.write(self.target, PEM)
+
+        self.move()
+
+        self.assertEqual(self.target.read_bytes(), PEM)
+        self.assertFalse(self.source.exists())
+
+    def test_a_different_key_in_place_keeps_both(self):
+        other = PEM.replace(b"FAKEKEYBODY", b"OTHERKEY")
+        self.write(self.target, other)
+
+        with self.assertRaises(setup.Refuse):
+            self.move()
+
+        self.assertEqual((self.source.read_bytes(), self.target.read_bytes()), (PEM, other))
+
+    def test_a_source_that_is_not_a_private_key_is_kept(self):
+        self.write(self.source, b"not a key\n")
+
+        with self.assertRaises(setup.Refuse):
+            self.move()
+
+        self.assertTrue(self.source.exists())
+        self.assertFalse(self.target.exists())
+
+    def test_a_linked_or_open_source_is_refused_and_kept(self):
+        elsewhere = self.factory / "elsewhere.pem"
+        self.source.rename(elsewhere)
+        self.source.symlink_to(elsewhere)
+        with self.assertRaises(setup.Refuse):
+            self.move()
+        self.source.unlink()
+
+        os.link(elsewhere, self.source)
+        with self.assertRaises(setup.Refuse):
+            self.move()
+        elsewhere.unlink()
+
+        os.chmod(self.source, 0o640)
+        with self.assertRaises(setup.Refuse):
+            self.move()
+
+        self.assertEqual(self.source.read_bytes(), PEM)
+        self.assertFalse(self.target.exists())
+
+    def test_apply_moves_the_key_and_prints_no_key_material(self):
+        me, mine = pwd.getpwuid(os.getuid()).pw_name, grp.getgrgid(os.getgid()).gr_name
+        step = setup.MoveKey(self.source, self.target, me, mine, os.getuid())
+
+        with contextlib.redirect_stdout(io.StringIO()) as shown:
+            setup.apply([step])
+
+        self.assertEqual(self.target.read_bytes(), PEM)
+        self.assertFalse(self.source.exists())
+        self.assertNotIn("FAKEKEYBODY", shown.getvalue())
 
 
 class RefusalTest(unittest.TestCase):

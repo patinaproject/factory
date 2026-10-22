@@ -17,16 +17,16 @@ from hermes_constants import get_hermes_home
 
 from .broker import Broker
 from .credentials import UPLOAD_TOKEN, GatewayCredentials
+from .github_app import GitHubApp
 
 PLATFORM = "factory_uploads"
 LINEAR_PLUGIN = Path("plugins") / "linear-agent-session" / "linear.py"
 SECRET_NAMES = Path("plugins") / "factory-secret-names" / "plugin.yaml"
 
 
-def claude_session(config: dict) -> dict:
+def factory_settings(config: dict) -> dict:
     entries = (config.get("plugins") or {}).get("entries") or {}
-    settings = (entries.get("linear-agent-session") or {}).get("settings") or {}
-    return settings.get("claude_session") or {}
+    return (entries.get("linear-agent-session") or {}).get("settings") or {}
 
 
 class FactoryUploadsAdapter(BasePlatformAdapter):
@@ -34,13 +34,15 @@ class FactoryUploadsAdapter(BasePlatformAdapter):
         super().__init__(config, Platform(PLATFORM))
         repositories = (getattr(config, "extra", None) or {}).get("repositories") or []
         home = get_hermes_home()
+        settings = factory_settings(load_config_readonly())
         self.broker = Broker(
             home,
             list(repositories),
             lambda: get_scoped_secret(UPLOAD_TOKEN),
             credentials=GatewayCredentials(
-                get_scoped_secret, claude_session(load_config_readonly()), home / LINEAR_PLUGIN, home,
+                get_scoped_secret, settings.get("claude_session") or {}, home / LINEAR_PLUGIN, home,
                 home / SECRET_NAMES,
+                github_app=GitHubApp.from_settings(settings.get("github")),
             ),
         )
 

@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from factory_uploads.broker import Broker  # noqa: E402
 from factory_uploads.credentials import UPLOAD_TOKEN, GatewayCredentials  # noqa: E402
+from factory_uploads.github_app import GitHubApp  # noqa: E402
 
 logger = logging.getLogger("factory_uploads.service")
 
@@ -41,6 +42,10 @@ def load_config(path: Path) -> dict:
         raise ConfigError(f"{path}: allowed_uids must list positive uids")
     if not all(isinstance(rid, int) for rid in config["repositories"].values()):
         raise ConfigError(f"{path}: each repository maps to its numeric GitHub id")
+    try:
+        GitHubApp.from_settings(config.get("github"))
+    except ValueError as error:
+        raise ConfigError(f"{path}: {error}") from None
     return config
 
 
@@ -127,7 +132,10 @@ def make_broker(config: dict, secrets: dict) -> Broker:
         list(ids),
         lambda: secrets.get(UPLOAD_TOKEN),
         resolve_repository_id=ids.__getitem__,
-        credentials=GatewayCredentials(secrets.get, config.get("claude_session") or {}, LINEAR_MODULE, home, SECRET_NAMES),
+        credentials=GatewayCredentials(
+            secrets.get, config.get("claude_session") or {}, LINEAR_MODULE, home, SECRET_NAMES,
+            github_app=GitHubApp.from_settings(config.get("github")),
+        ),
         socket_path=Path(config["socket"]),
         state_dir=home / "state",
         socket_mode=0o660,

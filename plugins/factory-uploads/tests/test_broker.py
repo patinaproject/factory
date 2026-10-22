@@ -237,7 +237,7 @@ class StatusTest(BrokerTestCase):
             set(after),
             {
                 "ok", "token_present", "linear_ready", "proxy_token_present", "mcp_tokens_present",
-                "last_state", "expires_at", "checked_at",
+                "github_app_ready", "last_state", "expires_at", "checked_at",
             },
         )
 
@@ -252,7 +252,9 @@ class FakeCredentials:
         self.linear = {"access_token": "lin_oauth_FAKE_access", "expires_at": 1_900_000_000.0}
         self.proxy = "proxy-FAKE-token"
         self.mcp = {"sentry": "sntryu_FAKE", "posthog": None}
+        self.github = {"access_token": "ghs_FAKE_installation", "expires_at": 1_800_003_600.0}
         self.failure = None
+        self.github_failure = None
 
     def linear_ready(self):
         return self.linear is not None
@@ -270,6 +272,14 @@ class FakeCredentials:
 
     def mcp_token(self, server):
         return self.mcp.get(server)
+
+    def github_ready(self):
+        return self.github is not None
+
+    def github_token(self):
+        if self.github_failure:
+            raise self.github_failure
+        return self.github
 
 
 class CredentialTest(BrokerTestCase):
@@ -296,12 +306,16 @@ class CredentialTest(BrokerTestCase):
             await ask(self.broker.socket_path, {"op": "mcp_token", "server": "sentry"}),
             {"ok": True, "token": "sntryu_FAKE", "expires_at": None},
         )
+        self.assertEqual(
+            await ask(self.broker.socket_path, {"op": "github_token"}),
+            {"ok": True, "token": "ghs_FAKE_installation", "expires_at": 1_800_003_600.0},
+        )
 
     async def test_a_missing_credential_answers_unavailable(self):
-        self.credentials.linear = self.credentials.proxy = None
+        self.credentials.linear = self.credentials.proxy = self.credentials.github = None
 
         for request in (
-            {"op": "linear_token"}, {"op": "proxy_token"},
+            {"op": "linear_token"}, {"op": "proxy_token"}, {"op": "github_token"},
             {"op": "mcp_token", "server": "posthog"}, {"op": "mcp_token", "server": "unconfigured"},
         ):
             with self.subTest(request=request):
@@ -324,6 +338,14 @@ class CredentialTest(BrokerTestCase):
 
         self.assertEqual(reply, {"ok": False, "state": "error", "message": broker_module.LINEAR_FAILED})
 
+    async def test_a_failed_github_token_gets_a_fixed_reply(self):
+        self.credentials.github_failure = RuntimeError("mint installation token: HTTP 401: Bad credentials")
+
+        with self.assertLogs("factory_uploads.broker", level="WARNING"):
+            reply = await ask(self.broker.socket_path, {"op": "github_token"})
+
+        self.assertEqual(reply, {"ok": False, "state": "error", "message": broker_module.GITHUB_FAILED})
+
     async def test_the_upload_token_is_never_handed_out(self):
         replies = [await ask(self.broker.socket_path, {"op": op}) for op in ("linear_token", "proxy_token", "status")]
         replies.append(await ask(self.broker.socket_path, {"op": "mcp_token", "server": "sentry"}))
@@ -335,23 +357,26 @@ class CredentialTest(BrokerTestCase):
         self.credentials.proxy = None
         await ask(self.broker.socket_path, {"op": "proxy_token"})
         await ask(self.broker.socket_path, {"op": "mcp_token", "server": "sentry"})
+        await ask(self.broker.socket_path, {"op": "github_token"})
 
         log = (self.home / "factory-uploads" / "log.jsonl").read_text()
         entries = [json.loads(line) for line in log.splitlines()]
         self.assertEqual([(e["op"], e.get("server"), e["state"]) for e in entries], [
             ("linear_token", None, "ok"), ("proxy_token", None, "unavailable"), ("mcp_token", "sentry", "ok"),
+            ("github_token", None, "ok"),
         ])
         self.assertIsInstance(entries[0]["pid"], int)
         self.assertNotIn("lin_oauth_FAKE_access", log)
         self.assertNotIn("proxy-FAKE-token", log)
         self.assertNotIn("sntryu_FAKE", log)
+        self.assertNotIn("ghs_FAKE_installation", log)
 
     async def test_status_reports_the_credentials_as_booleans(self):
         status = await ask(self.broker.socket_path, {"op": "status"})
 
         self.assertEqual(
-            (status["linear_ready"], status["proxy_token_present"], status["mcp_tokens_present"]),
-            (True, True, {"sentry": True, "posthog": False}),
+            (status["linear_ready"], status["proxy_token_present"], status["mcp_tokens_present"], status["github_app_ready"]),
+            (True, True, {"sentry": True, "posthog": False}, True),
         )
         self.assertNotIn("proxy-FAKE-token", json.dumps(status))
         self.assertNotIn("sntryu_FAKE", json.dumps(status))

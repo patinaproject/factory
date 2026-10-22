@@ -24,6 +24,7 @@ SERVICE_FILES = (
     "plugins/factory-uploads/__init__.py",
     "plugins/factory-uploads/broker.py",
     "plugins/factory-uploads/credentials.py",
+    "plugins/factory-uploads/github_app.py",
     "plugins/factory-uploads/service.py",
     "plugins/factory-uploads/upload_token.py",
     "plugins/linear-agent-session/linear.py",
@@ -115,6 +116,15 @@ class ConfigTest(ServiceTestCase):
     def test_a_repository_without_its_numeric_id_is_refused(self):
         with self.assertRaises(service.ConfigError):
             service.load_config(self.write_config(repositories={"example-org/example-repo": "7"}))
+
+    def test_a_github_app_with_a_bad_id_or_a_relative_key_path_is_refused(self):
+        key = str(self.home / "github-app.pem")
+        for github in (
+            {"app_id": "x", "installation_id": 2, "private_key_path": key},
+            {"app_id": 1, "installation_id": 2, "private_key_path": "github-app.pem"},
+        ):
+            with self.subTest(github=github), self.assertRaises(service.ConfigError):
+                service.load_config(self.write_config(github=github))
 
 
 class SecretsTest(ServiceTestCase):
@@ -238,6 +248,35 @@ class ServeTest(ServiceTestCase):
         self.assertEqual(code, 0)
         self.assertFalse(broker.socket_path.exists())
         self.assertTrue((self.home / "state" / "log.jsonl").exists())
+
+    def status(self, broker) -> dict:
+        async def scenario():
+            stopping = asyncio.Event()
+            serving = asyncio.ensure_future(service.serve(broker, stopping))
+            while not broker.socket_path.exists():
+                await asyncio.sleep(0.01)
+            reader, writer = await asyncio.open_unix_connection(str(broker.socket_path))
+            writer.write(b'{"op": "status"}\n')
+            reply = json.loads(await reader.readline())
+            writer.close()
+            stopping.set()
+            await serving
+            return reply
+
+        return asyncio.run(scenario())
+
+    def test_the_github_app_key_in_the_brokers_home_makes_it_ready(self):
+        key = self.home / "github-app.pem"
+        config = service.load_config(self.write_config(
+            github={"app_id": 1, "installation_id": 2, "private_key_path": str(key)},
+        ))
+
+        self.assertFalse(self.status(service.make_broker(config, {}))["github_app_ready"])
+        key.write_text("key")
+        self.assertTrue(self.status(service.make_broker(config, {}))["github_app_ready"])
+
+    def test_a_config_without_a_github_app_is_never_ready(self):
+        self.assertFalse(self.status(service.make_broker(service.load_config(self.write_config()), {}))["github_app_ready"])
 
 
 class DeclaredNamesTest(ServiceTestCase):
