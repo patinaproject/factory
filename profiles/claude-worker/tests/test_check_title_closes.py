@@ -30,7 +30,7 @@ class CheckTitleClosesTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("#177", output)
         self.assertNotIn("#247", output)
-        self.assertIn("retitle to the issue this pull request completes", output)
+        self.assertIn("Retitle to the issue this pull request completes", output)
         self.assertIn("use another type", output)
 
     def test_a_fix_title_for_an_issue_the_body_closes_passes(self) -> None:
