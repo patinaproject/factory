@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unittest
 import uuid
 from pathlib import Path
 
@@ -34,9 +35,9 @@ SYSTEM_PROMPT = (
     "conflicting (`mergeable: CONFLICTING`) and update-branch refuses, fetch, run `git merge origin/<base>`, "
     "resolve the conflicts, commit the merge, and publish it with push-signed, which accepts a merge of the "
     "current base head. Then wait for checks and finish through the ready gate as usual. When you cannot "
-    "resolve a conflict with confidence, for example both sides change the same behavior, do not guess: run "
-    "`hermes kanban block <task id> --kind needs_input '<reason naming each conflicting file>'` once and "
-    "stop.\n\n"
+    "resolve a conflict with confidence, for example both sides change the same behavior, do not guess: stop, "
+    "and make the first line of your final message `Needs input:` followed by a reason naming each "
+    "conflicting file. The worker reads that line and blocks the card.\n\n"
     "Reach Linear only with the token in LINEAR_API_KEY, which the factory's Linear agent app issued for this "
     "run. Never mint a Linear token yourself and never run a secrets helper: a token request with another scope "
     "set revokes the factory's tokens.\n\n"
@@ -44,8 +45,8 @@ SYSTEM_PROMPT = (
     "branch, or a person says the cause of a failure is fixed, run `gh pr update-branch <number>` so every "
     "check runs again on a new head. When a required check failed in a test or step the pull request does "
     "not change, such as a timeout, run `gh run rerun <run-id> --failed` once for that run. Wait for the "
-    "new run with `wait-for-checks` before you judge the ready gate. When a re-run fails again, block the "
-    "card and name both attempts' URLs.\n\n"
+    "new run with `wait-for-checks` before you judge the ready gate. When a re-run fails again, stop, "
+    "and make the first line of your final message `Needs input:` followed by both attempts' URLs.\n\n"
     "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
     "shows its observable result, such as rendered command output or a probe. Run "
     f"`python3 {(SCRIPTS / 'github-upload-image').resolve()} <file>...` on the images, then paste each `<img>` tag it "
@@ -2411,3 +2412,36 @@ class ClaudeSessionTest(GitFixture):
         self.run_session("--takeover-pr", TAKEOVER_PR)
 
         self.assertEqual(self.claude_call()["argv"][1], "Continue.")
+
+
+class FencedPromptTest(unittest.TestCase):
+    CARD_CHANGE = re.compile(
+        r"\b(?:block|unblock|complete|reopen|archive|move|mark)\s+(?:the|this)\s+card\b|needs_input|kanban_block",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def conflict_comment() -> str:
+        loader = importlib.machinery.SourceFileLoader("reopen_conflicts_under_test", str(SCRIPTS / "reopen-conflicts"))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        pull = {"url": "https://github.com/o/r/pull/7", "baseRefName": "main", "headRefOid": "a" * 40}
+        return module.comment_text(pull)
+
+    def texts(self) -> dict[str, str]:
+        module = ClaudeSessionTest.session_module()
+        return {
+            "SYSTEM_PROMPT": module.SYSTEM_PROMPT,
+            "TRIAGE_SYSTEM_PROMPT": module.TRIAGE_SYSTEM_PROMPT,
+            "reopen-conflicts comment": self.conflict_comment(),
+        }
+
+    def test_no_text_tells_claude_to_change_the_board(self) -> None:
+        for name, text in self.texts().items():
+            commands = re.findall(r"hermes kanban(?: --?[\w-]+(?: \S+)?)* (\w+)", text)
+            self.assertEqual(set(commands) - {"show", "list"}, set(), name)
+            self.assertIsNone(self.CARD_CHANGE.search(text), name)
+
+    def test_the_conflict_comment_and_rule_ask_for_a_needs_input_message(self) -> None:
+        self.assertIn("`Needs input:`", self.texts()["reopen-conflicts comment"])
+        self.assertIn("`Needs input:`", self.texts()["SYSTEM_PROMPT"])

@@ -112,8 +112,9 @@ PUBLISH_RULE = (
     "(`mergeable: CONFLICTING`) and update-branch refuses, fetch, run `git merge origin/<base>`, resolve "
     "the conflicts, commit the merge, and publish it with push-signed, which accepts a merge of the current "
     "base head. Then wait for checks and finish through the ready gate as usual. When you cannot resolve a "
-    "conflict with confidence, for example both sides change the same behavior, do not guess: run "
-    "`hermes kanban block <task id> --kind needs_input '<reason naming each conflicting file>'` once and stop."
+    "conflict with confidence, for example both sides change the same behavior, do not guess: stop, "
+    "and make the first line of your final message `Needs input:` followed by a reason naming each "
+    "conflicting file. The worker reads that line and blocks the card."
 )
 LINEAR_RULE = (
     "Reach Linear only with the token in LINEAR_API_KEY, which the factory's Linear agent app issued for this "
@@ -125,8 +126,8 @@ CHECKS_RULE = (
     "branch, or a person says the cause of a failure is fixed, run `gh pr update-branch <number>` so every "
     "check runs again on a new head. When a required check failed in a test or step the pull request does "
     "not change, such as a timeout, run `gh run rerun <run-id> --failed` once for that run. Wait for the "
-    "new run with `wait-for-checks` before you judge the ready gate. When a re-run fails again, block the "
-    "card and name both attempts' URLs."
+    "new run with `wait-for-checks` before you judge the ready gate. When a re-run fails again, stop, "
+    "and make the first line of your final message `Needs input:` followed by both attempts' URLs."
 )
 EVIDENCE_RULE = (
     "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
