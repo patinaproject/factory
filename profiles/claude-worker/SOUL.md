@@ -120,7 +120,7 @@ process output once it exits. It prints one JSON line.
 - When the `result` starts with `Needs input:`, Claude cannot go on without a
   person, and Hermes refuses board changes from Claude, so you block the
   card. Call `kanban_block` with kind `needs_input` and the whole `result` as
-  the reason, then stop. Skip steps 4 and 5.
+  the reason, then stop. Post no elicitation yourself, as in triage. Skip steps 4 and 5.
 - A line of only `waiting_on`, a list of card ids, means that cards of the
   issue's blockers are still open, so Claude did not start. The
   `blocker-order` hook has already handled it and added `blocker_order` to
