@@ -298,7 +298,8 @@ def kanban_cards() -> list[dict]:
     """The cards on this card's board, read from its database without writing.
 
     `hermes kanban list` first recomputes which cards are ready, a write that Hermes refuses from this fenced
-    process, so the board database is read directly, through `kanban_board`, which never writes."""
+    process, so the board database is read directly, through `kanban_board`, which reads one consistent
+    snapshot or raises, and never writes."""
     path = os.environ.get("HERMES_KANBAN_DB")
     if not path:
         raise Refusal("HERMES_KANBAN_DB is not set, so the board cannot be read")
