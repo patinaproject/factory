@@ -1574,8 +1574,11 @@ each check. Report each result.
     pull request: A's card is `done`, B's card moves to `ready` through a
     `promoted` event, and B's worker branches from a default branch that
     holds A's merge. Delegate them again, B and then A within a minute: B's
-    run waits up to 5 minutes for A's card, then waits on it. An issue whose
-    blocker is not delegated runs at once, and its worker's blocker gate
+    run waits up to 5 minutes for A's card, then waits on it. Delegate B,
+    wait over 5 minutes, then delegate A: B starts without waiting, and its
+    worker's blocker gate decides. B waits for A when A is delegated before
+    B's first run, or within 300 s of it. An issue whose blocker is not
+    delegated when its run starts runs at once, and its worker's blocker gate
     decides. For two issues that block each other, the second card's run
     links nothing, its session gets one `thought` naming the cycle, and its
     Claude starts.
