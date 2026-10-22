@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unittest
 import uuid
 from pathlib import Path
 
@@ -2353,3 +2354,26 @@ class ClaudeSessionTest(GitFixture):
         self.run_session("--takeover-pr", TAKEOVER_PR)
 
         self.assertEqual(self.claude_call()["argv"][1], "Continue.")
+
+
+class FencedPromptTest(unittest.TestCase):
+    """Hermes refuses every board change from the fenced Claude child, so no prompt may ask for one."""
+
+    BOARD_READS = {"show", "list"}
+
+    def prompts(self) -> dict[str, str]:
+        if str(SCRIPTS) not in sys.path:
+            sys.path.insert(0, str(SCRIPTS))
+        loader = importlib.machinery.SourceFileLoader("claude_session_prompts", str(SCRIPTS / "claude-session"))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        return {"SYSTEM_PROMPT": module.SYSTEM_PROMPT, "TRIAGE_SYSTEM_PROMPT": module.TRIAGE_SYSTEM_PROMPT}
+
+    def test_no_prompt_tells_claude_to_change_the_board(self) -> None:
+        for name, prompt in self.prompts().items():
+            verbs = set(re.findall(r"hermes kanban (\w+)", prompt))
+            self.assertEqual(verbs - self.BOARD_READS, set(), name)
+
+    def test_conflict_rule_reports_needs_input_in_the_result(self) -> None:
+        prompt = self.prompts()["SYSTEM_PROMPT"]
+        self.assertIn("`Needs input:`", prompt)
