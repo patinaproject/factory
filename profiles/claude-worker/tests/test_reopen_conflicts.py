@@ -102,7 +102,8 @@ class ReopenConflictsTest(unittest.TestCase):
         text = (
             f"Pull request https://github.com/{REPO}/pull/{number} conflicts with {base}. Merge origin/{base} into the "
             "branch, resolve the conflicts, and publish the merge with push-signed. When you cannot resolve a conflict "
-            "with confidence, block this card as needs_input and name each conflicting file.\n\n"
+            "with confidence, stop and make the first line of your final message `Needs input:` followed by a reason "
+            "naming each conflicting file.\n\n"
             f"conflict_head: {head}"
         )
         return text

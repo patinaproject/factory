@@ -2357,8 +2357,6 @@ class ClaudeSessionTest(GitFixture):
 
 
 class FencedPromptTest(unittest.TestCase):
-    """Hermes refuses every board change from the fenced Claude child, so no text Claude reads may ask for one."""
-
     CARD_CHANGE = re.compile(
         r"\b(?:block|unblock|complete|reopen|archive|move|mark)\s+(?:the|this)\s+card\b|needs_input|kanban_block",
         re.IGNORECASE,
