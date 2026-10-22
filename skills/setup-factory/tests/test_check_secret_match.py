@@ -24,6 +24,7 @@ if "--raw" in args:
     sys.exit(99)
 key = args[2]
 if key == "secrets.command":
+    print("Command helper: applied 1 secrets")
     print(json.dumps({"command": os.environ["FAKE_HELPER"]}))
 elif key.endswith(".secret"):
     print(json.dumps(os.environ["FAKE_ROUTE_SECRET"]))
