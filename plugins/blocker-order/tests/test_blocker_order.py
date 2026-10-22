@@ -4,7 +4,9 @@ import importlib.util
 import itertools
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -32,6 +34,7 @@ class FakeBoard:
         self.calls: list[tuple[str, dict]] = []
         self.fail: dict[str, str] = {}
         self.titles: dict[str, str] = {}
+        self.logs: dict[str, str] = {}
 
     def add(self, task: str, status: str = "ready", title: str = "") -> None:
         self.status[task] = status
@@ -68,6 +71,11 @@ class FakeBoard:
         if name in self.fail:
             return json.dumps({"error": self.fail[name]})
         worker = os.environ["HERMES_KANBAN_TASK"]
+        if name in order.PROCESS_TOOLS:
+            assert args["action"] == "log", args
+            if args["session_id"] not in self.logs:
+                return json.dumps({"error": f"Process {args['session_id']} not found"})
+            return json.dumps({"session_id": args["session_id"], "output": self.logs[args["session_id"]]})
         if name == "kanban_link":
             parent, child = args["parent_id"], args["child_id"]
             if parent not in self.status or child not in self.status:
@@ -106,7 +114,7 @@ class Hooked(unittest.TestCase):
         os.environ.pop(order.STOP_NUDGE, None)
         self.hook = None
 
-    def call(self, result: str, tool_name: str = "process", task: str = "t_1"):
+    def call(self, result: str, tool_name: str = "process_manage", task: str = "t_1"):
         hooks = []
 
         board = self.board
@@ -121,7 +129,7 @@ class Hooked(unittest.TestCase):
         order.register(Ctx())
         self.assertEqual([name for name, _ in hooks], ["transform_tool_result"])
         os.environ["HERMES_KANBAN_TASK"] = task
-        return hooks[0][1](tool_name=tool_name, args={"action": "wait"}, result=result, task_id="s", status="ok")
+        return hooks[0][1](tool_name=tool_name, args={"action": "wait", "session_id": "proc_1"}, result=result, task_id="s", status="ok")
 
 
 class HookTest(Hooked):
@@ -227,8 +235,13 @@ class HookTest(Hooked):
         first = self.call(process_result(waiting("t_a", "t_b")))
         calls = len(self.board.calls)
 
-        self.assertEqual(self.call(process_result(waiting("t_a", "t_b")), tool_name="process"), first)
+        self.assertEqual(self.call(process_result(waiting("t_a", "t_b")), tool_name="process_manage"), first)
         self.assertEqual(len(self.board.calls), calls)
+
+    def test_an_older_hermes_passes_the_process_tool_by_that_name(self):
+        outcome = json.loads(self.call(process_result(waiting("t_a", "t_b")), tool_name="process"))["blocker_order"]
+
+        self.assertEqual(outcome["blocked"], True)
 
     def test_the_terminal_tool_result_is_read_too(self):
         outcome = json.loads(self.call(process_result(waiting("t_a", "t_b")), tool_name="terminal"))["blocker_order"]
@@ -238,11 +251,11 @@ class HookTest(Hooked):
     def test_every_other_result_is_left_alone(self):
         cases = {
             "another tool": ("kanban_show", process_result(waiting("t_a"))),
-            "a run report": ("process", process_result(json.dumps({"session_id": "s", "result": "done"}))),
-            "an earlier line": ("process", process_result(waiting("t_a"), json.dumps({"session_id": "s"}))),
-            "extra keys": ("process", process_result(json.dumps({"waiting_on": ["t_a"], "x": 1}))),
-            "no cards": ("process", process_result(json.dumps({"waiting_on": []}))),
-            "not cards": ("process", process_result(json.dumps({"waiting_on": [1]}))),
+            "a run report": ("process_manage", process_result(json.dumps({"session_id": "s", "result": "done"}))),
+            "an earlier line": ("process_manage", process_result(waiting("t_a"), json.dumps({"session_id": "s"}))),
+            "extra keys": ("process_manage", process_result(json.dumps({"waiting_on": ["t_a"], "x": 1}))),
+            "no cards": ("process_manage", process_result(json.dumps({"waiting_on": []}))),
+            "not cards": ("process_manage", process_result(json.dumps({"waiting_on": [1]}))),
             "not JSON": ("process", "plain text"),
             "no output": ("process", json.dumps({"status": "timeout"})),
         }
@@ -262,7 +275,7 @@ class HookTest(Hooked):
                     hooks.append(callback)
 
             order.register(Ctx())
-            self.assertIsNone(hooks[0](tool_name="process", args={}, result=process_result(waiting("t_a"))))
+            self.assertIsNone(hooks[0](tool_name="process_manage", args={}, result=process_result(waiting("t_a"))))
         self.assertEqual(self.board.calls, [])
 
 
@@ -309,6 +322,42 @@ class NeedsInputTest(Hooked):
         ))
         self.assertNotIn(order.STOP_NUDGE, os.environ)
 
+    def cut(self, reason: str, session: str = "proc_1") -> str:
+        """What `process wait` returns for a long report: the last 2000 characters and how many it dropped."""
+        output = "starting\n" + report(reason) + "\n"
+        self.board.logs[session] = output
+        return json.dumps({"status": "exited", "exit_code": 0, "output": output[-2000:], "output_cut": len(output) - 2000})
+
+    def test_a_report_longer_than_the_cut_the_tool_keeps_is_read_from_the_log(self):
+        reason = "Needs input: " + "Which option should the factory take for the retry policy? " * 50
+        cut = self.cut(reason)
+        self.assertGreater(len(reason), 2000)
+        self.assertIsNone(order.needs_input(json.loads(cut)["output"]))
+
+        rewritten = json.loads(self.call(cut))
+
+        self.assertEqual(self.board.calls, [
+            ("process_manage", {"action": "log", "session_id": "proc_1"}),
+            ("kanban_block", {"reason": reason, "kind": "needs_input"}),
+        ])
+        self.assertEqual(self.board.status["t_1"], "blocked")
+        self.assertEqual(rewritten["needs_input_block"]["blocked"], True)
+        self.assertEqual(rewritten["output"], json.loads(cut)["output"])
+        self.assertEqual(rewritten["output_cut"], json.loads(cut)["output_cut"])
+
+    def test_a_cut_report_that_the_log_no_longer_has_is_left_alone(self):
+        cut = self.cut("Needs input: " + "why? " * 600)
+        del self.board.logs["proc_1"]
+
+        self.assertIsNone(self.call(cut))
+        self.assertEqual([name for name, _ in self.board.calls], ["process_manage"])
+
+    def test_a_result_that_was_not_cut_never_reads_the_log(self):
+        self.assertIsNone(self.call(process_result(report("Pushed a fix."))))
+        self.call(process_result(report(self.reason)))
+
+        self.assertEqual([name for name, _ in self.board.calls], ["kanban_block"])
+
     def test_other_reports_are_left_alone(self):
         cases = {
             "not first": report("Done.\nNeeds input: later"),
@@ -320,6 +369,27 @@ class NeedsInputTest(Hooked):
             with self.subTest(name=name):
                 self.assertIsNone(self.call(process_result(*line.split("\n"))))
         self.assertEqual(self.board.calls, [])
+
+
+class ToolNameTest(unittest.TestCase):
+    def test_the_watched_names_cover_the_tools_hermes_registers(self):
+        hermes = Path(os.environ.get("HERMES_AGENT_DIR", "~/.hermes/hermes-agent")).expanduser()
+        if not hermes.is_dir():
+            self.skipTest(f"No Hermes checkout at {hermes}; set HERMES_AGENT_DIR to run this test.")
+        scratch = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        with mock.patch.dict(os.environ, {"HERMES_HOME": scratch}), mock.patch.object(sys, "path", [str(hermes), *sys.path]):
+            try:
+                import tools.process_registry  # noqa: F401
+                import tools.terminal_tool  # noqa: F401
+                from tools.registry import registry
+            except ImportError as error:
+                self.skipTest(f"Hermes at {hermes} is not importable with this Python ({error}); run with its interpreter.")
+            names = set(registry.get_all_tool_names())
+            terminal_tools = {name for name in names if registry.get_toolset_for_tool(name) == "terminal"}
+        self.assertIn("terminal", terminal_tools)
+        self.assertTrue(terminal_tools & {"process", "process_manage"}, sorted(terminal_tools))
+        self.assertLessEqual(terminal_tools & {"process", "process_manage", "terminal"}, set(order.WATCHED_TOOLS))
 
 
 def blocker(identifier: str, state: str = "started") -> dict:

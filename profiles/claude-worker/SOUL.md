@@ -127,7 +127,9 @@ process output once it exits. It prints one JSON line.
   `instruction`, which says to stop. Post no elicitation yourself, as in
   triage. Skip steps 4 and 5. When the result has no `needs_input_block`, the
   hook is not loaded: call `kanban_block` yourself with kind `needs_input` and
-  the whole `result` as the reason, then stop.
+  the whole `result` as the reason, then stop. A `wait` result that has
+  `output_cut` holds only the last 2000 characters, so a long result loses its
+  start: call the process tool's `log` action to read the whole line first.
 - A line of only `waiting_on`, a list of card ids, means that cards of the
   issue's blockers are still open, so Claude did not start. The
   `blocker-order` hook has already handled it and added `blocker_order` to
