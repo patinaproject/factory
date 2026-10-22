@@ -2357,12 +2357,35 @@ class ClaudeSessionTest(GitFixture):
 
 
 class FencedPromptTest(unittest.TestCase):
-    """Hermes refuses every board change from the fenced Claude child, so no prompt may ask for one."""
+    """Hermes refuses every board change from the fenced Claude child, so no text Claude reads may ask for one."""
 
-    def test_no_prompt_tells_claude_to_change_the_board(self) -> None:
+    CARD_CHANGE = re.compile(
+        r"\b(?:block|unblock|complete|reopen|archive|move|mark)\s+(?:the|this)\s+card\b|needs_input|kanban_block",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def conflict_comment() -> str:
+        loader = importlib.machinery.SourceFileLoader("reopen_conflicts_under_test", str(SCRIPTS / "reopen-conflicts"))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        pull = {"url": "https://github.com/o/r/pull/7", "baseRefName": "main", "headRefOid": "a" * 40}
+        return module.comment_text(pull)
+
+    def texts(self) -> dict[str, str]:
         module = ClaudeSessionTest.session_module()
-        for name in ("SYSTEM_PROMPT", "TRIAGE_SYSTEM_PROMPT"):
-            prompt = getattr(module, name)
-            commands = re.findall(r"hermes kanban(?: --?[\w-]+(?: \S+)?)* (\w+)", prompt)
+        return {
+            "SYSTEM_PROMPT": module.SYSTEM_PROMPT,
+            "TRIAGE_SYSTEM_PROMPT": module.TRIAGE_SYSTEM_PROMPT,
+            "reopen-conflicts comment": self.conflict_comment(),
+        }
+
+    def test_no_text_tells_claude_to_change_the_board(self) -> None:
+        for name, text in self.texts().items():
+            commands = re.findall(r"hermes kanban(?: --?[\w-]+(?: \S+)?)* (\w+)", text)
             self.assertEqual(set(commands) - {"show", "list"}, set(), name)
-            self.assertNotIn("kanban_block", prompt, name)
+            self.assertIsNone(self.CARD_CHANGE.search(text), name)
+
+    def test_the_conflict_comment_and_rule_ask_for_a_needs_input_message(self) -> None:
+        self.assertIn("`Needs input:`", self.texts()["reopen-conflicts comment"])
+        self.assertIn("`Needs input:`", self.texts()["SYSTEM_PROMPT"])
