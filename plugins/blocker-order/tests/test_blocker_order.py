@@ -266,6 +266,62 @@ class HookTest(Hooked):
         self.assertEqual(self.board.calls, [])
 
 
+def report(result: str) -> str:
+    return json.dumps({"session_id": "s", "resumed": True, "subtype": "success", "num_turns": 3, "result": result})
+
+
+class NeedsInputTest(Hooked):
+    def setUp(self) -> None:
+        super().setUp()
+        self.board.add("t_1", "todo")
+        self.board.start("t_1")
+        self.reason = "Needs input: which of the two migrations should win?\n\n1. keep a\n2. keep b"
+
+    def test_a_resumed_run_that_ends_with_needs_input_blocks_the_card_once(self):
+        self.assertIsNone(self.call(process_result(report("Pushed a fix; checks pending."))))
+        self.assertEqual(self.board.status["t_1"], "running")
+
+        outcome = json.loads(self.call(process_result(report(self.reason))))["needs_input_block"]
+
+        self.assertEqual(self.board.calls, [("kanban_block", {"reason": self.reason, "kind": "needs_input"})])
+        self.assertEqual(self.board.status["t_1"], "blocked")
+        self.assertEqual(outcome, {"blocked": True, "instruction": (
+            "Claude needs input, so the blocker-order hook blocked this card with kind needs_input and the whole "
+            "result as the reason. Stop now: call no other tool and do not run claude-session again."
+        )})
+        self.assertEqual(os.environ[order.STOP_NUDGE], "off")
+
+    def test_the_same_report_read_twice_blocks_once(self):
+        first = self.call(process_result(report(self.reason)))
+
+        self.assertEqual(self.call(process_result(report(self.reason))), first)
+        self.assertEqual(len(self.board.calls), 1)
+
+    def test_a_block_hermes_refuses_tells_the_worker_to_block_itself(self):
+        self.board.fail["kanban_block"] = "could not block t_1"
+
+        outcome = json.loads(self.call(process_result(report(self.reason)), tool_name="terminal"))["needs_input_block"]
+
+        self.assertEqual(outcome["blocked"], False)
+        self.assertEqual(outcome["instruction"], (
+            "The blocker-order hook could not block this card: could not block t_1. Call kanban_block with kind "
+            "needs_input and the whole result as the reason, then stop. Do not run claude-session again."
+        ))
+        self.assertNotIn(order.STOP_NUDGE, os.environ)
+
+    def test_other_reports_are_left_alone(self):
+        cases = {
+            "not first": report("Done.\nNeeds input: later"),
+            "no session": json.dumps({"result": self.reason}),
+            "an error line": json.dumps({"error": "boom"}),
+            "an earlier line": report(self.reason) + "\n" + report("done"),
+        }
+        for name, line in cases.items():
+            with self.subTest(name=name):
+                self.assertIsNone(self.call(process_result(*line.split("\n"))))
+        self.assertEqual(self.board.calls, [])
+
+
 def blocker(identifier: str, state: str = "started") -> dict:
     return {"id": f"uuid-{identifier}", "identifier": identifier, "gitBranchName": f"{identifier.lower()}-work",
             "stateType": state, "delegate": "app-user", "delegatedToSelf": True}

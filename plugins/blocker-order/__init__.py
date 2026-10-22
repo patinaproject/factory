@@ -10,6 +10,10 @@ rewrites the result so the worker stops.
 Hermes refuses a link that would close a cycle. The hook links nothing for that card. When it linked
 no card, the result tells the worker to post one notice and run `claude-session` again with
 `--ignore-blockers`, so the card starts as it did before.
+
+The hook also reads each `claude-session` report whose `result` starts with `Needs input:`, from the first
+run and from every resume, and blocks the card with kind `needs_input` and that result as the reason. The
+worker's steps differ by run, so no step of its prompt is what makes that block happen: the tool result is.
 """
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ CYCLE_REFUSAL = "would create a cycle"
 # Hermes' turn-end guard looks for a kanban_block call in the transcript, not on the board. Without this,
 # it would push the worker to block a card that this hook already moved to todo.
 STOP_NUDGE = "HERMES_KANBAN_STOP_NUDGE"
+NEEDS_INPUT = "Needs input:"
 # A worker can read the same process output twice, with `wait` and then `log`.
 _handled: dict[tuple, str] = {}
 
@@ -47,6 +52,39 @@ def waiting_on(result: Any) -> Optional[list[str]]:
             return cards
         return None
     return None
+
+
+def needs_input(result: Any) -> Optional[str]:
+    """The `result` of the last JSON line, a `claude-session` report, when it starts with `Needs input:`."""
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return None
+    output = payload.get("output") if isinstance(payload, dict) else None
+    if not isinstance(output, str):
+        return None
+    for line in reversed(output.splitlines()):
+        try:
+            report = json.loads(line)
+        except ValueError:
+            continue
+        text = report.get("result") if isinstance(report, dict) and "session_id" in report else None
+        return text if isinstance(text, str) and text.startswith(NEEDS_INPUT) else None
+    return None
+
+
+def block_for_input(reason: str, dispatch: Dispatch) -> dict:
+    answer = _call(dispatch, "kanban_block", {"reason": reason, "kind": "needs_input"})
+    if not answer.get("ok"):
+        return {"blocked": False, "instruction": (
+            f"The blocker-order hook could not block this card: {answer.get('error')}. Call kanban_block "
+            "with kind needs_input and the whole result as the reason, then stop. Do not run claude-session again."
+        )}
+    os.environ[STOP_NUDGE] = "off"
+    return {"blocked": True, "instruction": (
+        "Claude needs input, so the blocker-order hook blocked this card with kind needs_input and the whole "
+        "result as the reason. Stop now: call no other tool and do not run claude-session again."
+    )}
 
 
 def _call(dispatch: Dispatch, tool: str, args: dict) -> dict:
@@ -110,6 +148,14 @@ def make_hook(ctx: Any):
         task = os.environ.get("HERMES_KANBAN_TASK")
         if tool_name not in WATCHED_TOOLS or not task:
             return None
+        reason = needs_input(result)
+        if reason is not None:
+            key = (task, os.environ.get("HERMES_KANBAN_RUN_ID"), reason)
+            if key not in _handled:
+                rewritten = json.loads(result)
+                rewritten["needs_input_block"] = block_for_input(reason, ctx.dispatch_tool)
+                _handled[key] = json.dumps(rewritten)
+            return _handled[key]
         cards = waiting_on(result)
         if cards is None:
             return None
