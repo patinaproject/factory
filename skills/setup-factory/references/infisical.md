@@ -406,21 +406,34 @@ the broker from part 5, so the worker has a source for its tokens:
 
 ## Verify
 
-Run these before you remove anything from `.env`. Each line prints `1` when
-the value that Hermes loads matches the value in the folder, and `0` when it
-does not.
-[`scripts/check-secret-match`](../scripts/check-secret-match) compares the
-folder's value with the value that the `secrets.command` helper prints for the
-key, and checks that the route's `secret` in `config.yaml` still reads `${<key>}`. The
-values stay inside the script, and it never runs `hermes config get --raw`:
+Verify is an operator-only step. When `<home>/.env` does not set a key,
+the check runs the `secrets.command` helper, and agents never run a secrets
+helper by hand. The script refuses to run without a terminal.
 
-```sh
-match() {
-  python3 <repo>/skills/setup-factory/scripts/check-secret-match <home>/.env <project id> <environment> <folder> "$1" "$2"
-}
-match LINEAR_WEBHOOK_SECRET <webhook_route>
-match GITHUB_WEBHOOK_SECRET github
-```
+[`scripts/check-secret-match`](../scripts/check-secret-match) compares the
+folder's value with the value that the gateway loads for the key. Hermes keeps
+a non-empty value that `.env` sets, so when `<home>/.env` sets the key, the script
+compares that value. Otherwise it compares the value that the helper prints.
+It also checks that the route's `secret` in `config.yaml` still reads
+`${<key>}`. Each line prints `1` when the values match and `0` when they do
+not. The values stay inside the script, and it never runs
+`hermes config get --raw`.
+
+> **HUMAN CHECKPOINT.** Before you remove anything from `.env`, ask the
+> operator to run these lines in their own terminal and to report what each
+> one prints:
+>
+> ```sh
+> match() {
+>   python3 <repo>/skills/setup-factory/scripts/check-secret-match <home>/.env <project id> <environment> <folder> "$1" "$2"
+> }
+> match LINEAR_WEBHOOK_SECRET <webhook_route>
+> match GITHUB_WEBHOOK_SECRET github
+> ```
+>
+> Continue only when both print `1`. A `0` means that the gateway uses a
+> value today that differs from the folder's. Stop and report the key to the
+> operator.
 
 Then remove each moved value from `.env`. Back up both files first:
 
@@ -432,8 +445,9 @@ for key in <each key from the first table>; do
 done
 ```
 
-Run the `match` lines again. They must still print `1`, which shows that the
-values now come from Infisical and not from `.env`.
+> **HUMAN CHECKPOINT.** Ask the operator to run the `match` lines again in
+> their own terminal. They must still print `1`, which shows that the values
+> now come from Infisical and not from `.env`.
 
 Part 15 restarts the gateway. The webhook live tests in
 [`linear-app.md`](linear-app.md) and [`github.md`](github.md) then confirm that

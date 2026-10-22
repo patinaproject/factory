@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,7 @@ printf '%s\\n' "$FAKE_FOLDER"
 
 FAKE_HELPER = """\
 #!/bin/sh
+: > "{ran}"
 [ "$FACTORY_INFISICAL_CLIENT_ID" = "{id}" ] && [ "$FACTORY_INFISICAL_CLIENT_SECRET" = "{secret}" ] || exit 1
 cat "{loaded}"
 """
@@ -54,14 +56,13 @@ class CheckSecretMatchTest(unittest.TestCase):
         hermes.write_text(f"#!{sys.executable}\n{FAKE_HERMES}")
         infisical = stubs / "infisical"
         infisical.write_text(FAKE_INFISICAL)
+        self.ran = self.tmp / "helper-ran"
         self.helper = self.tmp / "helper"
-        self.helper.write_text(FAKE_HELPER.format(id=CLIENT_ID, secret=CLIENT_SECRET, loaded=self.tmp / "loaded"))
+        self.helper.write_text(FAKE_HELPER.format(id=CLIENT_ID, secret=CLIENT_SECRET, loaded=self.tmp / "loaded", ran=self.ran))
         for path in (hermes, infisical, self.helper):
             path.chmod(0o755)
         self.env_file = self.tmp / ".env"
-        self.env_file.write_text(
-            f"FACTORY_INFISICAL_CLIENT_ID={CLIENT_ID}\nFACTORY_INFISICAL_CLIENT_SECRET={CLIENT_SECRET}\n"
-        )
+        self.dotenv("")
         self.log = self.tmp / "hermes.log"
         self.load(f"OTHER='x'\nLINEAR_WEBHOOK_SECRET='{FOLDER_VALUE}'\n")
         self.env = {
@@ -79,17 +80,29 @@ class CheckSecretMatchTest(unittest.TestCase):
             f"platforms:\n  webhook:\n    extra:\n      routes:\n        linear:\n          secret: {secret}\n"
         )
 
+    def dotenv(self, extra: str) -> None:
+        self.env_file.write_text(
+            f"FACTORY_INFISICAL_CLIENT_ID={CLIENT_ID}\nFACTORY_INFISICAL_CLIENT_SECRET={CLIENT_SECRET}\n{extra}"
+        )
+
     def load(self, text: str) -> None:
         (self.tmp / "loaded").write_text(text)
 
-    def check(self, **overrides: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), str(self.env_file), "proj1", "dev", "/factory", "LINEAR_WEBHOOK_SECRET", "linear"],
-            env={**self.env, **overrides},
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+    def check(self, terminal: bool = True, **overrides: str) -> subprocess.CompletedProcess:
+        controller, follower = pty.openpty() if terminal else (None, subprocess.DEVNULL)
+        try:
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), str(self.env_file), "proj1", "dev", "/factory", "LINEAR_WEBHOOK_SECRET", "linear"],
+                env={**self.env, **overrides},
+                stdin=follower,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        finally:
+            if terminal:
+                os.close(controller)
+                os.close(follower)
 
     def assert_quiet(self, result: subprocess.CompletedProcess) -> None:
         for value in (FOLDER_VALUE, OTHER_VALUE, CLIENT_ID, CLIENT_SECRET):
@@ -137,6 +150,37 @@ class CheckSecretMatchTest(unittest.TestCase):
         result = self.check(FAKE_FOLDER="[]")
 
         self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
+
+    def test_compares_the_env_file_value_when_the_env_file_sets_the_key(self) -> None:
+        self.dotenv(f"LINEAR_WEBHOOK_SECRET={OTHER_VALUE}\n")
+        result = self.check()
+
+        self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
+        self.assert_quiet(result)
+
+    def test_reports_a_match_from_the_env_file_without_running_the_helper(self) -> None:
+        self.dotenv(f"export LINEAR_WEBHOOK_SECRET='{FOLDER_VALUE}'\n")
+        self.load(f"LINEAR_WEBHOOK_SECRET='{OTHER_VALUE}'\n")
+        result = self.check()
+
+        self.assertEqual((result.returncode, result.stdout), (0, "1\n"))
+        self.assertFalse(self.ran.exists())
+        self.assert_quiet(result)
+
+    def test_compares_the_helper_value_when_the_env_file_sets_the_key_empty(self) -> None:
+        self.dotenv("LINEAR_WEBHOOK_SECRET=\n")
+        result = self.check()
+
+        self.assertEqual((result.returncode, result.stdout), (0, "1\n"))
+        self.assertTrue(self.ran.exists())
+
+    def test_refuses_to_run_without_a_terminal(self) -> None:
+        result = self.check(terminal=False)
+
+        self.assertEqual((result.returncode, result.stdout), (2, ""))
+        self.assertFalse(self.ran.exists())
+        self.assertFalse(self.log.exists())
+        self.assert_quiet(result)
 
     def test_never_hands_the_identity_to_a_shell_found_on_path(self) -> None:
         spy = self.tmp / "spy"
