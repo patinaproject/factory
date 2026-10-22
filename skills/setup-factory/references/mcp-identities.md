@@ -17,7 +17,7 @@ factory's server on that service:
 | `url` | The service's HTTP MCP endpoint, an `https` URL |
 | `token_env` | The variable that holds the factory's token. Only the gateway holds its value |
 | `scheme` | Optional. The `Authorization` scheme word, `Bearer` by default |
-| `headers` | Optional. Fixed headers that hold no secret, such as a read-only flag. They reach argv, so `claude-session` refuses a header name with `auth`, `key`, `token`, `secret`, `cookie`, or `password` in it |
+| `headers` | Optional. Fixed headers that hold no secret, such as a read-only flag. They reach argv, so `claude-session` refuses a header name, or a name in the `url`'s query string, with `auth`, `key`, `token`, `secret`, `cookie`, `password`, `cred`, `session`, `sig`, `pass`, `pwd`, `jwt`, `bearer`, or `access` in it, and a header or query value that starts with `Bearer`, `Basic`, `Token`, or `Sentry-Bearer` |
 
 For each server, `claude-session` passes a server of the same name with
 `--mcp-config`, so it replaces the repository's server of that name in each
@@ -73,8 +73,9 @@ factory's Linear server and the repository's own servers.
    `_KEY`, `_SECRET`, or `_PASSWORD`. Declare the name in
    `plugins/factory-secret-names/plugin.yaml` in a factory pull request, so
    Hermes strips it from every process a home starts. `SENTRY_ACCESS_TOKEN`
-   is already declared. `check-install` reports a name the manifest does not
-   declare.
+   is already declared. The broker serves only a declared name, so a
+   `token_env` the manifest does not declare gets no token and every run that
+   uses it refuses. `check-install` reports such a name.
 2. After the pull request merges and deploys, add the server to
    `claude_session.mcp_servers` in the settings JSON of both homes.
 3. Restart the gateway with

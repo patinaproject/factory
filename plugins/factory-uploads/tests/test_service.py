@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from unittest import mock
 
-from tests.support import PLUGIN, TOKEN, QuickServer
+from tests.support import PLUGIN, TOKEN, QuickServer, secret_names_manifest
 
 service = importlib.import_module("factory_uploads.service")
 
@@ -85,6 +85,11 @@ class ServiceTestCase(unittest.TestCase):
         self.home.mkdir()
         self.run_dir.mkdir()
         self.config_path = Path(tmp.name) / "broker.json"
+        manifest = Path(tmp.name) / "secret-names.yaml"
+        manifest.write_text(secret_names_manifest("EXAMPLE_PROXY_TOKEN"))
+        patcher = mock.patch.object(service, "SECRET_NAMES", manifest)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.config = {
             "socket": str(self.run_dir / "factory-uploads.sock"),
             "home": str(self.home),
@@ -233,6 +238,18 @@ class ServeTest(ServiceTestCase):
         self.assertEqual(code, 0)
         self.assertFalse(broker.socket_path.exists())
         self.assertTrue((self.home / "state" / "log.jsonl").exists())
+
+
+class DeclaredNamesTest(ServiceTestCase):
+    def test_the_service_serves_a_declared_variable_and_refuses_an_undeclared_one(self):
+        secrets = {"EXAMPLE_PROXY_TOKEN": "proxy-FAKE", "SLACK_BOT_TOKEN": "xoxb-FAKE"}
+
+        for variable, token in (("EXAMPLE_PROXY_TOKEN", "proxy-FAKE"), ("SLACK_BOT_TOKEN", None)):
+            with self.subTest(variable=variable):
+                config = {**self.config, "claude_session": {"auth_token_env": variable}}
+                credentials = service.make_broker(config, secrets)._credentials
+
+                self.assertEqual(credentials.proxy_token(), token)
 
 
 class SystemPythonTest(unittest.TestCase):

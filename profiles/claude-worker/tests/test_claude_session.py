@@ -1377,7 +1377,26 @@ class ClaudeSessionTest(GitFixture):
             ({"sentry": {**sentry, "scheme": 7}}, "claude_session.mcp_servers.sentry.scheme must be one Authorization scheme word, such as Bearer"),
             *(
                 ({"sentry": {**sentry, "headers": {header: "x"}}}, "claude_session.mcp_servers.sentry.headers must hold no credential; mcp-headers sends the token as Authorization")
-                for header in ("authorization", "X-API-Key", "x-access-token", "Cookie")
+                for header in (
+                    "authorization", "X-API-Key", "x-access-token", "Cookie",
+                    "X-Credential", "X-Session", "Signature", "X-Pass", "X-Pwd", "X-Jwt", "X-Access",
+                )
+            ),
+            *(
+                ({"sentry": {**sentry, "url": url}}, "claude_session.mcp_servers.sentry.url must hold no credential in its query string; mcp-headers sends the token as Authorization")
+                for url in (
+                    "https://mcp.example/mcp?api_key=x", "https://mcp.example/mcp?access_token=x",
+                    "https://mcp.example/mcp?skills=inspect&X-Session=x", "https://mcp.example/mcp?sig",
+                )
+            ),
+            *(
+                ({"sentry": {**sentry, **changes}}, "claude_session.mcp_servers.sentry must hold no Authorization scheme in a header value or URL query value; mcp-headers sends the token")
+                for changes in (
+                    {"headers": {"x-scope": "Bearer abc"}}, {"headers": {"x-scope": "basic abc"}},
+                    {"headers": {"x-scope": "TOKEN abc"}}, {"headers": {"x-scope": "Sentry-Bearer abc"}},
+                    {"url": "https://mcp.example/mcp?scope=Bearer%20abc"}, {"url": "https://mcp.example/mcp?scope=Basic+abc"},
+                    {"url": "https://mcp.example/mcp?scope=Token%20abc"},
+                )
             ),
         ):
             with self.subTest(value=value):

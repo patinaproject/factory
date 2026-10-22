@@ -44,7 +44,7 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlsplit
 
 import blockers
 import card_branch
@@ -188,8 +188,9 @@ LINEAR_MCP_SERVER = {
 MCP_SERVER_KEYS = frozenset({"url", "token_env", "scheme", "headers"})
 MCP_STATUS_SECONDS = 90.0
 UNREACHABLE_MODEL_URL = "http://127.0.0.1:9"
-# Fixed headers reach argv in --mcp-config, so a header that could carry a secret is refused.
-CREDENTIAL_HEADER = re.compile(r"auth|key|token|secret|cookie|password", re.IGNORECASE)
+# Fixed headers and the URL reach argv in --mcp-config, where ps shows them, so a name or value that could carry a secret is refused.
+CREDENTIAL_NAME = re.compile(r"auth|key|token|secret|cookie|password|cred|session|sig|pass|pwd|jwt|bearer|access", re.IGNORECASE)
+AUTHORIZATION_VALUE = re.compile(r"\s*(?:bearer|basic|token|sentry-bearer)(?:\s|$)", re.IGNORECASE)
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
@@ -824,8 +825,13 @@ def factory_mcp_servers(transport: dict) -> dict:
         headers = server.get("headers", {})
         if not (isinstance(headers, dict) and all(isinstance(v, str) for v in headers.values())):
             raise Refusal(f"{where}.headers must map header names to fixed strings")
-        if any(CREDENTIAL_HEADER.search(header) for header in headers):
+        if any(CREDENTIAL_NAME.search(header) for header in headers):
             raise Refusal(f"{where}.headers must hold no credential; mcp-headers sends the token as Authorization")
+        query = parse_qsl(urlsplit(server["url"]).query, keep_blank_values=True)
+        if any(CREDENTIAL_NAME.search(key) for key, _ in query):
+            raise Refusal(f"{where}.url must hold no credential in its query string; mcp-headers sends the token as Authorization")
+        if any(AUTHORIZATION_VALUE.match(value) for value in (*headers.values(), *(value for _, value in query))):
+            raise Refusal(f"{where} must hold no Authorization scheme in a header value or URL query value; mcp-headers sends the token")
     return servers
 
 
