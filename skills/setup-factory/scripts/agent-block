@@ -4,10 +4,12 @@
 Setup part 17 owns the text between the `<!-- factory:begin -->` and
 `<!-- factory:end -->` markers. The block is rendered only from
 `references/agent-instructions.block.tmpl` and a JSON values file, so a fresh
-install reproduces the live block byte for byte. With no flag, the command
-compares the live block with the render and prints PASS or FAIL, with a diff
-on a difference. `--write` replaces the block in place, keeps every other line,
-and backs up CLAUDE.md first. `--print` writes the render to stdout.
+install reproduces the live block byte for byte. With no flag, or with `--check`, the
+command compares the live block with the render and prints PASS or FAIL, with a diff
+on a difference. A marker inside a line of other text, such as a code span,
+is not a block, but a marker line with leading or trailing whitespace is refused.
+CRLF and CR-only line endings read as line breaks. `--write` replaces the block in place, keeps every other
+line, saves the file with LF endings, and backs up CLAUDE.md first. `--print` writes the render to stdout.
 
 Template syntax: `{{name}}` takes a value, and `{{#name}}...{{/name}}` keeps
 its text only when the value of `name` is set. A value may span lines; its
@@ -31,6 +33,11 @@ TEMPLATE = Path(__file__).resolve().parents[1] / "references" / "agent-instructi
 SECTION = re.compile(r"\{\{#(\w+)\}\}(.*?)\{\{/\1\}\}", re.S)
 PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
 BLOCK = re.compile(rf"^{re.escape(BEGIN)}$.*?^{re.escape(END)}$\n?", re.M | re.S)
+
+
+def read_lines(path: Path) -> str:
+    """Decode as UTF-8 and treat CRLF and CR as line breaks. `Path.read_text(newline=)` needs Python 3.13."""
+    return path.read_bytes().decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def template_keys(template: str) -> set[str]:
@@ -57,6 +64,9 @@ def render(template: str, values: dict) -> str:
 
 
 def marker_problem(lines: list[str]) -> str | None:
+    near = [n for n, line in enumerate(lines, 1) if line.strip() in (BEGIN, END) and line not in (BEGIN, END)]
+    if near:
+        return f"line {near[0]} holds a marker with leading or trailing whitespace; put each marker alone at the start of its line"
     begins, ends = lines.count(BEGIN), lines.count(END)
     if begins != 1 or ends != 1:
         return f"expected one {BEGIN} and one {END}, found {begins} and {ends}"
@@ -69,8 +79,8 @@ def check(config: Path, template: str, values: dict) -> list[tuple[bool, str]]:
     claude_md = config / "CLAUDE.md"
     if not claude_md.is_file():
         return [(False, f"{claude_md} is missing; write the block with --write")]
-    text = claude_md.read_text()
-    problem = marker_problem(text.splitlines())
+    text = read_lines(claude_md)
+    problem = marker_problem(text.split("\n"))
     if problem:
         return [(False, f"{claude_md}: {problem}")]
     live = BLOCK.search(text).group(0)
@@ -86,16 +96,18 @@ def check(config: Path, template: str, values: dict) -> list[tuple[bool, str]]:
 def write(config: Path, template: str, values: dict) -> str:
     claude_md = config / "CLAUDE.md"
     block = render(template, values)
-    text = claude_md.read_text() if claude_md.exists() else ""
+    text = read_lines(claude_md) if claude_md.exists() else ""
     if text.strip():
-        problem = marker_problem(text.splitlines()) if BEGIN in text or END in text else None
+        lines = text.split("\n")
+        has_marker_line = any(line.strip() in (BEGIN, END) for line in lines)
+        problem = marker_problem(lines) if has_marker_line else None
         if problem:
             raise ValueError(f"{claude_md}: {problem}")
     if BLOCK.search(text):
         new = BLOCK.sub(lambda _: block, text, count=1)
     else:
         new = (text.rstrip("\n") + "\n\n" if text.strip() else "") + block
-    if new == text:
+    if claude_md.exists() and new.encode() == claude_md.read_bytes():
         return "unchanged"
     claude_md.parent.mkdir(parents=True, exist_ok=True)
     backup = ""
@@ -103,7 +115,7 @@ def write(config: Path, template: str, values: dict) -> str:
         backup_path = claude_md.with_name(f"CLAUDE.md.bak-{time.strftime('%Y%m%d%H%M%S')}")
         shutil.copy2(claude_md, backup_path)
         backup = f"; backup at {backup_path}"
-    claude_md.write_text(new)
+    claude_md.write_bytes(new.encode("utf-8"))
     return f"wrote the factory block{backup}"
 
 
@@ -112,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--values", required=True, type=Path, help="JSON file of this factory's values")
     parser.add_argument("--config-dir", help="Claude config directory; default $CLAUDE_CONFIG_DIR or ~/.claude")
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="compare the block with the render; the default")
     mode.add_argument("--write", action="store_true", help="replace the block, then check")
     mode.add_argument("--print", action="store_true", help="print the render and change nothing")
     args = parser.parse_args(argv)

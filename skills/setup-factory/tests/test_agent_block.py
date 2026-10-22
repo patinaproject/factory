@@ -132,6 +132,71 @@ class FileTest(unittest.TestCase):
         agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
         self.assertEqual(self.claude_md.read_text(), f"mine\n\n{self.block}")
 
+    def test_write_appends_when_the_markers_appear_only_inline(self) -> None:
+        notes = f"the block sits between `{agent_block.BEGIN}` and `{agent_block.END}`\n"
+        self.claude_md.write_text(notes)
+        agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
+        self.assertEqual(self.claude_md.read_text(), f"{notes}\n{self.block}")
+        self.assertEqual(self.failures(), [])
+
+    def near_miss_blocks(self) -> dict[str, str]:
+        stale = self.block.replace("Never use `git push`", "Never use `git pull`")
+        b, e = agent_block.BEGIN, agent_block.END
+        return {
+            "indented": stale.replace(b, "  " + b).replace(e, "  " + e),
+            "trailing spaces": stale.replace(b, b + " ").replace(e, e + " "),
+        }
+
+    def line_ending_blocks(self) -> dict[str, str]:
+        stale = self.block.replace("Never use `git push`", "Never use `git pull`")
+        text = f"notes\n\n{stale}\n@~/.claude/pstack-models.md\n"
+        return {"crlf": text.replace("\n", "\r\n"), "cr only": text.replace("\n", "\r")}
+
+    def test_write_refuses_a_real_block_whose_markers_are_not_exact(self) -> None:
+        for name, text in self.near_miss_blocks().items():
+            with self.subTest(name):
+                self.claude_md.write_bytes(f"notes\n{text}".encode())
+                before = self.claude_md.read_bytes()
+                with self.assertRaises(ValueError):
+                    agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
+                self.assertEqual(self.claude_md.read_bytes(), before)
+
+    def test_check_fails_a_real_block_whose_markers_are_not_exact(self) -> None:
+        for name, text in self.near_miss_blocks().items():
+            with self.subTest(name):
+                self.claude_md.write_bytes(f"notes\n{text}".encode())
+                self.assertEqual(len(self.failures()), 1)
+
+    def test_refusal_names_the_whitespace_and_the_line(self) -> None:
+        for name, text in self.near_miss_blocks().items():
+            with self.subTest(name):
+                self.claude_md.write_bytes(f"notes\n{text}".encode())
+                with self.assertRaisesRegex(ValueError, r"line 2 holds a marker with leading or trailing whitespace") as raised:
+                    agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
+                self.assertNotIn("carriage return", str(raised.exception))
+
+    def test_write_replaces_the_one_block_in_a_crlf_or_cr_only_file_and_saves_lf(self) -> None:
+        for name, text in self.line_ending_blocks().items():
+            with self.subTest(name):
+                for backup in self.config.glob("CLAUDE.md.bak-*"):
+                    backup.unlink()
+                self.claude_md.write_bytes(text.encode())
+                agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
+                self.assertEqual(
+                    self.claude_md.read_bytes().decode(),
+                    f"notes\n\n{self.block}\n@~/.claude/pstack-models.md\n",
+                )
+                self.assertEqual(self.claude_md.read_bytes().decode().count(agent_block.BEGIN), 1)
+                self.assertEqual(self.failures(), [])
+                backups = list(self.config.glob("CLAUDE.md.bak-*"))
+                self.assertEqual([b.read_bytes() for b in backups], [text.encode()])
+
+    def test_check_reads_a_crlf_or_cr_only_block_as_its_lines(self) -> None:
+        for name, text in self.line_ending_blocks().items():
+            with self.subTest(name):
+                self.claude_md.write_bytes(text.replace("git pull", "git push").encode())
+                self.assertEqual(self.failures(), [])
+
     def test_write_creates_the_file(self) -> None:
         agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
         self.assertEqual(self.claude_md.read_text(), self.block)
@@ -179,6 +244,15 @@ class CommandTest(unittest.TestCase):
         code, out = self.run_main()
         self.assertEqual(code, 0)
         self.assertTrue(out.startswith("PASS"))
+
+    def test_explicit_check_equals_the_default(self) -> None:
+        (self.config / "CLAUDE.md").write_text(render(VALUES).replace("push-signed", "push-unsigned"))
+        self.assertEqual(self.run_main("--check"), self.run_main())
+        self.assertEqual(self.run_main("--check")[0], 1)
+
+    def test_check_refuses_to_combine_with_write(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.run_main("--check", "--write")
 
 
 if __name__ == "__main__":
