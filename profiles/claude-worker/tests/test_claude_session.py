@@ -70,7 +70,10 @@ MCP_SERVERS = {
     "sentry": {"url": "https://mcp.sentry.dev/mcp?skills=inspect", "token_env": "EXAMPLE_SENTRY_TOKEN", "scheme": "Sentry-Bearer"},
     "posthog": {"url": "https://mcp.posthog.com/mcp", "token_env": "EXAMPLE_POSTHOG_KEY", "headers": {"x-posthog-read-only": "true"}},
 }
-TOKEN_PREFIXES = ("ghp_", "gho_", "ghs_", "github_pat_", "sntrys_", "lin_api_", "xoxb-", "sk-")
+TOKEN_PREFIXES = (
+    "ghp_", "gho_", "ghs_", "ghu_", "github_pat_", "glpat-", "sntrys_", "sntryu_", "lin_api_", "phx_", "xoxb-", "xoxp-",
+    "sk-0123456789abcdefghij",
+)
 DEFAULT_ENTRY = (
     "Work Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) in example-org/example-repo "
     "on branch abc-123-fix. First start the issue through this repository's own issue-start workflow, "
@@ -1445,6 +1448,18 @@ class ClaudeSessionTest(GitFixture):
             {name: (built[name]["url"], built[name].get("headers")) for name in servers},
             {name: (spec["url"], spec.get("headers")) for name, spec in servers.items()},
         )
+
+    def test_a_language_tag_that_starts_with_sk_is_not_a_credential(self) -> None:
+        server = {**MCP_SERVERS["sentry"], "url": "https://mcp.example/mcp?lang=sk-SK", "headers": {"Accept-Language": "sk-SK"}}
+        self.settings = self.write_settings([self.repository], {"mcp_servers": {"sentry": server}})
+        self.broker.answers["status"] = [{"ok": True, "mcp_tokens_present": {"sentry": True}}]
+
+        code, _ = self.run_session()
+
+        self.assertEqual(code, 0)
+        argv = self.claude_call()["argv"]
+        built = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]["sentry"]
+        self.assertEqual((built["url"], built["headers"]["Accept-Language"]), (server["url"], "sk-SK"))
 
     def test_a_leftover_sentry_token_env_is_refused(self) -> None:
         self.settings = self.write_settings([self.repository], {"sentry_token_env": "SENTRY_ACCESS_TOKEN"})

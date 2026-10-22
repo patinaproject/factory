@@ -192,7 +192,10 @@ UNREACHABLE_MODEL_URL = "http://127.0.0.1:9"
 # Fixed headers and the URL reach argv in --mcp-config, where ps shows them, so a name or value that could carry a secret is refused.
 CREDENTIAL_NAME = re.compile(r"auth|key|token|secret|cookie|password|cred|session|sig|pass|pwd|jwt|bearer|access", re.IGNORECASE)
 AUTHORIZATION_VALUE = re.compile(r"\s*(?:bearer|basic|token|sentry-bearer)(?:\s|$)", re.IGNORECASE)
-TOKEN_PREFIXES = ("ghp_", "gho_", "ghs_", "github_pat_", "sntrys_", "lin_api_", "xoxb-", "sk-")
+# `sk-` alone is a language tag such as sk-SK, so it counts only with a token's worth of characters after it.
+TOKEN_SHAPE = re.compile(
+    r"\s*(?:(?:ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|sntrys_|sntryu_|lin_api_|phx_|xoxb-|xoxp-)|sk-[A-Za-z0-9_-]{20})"
+)
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
@@ -838,7 +841,7 @@ def factory_mcp_servers(transport: dict) -> dict:
         values = (*headers.values(), *(value for _, value in query))
         if any(AUTHORIZATION_VALUE.match(value) for value in values):
             raise Refusal(f"{where} must hold no Authorization scheme in a header value or URL query value; mcp-headers sends the token")
-        if any(value.lstrip().startswith(TOKEN_PREFIXES) for value in values):
+        if any(TOKEN_SHAPE.match(value) for value in values):
             raise Refusal(f"{where} must hold no known token prefix in a header value or URL query value; mcp-headers sends the token")
     return servers
 
