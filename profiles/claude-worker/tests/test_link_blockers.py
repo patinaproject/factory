@@ -33,6 +33,8 @@ elif argv[:2] == ["kanban", "link"]:
         child["status"] = "todo"
 elif argv[:2] == ["kanban", "unlink"]:
     links.remove(argv[2:4])
+elif argv[:2] == ["kanban", "assign"]:
+    next(c for c in cards if c["id"] == argv[2])["assignee"] = argv[3]
 else:
     sys.exit("unexpected " + repr(argv))
 json.dump(state, open(path, "w"))
@@ -41,12 +43,12 @@ json.dump(state, open(path, "w"))
 
 def card(task_id: str, identifier: str, status: str = "ready", **extra) -> dict:
     return {"id": task_id, "title": f"{identifier}: work", "body": "", "status": status,
-            "branch_name": f"{identifier.lower()}-work", **extra}
+            "branch_name": f"{identifier.lower()}-work", "assignee": "claude-worker", **extra}
 
 
-def issue(identifier: str, state_type: str = "unstarted") -> dict:
+def issue(identifier: str, state_type: str = "unstarted", delegate: str | None = "app") -> dict:
     return {"id": f"uuid-{identifier}", "identifier": identifier,
-            "gitBranchName": f"{identifier.lower()}-work", "stateType": state_type}
+            "gitBranchName": f"{identifier.lower()}-work", "stateType": state_type, "delegate": delegate}
 
 
 class LinkBlockersTest(unittest.TestCase):
@@ -67,7 +69,7 @@ class LinkBlockersTest(unittest.TestCase):
     def run_script(self, relations: dict, *args: str) -> tuple[int, dict]:
         env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path)}
         proc = subprocess.run([sys.executable, str(SCRIPTS / "link_blockers.py"), *args],
-                              input=json.dumps({"blockedBy": [], "blocks": [], **relations}),
+                              input=json.dumps({"blockedBy": [], "blocks": [], "delegate": "app", **relations}),
                               capture_output=True, text=True, env=env)
         return proc.returncode, json.loads(proc.stdout)
 
@@ -75,7 +77,7 @@ class LinkBlockersTest(unittest.TestCase):
         self.board([card("t_a", "A-1", "running"), card("t_b", "A-2")])
         code, out = self.run_script({"blockedBy": [issue("A-1")]}, "--task", "t_b")
         self.assertEqual((code, out), (0, {"linked": [{"issue": "A-1", "parent": "t_a", "child": "t_b"}],
-                                           "skipped": [], "cycle": None}))
+                                           "skipped": [], "cycle": None, "released": []}))
         self.assertEqual(self.state()["links"], [["t_a", "t_b"]])
         self.assertEqual(self.state()["cards"][1]["status"], "todo")
 
@@ -126,24 +128,78 @@ class LinkBlockersTest(unittest.TestCase):
         code, out = self.run_script({"blockedBy": [issue("A-1"), issue("A-3")]}, "--task", "t_b")
         self.assertEqual((code, [link["parent"] for link in out["linked"]]), (0, ["t_a", "t_c"]))
 
-    def test_a_cycle_links_nothing_and_removes_the_link_that_closed_it(self) -> None:
+    def test_a_cycle_links_nothing_and_removes_nothing(self) -> None:
         self.board([card("t_a", "A-1", "todo"), card("t_b", "A-2")], [["t_b", "t_a"]])
         code, out = self.run_script({"blockedBy": [issue("A-1")]}, "--task", "t_b")
-        self.assertEqual((code, out), (0, {"linked": [], "skipped": [], "cycle": ["A-1"]}))
-        self.assertEqual(self.state()["links"], [])
+        self.assertEqual((code, out), (0, {"linked": [], "skipped": [], "cycle": ["A-1"], "released": []}))
+        self.assertEqual(self.state()["links"], [["t_b", "t_a"]])
 
-    def test_a_cycle_undoes_the_links_made_in_the_same_run(self) -> None:
+    def test_a_cycle_leaves_the_links_a_run_would_have_made_unmade(self) -> None:
         self.board([card("t_a", "A-1"), card("t_c", "A-3", "todo"), card("t_b", "A-2")], [["t_b", "t_c"]])
         code, out = self.run_script({"blockedBy": [issue("A-1"), issue("A-3")]}, "--task", "t_b")
         self.assertEqual((code, out["cycle"], out["linked"]), (0, ["A-3"], []))
-        self.assertEqual(self.state()["links"], [])
+        self.assertEqual(self.state()["links"], [["t_b", "t_c"]])
 
-    def test_a_longer_cycle_is_found_through_intermediate_cards(self) -> None:
+    def test_a_longer_cycle_is_found_through_intermediate_cards_and_keeps_them(self) -> None:
         self.board([card("t_a", "A-1", "todo"), card("t_b", "A-2", "todo"), card("t_c", "A-3")],
                    [["t_c", "t_a"], ["t_a", "t_b"]])
         code, out = self.run_script({"blockedBy": [issue("A-2")]}, "--task", "t_c")
         self.assertEqual((code, out["cycle"]), (0, ["A-2"]))
+        self.assertEqual(self.state()["links"], [["t_c", "t_a"], ["t_a", "t_b"]])
+
+    def test_a_correct_chain_survives_a_mistaken_closing_relation(self) -> None:
+        self.board([card("t_a", "A-1"), card("t_b", "A-2", "todo"), card("t_c", "A-3", "todo")],
+                   [["t_a", "t_b"], ["t_b", "t_c"]])
+        code, out = self.run_script({"blocks": [issue("A-1")]}, "--task", "t_c")
+        self.assertEqual((code, out["cycle"]), (0, ["A-1"]))
+        self.assertEqual(self.state()["links"], [["t_a", "t_b"], ["t_b", "t_c"]])
+
+    def test_issues_that_block_each_other_report_a_cycle_and_link_nothing(self) -> None:
+        self.board([card("t_a", "A-1"), card("t_b", "A-2")])
+        code, out = self.run_script({"blockedBy": [issue("A-1")], "blocks": [issue("A-1")]}, "--task", "t_b")
+        self.assertEqual((code, out), (0, {"linked": [], "skipped": [], "cycle": ["A-1"], "released": []}))
         self.assertEqual(self.state()["links"], [])
+
+    def test_a_card_waits_unassigned_only_for_a_delegated_blocker_without_a_card(self) -> None:
+        self.board([card("t_c", "A-3")])
+        cases = {
+            "delegated, no card": (issue("A-1"), True),
+            "not delegated": (issue("A-1", delegate=None), False),
+            "delegated elsewhere": (issue("A-1", delegate="someone"), False),
+            "finished": (issue("A-1", "completed"), False),
+            "has a card": (issue("A-3"), False),
+        }
+        for name, (blocker, unassigned) in cases.items():
+            with self.subTest(name):
+                code, out = self.run_script({"blockedBy": [blocker]}, "--parents")
+                self.assertEqual((code, out["unassigned"]), (0, unassigned))
+
+    def test_a_blockers_card_links_the_waiting_card_and_assigns_it(self) -> None:
+        self.board([card("t_a", "A-1"), card("t_b", "A-2", assignee=None)])
+        code, out = self.run_script({"blocks": [issue("A-2")]}, "--task", "t_a")
+        self.assertEqual((code, out["linked"], out["released"]),
+                         (0, [{"issue": "A-2", "parent": "t_a", "child": "t_b"}], ["t_b"]))
+        self.assertEqual((self.state()["links"], self.state()["cards"][1]["assignee"]), ([["t_a", "t_b"]], "claude-worker"))
+
+    def test_a_cycle_still_assigns_the_waiting_card_so_the_blocker_gate_decides(self) -> None:
+        self.board([card("t_a", "A-1"), card("t_b", "A-2", assignee=None)], [["t_b", "t_a"]])
+        code, out = self.run_script({"blocks": [issue("A-2")]}, "--task", "t_a")
+        self.assertEqual((code, out["cycle"], out["released"]), (0, ["A-2"], ["t_b"]))
+
+    def test_a_waiting_card_is_assigned_once_its_blocker_is_no_longer_delegated(self) -> None:
+        self.board([card("t_b", "A-2", assignee=None)])
+        code, out = self.run_script({"blockedBy": [issue("A-1")]}, "--task", "t_b")
+        self.assertEqual((code, out["released"], self.state()["cards"][0]["assignee"]), (0, [], None))
+        code, out = self.run_script({"blockedBy": [issue("A-1", delegate=None)]}, "--task", "t_b")
+        self.assertEqual((code, out["released"], self.state()["cards"][0]["assignee"]), (0, ["t_b"], "claude-worker"))
+
+    def test_release_assigns_the_waiting_cards_of_an_issue_that_gets_no_card(self) -> None:
+        self.board([card("t_b", "A-2", assignee=None), card("t_c", "A-3"),
+                    card("t_d", "A-4", "blocked", assignee=None), card("t_e", "A-5", "triage", assignee=None)])
+        blocked = [issue("A-2"), issue("A-3"), issue("A-4"), issue("A-5"), issue("A-6")]
+        code, out = self.run_script({"blocks": blocked}, "--release")
+        self.assertEqual((code, out), (0, {"released": ["t_b"]}))
+        self.assertEqual([c["assignee"] for c in self.state()["cards"]], ["claude-worker", "claude-worker", None, None])
 
     def test_a_hermes_failure_reports_the_error(self) -> None:
         self.state_path.write_text("not json")

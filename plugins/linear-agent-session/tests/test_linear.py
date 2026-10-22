@@ -535,7 +535,7 @@ class IssueTest(unittest.TestCase):
                 "relations": {
                     "nodes": [
                         {"type": "blocks", "relatedIssue": {"id": "uuid-b2", "identifier": "ABC-125", "branchName": "abc-125-later",
-                                                            "state": {"type": "unstarted"}}},
+                                                            "state": {"type": "unstarted"}, "delegate": {"id": "app-user-1"}}},
                         {"type": "related", "relatedIssue": {"id": "uuid-r", "identifier": "ABC-130", "branchName": "abc-130-rel",
                                                              "state": {"type": "started"}}},
                     ]
@@ -543,7 +543,7 @@ class IssueTest(unittest.TestCase):
                 "inverseRelations": {
                     "nodes": [
                         {"type": "blocks", "issue": {"id": "uuid-b1", "identifier": "ABC-122", "branchName": "abc-122-first",
-                                                     "state": {"type": "started"}}},
+                                                     "state": {"type": "started"}, "delegate": None}},
                         {"type": "duplicate", "issue": {"id": "uuid-d", "identifier": "ABC-131", "branchName": "abc-131-dup",
                                                         "state": {"type": "started"}}},
                     ]
@@ -582,10 +582,12 @@ class IssueTest(unittest.TestCase):
                     {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
                 ],
                 "blockedBy": [
-                    {"id": "uuid-b1", "identifier": "ABC-122", "gitBranchName": "abc-122-first", "stateType": "started"}
+                    {"id": "uuid-b1", "identifier": "ABC-122", "gitBranchName": "abc-122-first", "stateType": "started",
+                     "delegate": None}
                 ],
                 "blocks": [
-                    {"id": "uuid-b2", "identifier": "ABC-125", "gitBranchName": "abc-125-later", "stateType": "unstarted"}
+                    {"id": "uuid-b2", "identifier": "ABC-125", "gitBranchName": "abc-125-later", "stateType": "unstarted",
+                     "delegate": "app-user-1"}
                 ],
                 "agentSessions": [
                     {"id": "s-new", "status": "active", "createdAt": "2026-01-02T00:00:00.000Z", "appUserId": "app-user-1",

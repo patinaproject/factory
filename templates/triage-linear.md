@@ -47,6 +47,14 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
   agent session. Hermes holds a linked card in `todo`, without a worker run,
   until every parent card is `done` or archived, and a card is `done` when its
   pull request merges.
+- A card created while a blocker is delegated but has no card yet waits with no
+  assignee, because the dispatcher skips an unassigned card. The blocker's own
+  card assigns it. When an issue gets no card from this event, because
+  "Delegation gate" stops, or the issue is un-delegated, completed, or
+  canceled, run `<<link_blockers>> --release` with the issue exactly as
+  `linear_issue` returned it, before you stop. It assigns the cards that wait for the issue, so each one
+  starts and its worker's blocker gate decides. When it prints `error`, post
+  that error as one `thought`.
 - Add free-text card comments with the `kanban_comment` tool, not the shell.
 - To unblock a card, follow "Unblock a card" below, with the reason
   `resumed from Linear; see the card comments`.
@@ -165,11 +173,17 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
 
    Add `--parent '<task id>'` once for each task id in its `parents`. A card
    created with a parent waits in `todo` from its first moment, so the
-   dispatcher never claims it early.
+   dispatcher never claims it early. When it prints `error`, post that error
+   as one `thought`, create the card with no `--parent`, and go on: step 7
+   links it. When `unassigned` is true, a delegated blocker has no card yet, so
+   leave out `--assignee claude-worker`. The dispatcher skips an unassigned
+   card, and the blocker's card links and assigns it. Otherwise, and when the
+   command failed, keep `--assignee claude-worker`.
 
    Create the card with the chosen repository's card flags, the branch you
-   chose, one `--parent` for each parent, and a title made of the identifier, a colon, and the issue title
-   with every character except letters, digits, spaces, `.` and `-` removed:
+   chose, one `--parent` for each parent, and a title made of the identifier,
+   a colon, and the issue title with every character except letters, digits,
+   spaces, `.` and `-` removed:
 
    ````sh
    hermes kanban create '<title>' \
@@ -228,7 +242,8 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    `cycle` is not null, the blockers form a cycle and the command linked
    nothing. Post one `thought` on this agent session naming the issues in
    `cycle`, and say that no card waits for another until a person removes the
-   cycle.
+   cycle. The command never removes a link, and `released` lists the cards it
+   assigned, so a cycle is left to the worker's blocker gate.
 8. When the gate passed and the issue's `stateType` is `triage`, move it to
    Todo as "Delegation gate" says.
    If this run created the card, unblocked it, or moved it to this agent

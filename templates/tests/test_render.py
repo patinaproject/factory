@@ -370,6 +370,7 @@ class PromptSubstitutionTest(unittest.TestCase):
         script = "python3 /srv/hermes/profiles/claude-worker/scripts/link_blockers.py"
         self.assertIn(f"{script} --parents <<'BLOCKERS'", prompt)
         self.assertIn(f"{script} --task '<task id>' <<'BLOCKERS'", prompt)
+        self.assertIn(f"`{script} --release`", prompt)
         self.assertNotIn("<<link_blockers>>", prompt)
 
     def test_linear_prompt_names_the_app_user(self):

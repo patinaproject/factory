@@ -69,8 +69,8 @@ ISSUE_QUERY = """query Issue($id: String!) {
     labels { nodes { name } }
     attachments { nodes { url sourceType } }
     agentSessions(first: 20) { nodes { id status createdAt appUser { id } creator { id } } }
-    relations(first: 50) { nodes { type relatedIssue { id identifier branchName state { type } } } }
-    inverseRelations(first: 50) { nodes { type issue { id identifier branchName state { type } } } }
+    relations(first: 50) { nodes { type relatedIssue { id identifier branchName state { type } delegate { id } } } }
+    inverseRelations(first: 50) { nodes { type issue { id identifier branchName state { type } delegate { id } } } }
   }
 }"""
 
@@ -534,6 +534,7 @@ def _blocking_issues(relations: dict, side: str) -> list:
             "identifier": n[side]["identifier"],
             "gitBranchName": n[side]["branchName"],
             "stateType": n[side]["state"]["type"],
+            "delegate": n[side]["delegate"]["id"] if n[side]["delegate"] else None,
         }
         for n in relations["nodes"]
         if n["type"] == "blocks"

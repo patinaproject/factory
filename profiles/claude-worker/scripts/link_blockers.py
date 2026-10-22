@@ -10,18 +10,28 @@ Standard input is the issue as the `linear_issue` tool prints it. The command re
 and `stateType`.
 
 `--parents` is for a card that does not exist yet. It prints
-`{"parents": [task id, ...], "skipped": [...]}` for the `--parent` flags of
-`hermes kanban create`, which links the card before the dispatcher can claim it.
+`{"parents": [task id, ...], "skipped": [...], "unassigned": bool}` for the `--parent` flags of
+`hermes kanban create`, which links the card before the dispatcher can claim it. `unassigned` is
+true when a blocker is delegated to the same agent but has no card yet. Create the card with no
+assignee then, because the dispatcher skips an unassigned `ready` card and the blocker's own
+`--task` run, which links it and assigns it, is what lets it start.
 
 `--task <id>` links the existing card both ways: the cards of its blockers become its
 parents, and it becomes the parent of the cards of the issues it blocks. It prints
-`{"linked", "skipped", "cycle"}` and exits 0. Run it again after a failure: a link that
+`{"linked", "skipped", "cycle", "released"}` and exits 0. Run it again after a failure: a link that
 exists is not made twice. Each issue is skipped with a reason when it has no live card
 on the board (never delegated, or archived), is completed or canceled, or when the
 child card has left `triage`, `todo`, and `ready`, because a started worker has already
-read its issue and Hermes refuses to link a running card. When the blockers form a cycle
-the command links nothing, removes the links that closed the cycle, and prints the
-issues in `cycle`. It exits 1 with `{"error": reason}` when Hermes fails.
+read its issue and Hermes refuses to link a running card. When a link would close a
+cycle, with the links the board already has or with the links this run would make, the command
+links nothing, removes nothing, and prints the issues in `cycle`. Each card that was waiting
+unassigned, the card itself or the card of an issue it blocks, gets the worker assigned and is
+listed in `released`, so a cycle or a missing blocker is left to the worker's blocker gate. It
+exits 1 with `{"error": reason}` when Hermes fails.
+
+`--release` is for an issue that will have no card, such as one that is not ready for the agent or
+is no longer delegated. It assigns the waiting cards of the issues in `blocks` and prints
+`{"released": [task id, ...]}`.
 """
 from __future__ import annotations
 
@@ -32,7 +42,9 @@ import subprocess
 import sys
 
 LINKABLE_CHILD_STATUSES = ("triage", "todo", "ready")
+RELEASABLE_CARD_STATUSES = ("todo", "ready")
 FINISHED_ISSUE_STATES = ("completed", "canceled")
+ASSIGNEE = "claude-worker"
 
 
 class Failed(Exception):
@@ -78,19 +90,27 @@ class Board:
                     return card
         return None
 
-    def path(self, from_id: str, to_id: str) -> list[tuple[str, str]] | None:
-        """The parent-to-child links that lead from one card down to another, or None."""
-        stack = [(from_id, [])]
+    def reaches(self, from_id: str, to_id: str, planned: list[tuple[str, str]]) -> bool:
+        """Whether parent-to-child links, the board's and the planned ones, lead from one card down to another."""
+        stack = [from_id]
         seen = set()
         while stack:
-            node, edges = stack.pop()
+            node = stack.pop()
             if node == to_id:
-                return edges
-            if node in seen:
-                continue
-            seen.add(node)
-            stack.extend((child, [*edges, (node, child)]) for child in self.show(node)["children"])
-        return None
+                return True
+            if node not in seen:
+                seen.add(node)
+                stack.extend([*self.show(node)["children"], *(child for parent, child in planned if parent == node)])
+        return False
+
+    def release(self, task_id: str) -> list[str]:
+        """Assign the worker to a card that waits unassigned, so the dispatcher can start it."""
+        task = self.show(task_id)["task"]
+        if task["assignee"] is not None or task["status"] not in RELEASABLE_CARD_STATUSES:
+            return []
+        run(*self.kanban, "assign", task_id, ASSIGNEE)
+        self.forget(task_id)
+        return [task_id]
 
 
 def live_card(board: Board, issue: dict, skipped: list[dict]) -> dict | None:
@@ -114,13 +134,24 @@ def blocker_cards(board: Board, issues: list[dict], skipped: list[dict]) -> list
     return found
 
 
+def waits_for_card(board: Board, issues: list[dict], delegate: str) -> bool:
+    """Whether an issue delegated to the same agent is still to get its card, which will link this one."""
+    return any(
+        issue["delegate"] == delegate and issue["stateType"] not in FINISHED_ISSUE_STATES and board.card_for(issue) is None
+        for issue in issues
+    )
+
+
 def link_all(board: Board, task_id: str, relations: dict) -> dict:
-    result: dict = {"linked": [], "skipped": [], "cycle": None}
+    result: dict = {"linked": [], "skipped": [], "cycle": None, "released": []}
     pairs = [(issue, parent, task_id) for issue, parent in blocker_cards(board, relations["blockedBy"], result["skipped"])]
+    waiting = []
     for issue in relations["blocks"]:
         card = live_card(board, issue, result["skipped"])
         if card is not None:
             pairs.append((issue, task_id, card["id"]))
+            waiting.append(card["id"])
+    planned: list[tuple[str, str]] = []
     cycle: list[str] = []
     for issue, parent, child in pairs:
         if parent == child or child in board.show(parent)["children"]:
@@ -128,24 +159,23 @@ def link_all(board: Board, task_id: str, relations: dict) -> dict:
         child_status = board.show(child)["task"]["status"]
         if child_status not in LINKABLE_CHILD_STATUSES:
             result["skipped"].append({"issue": issue["identifier"], "reason": f"the child card is {child_status}"})
-            continue
-        closing = board.path(child, parent)
-        if closing is not None:
+        elif board.reaches(child, parent, planned):
             cycle.append(issue["identifier"])
-            for edge in closing:
-                run(*board.kanban, "unlink", *edge)
-                board.forget(edge[0])
-                board.forget(edge[1])
-            continue
-        run(*board.kanban, "link", parent, child)
-        board.forget(parent)
-        board.forget(child)
-        result["linked"].append({"issue": issue["identifier"], "parent": parent, "child": child})
+        else:
+            planned.append((parent, child))
+            result["linked"].append({"issue": issue["identifier"], "parent": parent, "child": child})
     if cycle:
-        for link in result["linked"]:
-            run(*board.kanban, "unlink", link["parent"], link["child"])
         result["linked"] = []
         result["cycle"] = cycle
+    else:
+        for link in result["linked"]:
+            run(*board.kanban, "link", link["parent"], link["child"])
+            board.forget(link["parent"])
+            board.forget(link["child"])
+    if not waits_for_card(board, relations["blockedBy"], relations["delegate"]):
+        result["released"] += board.release(task_id)
+    for child in waiting:
+        result["released"] += board.release(child)
     return result
 
 
@@ -154,16 +184,25 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--parents", action="store_true", help="print the parent cards for a card to be created")
     mode.add_argument("--task", help="link this existing card both ways")
+    mode.add_argument("--release", action="store_true", help="assign the waiting cards of the issues this issue blocks")
     args = parser.parse_args(argv)
     kanban = [os.environ.get("HERMES_BIN", "hermes"), "kanban"]
     try:
         relations = json.load(sys.stdin)
-        relations = {"blockedBy": list(relations["blockedBy"]), "blocks": list(relations["blocks"])}
+        relations = {key: relations[key] for key in ("blockedBy", "blocks", "delegate")}
         board = Board(kanban)
         if args.parents:
             skipped: list[dict] = []
             parents = [card_id for _, card_id in blocker_cards(board, relations["blockedBy"], skipped)]
-            result = {"parents": parents, "skipped": skipped}
+            result = {"parents": parents, "skipped": skipped,
+                      "unassigned": waits_for_card(board, relations["blockedBy"], relations["delegate"])}
+        elif args.release:
+            released = []
+            for issue in relations["blocks"]:
+                card = board.card_for(issue)
+                if card is not None:
+                    released += board.release(card["id"])
+            result = {"released": released}
         else:
             result = link_all(board, args.task, relations)
     except (Failed, KeyError, ValueError, TypeError) as failure:
