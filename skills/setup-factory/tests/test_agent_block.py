@@ -132,6 +132,13 @@ class FileTest(unittest.TestCase):
         agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
         self.assertEqual(self.claude_md.read_text(), f"mine\n\n{self.block}")
 
+    def test_write_appends_when_the_markers_appear_only_inline(self) -> None:
+        notes = f"the block sits between `{agent_block.BEGIN}` and `{agent_block.END}`\n"
+        self.claude_md.write_text(notes)
+        agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
+        self.assertEqual(self.claude_md.read_text(), f"{notes}\n{self.block}")
+        self.assertEqual(self.failures(), [])
+
     def test_write_creates_the_file(self) -> None:
         agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
         self.assertEqual(self.claude_md.read_text(), self.block)
@@ -179,6 +186,15 @@ class CommandTest(unittest.TestCase):
         code, out = self.run_main()
         self.assertEqual(code, 0)
         self.assertTrue(out.startswith("PASS"))
+
+    def test_explicit_check_equals_the_default(self) -> None:
+        (self.config / "CLAUDE.md").write_text(render(VALUES).replace("push-signed", "push-unsigned"))
+        self.assertEqual(self.run_main("--check"), self.run_main())
+        self.assertEqual(self.run_main("--check")[0], 1)
+
+    def test_check_refuses_to_combine_with_write(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.run_main("--check", "--write")
 
 
 if __name__ == "__main__":

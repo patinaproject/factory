@@ -4,9 +4,10 @@
 Setup part 17 owns the text between the `<!-- factory:begin -->` and
 `<!-- factory:end -->` markers. The block is rendered only from
 `references/agent-instructions.block.tmpl` and a JSON values file, so a fresh
-install reproduces the live block byte for byte. With no flag, the command
-compares the live block with the render and prints PASS or FAIL, with a diff
-on a difference. `--write` replaces the block in place, keeps every other line,
+install reproduces the live block byte for byte. With no flag, or with `--check`, the
+command compares the live block with the render and prints PASS or FAIL, with a diff
+on a difference. A marker inside a line of other text, such as a code span,
+is not a block. `--write` replaces the block in place, keeps every other line,
 and backs up CLAUDE.md first. `--print` writes the render to stdout.
 
 Template syntax: `{{name}}` takes a value, and `{{#name}}...{{/name}}` keeps
@@ -88,7 +89,9 @@ def write(config: Path, template: str, values: dict) -> str:
     block = render(template, values)
     text = claude_md.read_text() if claude_md.exists() else ""
     if text.strip():
-        problem = marker_problem(text.splitlines()) if BEGIN in text or END in text else None
+        lines = text.splitlines()
+        has_marker_line = BEGIN in lines or END in lines
+        problem = marker_problem(lines) if has_marker_line else None
         if problem:
             raise ValueError(f"{claude_md}: {problem}")
     if BLOCK.search(text):
@@ -112,6 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--values", required=True, type=Path, help="JSON file of this factory's values")
     parser.add_argument("--config-dir", help="Claude config directory; default $CLAUDE_CONFIG_DIR or ~/.claude")
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="compare the block with the render; the default")
     mode.add_argument("--write", action="store_true", help="replace the block, then check")
     mode.add_argument("--print", action="store_true", help="print the render and change nothing")
     args = parser.parse_args(argv)
