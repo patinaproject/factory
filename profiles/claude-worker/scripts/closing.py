@@ -17,11 +17,15 @@ from typing import Iterable
 ISSUE_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/([1-9][0-9]*)$")
 IDENTIFIER = re.compile(r"^[A-Z][A-Z0-9]*-[1-9][0-9]*$")
 NUMBER = re.compile(r"^#([1-9][0-9]*)$")
+# A reference may be the text of a Markdown link to a GitHub or Linear issue, as in `Closes [PAT-9](<its URL>)`,
+# which GitHub and Linear both close on.
 CLOSING = re.compile(
-    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[ \t]*:?[ \t]+"
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[ \t]*:?[ \t]+(?P<link>\[)?"
     r"(?:(?P<repo>[\w.-]+/[\w.-]+)?#(?P<number>[1-9][0-9]*)\b"
     r"|https://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/(?P<url_number>[1-9][0-9]*)\b"
-    r"|(?P<linear>https://linear\.app/[\w-]+/issue/)?(?P<identifier>[A-Z][A-Z0-9]*-[1-9][0-9]*)\b)",
+    r"|(?P<linear>https://linear\.app/[\w-]+/issue/)?(?P<identifier>[A-Z][A-Z0-9]*-[1-9][0-9]*)\b)"
+    r"(?(link)\]\((?:https://github\.com/[\w.-]+/[\w.-]+/issues/[1-9][0-9]*"
+    r"|https://linear\.app/[\w-]+/issue/[A-Z][A-Z0-9]*-[1-9][0-9]*(?:/[^\s)]*)?)\))",
     re.IGNORECASE,
 )
 # The `fix` commit type is itself a closing keyword, so a squash commit titled `fix: #5 ...` closes #5.
@@ -81,7 +85,7 @@ def with_url(body: str, identifier: str, url: str) -> str:
     parts, last = [], 0
     for match in CLOSING.finditer(body):
         start, end = match.span("identifier")
-        if match["linear"] or (match["identifier"] or "").upper() != identifier.upper():
+        if match["linear"] or match["link"] or (match["identifier"] or "").upper() != identifier.upper():
             continue
         if any(left <= start < right for left, right in hidden):
             continue

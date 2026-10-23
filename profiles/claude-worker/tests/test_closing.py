@@ -46,7 +46,10 @@ class ClosesTest(unittest.TestCase):
             "Closes https://linear.app/example/issue/PAT-5325/report-usage": {"PAT-5325"},
             "Closes #190, closes https://linear.app/example/issue/PAT-5325/x": {"#190", "PAT-5325"},
             "Mentions #204 and PAT-5348": set(),
-            "Closes [#5](https://github.com/example-org/example-repo/issues/5)": set(),
+            "Closes [#5](https://github.com/example-org/example-repo/issues/5)": {"#5"},
+            "Resolves [PAT-9](https://linear.app/x/issue/PAT-9/the-title)": {"PAT-9"},
+            "Closes [#5](https://example.com/5)": set(),
+            "Closes [#5]": set(),
             "`Closes #1`\n<!-- Closes #2 -->\n```\nCloses #3\n```\nCloses #4": {"#4"},
             "~~Closes #1~~\n> Closes #2\n~~~\nCloses #3\n~~~\nCloses #4": {"#4"},
         }
@@ -79,10 +82,10 @@ class ClosesTest(unittest.TestCase):
             closing.reference("https://github.com/someone/else/issues/12", REPO)
 
     def test_only_a_rendered_bare_identifier_becomes_its_url(self) -> None:
-        body = "Closes PAT-9\n`Closes PAT-9`\nCloses PAT-90, closes https://linear.app/y/issue/PAT-9\nfixes pat-9"
+        body = "Closes PAT-9\n`Closes PAT-9`\nCloses PAT-90, closes https://linear.app/y/issue/PAT-9\nfixes pat-9\nCloses [PAT-9](https://linear.app/y/issue/PAT-9)"
         self.assertEqual(
             closing.with_url(body, "PAT-9", LINEAR_URL),
-            f"Closes {LINEAR_URL}\n`Closes PAT-9`\nCloses PAT-90, closes https://linear.app/y/issue/PAT-9\nfixes {LINEAR_URL}",
+            f"Closes {LINEAR_URL}\n`Closes PAT-9`\nCloses PAT-90, closes https://linear.app/y/issue/PAT-9\nfixes {LINEAR_URL}\nCloses [PAT-9](https://linear.app/y/issue/PAT-9)",
         )
 
 
@@ -119,7 +122,8 @@ class AgreementTest(unittest.TestCase):
         "~~Closes #5~~\nCloses https://linear.app/x/issue/PAT-9": False,
         "<!-- Closes #5 -->\nCloses https://linear.app/x/issue/PAT-9": False,
         "`Closes #5`\nCloses https://linear.app/x/issue/PAT-9": False,
-        "Closes [#5](https://github.com/example-org/example-repo/issues/5), closes https://linear.app/x/issue/PAT-9": False,
+        "Closes [#5](https://github.com/example-org/example-repo/issues/5), closes https://linear.app/x/issue/PAT-9": True,
+        "> Closes [#5](https://github.com/example-org/example-repo/issues/5)\nCloses https://linear.app/x/issue/PAT-9": False,
         "Closes #5, closes https://linear.app/x/issue/PAT-9": True,
         "FIXES example-org/example-repo#5\nresolves https://linear.app/x/issue/PAT-9/slug": True,
     }
