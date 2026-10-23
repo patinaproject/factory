@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import importlib
 import json
 import os
 import re
@@ -685,22 +686,27 @@ def check_toolchain(repo: dict, worktree: Path) -> None:
             )
 
 
-def linear_access() -> tuple:
-    """A client and a token from the worker home's linear-agent-session plugin, which gets tokens from the gateway's broker."""
+def plugin_module(name: str):
+    """A module of the worker home's linear-agent-session plugin: `linear`, or `broker_client` for the gateway's broker."""
     home = os.environ.get("HERMES_HOME")
     if not home:
         raise Refusal("HERMES_HOME is not set; claude-session reads the Linear token through the worker home's plugin")
     plugin = Path(home) / "plugins" / "linear-agent-session"
-    if not (plugin / "linear.py").is_file():
+    if not (plugin / f"{name}.py").is_file():
         raise Refusal(f"the linear-agent-session plugin is not installed in {home}")
-    sys.path.insert(0, str(plugin))
-    import linear
+    if str(plugin) not in sys.path:
+        sys.path.insert(0, str(plugin))
+    return importlib.import_module(name)
 
+
+def linear_access() -> tuple:
+    """A client and a token from the worker home's linear-agent-session plugin, which gets tokens from the gateway's broker."""
+    linear = plugin_module("linear")
     try:
         client = linear.client_from_env()
         return client, client.access_token()
-    except linear.LinearError as error:
-        raise Refusal(f"Linear token: {error}", transient=isinstance(error, linear.BrokerUnavailable)) from None
+    except linear.CLIENT_ERRORS as error:
+        raise Refusal(f"Linear token: {error}", transient=isinstance(error, linear.broker_client.BrokerUnavailable)) from None
 
 
 def triage_playbook() -> Path:
@@ -720,7 +726,7 @@ def title_triage_documents(client, issue_id: str) -> dict:
     The result goes in the run's report and never changes its status: a failure here must not lose the
     triage outcome that the worker relays.
     """
-    import linear
+    linear = plugin_module("linear")
 
     try:
         issue = client.issue_documents(issue_id)
@@ -734,18 +740,18 @@ def title_triage_documents(client, issue_id: str) -> dict:
                 renamed.append(prefixed)
             elif title not in titles and prefixed not in titles:
                 missing.append(title)
-    except (linear.LinearError, OSError) as error:
+    except (*linear.CLIENT_ERRORS, OSError) as error:
         return {"error": f"checking the triage Documents failed: {error}"}
     return {"renamed": renamed, "missing": missing}
 
 
 def triage_mentions(client, issue_id: str, identifier: str) -> str:
     """Resolved here, not by the model, because a team can list several triage people and the model picked one."""
-    import linear
+    linear = plugin_module("linear")
 
     try:
         people = client.triage_people(issue_id)
-    except (linear.LinearError, OSError) as error:
+    except (*linear.CLIENT_ERRORS, OSError) as error:
         raise Refusal(f"reading who answers Linear issue {identifier}'s triage questions failed: {error}") from None
     owner = people["assignee"] or people["triage"]
     reporter = people["creator"] or owner
@@ -761,17 +767,17 @@ def triage_mentions(client, issue_id: str, identifier: str) -> str:
 
 
 def require_ready(client, issue_id: str, identifier: str) -> None:
-    import linear
+    linear = plugin_module("linear")
 
     try:
         labels = client.issue_labels(issue_id)
-    except linear.LinearError as error:
+    except linear.CLIENT_ERRORS as error:
         raise Refusal(f"reading the labels of Linear issue {identifier} failed: {error}") from None
     if linear.role_key(READY_LABEL) in map(linear.role_key, labels):
         return
     try:
         live = client.role_labels(issue_id).get(READY_LABEL)
-    except linear.LinearError as error:
+    except linear.CLIENT_ERRORS as error:
         raise Refusal(f"reading the labels of Linear issue {identifier} failed: {error}") from None
     wanted = f"`{live}`" if live else f"a label for the `{READY_LABEL}` role (Linear has none)"
     raise Refusal(
@@ -786,7 +792,7 @@ def triage_activity(client, issue_id: str, result: str | None) -> str | None:
     first = (result or "").partition("\n")[0]
     if not first.startswith(TRIAGE_OUTCOME):
         return None
-    import linear
+    linear = plugin_module("linear")
 
     role = linear.role_key(first.removeprefix(TRIAGE_OUTCOME))
     if role not in map(linear.role_key, TRIAGE_ROLES):
@@ -796,7 +802,7 @@ def triage_activity(client, issue_id: str, result: str | None) -> str | None:
 
     try:
         return "thought" if client.delegated_to_self(issue_id) else "response"
-    except (linear.LinearError, OSError):
+    except (*linear.CLIENT_ERRORS, OSError):
         # Ending a delegated issue's session under its implementation card is worse than leaving one open.
         return "thought"
 
@@ -868,14 +874,13 @@ def factory_mcp_servers(transport: dict) -> dict:
 def require_mcp_tokens(servers: dict) -> None:
     if not servers:
         return
-    import linear
+    broker_client = plugin_module("broker_client")
 
     try:
-        status = linear.broker_request(linear.broker_socket_path(os.environ), "status")
-    except linear.LinearError as error:
-        raise Refusal(f"MCP tokens: {error}", transient=isinstance(error, linear.BrokerUnavailable)) from None
-    present = status.get("mcp_tokens_present") or {}
-    missing = sorted(name for name in servers if present.get(name) is not True)
+        status = broker_client.status(broker_client.socket_path(os.environ))
+    except broker_client.BrokerError as error:
+        raise Refusal(f"MCP tokens: {error}", transient=isinstance(error, broker_client.BrokerUnavailable)) from None
+    missing = sorted(name for name in servers if not status.mcp_tokens_present.get(name))
     if missing:
         raise Refusal(f"MCP tokens: the gateway's broker holds no token for {', '.join(missing)}")
 

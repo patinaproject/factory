@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Callable, Optional
 
-from .linear import ACTIVITY_TYPES, LinearClient, LinearError, activity_content
+from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, LinearClient, LinearError, activity_content
 
 ClientFactory = Callable[[], LinearClient]
 
@@ -177,7 +177,7 @@ def run_issue(client_factory: ClientFactory, args: dict) -> str:
         issue = client.get_issue(_issue_argument(args))
         try:
             role_labels = client.role_labels(issue["id"])
-        except LinearError:
+        except CLIENT_ERRORS:
             # Every route decision reads the issue; the label names only word messages to people.
             role_labels = {}
         return {**issue, "role_labels": role_labels}

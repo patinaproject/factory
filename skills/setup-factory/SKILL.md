@@ -603,7 +603,7 @@ runs `/Library/Developer/CommandLineTools/usr/bin/python3`, not
    >
    > ```sh
    > cat "/Library/Application Support/factory-broker/installed-commit"
-   > git diff <installed>..<sha> -- plugins/factory-uploads plugins/linear-agent-session/linear.py skills/setup-factory/scripts/setup-broker-user
+   > git diff <installed>..<sha> -- plugins/factory-uploads plugins/linear-agent-session/linear.py plugins/linear-agent-session/broker_client.py skills/setup-factory/scripts/setup-broker-user
    > ```
    >
    > Then ask them to run, in their own terminal:

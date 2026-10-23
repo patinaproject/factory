@@ -7,19 +7,17 @@ import json
 import os
 import plistlib
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, SCRIPTS, git, with_interpreter
+from tests.support import REPO, SCRIPTS, FakeBroker, git, with_interpreter
 
 ROUTE_KEY = "platforms.webhook.extra.routes.linear"
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
@@ -147,48 +145,15 @@ REPO_FILES = {
 }
 
 
-class FakeBroker:
-    """A Unix socket that answers each request with `reply` and records what it was sent."""
-
-    def __init__(self, path: Path, reply: bytes):
-        self.requests: list = []
-        self.reply = reply
-        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.server.bind(str(path))
-        self.server.listen()
-        self.thread = threading.Thread(target=self.serve, daemon=True)
-        self.thread.start()
-
-    def serve(self) -> None:
-        while True:
-            try:
-                client, _ = self.server.accept()
-            except OSError:
-                return
-            with client:
-                request = b""
-                while not request.endswith(b"\n"):
-                    chunk = client.recv(4096)
-                    if not chunk:
-                        break
-                    request += chunk
-                self.requests.append(request)
-                client.sendall(self.reply)
-
-    def close(self) -> None:
-        self.server.close()
-
-
 STATUS = {
     "ok": True, "token_present": True, "linear_ready": True, "proxy_token_present": True, "github_app_ready": True,
     "last_state": None,
 }
-OK_STATUS = json.dumps(STATUS).encode() + b"\n"
 
 
 class CheckInstallTest(unittest.TestCase):
-    def broker(self, reply: bytes = OK_STATUS) -> FakeBroker:
-        broker = FakeBroker(self.root / "factory-uploads.sock", reply)
+    def broker(self) -> FakeBroker:
+        broker = FakeBroker(self.root / "factory-uploads.sock", status=[STATUS])
         self.addCleanup(broker.close)
         return broker
 
@@ -212,6 +177,10 @@ class CheckInstallTest(unittest.TestCase):
             self.install(home, "plugins/p1/__init__.py", "plugin\n")
             self.install(home, f"plugins/factory-secret-names/{SECRET_NAMES}", SECRET_NAMES_MANIFEST)
         self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
+        (self.root / "plugins" / "linear-agent-session").mkdir(parents=True)
+        (self.root / "plugins" / "linear-agent-session" / "broker_client.py").symlink_to(
+            REPO / "plugins" / "linear-agent-session" / "broker_client.py"
+        )
         self.install(self.root, "plugins/team/__init__.py", "team\n")
         self.install(self.root, "plugins/webhook-retry/__init__.py", "retry\n")
         self.install(self.worker, "SOUL.md", "soul\n")
@@ -576,19 +545,19 @@ class CheckInstallTest(unittest.TestCase):
     def test_healthy_broker_gets_only_a_status_request(self) -> None:
         self.assertEqual(self.check(), (0, ""))
 
-        self.assertEqual(self.uploads.requests, [b'{"op":"status"}\n'])
+        self.assertEqual(self.uploads.bodies, [{"op": "status"}])
 
     def test_broker_that_is_not_listening(self) -> None:
         self.uploads.close()
-        (self.root / "factory-uploads.sock").unlink()
 
         self.assertEqual(
             self.check(),
-            (1, f"upload broker {self.root}/factory-uploads.sock: is unreachable: no broker is listening on it (part 5)\n"),
+            (1, f"upload broker {self.root}/factory-uploads.sock: is unreachable: the gateway's broker at "
+                f"{self.root}/factory-uploads.sock did not answer: No such file or directory (part 5)\n"),
         )
 
     def test_broker_without_a_token(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "token_present": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "token_present": False}]
 
         self.assertEqual(
             self.check(),
@@ -600,7 +569,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_linear_credentials_leaves_every_worker_without_linear(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "linear_ready": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "linear_ready": False}]
 
         self.assertEqual(
             self.check(),
@@ -612,7 +581,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_the_github_app_leaves_the_workers_gh_to_expire(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "github_app_ready": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "github_app_ready": False}]
 
         self.assertEqual(
             self.check(),
@@ -624,7 +593,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_the_proxy_token_matters_only_when_one_is_configured(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "proxy_token_present": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "proxy_token_present": False}]
         self.assertEqual(self.check(), (0, ""))
 
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
@@ -639,7 +608,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_an_mcp_token_matters_only_for_a_configured_server(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True, "posthog": False}}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True, "posthog": False}}]
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "SENTRY_ACCESS_TOKEN"})
         self.assertEqual(self.check(), (0, ""))
 
@@ -659,7 +628,7 @@ class CheckInstallTest(unittest.TestCase):
     def test_broker_that_does_not_answer_a_status_request_properly(self) -> None:
         for reply in (b"not json\n", b'{"ok": false}\n', b"[]\n", b""):
             with self.subTest(reply=reply):
-                self.uploads.reply = reply
+                self.uploads.answers["status"] = [reply]
 
                 code, out = self.check()
 
@@ -797,7 +766,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertNotIn("s3cr3t", out)
 
     def test_an_mcp_token_in_the_worker_env_is_reported_by_name_only(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True}}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "SENTRY_ACCESS_TOKEN"})
         self.install(self.worker, ".env", "SENTRY_ACCESS_TOKEN=s3cr3t-6\n")
 
@@ -811,7 +780,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertNotIn("s3cr3t", out)
 
     def test_an_mcp_token_variable_hermes_would_pass_to_every_process(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True}}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "OTHER_SENTRY_TOKEN"})
 
         self.assertEqual(

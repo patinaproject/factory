@@ -35,7 +35,7 @@ class RefreshGhAppLoginTest(unittest.TestCase):
         self.worker = self.root / "profiles" / "claude-worker"
         plugin = self.worker / "plugins" / "linear-agent-session"
         plugin.mkdir(parents=True)
-        (plugin / "linear.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "linear.py")
+        (plugin / "broker_client.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "broker_client.py")
         self.script = self.worker / "scripts" / "refresh-gh-app-login"
         self.script.parent.mkdir(parents=True)
         shutil.copy(SCRIPTS / "refresh-gh-app-login", self.script)
@@ -46,7 +46,7 @@ class RefreshGhAppLoginTest(unittest.TestCase):
         self.gh_config_dir = self.tmp / "gh"
 
     def broker(self, *replies: dict) -> FakeBroker:
-        broker = FakeBroker(self.root, github_token=list(replies))
+        broker = FakeBroker(self.root / "factory-uploads.sock", github_token=list(replies))
         self.addCleanup(broker.close)
         return broker
 

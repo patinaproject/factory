@@ -50,7 +50,7 @@ class HelperTestCase(unittest.TestCase):
         self.worker = self.root / "profiles" / "claude-worker"
         plugin = self.worker / "plugins" / "linear-agent-session"
         plugin.mkdir(parents=True)
-        (plugin / "linear.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "linear.py")
+        (plugin / "broker_client.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "broker_client.py")
         self.script = self.worker / "scripts" / self.script_name
         self.script.parent.mkdir(parents=True)
         shutil.copy(SCRIPTS / self.script_name, self.script)
@@ -58,7 +58,7 @@ class HelperTestCase(unittest.TestCase):
         self.env = {**os.environ, "HERMES_HOME": str(self.worker)}
 
     def broker(self, *replies: dict) -> FakeBroker:
-        broker = FakeBroker(self.root, proxy_token=list(replies))
+        broker = FakeBroker(self.root / "factory-uploads.sock", proxy_token=list(replies))
         self.addCleanup(broker.close)
         return broker
 
@@ -67,14 +67,14 @@ class HelperTestCase(unittest.TestCase):
         return proc.returncode, proc.stdout
 
     def test_a_busy_broker_is_asked_again(self) -> None:
-        broker = FakeBroker(self.root, **{self.op: [BUSY, granted("t", None)]})
+        broker = FakeBroker(self.root / "factory-uploads.sock", **{self.op: [BUSY, granted("t", None)]})
         self.addCleanup(broker.close)
 
         self.assertEqual(self.run_script(*self.args), (0, self.printed))
         self.assertEqual(broker.requests, [self.op, self.op])
 
     def test_a_broker_that_stays_busy_prints_nothing_after_a_bounded_wait(self) -> None:
-        broker = FakeBroker(self.root, **{self.op: [BUSY]})
+        broker = FakeBroker(self.root / "factory-uploads.sock", **{self.op: [BUSY]})
         self.addCleanup(broker.close)
 
         self.assertEqual(self.run_script(*self.args), (1, ""))
@@ -151,7 +151,7 @@ class McpHeadersTest(HelperTestCase):
     printed = '{"Authorization": "Sentry-Bearer t"}\n'
 
     def mcp_broker(self, *replies: dict) -> FakeBroker:
-        broker = FakeBroker(self.root, mcp_token=list(replies))
+        broker = FakeBroker(self.root / "factory-uploads.sock", mcp_token=list(replies))
         self.addCleanup(broker.close)
         return broker
 

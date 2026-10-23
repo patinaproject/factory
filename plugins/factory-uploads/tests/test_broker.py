@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import importlib.util
 import json
 import os
 import socket
@@ -14,6 +15,11 @@ from unittest import mock
 from tests.support import PNG, TOKEN, UUID_URL, FakeUploads, upload_token
 
 from factory_uploads import broker as broker_module
+
+_client_path = Path(__file__).resolve().parents[2] / "linear-agent-session" / "broker_client.py"
+_spec = importlib.util.spec_from_file_location("broker_client", _client_path)
+broker_client = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(broker_client)
 
 REPO = "example-org/example-repo"
 PROBES = ("ghp_ABCDEF123456", "github_pat_ANOTHER_fake1")
@@ -240,6 +246,7 @@ class StatusTest(BrokerTestCase):
                 "github_app_ready", "last_state", "expires_at", "checked_at",
             },
         )
+        self.assertEqual(set(after) - {"ok"}, set(broker_client.Status._fields))
 
     async def test_status_says_when_the_token_is_missing(self):
         self.token = None

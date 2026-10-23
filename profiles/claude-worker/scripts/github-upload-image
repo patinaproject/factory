@@ -13,10 +13,8 @@ from __future__ import annotations
 
 import argparse
 import html
-import json
 import os
 import re
-import socket
 import struct
 import subprocess
 import sys
@@ -24,20 +22,15 @@ import time
 from pathlib import Path
 
 SOCKET_ENV = "FACTORY_EVIDENCE_SOCKET"
-DEFAULT_SOCKET = Path.home() / ".hermes/factory-uploads.sock"
-WAIT_SECONDS = 30
+HOME = Path(__file__).resolve().parent.parent
+UPLOAD_SECONDS = 75
 MAX_BYTES = 10 * 1024 * 1024
 MAX_WIDTH = 800
-REPLY_LIMIT = 65536
 GATEWAY_DOWN = (
     "Image upload is unavailable right now because the gateway is not answering. "
     "Attach the images to the Linear issue instead and say so in the pull request body."
 )
 GITHUB_REMOTE = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
-
-
-class GatewayDown(Exception):
-    pass
 
 
 def image_width(data: bytes) -> int | None:
@@ -72,42 +65,6 @@ def img_tag(url: str, path: Path, data: bytes) -> str:
     return f'<img src="{html.escape(url)}" alt="{html.escape(path.stem)}"{size}>'
 
 
-def connect(path: str, wait: float, clock, sleep) -> socket.socket:
-    deadline = clock() + wait
-    while True:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            sock.connect(path)
-            return sock
-        except OSError:
-            sock.close()
-        if clock() >= deadline:
-            raise GatewayDown
-        sleep(0.5)
-
-
-def exchange(sock: socket.socket, header: dict, data: bytes) -> dict:
-    """Send one request and read the one-line reply. A broken connection is a failed upload."""
-    sock.settimeout(75)
-    try:
-        sock.sendall(json.dumps(header).encode() + b"\n" + data)
-    except OSError:
-        pass  # the gateway may answer a refusal before it reads every byte
-    reply = b""
-    try:
-        while not reply.endswith(b"\n") and len(reply) < REPLY_LIMIT:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            reply += chunk
-    except OSError:
-        pass
-    try:
-        return json.loads(reply)
-    except ValueError:
-        return {"ok": False, "message": "The gateway closed the connection before it answered. GitHub may or may not have stored the image."}
-
-
 def repository_from_git() -> str | None:
     result = subprocess.run(
         ["git", "remote", "get-url", "origin"], capture_output=True, text=True, check=False
@@ -116,7 +73,7 @@ def repository_from_git() -> str | None:
     return match.group(1) if match else None
 
 
-def main(argv, env, out, err, clock=time.monotonic, sleep=time.sleep, repository=repository_from_git) -> int:
+def main(argv, env, out, err, sleep=time.sleep, repository=repository_from_git) -> int:
     parser = argparse.ArgumentParser(
         prog="github-upload-image",
         description="Upload images for a pull request description and print one <img> tag per file.",
@@ -138,21 +95,25 @@ def main(argv, env, out, err, clock=time.monotonic, sleep=time.sleep, repository
             print(f"error: {path} is larger than {MAX_BYTES // (1024 * 1024)} MB", file=err)
             return 2
         loaded.append((path, data))
-    socket_path = env.get(SOCKET_ENV) or str(DEFAULT_SOCKET)
+    sys.path.insert(0, str(HOME / "plugins" / "linear-agent-session"))
+    import broker_client
+
+    socket_path = env.get(SOCKET_ENV) or broker_client.socket_path({"HERMES_HOME": str(HOME)})
     failed = False
     for path, data in loaded:
         try:
-            sock = connect(socket_path, WAIT_SECONDS, clock, sleep)
-        except GatewayDown:
+            reply = broker_client.request(
+                socket_path, "upload", timeout=UPLOAD_SECONDS, payload=data, sleep=sleep,
+                repo=repo, name=path.name, size=len(data),
+            )
+        except broker_client.BrokerUnavailable:
             print(f"error: {GATEWAY_DOWN}", file=err)
             return 3
-        with sock:
-            reply = exchange(sock, {"op": "upload", "repo": repo, "name": path.name, "size": len(data)}, data)
-        if reply.get("ok"):
-            print(img_tag(reply["url"], path, data), file=out)
-        else:
+        except broker_client.BrokerError as error:
             failed = True
-            print(f"error: {path}: {reply.get('message', 'The upload failed.')}", file=err)
+            print(f"error: {path}: {error}", file=err)
+            continue
+        print(img_tag(reply["url"], path, data), file=out)
     return 1 if failed else 0
 
 

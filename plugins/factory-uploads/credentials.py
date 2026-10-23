@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import sys
 import threading
 from pathlib import Path
 from typing import Callable
@@ -100,7 +101,11 @@ class GatewayCredentials:
         return self._github_app.installation_token() if self._github_app is not None else None
 
     def _linear_module(self):
-        spec = importlib.util.spec_from_file_location("factory_uploads_linear", self._linear_path)
+        beside_its_broker_client = [str(self._linear_path.parent)]
+        spec = importlib.util.spec_from_file_location(
+            "factory_uploads_linear", self._linear_path, submodule_search_locations=beside_its_broker_client
+        )
         module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         return module
