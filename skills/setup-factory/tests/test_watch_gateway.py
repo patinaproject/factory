@@ -238,7 +238,17 @@ class WatchGatewayTest(unittest.TestCase):
         output = self.tick()
 
         self.assertEqual((self.restarts, self.beat.paths, self.broker.requests), (0, [], []))
-        self.assertIn("broker_client.py cannot be read, so the upload broker is not asked", output)
+        self.assertIn("broker_client.py cannot be loaded, so the upload broker is not asked", output)
+
+    def test_a_broker_client_that_does_not_load_is_reported_not_raised(self) -> None:
+        client = self.root / "plugins" / "linear-agent-session" / "broker_client.py"
+        client.unlink()
+        client.write_text("def broken(:\n")
+
+        output = self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths), (0, []))
+        self.assertIn("broker_client.py cannot be loaded, so the upload broker is not asked", output)
 
     def test_the_broker_user_socket_named_by_its_config_is_the_one_probed(self) -> None:
         self.broker.close()

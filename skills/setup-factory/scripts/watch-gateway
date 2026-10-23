@@ -156,8 +156,8 @@ def probe_broker(socket_path: Path, client_path: Path) -> Finding:
         spec = importlib.util.spec_from_file_location("broker_client", client_path)
         client = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(client)
-    except OSError:
-        return Finding(UNKNOWN, f"{client_path} cannot be read, so the upload broker is not asked")
+    except (OSError, SyntaxError, ImportError):
+        return Finding(UNKNOWN, f"{client_path} cannot be loaded, so the upload broker is not asked")
     try:
         status = client.status(str(socket_path), timeout=PROBE_SECONDS)
     except client.BrokerUnavailable:

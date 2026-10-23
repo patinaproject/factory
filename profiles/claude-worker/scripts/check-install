@@ -503,8 +503,8 @@ def check_upload_broker(root: Path, token_env: str, mcp_envs: dict) -> list:
         spec = importlib.util.spec_from_file_location("broker_client", root / BROKER_CLIENT)
         client = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(client)
-    except OSError:
-        return [Drift("upload broker", str(root / BROKER_CLIENT), "cannot be read, so the broker is not asked (part 5)")]
+    except (OSError, SyntaxError, ImportError):
+        return [Drift("upload broker", str(root / BROKER_CLIENT), "cannot be loaded, so the broker is not asked (part 5)")]
     path = root / client.SOCKET_NAME
 
     def drift(detail: str) -> list:
@@ -849,6 +849,7 @@ BROKER_FILES = {
     "linear.py": "plugins/linear-agent-session/linear.py",
     "broker_client.py": "plugins/linear-agent-session/broker_client.py",
 }
+BROKER_SOCKET_LINK = "factory-uploads.sock"
 BROKER_KEYS = ("user", "group", "label", "lib", "socket", "home", "allowed_uids")
 NO_SHELL = "/usr/bin/false"
 
@@ -969,7 +970,7 @@ def check_broker_user(
             f"{local(github['private_key_path'])} is readable by {accounts.me}, so a factory process could read the GitHub App key"
         ))
 
-    link = root / "factory-uploads.sock"
+    link = root / BROKER_SOCKET_LINK
     if not link.is_symlink() or os.readlink(link) != config["socket"]:
         drifts.append(drift(f"{link} is not a link to {config['socket']}"))
     for name in broker_only_names(commit):
