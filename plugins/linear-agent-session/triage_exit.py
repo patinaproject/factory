@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping, NamedTuple, Optional
 TRIAGE_BOARD = "triage"
 ARCHIVE_TIMEOUT_SECONDS = 120.0
 HERMES_TIMEOUT_SECONDS = 60.0
+TAKEOVER_SUFFIX = "-takeover"
 LINEAR_ISSUE_ID = re.compile(r"^linear_issue_id:\s*(\S+)\s*$", re.MULTILINE)
 
 
@@ -29,6 +30,7 @@ class Card:
     status: str
     title: str
     body: str
+    branch_name: Optional[str] = None
 
 
 class Verdict(NamedTuple):
@@ -47,30 +49,38 @@ def passed(reason: str) -> Verdict:
     return Verdict("pass", reason)
 
 
-def is_status_change(payload: Any) -> bool:
+def payload_passthrough(payload: Any) -> Optional[str]:
+    """Why the payload alone cannot be a plain Triage exit, or None when it might be. Reads no board and no Linear."""
     if not isinstance(payload, Mapping) or payload.get("type") != "Issue" or payload.get("action") != "update":
-        return False
+        return "not an Issue status change"
     previous = payload.get("updatedFrom")
-    return isinstance(previous, Mapping) and "stateId" in previous
+    if not (isinstance(previous, Mapping) and "stateId" in previous):
+        return "not an Issue status change"
+    if {"delegateId", "labelIds"} & set(previous):
+        return "the update also changed the delegate or labels"
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return "the payload names no issue"
+    state = data.get("state")
+    state_type = state.get("type") if isinstance(state, Mapping) else None
+    if not isinstance(state_type, str) or state_type == "triage":
+        return "the issue did not leave Triage"
+    issue_id, identifier = data.get("id"), data.get("identifier")
+    if not (isinstance(issue_id, str) and issue_id and isinstance(identifier, str) and identifier):
+        return "the payload names no issue"
+    return None
 
 
 def decide(payload: Any, app_user_id: str, triage_cards: list[Card], work_cards: list[Card]) -> Verdict:
-    if not is_status_change(payload):
-        return passed("not an Issue status change")
-    if {"delegateId", "labelIds"} & set(payload["updatedFrom"]):
-        return passed("the update also changed the delegate or labels")
-    data = payload.get("data")
-    state = data.get("state") if isinstance(data, Mapping) else None
-    state_type = state.get("type") if isinstance(state, Mapping) else None
-    if not isinstance(state_type, str) or state_type == "triage":
-        return passed("the issue did not leave Triage")
+    reason = payload_passthrough(payload)
+    if reason is not None:
+        return passed(reason)
+    data = payload["data"]
     if not app_user_id:
         return passed("app_user_id is not set")
     if _delegate(data) == app_user_id:
         return passed("the issue is delegated to the agent app")
-    issue_id, identifier = data.get("id"), data.get("identifier")
-    if not (isinstance(issue_id, str) and issue_id and isinstance(identifier, str) and identifier):
-        return passed("the payload names no issue")
+    issue_id, identifier = data["id"], data["identifier"]
     if any(_names_issue(card, issue_id) or card.title.startswith(f"{identifier}:") for card in work_cards):
         return passed("the issue has a card on the default board")
     found = [card for card in triage_cards if _names_issue(card, issue_id)]
@@ -85,23 +95,35 @@ def decide(payload: Any, app_user_id: str, triage_cards: list[Card], work_cards:
 def handle(
     payload: Any,
     *,
-    app_user_id: str,
+    app_user_id: Callable[[], str],
     cards: Callable[[Optional[str]], list[Card]],
     issue_status: Callable[[str], Mapping[str, Any]],
     archive: Callable[[str], Optional[str]],
 ) -> Verdict:
     """Decide from the payload and the boards, confirm against the live issue, then archive.
 
+    The payload check runs first, so a delivery that cannot be a plain exit costs no `hermes` call.
     The live read catches a delivery that is out of date, such as a replay after the issue went back to Triage.
+    It also gives the issue's branch, which finds a default-board card that Hermes rewrote.
     """
-    verdict = decide(payload, app_user_id, cards(TRIAGE_BOARD), cards(None))
+    reason = payload_passthrough(payload)
+    if reason is not None:
+        return passed(reason)
+    app = app_user_id()
+    work_cards = cards(None)
+    verdict = decide(payload, app, cards(TRIAGE_BOARD), work_cards)
     if not verdict.handled:
         return verdict
     live = issue_status(payload["data"]["id"])
     if live["stateType"] == "triage":
         return passed("the issue is back in Triage")
-    if live["delegate"] == app_user_id:
+    if live["delegate"] == app:
         return passed("the issue is now delegated to the agent app")
+    branch = live["branch"]
+    if not branch:
+        return passed("the live issue has no branch")
+    if any(card.branch_name in (branch, branch + TAKEOVER_SUFFIX) for card in work_cards):
+        return passed("the issue has a card on its branch on the default board")
     if verdict.action == "archive":
         error = archive(verdict.task_id)
         if error is not None:
@@ -120,7 +142,7 @@ def handler(
     def run(payload: Any) -> Verdict:
         return handle(
             payload,
-            app_user_id=app_user_id(),
+            app_user_id=app_user_id,
             cards=cards,
             issue_status=lambda issue_id: client().issue_status(issue_id),
             archive=lambda task_id: archive_card(home(), task_id),
@@ -141,13 +163,16 @@ def kanban_cards(board: Optional[str]) -> list[Card]:
 
     with kanban_db_connect.connect_closing(board=board) as conn:
         tasks = kanban_db.list_tasks(conn)
-    return [Card(task.id, task.status, task.title or "", task.body or "") for task in tasks]
+    return [Card(task.id, task.status, task.title or "", task.body or "", task.branch_name) for task in tasks]
 
 
 def listed_cards(board: Optional[str]) -> list[Card]:
     pinned = ["--board", board] if board else []
     tasks = json.loads(_hermes("kanban", *pinned, "list", "--json"))
-    return [Card(task["id"], task["status"], task.get("title") or "", task.get("body") or "") for task in tasks]
+    return [
+        Card(task["id"], task["status"], task.get("title") or "", task.get("body") or "", task.get("branch_name"))
+        for task in tasks
+    ]
 
 
 def configured_app_user_id() -> str:

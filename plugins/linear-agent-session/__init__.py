@@ -171,7 +171,7 @@ def make_dispatch_hook(
 
     async def archive_triage_exit(event: Any, route: str) -> Optional[dict[str, str]]:
         """Skip the turn only when the card was archived or left to its worker. Any doubt or error sends it to triage."""
-        if route != webhook_route() or not triage_exit.is_status_change(event.raw_message):
+        if route != webhook_route() or triage_exit.payload_passthrough(event.raw_message) is not None:
             return None
         try:
             loop = asyncio.get_running_loop()
