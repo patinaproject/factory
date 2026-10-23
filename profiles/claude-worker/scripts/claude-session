@@ -1285,8 +1285,9 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     if outcome.subtype not in COMPLETED_SUBTYPES:
         error = f"claude run ended with {outcome.subtype} (exit {exit_code})"
         return 1, result_line.Failed(error, session, outcome, blocker_error)
-    activity = triage_activity(client, args.issue_id, outcome.result) if triage else None
-    return 0, result_line.Done(session, outcome, blocker_error, triage, activity)
+    if not triage:
+        return 0, result_line.Done(session, outcome, blocker_error)
+    return 0, result_line.Done(session, outcome, blocker_error, triage_activity(client, args.issue_id, outcome.result))
 
 
 def read_init(proc: subprocess.Popen, timeout: float) -> dict | None:

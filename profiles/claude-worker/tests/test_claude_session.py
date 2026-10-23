@@ -706,6 +706,7 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session(env=self.board_env)
 
         self.assertEqual((status, report), (0, {"waiting_on": ["t_a"]}))
+        self.assert_reads_back(report, RESULT_LINE.Waiting)
         self.assertFalse(self.log.exists())
         self.assertEqual(git(self.worktree, "rev-parse", "HEAD"), head)
 
@@ -1717,6 +1718,7 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session()
 
         self.assertEqual((status, report.get("transient")), (2, True))
+        self.assert_reads_back(report, RESULT_LINE.Refused)
         self.assertRegex(report["error"], r"^Linear token: the gateway's broker at .*/factory-uploads\.sock did not answer")
         self.assertFalse(self.log.exists())
 
@@ -1876,6 +1878,7 @@ class ClaudeSessionTest(GitFixture):
             ("needs input", {"result": "Needs input: which one?"}, {}, RESULT_LINE.Done),
             ("triage", {"result": "Triage outcome: done"}, TRIAGE_ENV, RESULT_LINE.Done),
             ("failed", {"subtype": "error_during_execution"}, {}, RESULT_LINE.Failed),
+            ("failed without output", {}, {"CLAUDE_BIN": "/usr/bin/false"}, RESULT_LINE.Failed),
             ("refused", {}, {"HERMES_HOME": str(empty)}, RESULT_LINE.Refused),
         )
         for name, claude, env, variant in cases:
@@ -1883,10 +1886,15 @@ class ClaudeSessionTest(GitFixture):
                 self.configure_fake_claude(**{"subtype": "success", "result": "Opened the pull request.", **claude})
                 _, report = self.run_session(env=env)
 
-                parsed = RESULT_LINE.last(json.dumps(report))
-                self.assertIsInstance(parsed, variant)
-                self.assertEqual(RESULT_LINE.encode(parsed), report)
+                parsed = self.assert_reads_back(report, variant)
                 self.assertEqual(RESULT_LINE.needs_input(parsed), claude.get("result") if name == "needs input" else None)
+
+    def assert_reads_back(self, report: dict, variant: type):
+        """The blocker-order hook reads the line as `variant`, and that report writes the same line."""
+        parsed = RESULT_LINE.last(json.dumps(report))
+        self.assertIsInstance(parsed, variant)
+        self.assertEqual(RESULT_LINE.encode(parsed), report)
+        return parsed
 
     def leftover_pid(self) -> int:
         return int((self.tmp / "leftover.pid").read_text())

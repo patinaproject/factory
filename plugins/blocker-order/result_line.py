@@ -8,10 +8,19 @@ copy of the plugin, the way it imports `linear.py`. The worker reads the same li
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from typing import Any, Optional, Union
 
 NEEDS_INPUT = "Needs input:"
+
+
+class _Unset:
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+# The default of a field whose key an implementation run leaves out, where a triage run writes null.
+UNSET: Any = _Unset()
 
 
 @dataclass(frozen=True)
@@ -24,8 +33,8 @@ class Session:
     worktree: str
     branch: str
     adopted: Optional[dict]
-    superseded: Any
-    issue_links: Any
+    superseded: Optional[dict]
+    issue_links: Optional[dict]
     triage_documents: Optional[dict]
 
 
@@ -51,11 +60,10 @@ class Waiting:
 class Done:
     """Claude finished. A triage run names the Linear activity that reports it, which may be none."""
 
-    session: Session
-    outcome: Outcome
+    session: Session = field(metadata={"flat": Session})
+    outcome: Outcome = field(metadata={"flat": Outcome})
     blocker_error: Optional[str] = None
-    triage: bool = False
-    activity: Optional[str] = None
+    activity: Optional[str] = UNSET
 
 
 @dataclass(frozen=True)
@@ -64,8 +72,8 @@ class Failed:
     subtype that does not count as finished."""
 
     error: str
-    session: Session
-    outcome: Optional[Outcome] = None
+    session: Session = field(metadata={"flat": Session})
+    outcome: Optional[Outcome] = field(default=None, metadata={"flat": Outcome})
     blocker_error: Optional[str] = None
 
 
@@ -79,6 +87,12 @@ class Refused:
 
 
 Report = Union[Waiting, Done, Failed, Refused]
+VARIANTS = (Waiting, Done, Failed, Refused)
+
+
+def waiting_on(report: Optional[Report]) -> Optional[list[str]]:
+    """The cards a waiting report names."""
+    return list(report.waiting_on) if isinstance(report, Waiting) else None
 
 
 def needs_input(report: Optional[Report]) -> Optional[str]:
@@ -89,16 +103,18 @@ def needs_input(report: Optional[Report]) -> Optional[str]:
 
 
 def encode(report: Report) -> dict:
-    if isinstance(report, Waiting):
-        return {"waiting_on": list(report.waiting_on)}
-    if isinstance(report, Refused):
-        return {"error": report.error, **({"transient": True} if report.transient else {})}
-    body = {**asdict(report.session), **_optional(blocker_error=report.blocker_error)}
-    if report.outcome is not None:
-        body.update(asdict(report.outcome))
-    if isinstance(report, Failed):
-        return {"error": report.error, **body}
-    return {**body, **({"activity": report.activity} if report.triage else {})}
+    """Each field is a key, and a `Session` or `Outcome` adds its own fields as keys. A field that holds its
+    default writes no key."""
+    body: dict = {}
+    for each in fields(report):
+        value = getattr(report, each.name)
+        if each.default is not MISSING and value == each.default:
+            continue
+        if "flat" in each.metadata:
+            body.update(asdict(value))
+        else:
+            body[each.name] = list(value) if isinstance(value, tuple) else value
+    return body
 
 
 def line(report: Report) -> str:
@@ -106,22 +122,14 @@ def line(report: Report) -> str:
 
 
 def decode(data: Any) -> Optional[Report]:
-    """The report a line's JSON object holds, or None when it is not one."""
+    """The one report whose keys are exactly the line's, or None when the line is not a report."""
     if not isinstance(data, dict):
         return None
-    if set(data) == {"waiting_on"}:
-        cards = data["waiting_on"]
-        valid = isinstance(cards, list) and cards and all(isinstance(card, str) and card for card in cards)
-        return Waiting(tuple(cards)) if valid else None
-    if "session_id" not in data:
-        return Refused(data["error"], bool(data.get("transient"))) if isinstance(data.get("error"), str) else None
-    session = _build(Session, data)
-    outcome = _build(Outcome, data) if "subtype" in data else None
-    if "error" in data:
-        return Failed(data["error"], session, outcome, data.get("blocker_error"))
-    if outcome is None:
-        return None
-    return Done(session, outcome, data.get("blocker_error"), "activity" in data, data.get("activity"))
+    for variant in VARIANTS:
+        report = _read(variant, data)
+        if report is not None:
+            return report
+    return None
 
 
 def last(output: str) -> Optional[Report]:
@@ -135,9 +143,22 @@ def last(output: str) -> Optional[Report]:
     return None
 
 
-def _optional(**values: Any) -> dict:
-    return {key: value for key, value in values.items() if value is not None}
-
-
-def _build(cls, data: dict):
-    return cls(**{field.name: data.get(field.name) for field in fields(cls)})
+def _read(variant, data: dict) -> Optional[Report]:
+    values, used = {}, set()
+    for each in fields(variant):
+        flat = each.metadata.get("flat")
+        names = [name.name for name in fields(flat)] if flat else [each.name]
+        if all(name in data for name in names):
+            values[each.name] = flat(**{name: data[name] for name in names}) if flat else data[each.name]
+            used.update(names)
+        elif each.default is MISSING:
+            return None
+    if used != set(data):
+        return None
+    if variant is Waiting:
+        (name,) = values
+        cards = values[name]
+        if not (isinstance(cards, list) and cards and all(isinstance(card, str) and card for card in cards)):
+            return None
+        values[name] = tuple(cards)
+    return variant(**values)

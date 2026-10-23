@@ -55,8 +55,7 @@ def tool_output(result: Any) -> Optional[dict]:
 
 def waiting_on(output: str) -> Optional[list[str]]:
     """The cards in the `waiting_on` line, when it is the last JSON line of the tool's output."""
-    report = result_line.last(output)
-    return list(report.waiting_on) if isinstance(report, result_line.Waiting) else None
+    return result_line.waiting_on(result_line.last(output))
 
 
 def needs_input(output: str) -> Optional[str]:
