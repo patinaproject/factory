@@ -18,6 +18,13 @@ from pathlib import Path
 
 from tests.support import BOT_LOGIN, REPO as FACTORY, SCRIPTS, FakeBroker, FakeGithub, GitFixture, git, granted
 
+_result_line_spec = importlib.util.spec_from_file_location(
+    "result_line", FACTORY / "plugins" / "blocker-order" / "result_line.py"
+)
+RESULT_LINE = importlib.util.module_from_spec(_result_line_spec)
+sys.modules[_result_line_spec.name] = RESULT_LINE
+_result_line_spec.loader.exec_module(RESULT_LINE)
+
 BUSY = {"ok": False, "state": "busy", "message": "The upload broker is busy. Try again in a moment."}
 
 # A fresh issue per test process keeps concurrent suites from seeing each other's fake claude in `ps`.
@@ -1751,11 +1758,19 @@ class ClaudeSessionTest(GitFixture):
 
     def test_missing_plugin_refuses_before_claude_starts(self) -> None:
         empty = self.tmp / "empty-home"
-        empty.mkdir()
+        self.install_result_line(empty)
         status, report = self.run_session(env={"HERMES_HOME": str(empty)})
 
         self.assertEqual(status, 2)
         self.assertEqual(report, {"error": f"the linear-agent-session plugin is not installed in {empty}"})
+        self.assertFalse(self.log.exists())
+
+    def test_a_home_without_the_blocker_order_plugin_refuses_before_claude_starts(self) -> None:
+        shutil.rmtree(self.hermes_home / "plugins" / "blocker-order")
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": f"the blocker-order plugin is not installed in {self.hermes_home}"})
         self.assertFalse(self.log.exists())
 
     def test_inherited_anthropic_variables_never_reach_claude(self) -> None:
@@ -1852,6 +1867,26 @@ class ClaudeSessionTest(GitFixture):
         # claude-session ends claude once the result is read, so a fake still exiting reports SIGTERM.
         self.assertRegex(report["error"], r"^claude run ended with error_during_execution \(exit (0|-15)\)$")
         self.assertEqual(report["session_id"], SESSION_ID)
+
+    def test_the_blocker_order_hook_reads_each_line_as_the_report_claude_session_wrote(self) -> None:
+        empty = self.tmp / "empty-home"
+        self.install_result_line(empty)
+        cases = (
+            ("done", {}, {}, RESULT_LINE.Done),
+            ("needs input", {"result": "Needs input: which one?"}, {}, RESULT_LINE.Done),
+            ("triage", {"result": "Triage outcome: done"}, TRIAGE_ENV, RESULT_LINE.Done),
+            ("failed", {"subtype": "error_during_execution"}, {}, RESULT_LINE.Failed),
+            ("refused", {}, {"HERMES_HOME": str(empty)}, RESULT_LINE.Refused),
+        )
+        for name, claude, env, variant in cases:
+            with self.subTest(name):
+                self.configure_fake_claude(**{"subtype": "success", "result": "Opened the pull request.", **claude})
+                _, report = self.run_session(env=env)
+
+                parsed = RESULT_LINE.last(json.dumps(report))
+                self.assertIsInstance(parsed, variant)
+                self.assertEqual(RESULT_LINE.encode(parsed), report)
+                self.assertEqual(RESULT_LINE.needs_input(parsed), claude.get("result") if name == "needs input" else None)
 
     def leftover_pid(self) -> int:
         return int((self.tmp / "leftover.pid").read_text())

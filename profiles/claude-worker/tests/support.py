@@ -331,11 +331,19 @@ class GitFixture(unittest.TestCase):
         plugin = home / "plugins" / "linear-agent-session"
         plugin.mkdir(parents=True)
         (plugin / "linear.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "tests" / "staged_linear.py")
+        self.install_result_line(home)
         (home / "linear-fake.json").write_text(json.dumps({"accepted": list(accepted)}))
         if cached_token:
             cache = home / "plugin-data" / "linear-agent-session" / "token.json"
             cache.parent.mkdir(parents=True)
             cache.write_text(json.dumps({"client_id": "id1", "access_token": cached_token, "expires_at": 4102444800}))
+
+    @staticmethod
+    def install_result_line(home: Path) -> None:
+        """The blocker-order plugin's report module, which claude-session imports from the worker home."""
+        plugin = home / "plugins" / "blocker-order"
+        plugin.mkdir(parents=True)
+        (plugin / "result_line.py").symlink_to(REPO / "plugins" / "blocker-order" / "result_line.py")
 
     @staticmethod
     def linear_requests(home: Path) -> list:

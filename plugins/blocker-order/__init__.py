@@ -17,12 +17,16 @@ no card, the result tells the worker to post one notice and run `claude-session`
 The hook also reads each `claude-session` report whose `result` starts with `Needs input:`, from the first
 run and from every resume, and blocks the card with kind `needs_input` and that result as the reason. The
 worker's steps differ by run, so no step of its prompt is what makes that block happen: the tool result is.
+
+`result_line.py` defines the report line, which `claude-session` writes and this hook reads.
 """
 from __future__ import annotations
 
 import json
 import os
 from typing import Any, Callable, Optional
+
+from . import result_line
 
 # Hermes renames the `process` tool to `process_manage` before it runs hooks (`_LEGACY_TOOL_ALIASES` in
 # `model_tools.py`), so a hook sees `process_manage`. Older Hermes passes `process`.
@@ -34,7 +38,6 @@ CYCLE_REFUSAL = "would create a cycle"
 # Hermes' turn-end guard looks for a kanban_block call in the transcript, not on the board. Without this,
 # it would push the worker to block a card that this hook already moved to todo.
 STOP_NUDGE = "HERMES_KANBAN_STOP_NUDGE"
-NEEDS_INPUT = "Needs input:"
 # A worker can read the same process output twice, with `wait` and then `log`.
 _handled: dict[tuple, str] = {}
 
@@ -50,29 +53,15 @@ def tool_output(result: Any) -> Optional[dict]:
     return payload if isinstance(payload, dict) and isinstance(payload.get("output"), str) else None
 
 
-def last_report(output: str) -> Optional[dict]:
-    """The last line of the output that is a JSON object."""
-    for line in reversed(output.splitlines()):
-        try:
-            report = json.loads(line)
-        except ValueError:
-            continue
-        return report if isinstance(report, dict) else None
-    return None
-
-
 def waiting_on(output: str) -> Optional[list[str]]:
     """The cards in the `waiting_on` line, when it is the last JSON line of the tool's output."""
-    report = last_report(output)
-    cards = report.get("waiting_on") if report is not None and set(report) == {"waiting_on"} else None
-    return cards if isinstance(cards, list) and cards and all(isinstance(card, str) and card for card in cards) else None
+    report = result_line.last(output)
+    return list(report.waiting_on) if isinstance(report, result_line.Waiting) else None
 
 
 def needs_input(output: str) -> Optional[str]:
     """The `result` of the last JSON line, a `claude-session` report, when it starts with `Needs input:`."""
-    report = last_report(output)
-    text = report.get("result") if report is not None and "session_id" in report else None
-    return text if isinstance(text, str) and text.startswith(NEEDS_INPUT) else None
+    return result_line.needs_input(result_line.last(output))
 
 
 def whole_output(payload: dict, tool_name: str, args: Any, dispatch: Dispatch) -> str:

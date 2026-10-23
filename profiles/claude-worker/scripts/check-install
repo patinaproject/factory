@@ -1252,8 +1252,11 @@ def json_file(path: Path) -> dict:
 
 
 def watched_tools(plugin: Path) -> tuple:
-    spec = importlib.util.spec_from_file_location("blocker_order_installed", plugin)
+    spec = importlib.util.spec_from_file_location(
+        "blocker_order_installed", plugin, submodule_search_locations=[str(plugin.parent)]
+    )
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     sys.dont_write_bytecode = True
     spec.loader.exec_module(module)
     return module.PROCESS_TOOLS, module.REQUIRED_TOOLS

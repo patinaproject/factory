@@ -1581,8 +1581,7 @@ class CheckHermesToolsTest(unittest.TestCase):
         (self.root / "installs" / "key" / "facts.json").write_text(
             json.dumps({"packages": {"venv": {"environment": str(site.parents[2])}}}))
         self.plugin = self.tmp / "worker" / "plugins" / "blocker-order" / "__init__.py"
-        self.plugin.parent.mkdir(parents=True)
-        shutil.copy(PLUGIN, self.plugin)
+        shutil.copytree(PLUGIN.parent, self.plugin.parent, ignore=shutil.ignore_patterns("tests", "__pycache__"))
 
     def register(self, tools: dict) -> None:
         (self.tree / "tools" / "registered.json").write_text(json.dumps(tools))
