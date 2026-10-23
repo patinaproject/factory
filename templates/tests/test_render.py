@@ -155,7 +155,7 @@ LINEAR_FILTERS = [
                 "all": [
                     {"field": "updatedFrom.labelIds", "exists": True},
                     {"field": "data.delegateId", "equals": "00000000-0000-4000-8000-000000000001"},
-                    {"field": "data.labels", "regex": '"name": *"ready-for-agent"'},
+                    {"field": "data.labels", "regex": '(?i)"name": *"ready[^a-z0-9"]*for[^a-z0-9"]*agent"'},
                     {"not": {"field": "data.id", "in_file": "owned-refs.json"}},
                 ]
             },
@@ -1276,6 +1276,24 @@ class LinearTriageReplayTest(HermesFiltersCase):
             CARDLESS_ISSUES[0], "unstarted", updated_from={"labelIds": ["l2"]}, delegateId=APP_USER, labels=READY + BUG,
         )
         self.assertIs(self.matches("Issue", passed), True)
+
+    def test_the_ready_label_matches_whatever_its_case_and_punctuation(self):
+        for name in ("Ready for agent", "ready for agent", "READY_FOR_AGENT", "ready-for-agent"):
+            with self.subTest(name):
+                labels = [{"id": "l1", "name": name, "color": "#0e8a16", "parentId": None}]
+                passed = linear_issue_event(
+                    CARDLESS_ISSUES[0], "unstarted", updated_from={"labelIds": []}, delegateId=APP_USER, labels=labels,
+                )
+                self.assertIs(self.matches("Issue", passed), True)
+
+    def test_other_triage_labels_do_not_match_the_ready_label(self):
+        for name in ("Ready for human", "Needs info", "Won't fix", "Not ready for agents", "Ready for agent soon"):
+            with self.subTest(name):
+                labels = [{"id": "l1", "name": name, "color": "#0e8a16", "parentId": None}]
+                event = linear_issue_event(
+                    CARDLESS_ISSUES[0], "unstarted", updated_from={"labelIds": []}, delegateId=APP_USER, labels=labels,
+                )
+                self.assertIs(self.matches("Issue", event), False)
 
     def test_label_changes_that_start_no_implementation_card_are_dropped(self):
         cases = {

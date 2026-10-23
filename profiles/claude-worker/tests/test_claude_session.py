@@ -294,7 +294,7 @@ class ClaudeSessionTest(GitFixture):
         (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, "labels": list(labels)}))
 
     def test_an_implementation_card_without_ready_for_agent_is_refused_before_claude_starts(self) -> None:
-        for labels in ((), ("bug", "needs-triage"), ("ready-for-human",)):
+        for labels in ((), ("bug", "needs-triage"), ("ready-for-human",), ("Ready for human",), ("Needs info",)):
             with self.subTest(labels=labels):
                 self.set_issue_labels(*labels)
                 status, report = self.run_session(env={"HERMES_KANBAN_BOARD": "default"})
@@ -314,6 +314,17 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(status, 0)
         self.assertTrue(self.log.exists())
+
+    def test_an_implementation_card_starts_whatever_the_case_and_punctuation_of_its_ready_label(self) -> None:
+        for label in ("Ready for agent", "ready for agent", "READY_FOR_AGENT", "Ready-For-Agent"):
+            with self.subTest(label=label):
+                self.log.unlink(missing_ok=True)
+                self.set_issue_labels("Bug", label)
+
+                status, _ = self.run_session()
+
+                self.assertEqual(status, 0)
+                self.assertTrue(self.log.exists())
 
     def test_a_triage_card_gets_the_triage_rules_and_none_of_the_implementation_rules(self) -> None:
         self.set_issue_labels("needs-triage")
@@ -390,6 +401,10 @@ class ClaudeSessionTest(GitFixture):
             ("Triage outcome: `Ready-for-agent`.", "app-user", "thought"),
             ("Triage outcome: `ready-for-agent`", None, "response"),
             ("Triage outcome: wontfix", None, "response"),
+            ("Triage outcome: Won't fix", None, "response"),
+            ("Triage outcome: Ready for human", "app-user", "response"),
+            ("Triage outcome: Ready for agent", "app-user", "thought"),
+            ("Triage outcome: Ready for agent", None, "response"),
             ("Triage outcome: done", "app-user", None),
             ("Needs input:\nWhich version?", "app-user", None),
         )
