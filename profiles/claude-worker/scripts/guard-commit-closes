@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Claude Code PreToolUse hook for a worker's Bash calls: never publish a commit that closes an issue the pull request body does not.
+"""Claude Code PreToolUse hook for a worker's Bash calls: never make or publish a commit that closes an issue the pull request body does not.
 
 Claude Code feeds the pending tool call as JSON on stdin. `push-signed` only moves a branch forward, so
 a published commit message cannot be reworded, and the `Validate pull request` check then fails the pull
-request for good. Before `push-signed` publishes, its commits are still local. This hook reads each
-commit that is not yet on the remote branch and, when the branch has an open pull request, refuses a
-commit that closes an issue (`fix: #N` does, as does `Closes #N`) which the body does not close, naming
-the local rewrite that fixes it. With no open pull request there is no body to compare, and the check
-in the pull request workflow decides.
+request for good. A commit closes an issue when its type is `fix` (`fix: #N`) or it says `Closes #N`.
+
+The hook checks twice. A `git commit` whose message the command spells out (`-m`, `-F <file>`, or a
+heredoc) is refused when it would close an issue the open pull request's body does not, so the bad commit
+is never made. A `push-signed` call is refused when any commit not yet on the remote branch does, naming a
+local rewrite that works under Claude Code's `GIT_EDITOR=true`.
+
+The commit-time check refuses only when the whole command fits the small grammar written out above `Word` and an
+open pull request body leaves out an issue the message closes. Everything else allows the commit: a command
+outside the grammar, a lookup that failed, timed out, or found no remote or pull request. The push-time
+check and the pull request workflow decide those. The push-time check still refuses when it cannot read
+the branch. One deadline covers the whole call.
 
 Exit 0 allows the call. Exit 2 refuses it and Claude Code shows stderr to the model.
 """
@@ -15,36 +22,61 @@ Exit 0 allows the call. Exit 2 refuses it and Claude Code shows stderr to the mo
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 import time
+from pathlib import Path
+from typing import NamedTuple
 
 import card_branch
 import check_title_closes
 
-# Claude Code's PreToolUse hooks run for 60 s by default; the guard answers inside half of that, or refuses.
-BUDGET_SECONDS = float(os.environ.get("GUARD_COMMIT_CLOSES_SECONDS", "30"))
-# A command that runs push-signed: at the start of a shell command, optional `env` and VAR=value prefixes,
-# a python interpreter with optional -I, then the script. `grep push-signed` and `cat .../push-signed` do not run it.
+# Claude Code waits 600 s for a hook by default; the guard answers well inside that, or refuses.
+DEFAULT_SECONDS = "30"
+# A command that runs push-signed: at the start of a shell command, any of `env`, `time`, `timeout N`, and
+# VAR=value prefixes, an optional python interpreter with its options, then the script, bare or quoted.
+# `grep push-signed` and `cat .../push-signed` do not run it.
+WRAPPERS = (
+    r"(?:(?:[^\s;&|()]*/)?(?:env|time|command|exec)\s+|(?:[^\s;&|()]*/)?nice\s+(?:-n\s*[^\s;&|()]+\s+|-[^\s;&|()]*\s+)*|timeout\s+(?:-[sk]\s+[^\s;&|()]+\s+|-[^\s;&|()]+\s+)*[0-9.]+[smhd]?\s+|[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]*\s+)*"
+)
+# Shell keywords that put a command first: `if push-signed; then`, `! push-signed`, `then push-signed`.
+# `[^\S\n]*` stops at a newline, which starts a command of its own, so a run of separators costs linear time.
+COMMAND_START = r"(?:^|[;&|(]|\n)[^\S\n]*(?:(?:if|then|else|elif|while|until|do|!|\{)[^\S\n]+)*"
 PUBLISH = re.compile(
-    r"(?:^|[;&|(]|\n)\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
-    r"\S*python[0-9.]*\s+(?:-I\s+)?\S*push-signed(?:\s|$|[;&|)])"
+    COMMAND_START + WRAPPERS +
+    r"(?:[^\s;&|()]*python[0-9.]*\s+(?:-[XW]\s+[^\s;&|()]+\s+|-[A-Za-z]+\s+)*)?[\"']?[^\s;&|()]*push-signed[\"']?(?:\s|$|[;&|)])"
+)
+# `bash -c '...'`: the quoted text is a command line of its own.
+SHELL_C = re.compile(
+    COMMAND_START + WRAPPERS + r"(?:[^\s;&|()]*/)?(?:ba|z|da|k)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+([\"'])(.*)\1", re.DOTALL
 )
 RECORD_END = "\x1e"
 FIELD = "\x1f"
-REFUSAL = (
+PUBLISH_REFUSAL = (
     "Refused: commit {sha} closes {ref} when it merges, but the pull request body has no `Closes {ref}` line. "
     "push-signed cannot reword a commit once it publishes it, so fix the commit now, while it is local. "
-    "{fix} Reword it to a type that does not close {ref}, such as "
-    "`feat: {ref} ...` or `refactor: {ref} ...`, and run push-signed again. When this pull request "
-    "completes {ref}, add `Closes {ref}` to its body instead."
+    "Give it a message that does not close {ref}, such as `feat: {ref} ...` or `refactor: {ref} ...` with "
+    "`Part of {ref}`. {fix} Then run push-signed again. When this pull request completes {ref}, add "
+    "`Closes {ref}` to its body instead."
 )
 FLAT_FIX = "Run `git reset --soft {base}` and commit again."
+# Claude Code runs every Bash command with GIT_EDITOR=true, so a `reword` keeps the old message. An `edit`
+# stop and `git commit --amend -m` need no editor.
 MERGE_FIX = (
-    "The branch holds a merge that a squash would flatten, so keep it: run "
-    "`GIT_SEQUENCE_EDITOR=\"sed -i.bak 's/^pick {sha}/reword {sha}/'\" git rebase --rebase-merges --interactive {base}`."
+    "The branch holds a merge that a squash would flatten, so keep it. Run "
+    "`GIT_SEQUENCE_EDITOR=\"sed -i.bak -E 's/^(pick|p) {sha}/edit {sha}/'\" git rebase --rebase-merges --interactive {base}`. "
+    "When it stops at {sha}, run `git commit --amend -m '<new message>'`, then `git rebase --continue`. "
+    "A merge after {sha} is rebuilt, so it may stop on that merge's conflicts again. Resolve them, `git add` "
+    "the files, and run `git rebase --continue` again."
+)
+COMMIT_REFUSAL = (
+    "Refused: this commit message closes {ref} when it merges, but the pull request body has no `Closes {ref}` "
+    "line, and push-signed cannot reword a commit once it publishes it. Commit with a type that does not close "
+    "{ref}, such as `feat: {ref} ...` or `refactor: {ref} ...`, and write `Part of {ref}` instead of a closing "
+    "line. When this pull request completes {ref}, add `Closes {ref}` to its body first."
 )
 
 
@@ -52,16 +84,31 @@ class Unreadable(Exception):
     pass
 
 
+class TimedOut(Unreadable):
+    pass
+
+
+def publishes(command: str) -> bool:
+    return bool(PUBLISH.search(command)) or any(PUBLISH.search(inner[2]) for inner in SHELL_C.finditer(command))
+
+
 class Clock:
-    """One deadline for the whole guard, so the calls together never outlast BUDGET_SECONDS."""
+    """One deadline for the whole guard, so the calls together never outlast the budget."""
 
     def __init__(self) -> None:
-        self.end = time.monotonic() + BUDGET_SECONDS
+        text = os.environ.get("GUARD_COMMIT_CLOSES_SECONDS", DEFAULT_SECONDS)
+        try:
+            self.budget = float(text)
+        except ValueError:
+            self.budget = math.nan
+        if not math.isfinite(self.budget) or self.budget <= 0:
+            raise Unreadable(f"GUARD_COMMIT_CLOSES_SECONDS={text!r} is not a positive number of seconds")
+        self.end = time.monotonic() + self.budget
 
     def left(self) -> float:
         remaining = self.end - time.monotonic()
         if remaining <= 0:
-            raise Unreadable(f"it ran past its {BUDGET_SECONDS:g} s time limit")
+            raise TimedOut(f"it ran past its {self.budget:g} s time limit")
         return remaining
 
 
@@ -69,7 +116,7 @@ def run(args: list[str], cwd: str, clock: Clock) -> str:
     try:
         proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=clock.left())
     except subprocess.TimeoutExpired as failure:
-        raise Unreadable(f"{args[0]} ran past the {BUDGET_SECONDS:g} s time limit") from failure
+        raise TimedOut(f"{args[0]} ran past the {clock.budget:g} s time limit") from failure
     except OSError as failure:
         raise Unreadable(f"{args[0]} could not run: {failure.strerror or failure}") from failure
     if proc.returncode != 0:
@@ -77,8 +124,303 @@ def run(args: list[str], cwd: str, clock: Clock) -> str:
     return proc.stdout
 
 
+def pull_request(branch: str, cwd: str, clock: Clock) -> tuple[str, set[str]] | None:
+    """The repository and the references the branch's open pull request body closes, or None without one."""
+    gh = os.environ.get("GH_BIN", "gh")
+    repo = json.loads(run([gh, "repo", "view", "--json", "nameWithOwner"], cwd, clock))["nameWithOwner"]
+    pulls = json.loads(run([gh, "pr", "list", "--head", branch, "--state", "open", "--json", "body", "--limit", "1"], cwd, clock))
+    return (repo, card_branch.closes(pulls[0]["body"] or "", repo)) if pulls else None
+
+
+def unclosed(message: str, repo: str, in_body: set[str]) -> list[str]:
+    return sorted(check_title_closes.title_closes(message, repo) - in_body, key=lambda ref: int(ref[1:]))
+
+
+def might_close(message: str) -> bool:
+    return bool(check_title_closes.FIX_TYPE.match(message) or card_branch.CLOSING.search(message))
+
+
+# A commit message written in the command
+#
+# The commit-time check reads the command with a small grammar it fully understands, and judges a commit only
+# when the whole command fits it. Anything else is unknown and allows the commit, because reading it wrong
+# would refuse a commit that never runs, or judge it in the wrong repository. The grammar:
+#
+#   command  = segment, joined by `&&`, `;`, or newlines
+#   segment  = `cd <path>` | [NAME=value ...] `git` [`-C <path>`] (`commit` | `add` | `status`) <arguments>
+#   message  = `-m`/`--message` <words>, one `-F`/`--file` <file>, or `-m "$(cat <<'EOF' ... EOF)"`
+#
+# A word is unquoted safe characters or quoted text with no expansion. NAME is never `GIT_*`, a path never
+# holds `~`, `$`, or a glob, and a `cd` whose logical and physical targets differ is unknown.
+
+
+class Word(NamedTuple):
+    text: str
+    raw: str
+    heredoc: bool = False
+
+
+SEPARATOR = object()
+UNQUOTED = re.compile(r"[A-Za-z0-9_./=:,+@%^-]+")
+HEREDOC_START = re.compile(r"\"\$\(cat <<(?:'(\w+)'|\"(\w+)\")\n")
+HEREDOC_END = re.compile(r"\s*\)\"")
+WORD_END = " \t\n;&"
+ASSIGNMENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=")
+COMMIT_FLAGS = {"--all", "--quiet", "--signoff", "--no-verify", "--amend", "--allow-empty", "--verbose"}
+COMMIT_SHORT_FLAGS = set("aqsnv")
+PATH_EXPANSION = re.compile(r"[~$`*?\[\]{}\\\x00]")
+
+
+def heredoc(command: str, start: int) -> tuple[str, int] | None:
+    """The body and end of a `"$(cat <<'EOF' ... EOF)"` word starting at `start`, else None."""
+    opened = HEREDOC_START.match(command, start)
+    if not opened:
+        return None
+    delimiter = opened[1] or opened[2]
+    line = opened.end()
+    while True:
+        newline = command.find("\n", line)
+        if newline < 0:
+            return None
+        if command[line:newline] == delimiter:
+            break
+        line = newline + 1
+    closed = HEREDOC_END.match(command, newline)
+    return (command[opened.end():line], closed.end()) if closed else None
+
+
+def tokens(command: str) -> list | None:
+    """The command's words and separators, or None when it holds anything outside the grammar."""
+    found: list = []
+    at = 0
+    while at < len(command):
+        char = command[at]
+        if char in " \t":
+            at += 1
+        elif char in "\n;":
+            if command.startswith(";;", at):
+                return None
+            found.append(SEPARATOR if char == ";" else "\n")
+            at += 1
+        elif command.startswith("&&", at):
+            found.append("&&")
+            at += 2
+        elif char == "&":
+            return None
+        else:
+            spelled = heredoc(command, at)
+            if spelled:
+                body, end = spelled
+                if end < len(command) and command[end] not in WORD_END:
+                    return None
+                found.append(Word(body, command[at:end], heredoc=True))
+                at = end
+                continue
+            text, start = "", at
+            while at < len(command) and command[at] not in WORD_END:
+                quote = command[at]
+                if quote in "'\"":
+                    close = command.find(quote, at + 1)
+                    inner = command[at + 1:close]
+                    if close < 0 or "\x00" in inner or (quote == '"' and re.search(r"[$`\\]", inner)):
+                        return None
+                    text, at = text + inner, close + 1
+                    continue
+                plain = UNQUOTED.match(command, at)
+                if not plain:
+                    return None
+                text, at = text + plain[0], plain.end()
+            found.append(Word(text, command[start:at]))
+    return found
+
+
+def simple_commands(command: str) -> list[tuple[bool, list[Word]]] | None:
+    """The command's segments as (runs only if the one before it succeeds, words), or None when a separator is out of place."""
+    segments: list[tuple[bool, list[Word]]] = []
+    current: list[Word] = []
+    dangling = False
+    chained = False
+    found = tokens(command)
+    if found is None:
+        return None
+    for token in found:
+        if isinstance(token, Word):
+            current.append(token)
+            continue
+        if not current:
+            if token != "\n":
+                return None
+            continue
+        segments.append((chained, current))
+        current, dangling = [], token == "&&"
+        chained = dangling
+    if current:
+        segments.append((chained, current))
+    elif dangling:
+        return None
+    return segments
+
+
+def in_repository(directory: str) -> bool:
+    """Whether a commit here can run at all: a `.git` in the directory or above it, GIT_DIR being refused earlier."""
+    while True:
+        if os.path.exists(os.path.join(directory, ".git")):
+            return True
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return False
+        directory = parent
+
+
+def plain_path(word: Word) -> str | None:
+    if word.heredoc or not word.text or word.text.startswith("-") or PATH_EXPANSION.search(word.text):
+        return None
+    return word.text
+
+
+def existing_realpath(path: str) -> str | None:
+    """The resolved path, or None when a component is missing: `nope/..` fails in the shell, but realpath collapses it."""
+    try:
+        return os.path.realpath(path, strict=True)
+    except OSError:
+        return None
+
+
+def change_directory(cwd: str, words: list[Word]) -> str | None:
+    """Where `cd <path>` lands, or None when the shell could land elsewhere: CDPATH, or a `..` past a symlink."""
+    target = plain_path(words[1]) if len(words) == 2 else None
+    if target is None or (os.environ.get("CDPATH") and not os.path.isabs(target)):
+        return None
+    logical = os.path.normpath(os.path.join(cwd, target))
+    physical = existing_realpath(os.path.join(cwd, target))
+    if physical is None or not os.path.isdir(physical) or os.path.realpath(logical) != physical:
+        return None
+    return logical
+
+
+def git_call(words: list[Word], cwd: str) -> tuple[str, list[Word], str] | None:
+    """The subcommand, its arguments, and its directory for `[NAME=value ...] git [-C <path>] <subcommand>`."""
+    while words and not words[0].heredoc and ASSIGNMENT.match(words[0].raw):
+        if ASSIGNMENT.match(words[0].raw)[1].startswith("GIT_"):
+            return None
+        words = words[1:]
+    if len(words) < 2 or words[0].heredoc or words[0].text != "git":
+        return None
+    rest = words[1:]
+    if rest[0].text == "-C" and not rest[0].heredoc:
+        target = plain_path(rest[1]) if len(rest) > 2 else None
+        if target is None:
+            return None
+        cwd = existing_realpath(os.path.join(cwd, target))
+        if cwd is None or not os.path.isdir(cwd):
+            return None
+        rest = rest[2:]
+    if rest[0].heredoc:
+        return None
+    return rest[0].text, rest[1:], cwd
+
+
+def commit_message(args: list[Word], cwd: str) -> str | None:
+    """The message a `git commit` with these arguments records, or None when it is not spelled out in the grammar."""
+    messages: list[Word] = []
+    files: list[Word] = []
+    args = list(args)
+    while args:
+        word = args.pop(0)
+        if word.heredoc:
+            return None
+        if word.text == "--":
+            break
+        if word.text.startswith("--"):
+            name, equals, value = word.text.partition("=")
+            if name not in ("--message", "--file"):
+                if word.text not in COMMIT_FLAGS:
+                    return None
+                continue
+            if not equals and not args:
+                return None
+            (messages if name == "--message" else files).append(Word(value, value) if equals else args.pop(0))
+        elif word.text.startswith("-") and len(word.text) > 1:
+            for at, flag in enumerate(word.text[1:], 2):
+                if flag in "mF":
+                    if at == len(word.text) and not args:
+                        return None
+                    value = word.text[at:]
+                    (messages if flag == "m" else files).append(Word(value, value) if value else args.pop(0))
+                    break
+                if flag not in COMMIT_SHORT_FLAGS:
+                    return None
+    if any(word.heredoc for word in args + files) or (messages and files) or len(files) > 1:
+        return None
+    if files:
+        path = plain_path(files[0])
+        if path is None:
+            return None
+        try:
+            return Path(cwd, path).read_text()
+        except (OSError, UnicodeDecodeError):
+            return None
+    return "\n\n".join(word.text for word in messages) if messages else None
+
+
+def spelled_commits(command: str, cwd: str) -> list[tuple[str, str]] | None:
+    """Each commit the command makes, as (directory, message), when the whole command fits the grammar, else None."""
+    segments = simple_commands(command)
+    if segments is None:
+        return None
+    commits = []
+    failed = False
+    for chained, words in segments:
+        if chained and failed:
+            continue
+        failed = False
+        if words[0].text == "cd" and not words[0].heredoc:
+            cwd = change_directory(cwd, words)
+            if cwd is None:
+                return None
+            continue
+        call = git_call(words, cwd)
+        if call is None:
+            return None
+        subcommand, args, directory = call
+        if subcommand in ("add", "status") and not any(word.heredoc for word in args):
+            continue
+        message = commit_message(args, directory) if subcommand == "commit" else None
+        if message is None:
+            return None
+        commits.append((directory, message))
+        failed = not in_repository(directory)
+    return commits
+
+
+def commit_refusals(command: str, cwd: str, clock: Clock) -> list[str]:
+    """Refuse a commit only when the command fits the grammar and the open pull request body leaves out an issue its message closes.
+
+    This is the one place that decides it. Every other outcome allows the commit: a command outside the
+    grammar, a failed or slow lookup (git, gh, no remote, no pull request), or a directory that is not a
+    repository. The push-time check and the pull request check are the backstop, so a lookup that fails
+    here must never stop a commit, and no lookup added later can.
+    """
+    problems = []
+    for where, message in spelled_commits(command, cwd) or []:
+        if not might_close(message):
+            continue
+        try:
+            branch = run(["git", "branch", "--show-current"], where, clock).strip()
+            pull = pull_request(branch, where, clock) if branch else None
+        except Exception:
+            continue
+        if pull is not None:
+            repo, in_body = pull
+            problems += [COMMIT_REFUSAL.format(ref=ref) for ref in unclosed(message, repo, in_body)]
+    return problems
+
+
+# Commits a push-signed call would publish
+
+
 def unpublished(cwd: str, clock: Clock) -> tuple[str, str, list[tuple[str, str]], bool]:
-    """The branch, the ref its unpublished commits follow (the remote branch, else the default branch), those commits as (sha, message) pairs, and whether one is a merge.
+    """The branch, the ref its unpublished commits follow (the remote branch, else the merge base with the default branch, which a moved-ahead default branch leaves behind it), those commits as (sha, message) pairs, and whether one is a merge.
 
     Commits that the default branch holds came in through a local merge of it and are not the branch's own,
     just as the pull request's commit list leaves out base commits.
@@ -90,50 +432,48 @@ def unpublished(cwd: str, clock: Clock) -> tuple[str, str, list[tuple[str, str]]
         run(["git", "rev-parse", "--verify", "--quiet", remote], cwd, clock)
         base = remote
     except Unreadable as failure:
-        if "time limit" in str(failure):
+        if isinstance(failure, TimedOut):
             raise
-        base = default
+        base = run(["git", "merge-base", "HEAD", default], cwd, clock).strip()
     log = run(["git", "log", "--reverse", f"--format=%h{FIELD}%P{FIELD}%B{RECORD_END}", "HEAD", f"^{base}", f"^{default}"], cwd, clock)
     records = [record.strip("\n").split(FIELD, 2) for record in log.split(RECORD_END) if record.strip()]
     commits = [(sha, message) for sha, _, message in records]
     return branch, base, commits, any(len(parents.split()) > 1 for _, parents, _ in records)
 
 
-def pull_request_body(branch: str, cwd: str, clock: Clock) -> tuple[str, str] | None:
-    gh = os.environ.get("GH_BIN", "gh")
-    repo = json.loads(run([gh, "repo", "view", "--json", "nameWithOwner"], cwd, clock))["nameWithOwner"]
-    pulls = json.loads(run([gh, "pr", "list", "--head", branch, "--state", "open", "--json", "body", "--limit", "1"], cwd, clock))
-    return (repo, pulls[0]["body"] or "") if pulls else None
-
-
-def refusals(cwd: str) -> list[str]:
-    clock = Clock()
+def publish_refusals(cwd: str, clock: Clock) -> list[str]:
     branch, base, commits, merged = unpublished(cwd, clock)
     if not commits:
         return []
-    found = pull_request_body(branch, cwd, clock)
-    if found is None:
+    pull = pull_request(branch, cwd, clock)
+    if pull is None:
         return []
-    repo, body = found
-    in_body = card_branch.closes(body, repo)
+    repo, in_body = pull
     return [
-        REFUSAL.format(
-            sha=sha, ref=ref, fix=(MERGE_FIX if merged else FLAT_FIX).format(sha=sha, base=base),
-        )
+        PUBLISH_REFUSAL.format(sha=sha, ref=ref, fix=(MERGE_FIX if merged else FLAT_FIX).format(sha=sha, base=base))
         for sha, message in commits
-        for ref in sorted(check_title_closes.title_closes(message, repo) - in_body, key=lambda ref: int(ref[1:]))
+        for ref in unclosed(message, repo, in_body)
     ]
 
 
 def decide(event: dict) -> tuple[int, str]:
     if event.get("tool_name") != "Bash":
         return 0, ""
-    if not PUBLISH.search((event.get("tool_input") or {}).get("command") or ""):
-        return 0, ""
+    command = (event.get("tool_input") or {}).get("command") or ""
+    cwd = event.get("cwd") or os.getcwd()
     try:
-        problems = refusals(event.get("cwd") or os.getcwd())
+        # One deadline for the whole call, however many commits it judges.
+        clock = Clock()
+    except Unreadable as failure:
+        clock, bad_budget = None, failure
+    problems = commit_refusals(command, cwd, clock) if clock else []
+    try:
+        if not problems and publishes(command):
+            if clock is None:
+                raise bad_budget
+            problems = publish_refusals(cwd, clock)
     except (Unreadable, json.JSONDecodeError, KeyError) as failure:
-        return 2, f"Refused: the commit closing check could not read the branch or its pull request ({failure}). Run push-signed again."
+        return 2, f"Refused: the commit closing check could not read the branch or its pull request ({failure}). Run the command again."
     return (2, "\n".join(problems)) if problems else (0, "")
 
 
