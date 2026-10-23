@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import itertools
 import json
 import sys
 import tempfile
@@ -145,6 +146,8 @@ class FileTest(unittest.TestCase):
         return {
             "indented": stale.replace(b, "  " + b).replace(e, "  " + e),
             "trailing spaces": stale.replace(b, b + " ").replace(e, e + " "),
+            "zero width space inside": stale.replace(b, b.replace("begin", "\u200bbegin")),
+            "spaces removed": stale.replace(b, b.replace(" ", "")),
         }
 
     def line_ending_blocks(self) -> dict[str, str]:
@@ -167,13 +170,50 @@ class FileTest(unittest.TestCase):
                 self.claude_md.write_bytes(f"notes\n{text}".encode())
                 self.assertEqual(len(self.failures()), 1)
 
-    def test_refusal_names_the_whitespace_and_the_line(self) -> None:
+    def test_refusal_names_the_line_and_its_stray_characters(self) -> None:
+        stray = {
+            "indented": "stray characters U+0020 SPACE;",
+            "trailing spaces": "stray characters U+0020 SPACE;",
+            "zero width space inside": "stray characters U+200B ZERO WIDTH SPACE;",
+            "spaces removed": "missing characters;",
+        }
         for name, text in self.near_miss_blocks().items():
             with self.subTest(name):
                 self.claude_md.write_bytes(f"notes\n{text}".encode())
-                with self.assertRaisesRegex(ValueError, r"line 2 holds a marker with leading or trailing whitespace") as raised:
+                with self.assertRaises(ValueError) as raised:
                     agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
-                self.assertNotIn("carriage return", str(raised.exception))
+                self.assertIn(f"line 2 holds a marker with {stray[name]}", str(raised.exception))
+                self.assertNotIn("CARRIAGE RETURN", str(raised.exception))
+
+    def test_refusal_names_invisible_characters_around_a_marker(self) -> None:
+        self.claude_md.write_text(f"notes\n\ufeff{self.block.replace(agent_block.END, agent_block.END + chr(0x2060))}")
+        with self.assertRaises(ValueError) as raised:
+            agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
+        self.assertIn("line 2 holds a marker with stray characters U+FEFF ZERO WIDTH NO-BREAK SPACE;", str(raised.exception))
+
+    def test_write_never_leaves_a_stale_or_second_block_whatever_pads_the_markers(self) -> None:
+        pads = ["".join(p) for n in range(3) for p in itertools.product(" \t\u00a0\u200b\ufeff\u2060", repeat=n)]
+        cases = [tuple(pad if i == slot else "" for i in range(4)) for slot in range(4) for pad in pads]
+        cases += [(pad,) * 4 for pad in pads]
+        stale = self.block.replace("Never use `git push`", "Never use `git pull`")
+        b, e = agent_block.BEGIN, agent_block.END
+        for pad in cases:
+            before_begin, after_begin, before_end, after_end = pad
+            padded = stale.replace(b, before_begin + b + after_begin).replace(e, before_end + e + after_end)
+            text = f"notes\n\n{padded}\n@~/.claude/pstack-models.md\n"
+            for ending in ("\n", "\r\n", "\r"):
+                with self.subTest(pads=pad, ending=ending):
+                    self.claude_md.write_bytes(text.replace("\n", ending).encode())
+                    before = self.claude_md.read_bytes()
+                    if any(pad):
+                        with self.assertRaises(ValueError):
+                            agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
+                        self.assertEqual(self.claude_md.read_bytes(), before)
+                        continue
+                    agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
+                    after = self.claude_md.read_bytes().decode()
+                    self.assertEqual(after, f"notes\n\n{self.block}\n@~/.claude/pstack-models.md\n")
+                    self.assertEqual(self.failures(), [])
 
     def test_write_replaces_the_one_block_in_a_crlf_or_cr_only_file_and_saves_lf(self) -> None:
         for name, text in self.line_ending_blocks().items():

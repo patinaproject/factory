@@ -7,7 +7,9 @@ Setup part 17 owns the text between the `<!-- factory:begin -->` and
 install reproduces the live block byte for byte. With no flag, or with `--check`, the
 command compares the live block with the render and prints PASS or FAIL, with a diff
 on a difference. A marker inside a line of other text, such as a code span,
-is not a block, but a marker line with leading or trailing whitespace is refused.
+is not a block. A line that equals a marker once every whitespace and invisible
+format character (Unicode category Cf) is removed is a marker line, and one that
+is not exactly the marker is refused with its stray characters named.
 CRLF and CR-only line endings read as line breaks. `--write` replaces the block in place, keeps every other
 line, saves the file with LF endings, and backs up CLAUDE.md first. `--print` writes the render to stdout.
 
@@ -25,6 +27,7 @@ import re
 import shutil
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 BEGIN = "<!-- factory:begin -->"
@@ -63,10 +66,30 @@ def render(template: str, values: dict) -> str:
     return PLACEHOLDER.sub(fill, text)
 
 
+def bare(text: str) -> str:
+    return "".join(c for c in text if not c.isspace() and unicodedata.category(c) != "Cf")
+
+
+MARKERS = {bare(BEGIN): BEGIN, bare(END): END}
+
+
+def marker_of(line: str) -> str | None:
+    return MARKERS.get(bare(line))
+
+
+def stray_characters(line: str, marker: str) -> list[str]:
+    opcodes = difflib.SequenceMatcher(None, marker, line, autojunk=False).get_opcodes()
+    stray = dict.fromkeys(c for op, _, _, j1, j2 in opcodes if op in ("insert", "replace") for c in line[j1:j2])
+    return [f"U+{ord(c):04X} {unicodedata.name(c, 'UNNAMED')}" for c in stray]
+
+
 def marker_problem(lines: list[str]) -> str | None:
-    near = [n for n, line in enumerate(lines, 1) if line.strip() in (BEGIN, END) and line not in (BEGIN, END)]
-    if near:
-        return f"line {near[0]} holds a marker with leading or trailing whitespace; put each marker alone at the start of its line"
+    for n, line in enumerate(lines, 1):
+        marker = marker_of(line)
+        if marker and line != marker:
+            stray = stray_characters(line, marker)
+            what = f"stray characters {', '.join(stray)}" if stray else "missing characters"
+            return f"line {n} holds a marker with {what}; put the marker {marker} alone on its line"
     begins, ends = lines.count(BEGIN), lines.count(END)
     if begins != 1 or ends != 1:
         return f"expected one {BEGIN} and one {END}, found {begins} and {ends}"
@@ -99,8 +122,7 @@ def write(config: Path, template: str, values: dict) -> str:
     text = read_lines(claude_md) if claude_md.exists() else ""
     if text.strip():
         lines = text.split("\n")
-        has_marker_line = any(line.strip() in (BEGIN, END) for line in lines)
-        problem = marker_problem(lines) if has_marker_line else None
+        problem = marker_problem(lines) if any(marker_of(line) for line in lines) else None
         if problem:
             raise ValueError(f"{claude_md}: {problem}")
     if BLOCK.search(text):
