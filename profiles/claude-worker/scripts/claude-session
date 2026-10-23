@@ -135,8 +135,8 @@ CLOSING_RULE = (
     "completes each issue it names. When it completes the issue, close it in the body with `Closes #<n>`. When "
     "it addresses only part of the issue, write `Part of #<n>` in the body and give every commit a type that "
     "does not close it, such as `feat` or `refactor`, because `fix` is a closing keyword. push-signed cannot "
-    "reword a published commit. A hook refuses a push-signed call whose unpublished commits close an issue "
-    "the body does not, and tells you how to rewrite them."
+    "reword a published commit. A hook refuses a `git commit` whose message closes an issue the body does "
+    "not, and a push-signed call whose unpublished commits do, and tells you how to fix them."
 )
 EVIDENCE_RULE = (
     "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
@@ -927,7 +927,7 @@ def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = Fa
     # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
     # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
-    # A refused publish keeps a commit from closing an issue the pull request body does not; see guard-commit-closes.
+    # A refused commit or publish keeps a commit from closing an issue the pull request body does not; see guard-commit-closes.
     guards = [
         {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"}
         for script in (CI_WAIT_GUARD, COMMIT_CLOSES_GUARD)
