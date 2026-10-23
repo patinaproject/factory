@@ -1705,6 +1705,69 @@ class CheckServicesTest(unittest.TestCase):
             "service gateway watch: no plist matches ~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist (part 12)",
         ])
 
+    def watch_with(self, *lock: str, root: tuple = ("--root", "/h")) -> None:
+        self.launchd.plist(
+            f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist",
+            "ai.patinaproject.factory.gateway-watch",
+            ProgramArguments=["/usr/bin/python3", "/h/scripts/watch-gateway", *root, "--token", "s3cr3t", *lock],
+        )
+        uid = os.getuid()
+        self.launchd.states({
+            "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
+            f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+        })
+
+    def test_a_watcher_whose_lock_is_hermes_own_gateway_lock_is_reported(self) -> None:
+        self.watch_with("--lock", "/h/gateway.lock")
+
+        self.assertEqual(self.check(), [
+            "service gateway watch: its --lock is Hermes' own /h/gateway.lock, which the running gateway always holds; "
+            "name a factory-owned file or drop --lock (part 12)",
+        ])
+
+    def assert_hermes_lock_reported(self, lock: str) -> None:
+        rows = self.check()
+        self.assertEqual(len(rows), 1, (lock, rows))
+        self.assertIn("is Hermes' own", rows[0])
+        self.assertTrue(rows[0].startswith("service gateway watch: its --lock is"), rows[0])
+
+    def test_a_hermes_lock_named_with_an_equals_sign_is_reported(self) -> None:
+        self.watch_with("--lock=/h/gateway.lock")
+
+        self.assert_hermes_lock_reported("--lock=/h/gateway.lock")
+
+    def test_a_hermes_lock_spelled_with_dot_dot_is_reported(self) -> None:
+        self.watch_with("--lock", "/h/sub/../gateway.lock")
+
+        self.assert_hermes_lock_reported("/h/sub/../gateway.lock")
+
+    def test_a_hermes_lock_reached_through_a_symlink_is_reported(self) -> None:
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home)
+        (home / "real").mkdir()
+        (home / "link").symlink_to(home / "real")
+        self.watch_with("--lock", str(home / "link" / "gateway.lock"), root=("--root", str(home / "real")))
+
+        self.assert_hermes_lock_reported("symlink")
+
+    def test_a_hermes_lock_under_the_default_root_is_reported(self) -> None:
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/h"}):
+            self.watch_with("--lock", "/h/gateway.lock", root=())
+
+            self.assert_hermes_lock_reported("default root")
+
+    def test_a_factory_lock_under_the_default_root_is_silent(self) -> None:
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/h"}):
+            self.watch_with("--lock", "/h/factory-gateway.lock", root=())
+
+            self.assertEqual(self.check(), [])
+
+    def test_a_watcher_with_a_factory_owned_lock_or_none_is_silent(self) -> None:
+        for lock in (("--lock", "/h/factory-gateway.lock"), ("--lock", "/store/locks/gateway.lock"), ()):
+            self.watch_with(*lock)
+
+            self.assertEqual(self.check(), [], lock)
+
     def test_program_arguments_are_never_printed(self) -> None:
         self.launchd.states({})
 

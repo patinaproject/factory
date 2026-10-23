@@ -16,6 +16,10 @@ import json, os, sys
 path = os.environ["FAKE_HERMES_STATE"]
 state = json.load(open(path))
 argv = sys.argv[1:]
+state["calls"] = state.get("calls", 0) + 1
+json.dump(state, open(path, "w"))
+if state["calls"] <= state.get("fail_first", 0):
+    sys.exit(state["fail_message"])
 if argv[1:3] == ["--board", state.get("board")]:
     argv = argv[:1] + argv[3:]
 elif state.get("board"):
@@ -115,6 +119,41 @@ class ArchiveCardTest(unittest.TestCase):
         code, out = self.archive("--board", "triage")
         self.assertEqual((code, out), (0, {"archived": "t_old", "freed_worktree": str(self.old)}))
         self.assertEqual(json.loads(self.state_path.read_text())["task"]["status"], "archived")
+
+    PREFLIGHT = ("kanban.db is not writable: file /home/.hermes/kanban.db-wal is read-only for this user. "
+                 "Hermes needs read-write access to open the database.")
+
+    def fail_first(self, times: int, message: str) -> None:
+        self.state.update(fail_first=times, fail_message=message)
+        self.save()
+
+    def calls(self) -> int:
+        return json.loads(self.state_path.read_text())["calls"]
+
+    def test_a_call_that_loses_the_preflight_race_is_retried_once(self) -> None:
+        self.fail_first(1, "Traceback (most recent call last):\n  ...\nsqlite3.OperationalError: " + self.PREFLIGHT)
+        code, out = self.archive()
+        self.assertEqual((code, out), (0, {"archived": "t_old", "freed_worktree": str(self.old)}))
+        self.assertEqual(self.calls(), 4)
+
+    def test_a_call_that_loses_the_preflight_race_twice_fails_after_one_retry(self) -> None:
+        self.fail_first(5, self.PREFLIGHT)
+        code, out = self.archive()
+        self.assertEqual(code, 1)
+        self.assertIn("read-only for this user", out["error"])
+        self.assertEqual(self.calls(), 2)
+
+    def test_any_other_failure_is_not_retried(self) -> None:
+        for message in (
+            "kanban.db is not writable: file /home/.hermes/kanban.db is read-only for this user.",
+            "kanban.db is not writable: directory /home/.hermes is read-only for this user.",
+            "hermes: database is locked",
+        ):
+            with self.subTest(message):
+                self.state.pop("calls", None)
+                self.fail_first(5, message)
+                code, _ = self.archive()
+                self.assertEqual((code, self.calls()), (1, 1))
 
     def test_a_failed_archive_reports_the_error_and_keeps_the_worktree_on_its_branch(self) -> None:
         self.state["archive_fails"] = True

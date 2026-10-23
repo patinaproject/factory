@@ -367,9 +367,17 @@ class WatchGatewayTest(unittest.TestCase):
         output = self.tick()
 
         self.assertEqual((self.restarts, self.beat.paths, self.state()["restarts"]), (0, [], []))
-        self.assertIn("gateway.lock exists, so the gateway is not restarted and the heartbeat stays quiet", output)
+        self.assertIn("factory-gateway.lock exists, so the gateway is not restarted and the heartbeat stays quiet", output)
 
         self.lock.unlink()
+        self.tick()
+
+        self.assertEqual(self.restarts, 1)
+
+    def test_a_held_hermes_gateway_lock_alone_does_not_hold_the_restart_back(self) -> None:
+        self.gateway.unresolved = {"linear"}
+        (self.root / "gateway.lock").write_text('{"kind": "hermes-gateway", "pid": 1}\n')
+
         self.tick()
 
         self.assertEqual(self.restarts, 1)
@@ -386,7 +394,7 @@ class WatchGatewayTest(unittest.TestCase):
         default = watch_gateway.discover(self.root, self.port, self.broker_config, lock=None)
         named = watch_gateway.discover(self.root, self.port, self.broker_config, lock=self.root / "elsewhere.lock")
 
-        self.assertEqual((default.lock, named.lock), (self.root / "gateway.lock", self.root / "elsewhere.lock"))
+        self.assertEqual((default.lock, named.lock), (self.root / "factory-gateway.lock", self.root / "elsewhere.lock"))
 
     def test_each_route_is_probed_once_per_check(self) -> None:
         self.tick()
@@ -438,10 +446,10 @@ class WatchGatewayTest(unittest.TestCase):
     def test_the_plist_names_a_lock_only_when_one_is_given(self) -> None:
         stdout = io.TextIOWrapper(io.BytesIO(), write_through=True)
         with mock.patch.object(sys, "stdout", stdout):
-            watch_gateway.main(["--print-plist", "--root", str(self.root), "--lock", "/somewhere/gateway.lock"])
+            watch_gateway.main(["--print-plist", "--root", str(self.root), "--lock", "/somewhere/deploy.lock"])
         job = plistlib.loads(stdout.buffer.getvalue())
 
-        self.assertEqual(job["ProgramArguments"][-2:], ["--lock", "/somewhere/gateway.lock"])
+        self.assertEqual(job["ProgramArguments"][-2:], ["--lock", "/somewhere/deploy.lock"])
 
 
 if __name__ == "__main__":

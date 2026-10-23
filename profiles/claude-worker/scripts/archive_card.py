@@ -22,8 +22,13 @@ import sys
 from pathlib import Path
 
 
+PREFLIGHT_RACE = "kanban.db-wal is read-only for this user"
+
+
 class Failed(Exception):
-    pass
+    def __init__(self, message: str, stderr: str = ""):
+        super().__init__(message)
+        self.stderr = stderr
 
 
 def run(*command: str) -> str:
@@ -33,12 +38,26 @@ def run(*command: str) -> str:
         raise Failed(f"{command[0]} could not run: {failure.strerror or failure}") from failure
     if proc.returncode != 0:
         detail = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "no error output"
-        raise Failed(f"{' '.join(command[:3])} failed: {detail}")
+        raise Failed(f"{' '.join(command[:3])} failed: {detail}", proc.stderr)
     return proc.stdout
 
 
+def run_kanban(*command: str) -> str:
+    """Retry once when Hermes' preflight loses a race with another `hermes kanban` process.
+
+    That process removes the `-wal` file between the preflight's existence check and its
+    permission check, so the call fails with a message about a file that is gone.
+    """
+    try:
+        return run(*command)
+    except Failed as failure:
+        if PREFLIGHT_RACE not in failure.stderr:
+            raise
+        return run(*command)
+
+
 def read_task(kanban: list[str], task_id: str) -> dict:
-    return json.loads(run(*kanban, "show", task_id, "--json"))["task"]
+    return json.loads(run_kanban(*kanban, "show", task_id, "--json"))["task"]
 
 
 def is_linked_worktree(path: Path) -> bool:
@@ -66,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         task = read_task(kanban, args.task_id)
         if task["status"] != "archived":
-            run(*kanban, "archive", args.task_id)
+            run_kanban(*kanban, "archive", args.task_id)
             task = read_task(kanban, args.task_id)
         freed = free_worktree(task)
     except (Failed, KeyError, ValueError) as failure:

@@ -1294,13 +1294,17 @@ token, a down gateway, and a down machine through a path that uses none of the
 helper's secrets. It needs no Infisical: it works for a factory whose secrets
 come from `.env`.
 
-**The gateway lock.** The watcher restarts nothing while `<root>/gateway.lock`
-exists. A person or an agent that deploys and restarts the gateway creates the
-file first, writing its purpose and the time, and removes it when the restart
-is done. A lock that outlives its deploy keeps the heartbeat quiet, which
-alerts a person. A machine whose deploys already hold another file passes
-`--lock <that file>` to `--print-plist`, and the plist then carries it. The
-real path stays in the private record.
+**The gateway lock.** The watcher restarts nothing while
+`<root>/factory-gateway.lock` exists. Hermes writes its own `<root>/gateway.lock`
+every time the gateway starts and keeps it while the gateway runs, so never
+create, edit, or delete that file, and never name it as the deploy lock. A
+person or an agent that deploys and restarts the gateway creates
+`<root>/factory-gateway.lock` first, writing its purpose and the time, and
+removes it when the restart is done. A lock that outlives its deploy keeps the
+heartbeat quiet, which alerts a person. A machine whose deploys already hold
+another file passes `--lock <that file>` to `--print-plist`, and the plist then
+carries it. The real path stays in the private record. `check-install` reports
+a watcher plist whose `--lock` is Hermes' own `gateway.lock`.
 
 > **HUMAN CHECKPOINT.** Ask the operator to create a dead-man's-switch monitor
 > that expects a ping every 5 minutes, with a grace period of 15 minutes,
@@ -1391,6 +1395,9 @@ factory, do these before the restart:
 
 > **HUMAN CHECKPOINT.** Ask the operator to run
 > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, not from a Hermes session or tool.
+> Before the restart, create the watcher's lock (`<root>/factory-gateway.lock`,
+> or the file the watcher's plist names with `--lock`) so `watch-gateway` stays
+> out of the way, and remove it afterwards.
 > When it exits 1, wait for the named cards or ask the operator whether to
 > run it again with a longer `--timeout`.
 
@@ -1939,7 +1946,9 @@ Hermes process starts. The new helper also writes
 6. If step 3 changed a plugin, a webhook config key, or a team skills setting:
 
    > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
-   > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes. Then confirm
+   > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes.
+   > Before the restart, create the watcher's lock (`<root>/factory-gateway.lock`,
+   > or the file the plist's `--lock` names), and remove it afterwards. Then confirm
    > that
    > `~/.hermes/logs/gateway.log` shows a startup after the install.
 
