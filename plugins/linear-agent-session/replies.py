@@ -3,8 +3,14 @@ from __future__ import annotations
 import collections
 import json
 import logging
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import blocks, linear
@@ -13,10 +19,23 @@ logger = logging.getLogger(__name__)
 
 # post_llm_call is bounded by nothing here, so the post carries its own bound, as in blocks.py.
 POST_TIMEOUT_SECONDS = blocks.POST_TIMEOUT_SECONDS
-RESPONSE_LIMIT = 4000
 # One entry per Hermes session with a post in its current turn. The turn-end hook clears it.
 RECORD_LIMIT = 1024
-NO_ANSWER = "Your reply arrived, but no answer was produced. Please send it again."
+ASK_AGAIN = (
+    "Your reply reached the factory, but its agent did not answer it. "
+    "Please send it again, and add anything it needs to act on it."
+)
+REASK_FIRST_SENTENCE = "This is a replay of a reply that a person sent in this Linear agent session at "
+REASK_PREAMBLE = (
+    REASK_FIRST_SENTENCE + "{sent}. "
+    "The turn that handled it then posted nothing to the session, so the person never got an answer.\n"
+    "A `prompted` event is always a person's reply, whoever opened the session. For this event, ignore any rule below "
+    "that says to post no activity: before you stop, post exactly one activity on this agent session. Answer the reply "
+    "in a `response`, from the reply, the issue, and its current state. When you need something from the person to go "
+    "on, ask for it in an `elicitation` instead. If the issue has changed since the reply so that it no longer needs "
+    "an answer, say so briefly in the `response`. Change cards only as the rules below allow.\n\n"
+)
+REASK_SOURCE = "linear-reply-reask"
 
 
 def _event_line(name: str) -> "re.Pattern[str]":
@@ -77,19 +96,84 @@ def reply_session(user_message: Optional[str]) -> Optional[str]:
     return session if session and not session.startswith("{") else None
 
 
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def route_toolsets(config: dict, route: str) -> str:
+    """The comma-joined toolsets of a webhook route, as Hermes' config holds them."""
+    value = config["platforms"]["webhook"]["extra"]["routes"][route].get("toolsets") or ""
+    return ",".join(value) if isinstance(value, list) else str(value)
+
+
+def find_hermes() -> str:
+    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
+    for candidate in filter(None, candidates):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    raise FileNotFoundError("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
+
+
+def hermes_home() -> str:
+    if os.environ.get("HERMES_HOME"):
+        return os.environ["HERMES_HOME"]
+    from hermes_constants import get_hermes_home
+
+    return str(get_hermes_home())
+
+
+def _run_reask(query: str, toolsets: str, redact: Callable[[str], str]) -> None:
+    directory: Optional[str] = None
+    try:
+        directory = tempfile.mkdtemp(prefix="linear-reask-")
+        path = os.path.join(directory, "query.md")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(query)
+        command = [find_hermes(), "chat", "-Q", "--oneshot", "--query-file", path]
+        if toolsets:
+            command += ["-t", toolsets]
+        command += ["--source", REASK_SOURCE]
+        done = subprocess.run(
+            command,
+            env={**os.environ, "HERMES_HOME": hermes_home()},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+        if done.returncode != 0:
+            logger.error(
+                "linear-agent-session: the reply re-ask exited %s: %s",
+                done.returncode,
+                redact((done.stderr or "")[-500:]),
+            )
+    except Exception as failure:
+        logger.error("linear-agent-session: the reply re-ask failed: %s", redact(f"{type(failure).__name__}: {failure}"))
+    finally:
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
+
+
+def spawn_reask(query: str, toolsets: str, redact: Callable[[str], str] = blocks.hermes_redact) -> threading.Thread:
+    """Run a fresh agent turn on the query in its own Hermes process, off the calling thread."""
+    thread = threading.Thread(target=_run_reask, args=(query, toolsets, redact), daemon=True)
+    thread.start()
+    return thread
+
+
 def make_turn_hook(
     record: PostRecord,
     get_client: Callable[[], linear.LinearClient],
+    reask: Callable[[str, str], Any],
+    toolsets: Callable[[], str],
     redact: Callable[[str], str] = blocks.hermes_redact,
 ) -> Callable[..., None]:
-    def post(agent_session: str, text: str) -> None:
+    def ask_again(agent_session: str) -> None:
         try:
-            # Redact before clipping: a cut can split a secret into a piece no pattern recognizes.
-            body = blocks._clip(redact(text).strip(), RESPONSE_LIMIT) if text and text.strip() else NO_ANSWER
-            get_client().create_activity(agent_session, linear.activity_content("response", body))
+            get_client().create_activity(agent_session, linear.activity_content("elicitation", ASK_AGAIN))
         except Exception as failure:
             logger.error(
-                "linear-agent-session: answering a reply in session %s failed: %s",
+                "linear-agent-session: asking for a reply again in session %s failed: %s",
                 agent_session,
                 redact(f"{type(failure).__name__}: {failure}"),
             )
@@ -97,7 +181,6 @@ def make_turn_hook(
     def on_turn_end(
         session_id: Optional[str] = None,
         user_message: Optional[str] = None,
-        assistant_response: Optional[str] = None,
         **_: Any,
     ) -> None:
         try:
@@ -105,11 +188,14 @@ def make_turn_hook(
             agent_session = reply_session(user_message)
             if agent_session is None or agent_session in posted:
                 return
-            worker = threading.Thread(target=post, args=(agent_session, assistant_response or ""), daemon=False)
+            if not user_message.startswith(REASK_FIRST_SENTENCE):
+                reask(REASK_PREAMBLE.format(sent=utc_now()) + user_message, toolsets())
+                return
+            worker = threading.Thread(target=ask_again, args=(agent_session,), daemon=False)
             worker.start()
             worker.join(POST_TIMEOUT_SECONDS)
             if worker.is_alive():
-                logger.warning("linear-agent-session: answering a reply in session %s is still running; moving on", agent_session)
+                logger.warning("linear-agent-session: asking for a reply again in session %s is still running; moving on", agent_session)
         except Exception:
             logger.exception("linear-agent-session: the reply guarantee failed")
 

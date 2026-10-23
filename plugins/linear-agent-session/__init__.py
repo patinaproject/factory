@@ -112,7 +112,15 @@ def register(ctx: Any) -> None:
         ),
     )
     ctx.register_hook("kanban_task_blocked", blocks.make_blocked_hook(get_client))
-    ctx.register_hook("post_llm_call", replies.make_turn_hook(posts, get_client))
+    ctx.register_hook(
+        "post_llm_call",
+        replies.make_turn_hook(
+            posts,
+            get_client,
+            replies.spawn_reask,
+            lambda: replies.route_toolsets(load_config_readonly(), ctx.get_config("webhook_route", default="linear")),
+        ),
+    )
     ctx.register_hook(
         "transform_api_error_classification", missing_secret.make_classification_hook(load_config_readonly, os.environ)
     )

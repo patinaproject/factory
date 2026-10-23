@@ -270,6 +270,8 @@ class SpawnReaskTest(unittest.TestCase):
     def test_a_missing_hermes_is_logged_and_never_raises(self):
         with mock.patch.dict(os.environ, {"HERMES_BIN": "/nonexistent/hermes", "PATH": "/nonexistent"}), \
                 mock.patch.object(Path, "home", lambda: Path("/nonexistent")), \
+                mock.patch.dict(sys.modules, {"agent": types.ModuleType("agent"), "agent.redact": types.SimpleNamespace(
+                    redact_sensitive_text=lambda text, force=False: fake_redact(text))}), \
                 self.assertLogs("linear_agent_session", "ERROR"):
             plugin.replies.spawn_reask("q", "terminal").join(10)
         self.assertFalse(self.record.exists())
