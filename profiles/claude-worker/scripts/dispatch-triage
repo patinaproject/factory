@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Start waiting triage cards while fewer than the factory's cap run on the Triage board.
 
-Hermes caps workers per host and per profile, never per board. So triage creates
+Hermes caps workers per host (`kanban.max_in_progress`) and per board
+(`kanban.max_spawn`), and this script adds the triage cap below `max_spawn`, so
+the default board cannot take triage's slots. Triage creates
 each triage card without an assignee, and the dispatcher skips it. Every minute
 a Hermes cron job runs this script. It counts the board's cards that are
 `running`, or `ready` with an assignee, and assigns `claude-worker` to waiting

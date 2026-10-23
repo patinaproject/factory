@@ -714,7 +714,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"config model.default in {self.root}: is not set to the operator's model alias (part 4)\n"
-                f"config kanban.max_in_progress in {self.root}: is not set to the operator's card limit (part 10)\n"),
+                f"config kanban.max_in_progress in {self.root}: is not a positive card limit (part 10)\n"),
         )
 
     def test_capacity_limits_that_are_not_positive_integers(self) -> None:
@@ -735,7 +735,7 @@ class CheckInstallTest(unittest.TestCase):
         self.config(self.root, {**ROOT_CONFIG, "kanban.max_spawn": 3})
 
         self.assertEqual(self.check(), (1, (
-            "kanban capacity max_spawn: 3 plus triage.max_running 2 is more than kanban.max_in_progress 4, so "
+            "kanban capacity kanban.max_spawn: 3 plus triage.max_running 2 is more than kanban.max_in_progress 4, so "
             "the default board can take every slot triage needs (part 10)\n"
         )))
 
@@ -1124,7 +1124,7 @@ class CheckInstallTest(unittest.TestCase):
         with sqlite3.connect(board) as db:
             db.execute(
                 "INSERT INTO tasks (id, status, assignee, created_at) VALUES ('t_old', 'ready', 'claude-worker', ?)",
-                (time.time() - 3 * 3600,),
+                (time.time() - 3 * 3600 - 30,),
             )
         db.close()
 
@@ -1139,6 +1139,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (1, (
             f"kanban board database {triage}: has no tasks.branch_name, tasks.status, so a card cannot wait for "
             "its blockers (part 15, check 29)\n"
+            f"stranded triage card check {triage}: cannot be read: no such column: t.created_at (part 10)\n"
         )))
 
     def test_a_board_database_that_cannot_be_read(self) -> None:
@@ -1466,13 +1467,13 @@ class CheckTriageCapacityTest(unittest.TestCase):
 
     def test_the_spawn_cap_and_triage_cap_together_exceed_the_host_limit(self) -> None:
         self.assertEqual(self.rows(3, 4, 2), [(
-            "kanban capacity max_spawn: 3 plus triage.max_running 2 is more than kanban.max_in_progress 4, so "
+            "kanban capacity kanban.max_spawn: 3 plus triage.max_running 2 is more than kanban.max_in_progress 4, so "
             "the default board can take every slot triage needs (part 10)"
         )])
 
     def test_the_triage_cap_exceeds_the_spawn_cap(self) -> None:
         self.assertEqual(self.rows(1, 4, 2), [(
-            "kanban capacity max_spawn: triage.max_running 2 is more than max_spawn 1, so triage cannot run "
+            "kanban capacity kanban.max_spawn: triage.max_running 2 is more than kanban.max_spawn 1, so triage cannot run "
             "that many cards on its own board (part 10)"
         )])
 
@@ -1563,7 +1564,10 @@ class CheckStrandedTriageTest(unittest.TestCase):
     def test_a_card_with_no_events_waits_from_its_creation(self) -> None:
         self.card("t_bare", age=40)
 
-        self.assertEqual(self.rows()[0].split(":")[1].strip(), "has waited 40 minutes in ready with an assignee and no worker, so the default board is probably holding every worker slot (part 10)")
+        self.assertEqual(self.rows(), [
+            "stranded triage card t_bare: has waited 40 minutes in ready with an assignee and no worker, so "
+            "the default board is probably holding every worker slot (part 10)"
+        ])
 
     def test_a_missing_database_is_silent(self) -> None:
         self.path.unlink()
