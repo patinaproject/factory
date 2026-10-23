@@ -96,6 +96,13 @@ def register(ctx: Any) -> None:
         handler=lambda args, **_: tools.run_to_todo(get_client, args),
         description=tools.TO_TODO_SCHEMA["description"],
     )
+    ctx.register_tool(
+        name="linear_issue_edit",
+        toolset=TOOLSET,
+        schema=tools.EDIT_SCHEMA,
+        handler=lambda args, **_: tools.run_edit(get_client, args),
+        description=tools.EDIT_SCHEMA["description"],
+    )
     ctx.register_hook(
         "pre_gateway_dispatch",
         make_dispatch_hook(

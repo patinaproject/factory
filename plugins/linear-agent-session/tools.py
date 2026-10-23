@@ -131,6 +131,25 @@ TO_TODO_SCHEMA = {
 }
 
 
+EDIT_SCHEMA = {
+    "name": "linear_issue_edit",
+    "description": (
+        "Edit `issue` (UUID or ABC-123): add_labels, remove_labels, and state, each by name, matched "
+        "whatever their case and punctuation. An added label replaces the issue's other label in its group. "
+        "Creates no label or status. Returns identifier, changed, labels (names), and state."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            **ISSUE_PARAMETERS["properties"],
+            "add_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to add."},
+            "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to remove."},
+            "state": {"type": "string", "description": "Status name to move the issue to, such as Canceled."},
+        },
+    },
+}
+
+
 def run_activity(client_factory: ClientFactory, args: dict) -> str:
     def run() -> dict:
         content = activity_content(
@@ -185,6 +204,21 @@ def run_undelegate(client_factory: ClientFactory, args: dict) -> str:
 
 def run_to_todo(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(lambda: client_factory().move_to_todo(_issue_argument(args)))
+
+
+def run_edit(client_factory: ClientFactory, args: dict) -> str:
+    def run() -> dict:
+        issue = _issue_argument(args)
+        add, remove, state = _names(args.get("add_labels")), _names(args.get("remove_labels")), args.get("state")
+        if not (add or remove or state):
+            raise LinearError("pass add_labels, remove_labels, or state")
+        return client_factory().edit_issue(issue, add_labels=add, remove_labels=remove, state=state)
+
+    return _tool_result_or_error(run)
+
+
+def _names(value) -> list:
+    return [value] if isinstance(value, str) else list(value or [])
 
 
 def _issue_argument(args: dict) -> str:

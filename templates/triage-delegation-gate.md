@@ -16,4 +16,5 @@ the label, so never create one. Read the issue's `labels` from
    stop.
 3. Otherwise the gate passes. After the issue's card is created or reused,
    when the issue's `stateType` is `triage`, move it with
-   `linear_issue_to_todo`. That is the one status change this prompt makes.
+   `linear_issue_to_todo`. That is the one status change this prompt makes
+   unasked.

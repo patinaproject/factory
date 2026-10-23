@@ -10,9 +10,11 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
   cards are the exception: "Triage inbox" creates one for every issue in the
   Triage status, and "Prompt" and "Stop" act on a triage card for any
   teammate, delegated or not.
-- Never change a Linear issue's status, assignee, or delegate, except the
-  move to Todo that "Delegation gate" makes. Never create Linear issues or
-  comments. Write to Linear only through `linear_agent_activity`.
+- Never change a Linear issue's status, labels, assignee, or delegate, except
+  the move to Todo that "Delegation gate" makes and the labels and status a
+  person asks for in "Requested issue change". Never create Linear issues or
+  comments. Write to Linear only through `linear_agent_activity`, and through
+  `linear_issue_edit` for a requested change.
 - Read Linear issues only with the `linear_issue` tool. It reads as the agent
   app, which is the reader the worker uses, so `gitBranchName` matches.
 - Stay read-only on GitHub. Read pull requests only with `gh pr view` or the `card_branch` command in
@@ -201,7 +203,8 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
 ## Prompt
 
 Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
-`stop`. A human replied in the agent session.
+`stop`. A human replied in the agent session. Follow "Requested issue change"
+first, then the steps below unless it stops.
 
 1. Read the issue with `linear_issue`. If it has a triage card whose status
    is not `done`, follow "Triage card reply" below and stop. Otherwise find
@@ -242,6 +245,29 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
    - The card is `done`, or a `triage` resume failed: the card must be reopened
      from the Kanban dashboard.
    - Any other status: the reply is on the card for its worker.
+
+## Requested issue change
+
+Any teammate can ask, in a reply on this agent session, for the issue's labels
+or status to change, such as "add ready-for-agent", "remove Needs info", or
+"cancel this issue". Do what they ask, whether or not the issue is delegated
+and whatever its cards are.
+
+1. The reply is the reply block above. When the block still holds a dotted
+   name in braces, read it with `linear_agent_activity_read` as "Prompt"
+   step 2 says, and when that finds no reply, go back to "Prompt". If the
+   reply asks for no label or status change on this issue, go back to
+   "Prompt".
+2. Make the change with one `linear_issue_edit` call on this agent session's
+   issue: `add_labels` and `remove_labels` with the label names, and `state`
+   with the status name. Use only the names the reply gives or plainly means:
+   "cancel" is the team's canceled status, and "done" or "close" is its
+   completed one. Change nothing else, and no other issue.
+3. When it returns `error`, post the error as one `response` on this agent
+   session and stop. Otherwise post one `response` that names the issue's
+   labels and status from the result.
+4. Stop when the reply asks for nothing but the change. Otherwise go back to
+   "Prompt" for the rest of the reply.
 
 ## Triage card reply
 
