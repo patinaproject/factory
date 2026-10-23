@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import pty
@@ -11,6 +14,10 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check-secret-match"
+loader = importlib.machinery.SourceFileLoader("check_secret_match", str(SCRIPT))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+check_secret_match = importlib.util.module_from_spec(spec)
+loader.exec_module(check_secret_match)
 FOLDER_VALUE = "whsec-folder-7d41"
 OTHER_VALUE = "whsec-stale-02bc"
 CLIENT_ID = "cid-5c1e7d"
@@ -44,6 +51,95 @@ FAKE_HELPER = """\
 [ "$FACTORY_INFISICAL_CLIENT_ID" = "{id}" ] && [ "$FACTORY_INFISICAL_CLIENT_SECRET" = "{secret}" ] || exit 1
 cat "{loaded}"
 """
+
+
+# Each env file and the value Hermes loads for KEY from it, decoded as utf-8-sig
+# and parsed by python-dotenv 1.2.2, as DotenvTableTest re-derives when dotenv is
+# importable. None means Hermes sets no value for KEY.
+DOTENV_TABLE = [
+    (b"KEY=abc", "abc"),
+    (b"\xef\xbb\xbfKEY=abc\nOTHER=x", "abc"),
+    (b"export\tKEY=abc", "abc"),
+    (b"export KEY=abc", "abc"),
+    (b"  KEY = abc  ", "abc"),
+    (b"KEY=abc\r\nOTHER=x", "abc"),
+    (b"KEY='abc'", "abc"),
+    (b'KEY="abc"', "abc"),
+    (b"KEY='a\"bc'", 'a"bc'),
+    (b"KEY='abc' # note", "abc"),
+    (b'KEY="abc"#note', "abc"),
+    (b"KEY=abc # note", "abc"),
+    (b"KEY=abc\t# note", "abc"),
+    (b"KEY=abc#note", "abc#note"),
+    (b"KEY=a\\nbc", "a\\nbc"),
+    (b"KEY=", ""),
+    (b"# KEY=abc", None),
+    (b"KEY=abc\nKEY=def", "def"),
+    (b'KEY="a\\"bc"', 'a"bc'),
+    (b"KEY='a\\'bc'", "a'bc"),
+    (b'KEY="a\\nbc"', "a\nbc"),
+    (b'KEY="abc', None),
+    (b"KEY='abc", None),
+    (b'KEY="ab\ncd"', "ab\ncd"),
+    (b'OTHER="x\nKEY=abc\n"', None),
+    (b"KEY='abc' junk", None),
+    (b"KEY=abc\nKEY", None),
+    (b"KEY=${OTHER}", ""),
+    (b"OTHER=x\nKEY=${OTHER}", "x"),
+    (b"KEY=a\x00b", "a\x00b"),
+    (b"KEY=\xc3\xa5bc", "\u00e5bc"),
+    (b"KEY=\xe5bc", "\u00e5bc"),
+]
+
+
+def hermes_dotenv_value(raw: bytes):
+    from dotenv.main import DotEnv
+    from dotenv.variables import parse_variables
+
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    resolved = {}
+    for name, value in DotEnv(dotenv_path=None, stream=io.StringIO(text), interpolate=False).parse():
+        if value is not None:
+            value = "".join(atom.resolve(resolved) for atom in parse_variables(value))
+        resolved[name] = value
+    return resolved.get("KEY")
+
+
+def dotenv_importable() -> bool:
+    try:
+        import dotenv  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+class DotenvTableTest(unittest.TestCase):
+    def test_every_line_it_reads_differently_from_dotenv_fails_closed(self) -> None:
+        for raw, hermes_value in DOTENV_TABLE:
+            with self.subTest(raw=raw):
+                try:
+                    value = check_secret_match.env_file_values(raw).get("KEY", "")
+                except check_secret_match.Unread:
+                    continue
+                self.assertEqual(value, hermes_value or "")
+
+    def test_reads_a_byte_order_mark_and_an_export_tab(self) -> None:
+        self.assertEqual(check_secret_match.env_file_values(b"\xef\xbb\xbfKEY=abc\n"), {"KEY": "abc"})
+        self.assertEqual(check_secret_match.env_file_values(b"export\tKEY=abc\n"), {"KEY": "abc"})
+
+    def test_names_the_line_it_cannot_read(self) -> None:
+        with self.assertRaises(check_secret_match.Unread) as caught:
+            check_secret_match.env_file_values(b"A=1\n\nB=\"x\n")
+        self.assertEqual(caught.exception.args, (3,))
+
+    @unittest.skipUnless(dotenv_importable(), "python-dotenv is not importable")
+    def test_the_table_is_what_dotenv_parses(self) -> None:
+        for raw, hermes_value in DOTENV_TABLE:
+            with self.subTest(raw=raw):
+                self.assertEqual(hermes_dotenv_value(raw), hermes_value)
 
 
 class CheckSecretMatchTest(unittest.TestCase):
@@ -164,6 +260,33 @@ class CheckSecretMatchTest(unittest.TestCase):
         result = self.check()
 
         self.assertEqual((result.returncode, result.stdout), (0, "1\n"))
+        self.assertFalse(self.ran.exists())
+        self.assert_quiet(result)
+
+    def test_reads_the_key_on_the_first_line_after_a_byte_order_mark(self) -> None:
+        self.env_file.write_bytes(
+            f"\ufeffLINEAR_WEBHOOK_SECRET={OTHER_VALUE}\nFACTORY_INFISICAL_CLIENT_ID={CLIENT_ID}\n".encode()
+        )
+        result = self.check()
+
+        self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
+        self.assertFalse(self.ran.exists())
+        self.assert_quiet(result)
+
+    def test_reads_export_followed_by_a_tab(self) -> None:
+        self.dotenv(f"export\tLINEAR_WEBHOOK_SECRET={OTHER_VALUE}\n")
+        result = self.check()
+
+        self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
+        self.assertFalse(self.ran.exists())
+        self.assert_quiet(result)
+
+    def test_reports_a_mismatch_for_a_line_it_cannot_read(self) -> None:
+        self.dotenv(f'LINEAR_WEBHOOK_SECRET="{FOLDER_VALUE}\\n"\n')
+        result = self.check()
+
+        self.assertEqual((result.returncode, result.stdout), (1, "0\n"))
+        self.assertIn("line 3 of", result.stderr)
         self.assertFalse(self.ran.exists())
         self.assert_quiet(result)
 
