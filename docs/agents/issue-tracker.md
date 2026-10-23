@@ -43,13 +43,19 @@ state role and preserves the category role.
 
 | Role | Axis | Meaning | GitHub | Linear |
 | --- | --- | --- | --- | --- |
-| `bug` | category | Something is broken | label | label |
-| `enhancement` | category | New feature or improvement | label | label |
-| `needs-triage` | state | Maintainer evaluation is required | label, issue open | label, Triage |
-| `needs-info` | state | Waiting for information | label, issue open | label |
-| `ready-for-agent` | state | Ready for an implementation agent | label, issue open | label, `Todo` |
-| `ready-for-human` | state | Requires human implementation | label, issue open | label, `Todo` |
-| `wontfix` | state | Deliberately declined | label, issue closed | label, Canceled |
+| `bug` | category | Something is broken | `Bug` label | `Bug` label, Type group |
+| `enhancement` | category | New feature or improvement | `Feature` label, not yet created | `Feature` label, Type group |
+| `needs-triage` | state | Maintainer evaluation is required | `Needs triage` label, issue open | `Needs triage` label, Triage |
+| `needs-info` | state | Waiting for information | `Needs info` label, issue open | `Needs info` label |
+| `ready-for-agent` | state | Ready for an implementation agent | `Ready for agent` label, issue open | `Ready for agent` label, `Todo` |
+| `ready-for-human` | state | Requires human implementation | `Ready for human` label, issue open | `Ready for human` label, `Todo` |
+| `wontfix` | state | Deliberately declined | `Won't fix` label, issue closed | `Won't fix` label, Canceled |
+
+The state labels form the single-select Triage label group. The Type group
+holds `Bug`, `Feature`, and other single-select values, so `bug` and
+`enhancement` name only two of them. The role names stay the factory's
+vocabulary. Factory code matches a label to a role ignoring case and
+punctuation, so `Ready for agent` is `ready-for-agent`.
 
 `wontfix` is terminal: it accompanies closure rather than sitting on open work.
 `ready-for-agent` and `ready-for-human` are both written; each is applied
@@ -91,10 +97,10 @@ relationships before mutation. Follow pagination for exhaustive reads.
 ### Public lifecycle
 
 GitHub issues carry the roles above as repository labels, alongside open/closed
-state. New public issues receive `needs-triage` unless they are already ready. A
-ready issue stays open and carries `ready-for-agent` or `ready-for-human`. Close
+state. New public issues receive `Needs triage` unless they are already ready. A
+ready issue stays open and carries `Ready for agent` or `Ready for human`. Close
 duplicates with the duplicate reason and native relationship when available;
-close deliberate non-work with `wontfix` and a rationale.
+close deliberate non-work with `Won't fix` and a rationale.
 
 ### Public branch name
 
