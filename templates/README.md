@@ -23,7 +23,10 @@ Triage status or moved into it, a status change of an issue listed in
 `<home>/triage-refs.json`, which holds each triage card's `linear_issue_id`, and
 a label change that leaves an issue delegated to the agent app with
 `ready-for-agent` and no implementation card. `refresh-owned-refs` writes both
-files.
+files. When a status change only moves an issue out of Triage, the
+`linear-agent-session` plugin archives its triage card before dispatch, and the
+triage prompt never runs. "Triage inbox" step 2 still covers every update the
+plugin sends on.
 
 The triage prompts are `triage-linear.md` and `triage-github.md`. In them,
 `triage-resume.md` is the one parked-card resume section that both prompts

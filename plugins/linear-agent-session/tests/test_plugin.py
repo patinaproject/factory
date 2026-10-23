@@ -70,8 +70,12 @@ def webhook_config(routes, global_secret=None):
 RESOLVED_CONFIG = webhook_config({"linear": {"secret": RESOLVED_SECRET}, "github": {"secret": RESOLVED_SECRET}})
 
 
+def no_triage_exit(payload):
+    raise AssertionError("an AgentSessionEvent never reaches the triage-exit step")
+
+
 def run_hook(evt, client, route="linear", config=RESOLVED_CONFIG):
-    hook = plugin.make_dispatch_hook(lambda: client, lambda: route, lambda: config)
+    hook = plugin.make_dispatch_hook(lambda: client, lambda: route, lambda: config, no_triage_exit)
     return asyncio.run(hook(event=evt, gateway=object(), session_store=None))
 
 
@@ -126,7 +130,7 @@ class DispatchHookTest(unittest.TestCase):
 
     def test_slow_linear_is_abandoned_at_the_deadline(self):
         client = RecordingClient(delay=1.0)
-        hook = plugin.make_dispatch_hook(lambda: client, lambda: "linear", lambda: RESOLVED_CONFIG)
+        hook = plugin.make_dispatch_hook(lambda: client, lambda: "linear", lambda: RESOLVED_CONFIG, no_triage_exit)
 
         async def timed():
             started = time.monotonic()
@@ -195,7 +199,7 @@ class SecretGuardTest(unittest.TestCase):
     def test_config_is_read_per_delivery(self):
         configs = [webhook_config({"linear": {"secret": "${LINEAR_WEBHOOK_SECRET}"}}), RESOLVED_CONFIG]
         client = RecordingClient()
-        hook = plugin.make_dispatch_hook(lambda: client, lambda: "linear", lambda: configs.pop(0))
+        hook = plugin.make_dispatch_hook(lambda: client, lambda: "linear", lambda: configs.pop(0), no_triage_exit)
         with self.assertLogs("linear_agent_session", "ERROR"):
             self.assertEqual(asyncio.run(hook(event=event(session_event("created")))), SKIP_LINEAR)
         self.assertIsNone(asyncio.run(hook(event=event(session_event("created")))))

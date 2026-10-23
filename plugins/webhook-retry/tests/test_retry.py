@@ -43,6 +43,24 @@ FAKE_HERMES = textwrap.dedent(
 )
 
 
+FAKE_TRIAGE_EXIT = textwrap.dedent(
+    """\
+    import json, os, sys
+    args = sys.argv[1:]
+    payload = json.load(open(args[args.index("--payload-file") + 1]))
+    with open(os.environ["FAKE_TRIAGE_LOG"], "a") as log:
+        log.write(json.dumps({"argv": args[:2], "payload": payload, "home": os.environ["HERMES_HOME"]}) + "\\n")
+    behavior = json.load(open(os.environ["FAKE_TRIAGE_BEHAVIOR"]))
+    if behavior.get("garble"):
+        print("not json")
+    else:
+        print(json.dumps({"handled": behavior["handled"], "action": "archive", "task_id": "t_triage", "reason": "r"}))
+    sys.exit(behavior.get("exit", 0))
+    """
+)
+TRIAGE_EXIT_PAYLOAD = {"type": "Issue", "action": "update", "updatedFrom": {"stateId": "s"}, "data": {"id": "issue-1"}}
+
+
 def ago(**delta) -> str:
     return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -82,8 +100,20 @@ class RetryTest(unittest.TestCase):
     def behave(self, **behaviors):
         self.behavior.write_text(json.dumps(behaviors))
 
+    def install_triage_exit(self, **behavior):
+        cli = self.home / "plugins" / "linear-agent-session" / "cli.py"
+        cli.parent.mkdir(parents=True)
+        cli.write_text(FAKE_TRIAGE_EXIT)
+        (self.home.parent / "triage.json").write_text(json.dumps(behavior))
+
+    def triage_checks(self):
+        log = self.home.parent / "triage.log"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
     def run_retry(self, *args):
         env = {
+            "FAKE_TRIAGE_LOG": str(self.home.parent / "triage.log"),
+            "FAKE_TRIAGE_BEHAVIOR": str(self.home.parent / "triage.json"),
             **os.environ, "HERMES_HOME": str(self.home), "HERMES_BIN": str(self.hermes),
             # Without these, find_hermes could reach a real hermes on PATH or in ~/.local/bin.
             "PATH": "/usr/bin:/bin", "HOME": str(self.home.parent),
@@ -113,6 +143,43 @@ class RetryTest(unittest.TestCase):
         )
         self.assertEqual((result.returncode, self.entries()), (0, {}))
         self.assertIn("retried linear older: succeeded", (self.queue / "retry.log").read_text())
+
+    def test_a_replayed_plain_triage_exit_archives_its_card_without_a_turn(self):
+        self.install_triage_exit(handled=True)
+        self.seed(entry("exit", payload=TRIAGE_EXIT_PAYLOAD))
+
+        result = self.run_retry()
+
+        self.assertEqual(self.chats(), [])
+        self.assertEqual(
+            self.triage_checks(),
+            [{"argv": ["triage-exit", "--payload-file"], "payload": TRIAGE_EXIT_PAYLOAD, "home": str(self.home)}],
+        )
+        self.assertEqual(
+            result.stdout, "retried linear exit: handled the Triage exit without a turn\nwebhook retry queue drained\n"
+        )
+        self.assertEqual(self.entries(), {})
+
+    def test_a_replayed_delivery_the_triage_exit_check_does_not_handle_runs_a_turn(self):
+        for behavior in ({"handled": False}, {"handled": True, "exit": 1}, {"garble": True}):
+            with self.subTest(behavior):
+                self.setUp()
+                self.install_triage_exit(**behavior)
+                self.seed(entry("decide", payload=TRIAGE_EXIT_PAYLOAD))
+
+                result = self.run_retry()
+
+                self.assertEqual(len(self.triage_checks()), 1)
+                self.assertEqual(len(self.chats()), 1)
+                self.assertEqual(result.stdout, "retried linear decide: succeeded\nwebhook retry queue drained\n")
+
+    def test_an_entry_without_a_payload_runs_a_turn_without_the_check(self):
+        self.install_triage_exit(handled=True)
+        self.seed(entry("old"))
+
+        self.run_retry()
+
+        self.assertEqual((len(self.triage_checks()), len(self.chats())), (0, 1))
 
     def test_entries_that_are_not_due_wait_and_now_forces_them(self):
         self.seed(entry("later", next_try=(dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")))

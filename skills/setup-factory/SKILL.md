@@ -1157,8 +1157,12 @@ hermes -p claude-worker cron create "every 1m" --name refresh-owned-refs --no-ag
 The same job writes `<home>/triage-refs.json` with the `linear_issue_id` of
 every card on the `triage` board. The `linear` route keeps a status change of
 an issue listed there, so a triage card is archived when a person moves its
-issue out of Triage or closes it. `check-install` reports this file the same
-way.
+issue out of Triage or closes it. When that update needs no other decision,
+the `linear-agent-session` plugin's dispatch hook archives the card itself and
+no triage turn starts. The issue is not delegated to the agent app, the update
+changed only the status, and no card on the default board names the issue.
+Every other update, and any update the hook cannot finish, reaches triage.
+`check-install` reports this file the same way.
 
 **Triage dispatch job.** Triage creates triage cards with no assignee, so the
 dispatcher skips them. `dispatch-triage` runs every minute. It assigns
@@ -1240,8 +1244,11 @@ operator's approval, after the root job exists.
 `<root>/webhook-retry/`. A delivery whose triage turn fails on a usage limit
 waits there until the limit resets. This job reruns the due deliveries every 10
 minutes, oldest first and one at a time, and stops at the first usage limit.
-It prints a line only when something happened, so Hermes delivers nothing on a
-quiet run. It belongs to the root profile for the same reason as
+Before it reruns a Linear `Issue` update, it runs the `triage-exit` command of
+the `linear-agent-session` plugin, which applies the dispatch hook's check. When
+that command archived the triage card or left a running one to its worker, the
+delivery is done without a turn. It prints a line only when something happened,
+so Hermes delivers nothing on a quiet run. It belongs to the root profile for the same reason as
 `check-install`. Install the wrapper and create the job when `hermes cron list`
 for the root profile has no `retry-failed-webhooks` job:
 
@@ -1619,7 +1626,8 @@ each check. Report each result.
     activity on an agent session the factory opened, and no other activity on
     that session. Edit the issue's title: no second card appears. Move a
     second issue into Triage from Backlog: it gets its own card. Move the
-    first issue out of Triage: its triage card is archived. Label the second
+    first issue out of Triage: its triage card is archived, the gateway log
+    shows `no triage turn` for it, and no triage session starts. Label the second
     issue `ready-for-agent` and delegate it to the agent while it is still in
     Triage: it gets an implementation card and moves to Todo.
 26. Delegate an issue without `ready-for-agent`. No implementation card

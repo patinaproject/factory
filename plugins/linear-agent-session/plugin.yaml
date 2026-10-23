@@ -5,7 +5,9 @@ description: >-
   Drops a webhook delivery on any route whose secret is still an unresolved
   ${NAME} reference, requeues a Kanban worker whose provider key was empty
   at start instead of parking it as a rejected credential, acknowledges
-  Linear agent session webhooks within Linear's 10-second deadline, tells the card's agent session when a card blocks or is
+  Linear agent session webhooks within Linear's 10-second deadline, archives
+  the triage card of an issue that only left Triage without a triage turn,
+  tells the card's agent session when a card blocks or is
   parked in triage, and gives agents the linear_agent_activity,
   linear_agent_activity_read, linear_issue, linear_agent_session_create, linear_delegated_issues,
   linear_issue_undelegate, and linear_issue_to_todo tools, acting as the

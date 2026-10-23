@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -53,7 +54,14 @@ def main(argv: Optional[list] = None) -> int:
     undelegate = commands.add_parser("undelegate", help="remove the agent app as an issue's delegate")
     undelegate.add_argument("issue")
 
+    exit_check = commands.add_parser(
+        "triage-exit", help="archive the triage card of an issue whose queued update only moved it out of Triage"
+    )
+    exit_check.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
+
     args = parser.parse_args(argv)
+    if args.command == "triage-exit":
+        return _triage_exit(plugin, args.payload_file)
     if args.command == "activity":
         tool_args = {
             "agent_session_id": args.agent_session_id,
@@ -78,6 +86,28 @@ def main(argv: Optional[list] = None) -> int:
         output = plugin.tools.run_issue(plugin.linear.client_from_env, {"issue": args.issue})
     print(output)
     return 1 if "error" in json.loads(output) else 0
+
+
+def _triage_exit(plugin, payload_file: str) -> int:
+    """Print `handled` true only when the card was archived or left to its worker, so the caller skips the turn.
+
+    webhook-retry runs this from a cron script, outside the Hermes process, so it reaches Hermes through its CLI.
+    The reason stays out of the output, because an archive error can quote a command's output.
+    """
+    triage_exit = plugin.triage_exit
+    try:
+        with open(payload_file, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        verdict = triage_exit.handler(
+            triage_exit.configured_app_user_id,
+            plugin.linear.client_from_env,
+            triage_exit.listed_cards,
+            lambda: Path(os.environ["HERMES_HOME"]),
+        )(payload)
+    except Exception as failure:
+        verdict = triage_exit.Verdict("failed", type(failure).__name__)
+    print(json.dumps({"handled": verdict.handled, "action": verdict.action, "task_id": verdict.task_id}))
+    return 0
 
 
 def _external_url(value: str) -> dict:
