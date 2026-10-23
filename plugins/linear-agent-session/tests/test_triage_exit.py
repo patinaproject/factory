@@ -49,13 +49,22 @@ def issue_update(state_type="backlog", previous=None, **data):
     }
 
 
-def card(task_id, status, issue=ISSUE, title="PAT-1: Fix it"):
+BRANCH = "pat-1-fix-it"
+
+
+def card(task_id, status, issue=ISSUE, title="PAT-1: Fix it", branch=None):
     body = f"```text\ncard: triage\nlinear_issue_id: {issue}\nlinear_issue_identifier: PAT-1\n```\n"
-    return SimpleNamespace(id=task_id, status=status, title=title, body=body)
+    return SimpleNamespace(id=task_id, status=status, title=title, body=body, branch_name=branch)
 
 
-def live_issue(state_type="backlog", delegate=None):
-    return 200, {"data": {"issue": {"state": {"type": state_type}, "delegate": {"id": delegate} if delegate else None}}}
+def rewritten_card(task_id, status, branch):
+    """What Hermes leaves when `kanban specify` succeeded but the restoring `edit` did not."""
+    return SimpleNamespace(id=task_id, status=status, title="Specified task", body="a spec", branch_name=branch)
+
+
+def live_issue(state_type="backlog", delegate=None, branch=BRANCH):
+    issue = {"state": {"type": state_type}, "delegate": {"id": delegate} if delegate else None, "branchName": branch}
+    return 200, {"data": {"issue": issue}}
 
 
 class FakeContext:
@@ -207,9 +216,22 @@ class TriageExitTest(Harness):
                 self.assertIsNone(self.dispatch(issue_update(state_type)))
         self.assert_only_the_plain_exit_is_archived()
 
+    def test_a_default_board_card_on_the_issue_branch_reaches_triage(self):
+        self.boards["triage"] = [card("t_triage", "todo")]
+        for branch in (BRANCH, f"{BRANCH}-takeover"):
+            with self.subTest(branch):
+                self.boards[None] = [rewritten_card("t_work", "review", branch)]
+                self.linear.graphql_responses = [live_issue("canceled")]
+                self.assertIsNone(self.dispatch(issue_update("canceled")))
+                self.assertEqual(self.archived(), [])
+        self.boards[None] = [rewritten_card("t_other", "review", "pat-2-other-issue")]
+        self.linear.graphql_responses = [live_issue("canceled")]
+        self.assertEqual(self.dispatch(issue_update("canceled"))["action"], "skip")
+        self.assertEqual(self.archived(), [["--board", "triage", "t_triage"]])
+
     def test_a_card_found_by_title_on_the_default_board_also_reaches_triage(self):
         self.boards["triage"] = [card("t_triage", "todo")]
-        self.boards[None] = [SimpleNamespace(id="t_work", status="ready", title="PAT-1: Fix it", body="no id line")]
+        self.boards[None] = [SimpleNamespace(id="t_work", status="ready", title="PAT-1: Fix it", body="no id line", branch_name=None)]
 
         self.assertIsNone(self.dispatch(issue_update("completed")))
         self.assert_only_the_plain_exit_is_archived()
@@ -264,6 +286,23 @@ class TriageExitTest(Harness):
         self.assertIsNone(self.dispatch(issue_update("backlog"), route="github"), "another route")
         self.assert_only_the_plain_exit_is_archived()
 
+    def test_a_delegate_or_label_change_passes_without_the_pool(self):
+        submitted = []
+        original = plugin.concurrent.futures.ThreadPoolExecutor.submit
+
+        def spy(pool, fn, *args, **kwargs):
+            submitted.append(args)
+            return original(pool, fn, *args, **kwargs)
+
+        self.boards["triage"] = [card("t_triage", "todo")]
+        with mock.patch.object(plugin.concurrent.futures.ThreadPoolExecutor, "submit", spy):
+            for changed in ("delegateId", "labelIds"):
+                previous = {"stateId": "triage-state", changed: None}
+                self.assertIsNone(self.dispatch(issue_update("backlog", previous=previous)))
+            self.assertEqual(submitted, [])
+            self.dispatch(issue_update("backlog"))
+        self.assertEqual(len(submitted), 1, "control: a plain exit does enter the pool")
+
     def test_no_app_user_id_reaches_triage(self):
         self.boards["triage"] = [card("t_triage", "todo")]
         ctx = FakeContext({})
@@ -283,6 +322,8 @@ FAKE_HERMES = textwrap.dedent(
         assert args[2:] == ["plugins.entries.linear-agent-session.settings.app_user_id", "--json"], args
         print(json.dumps(os.environ["FAKE_APP_USER_ID"]))
         sys.exit(0)
+    with open(os.environ["HERMES_LOG"], "a") as log:
+        log.write(json.dumps(args) + "\\n")
     assert args[0] == "kanban" and args[-2:] == ["list", "--json"], args
     board = args[2] if args[1] == "--board" else "default"
     print(json.dumps(json.load(open(os.environ["FAKE_BOARDS"]))[board]))
@@ -314,6 +355,7 @@ class TriageExitCliTest(unittest.TestCase):
             "FAKE_APP_USER_ID": APP,
             "FAKE_BOARDS": str(self.boards),
             "ARCHIVE_LOG": str(self.archive_log),
+            "HERMES_LOG": str(self.home / "hermes.log"),
         }
         outside_hermes = {"hermes_cli": None, "hermes_constants": None, "agent": None, "agent.redact": None}
         for patcher in (
@@ -325,7 +367,7 @@ class TriageExitCliTest(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def seed(self, triage, default=()):
-        as_task = lambda c: {"id": c.id, "status": c.status, "title": c.title, "body": c.body}
+        as_task = lambda c: {"id": c.id, "status": c.status, "title": c.title, "body": c.body, "branch_name": c.branch_name}
         self.boards.write_text(json.dumps({"triage": [as_task(c) for c in triage], "default": [as_task(c) for c in default]}))
 
     def archived(self):
@@ -365,6 +407,19 @@ class TriageExitCliTest(unittest.TestCase):
         code, output = self.run_cli(issue_update("backlog"))
 
         self.assertEqual((code, output), (0, {"handled": False, "action": "failed", "task_id": "t_triage"}))
+
+    def test_a_replayed_delivery_that_cannot_be_a_plain_exit_reads_nothing(self):
+        self.seed([card("t_triage", "ready")])
+        not_issue = {**issue_update("backlog"), "type": "AgentSessionEvent"}
+        delegate_changed = issue_update("backlog", previous={"stateId": "triage-state", "delegateId": None})
+        label_changed = issue_update("backlog", previous={"stateId": "triage-state", "labelIds": []})
+        still_in_triage = issue_update("triage")
+        for name, payload in {"type": not_issue, "delegate": delegate_changed, "labels": label_changed, "state": still_in_triage}.items():
+            with self.subTest(name):
+                code, output = self.run_cli(payload)
+                self.assertEqual((code, output["handled"], output["action"]), (0, False, "pass"))
+        self.assertFalse((self.home / "hermes.log").exists())
+        self.assertEqual(self.archived(), [])
 
     def test_an_unreadable_board_is_not_handled(self):
         self.boards.write_text("{}")
