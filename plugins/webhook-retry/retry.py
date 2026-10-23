@@ -23,6 +23,8 @@ This is a replay of a webhook delivery that arrived at {delivered_at} and could 
 Treat {delivered_at} as the current time. Wherever a step compares with the current time, such as a freshness check, use {delivered_at} and not `date -u`.
 
 """
+# The check reads two Kanban boards and the issue, and archives with three `hermes kanban` calls.
+TRIAGE_EXIT_TIMEOUT_SECONDS = 180
 SECRET_PATTERNS = (
     re.compile(r"lin_(?:api|oauth)_\w+"),
     re.compile(r"gh[pousr]_\w+"),
@@ -128,6 +130,29 @@ class Run:
             due.append(key)
         return due
 
+    def triage_exit_handled(self, entry: dict[str, Any]) -> bool:
+        """Run linear-agent-session's triage-exit check. Anything but a clean `handled` answer replays the turn."""
+        cli = self.home / "plugins" / "linear-agent-session" / "cli.py"
+        if not isinstance(entry.get("payload"), dict) or not cli.is_file():
+            return False
+        with tempfile.TemporaryDirectory(prefix="webhook-retry-") as scratch:
+            payload = Path(scratch) / "payload.json"
+            payload.write_text(json.dumps(entry["payload"]))
+            os.chmod(payload, 0o600)
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(cli), "triage-exit", "--payload-file", str(payload)],
+                    capture_output=True, text=True, timeout=TRIAGE_EXIT_TIMEOUT_SECONDS,
+                    env={**os.environ, "HERMES_HOME": str(self.home)},
+                )
+            except subprocess.TimeoutExpired:
+                return False
+        try:
+            answer = json.loads(proc.stdout)
+        except ValueError:
+            return False
+        return proc.returncode == 0 and isinstance(answer, dict) and answer.get("handled") is True
+
     def replay(self, hermes: str, entry: dict[str, Any]) -> tuple[int, str, Optional[dict]]:
         toolsets = route_toolsets(hermes, self.home, entry["route"])
         if not toolsets:
@@ -162,6 +187,11 @@ class Run:
             if entry is None or not self.update(key, "retry_started"):
                 continue
             who = f"{entry['route']} {entry['delivery']}"
+            if self.triage_exit_handled(entry):
+                retried += 1
+                self.update(key, "retry_succeeded")
+                self.say(f"retried {who}: handled the Triage exit without a turn")
+                continue
             code, stderr, usage = self.replay(hermes, entry)
             retried += 1
             if code == 0:

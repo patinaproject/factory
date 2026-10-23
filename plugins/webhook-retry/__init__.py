@@ -65,6 +65,7 @@ def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> N
             "delivered_at": queue_store.stamp(delivered_at(event)),
             "summary": summarize(event),
             "prompt": event.text,
+            "payload": issue_payload(event),
             "attempts": 0,
             "last_error": "",
             "next_try_at": None,
@@ -145,6 +146,12 @@ def secret_is_unresolved(route: str) -> bool:
     route_config = (extra.get("routes") or {}).get(route) or {}
     secret = route_config.get("secret", extra.get("secret", ""))
     return isinstance(secret, str) and UNRESOLVED_REFERENCE.match(secret) is not None
+
+
+def issue_payload(event: Any) -> Optional[dict]:
+    """A Linear Issue update replays through linear-agent-session's triage-exit check, which reads the payload."""
+    payload = event.raw_message
+    return payload if isinstance(payload, dict) and payload.get("type") == "Issue" else None
 
 
 def delivered_at(event: Any):

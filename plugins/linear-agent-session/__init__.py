@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import re
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, linear, missing_secret, tools
+from . import blocks, linear, missing_secret, tools, triage_exit
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,11 @@ TOOLSET = "linear_agent_session"
 ACK_BODY = "Received. Triaging now."
 # Linear marks a session unresponsive after 10 s without an activity; leave room for token minting.
 ACK_TIMEOUT_SECONDS = 5.0
+# Hermes does not bound pre_gateway_dispatch, and the webhook already answered 202, so a bulk move can wait its
+# turn. This backstop only frees a delivery whose Kanban read or archive hangs; the delivery then goes to triage.
+TRIAGE_EXIT_TIMEOUT_SECONDS = 300.0
+# Each archive runs `hermes kanban` three times. Its own pool keeps a bulk move off the acknowledgements' pool.
+TRIAGE_EXIT_WORKERS = 4
 # Hermes leaves a secret like this verbatim when its variable is unset, and anyone can sign with that text.
 UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$")
 
@@ -93,7 +99,15 @@ def register(ctx: Any) -> None:
     ctx.register_hook(
         "pre_gateway_dispatch",
         make_dispatch_hook(
-            get_client, lambda: ctx.get_config("webhook_route", default="linear"), load_config_readonly
+            get_client,
+            lambda: ctx.get_config("webhook_route", default="linear"),
+            load_config_readonly,
+            triage_exit.handler(
+                lambda: ctx.get_config("app_user_id", default=""),
+                get_client,
+                triage_exit.kanban_cards,
+                triage_exit.gateway_home,
+            ),
         ),
     )
     ctx.register_hook("kanban_task_blocked", blocks.make_blocked_hook(get_client))
@@ -118,7 +132,10 @@ def make_dispatch_hook(
     get_client: Callable[[], linear.LinearClient],
     webhook_route: Callable[[], str],
     load_config: Callable[[], Mapping[str, Any]],
+    handle_triage_exit: Callable[[Any], triage_exit.Verdict],
 ) -> Callable[..., Any]:
+    pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-exit")
+
     async def guard_then_acknowledge(event: Any, **_: Any) -> Optional[dict[str, str]]:
         route = _delivery_route(event)
         if route is None:
@@ -132,7 +149,7 @@ def make_dispatch_hook(
             )
             return {"action": "skip", "reason": f"route {route} secret is the unresolved reference ${{{variable}}}"}
         await acknowledge_best_effort(event, route)
-        return None
+        return await archive_triage_exit(event, route)
 
     async def acknowledge_best_effort(event: Any, route: str) -> None:
         try:
@@ -151,6 +168,28 @@ def make_dispatch_hook(
             )
         except Exception:
             logger.exception("linear-agent-session: agent session acknowledgement failed")
+
+    async def archive_triage_exit(event: Any, route: str) -> Optional[dict[str, str]]:
+        """Skip the turn only when the card was archived or left to its worker. Any doubt or error sends it to triage."""
+        if route != webhook_route() or not triage_exit.is_status_change(event.raw_message):
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+            verdict = await asyncio.wait_for(
+                loop.run_in_executor(pool, handle_triage_exit, event.raw_message), timeout=TRIAGE_EXIT_TIMEOUT_SECONDS
+            )
+        except Exception as failure:
+            logger.warning(
+                "linear-agent-session: sent a Triage exit to triage: %s",
+                blocks.hermes_redact(f"{type(failure).__name__}: {failure}"),
+            )
+            return None
+        if verdict.action == "failed":
+            logger.warning("linear-agent-session: sent a Triage exit to triage: %s", blocks.hermes_redact(verdict.reason))
+        if not verdict.handled:
+            return None
+        logger.info("linear-agent-session: %s; no triage turn", verdict.reason)
+        return {"action": "skip", "reason": verdict.reason}
 
     return guard_then_acknowledge
 

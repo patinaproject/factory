@@ -94,6 +94,10 @@ ISSUE_DELEGATE_QUERY = """query IssueDelegate($id: String!) {
   issue(id: $id) { id identifier delegate { id } }
 }"""
 
+ISSUE_STATUS_QUERY = """query IssueStatus($id: String!) {
+  issue(id: $id) { state { type } delegate { id } }
+}"""
+
 ISSUE_LABELS_QUERY = """query IssueLabels($id: String!) {
   issue(id: $id) { labels { nodes { name } } }
 }"""
@@ -267,6 +271,10 @@ class LinearClient:
                 reverse=True,
             ),
         }
+
+    def issue_status(self, id_or_identifier: str) -> dict:
+        issue = self._graphql(ISSUE_STATUS_QUERY, {"id": id_or_identifier})["issue"]
+        return {"stateType": issue["state"]["type"], "delegate": issue["delegate"]["id"] if issue["delegate"] else None}
 
     def blockers(self, id_or_identifier: str) -> list:
         """The issues that block this one, each with `delegatedToSelf`: whether this app is its delegate."""

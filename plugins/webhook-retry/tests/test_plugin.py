@@ -96,6 +96,20 @@ class PluginTest(unittest.TestCase):
         seconds = (wait.replace(tzinfo=dt.timezone.utc) - dt.datetime.now(dt.timezone.utc)).total_seconds()
         self.assertAlmostEqual(seconds, 1800, delta=10)
 
+    def test_a_linear_issue_delivery_keeps_its_payload_for_the_replay_check(self):
+        ev = event()
+        self.dispatch(ev)
+        self.assertEqual(self.entries()[ev.source.chat_id]["payload"], PAYLOAD)
+
+    def test_other_deliveries_keep_no_payload(self):
+        github = {"action": "closed", "pull_request": {"number": 1}, "repository": {"full_name": "o/r"}}
+        session = {"type": "AgentSessionEvent", "action": "created"}
+        for name, payload in (("github", github), ("agent session", session), ("not a dict", "raw")):
+            with self.subTest(name):
+                ev = event(delivery=name, payload=payload)
+                self.dispatch(ev)
+                self.assertIsNone(self.entries()[ev.source.chat_id]["payload"])
+
     def test_a_turn_that_finishes_leaves_nothing_behind(self):
         ev = event()
         self.dispatch(ev)
