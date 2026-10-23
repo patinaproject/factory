@@ -6,6 +6,7 @@ import re
 import stat
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -200,7 +201,8 @@ class ReplyGuaranteeTest(unittest.TestCase):
 
 
 STUB = """#!{python}
-import json, os, stat, sys
+import json, os, stat, sys, time
+time.sleep(float(os.environ.get("REASK_SLEEP", "0")))
 args = sys.argv[1:]
 path = args[args.index("--query-file") + 1]
 record = {{
@@ -236,9 +238,19 @@ class SpawnReaskTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def finished_run(self):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.record.exists():
+                record = json.loads(self.record.read_text())
+                if not os.path.exists(os.path.dirname(record["path"])):
+                    return record
+            time.sleep(0.05)
+        self.fail("the re-ask did not finish and remove its query")
+
     def test_it_runs_a_fresh_hermes_turn_from_a_private_query_file(self):
-        plugin.replies.spawn_reask("the query", "terminal,linear").join(10)
-        record = json.loads(self.record.read_text())
+        plugin.replies.spawn_reask("the query", "terminal,linear")
+        record = self.finished_run()
         self.assertEqual(
             record["argv"],
             ["chat", "-Q", "--oneshot", "--query-file", record["path"], "-t", "terminal,linear",
@@ -248,24 +260,18 @@ class SpawnReaskTest(unittest.TestCase):
         self.assertEqual(record["parent"], "parent")
         self.assertEqual(record["query"], "the query")
         self.assertEqual(record["mode"], 0o600)
-        self.assertFalse(os.path.exists(record["path"]))
-        self.assertFalse(os.path.exists(os.path.dirname(record["path"])))
 
-    def test_it_runs_off_the_calling_thread(self):
-        thread = plugin.replies.spawn_reask("q", "terminal")
-        self.assertTrue(thread.daemon)
-        thread.join(10)
+    def test_it_returns_before_hermes_finishes(self):
+        with mock.patch.dict(os.environ, {"REASK_SLEEP": "2"}):
+            started = time.monotonic()
+            plugin.replies.spawn_reask("q", "terminal")
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(self.finished_run()["query"], "q")
 
-    def test_a_failing_run_is_logged_redacted_and_removes_its_file(self):
-        with mock.patch.dict(os.environ, {"REASK_EXIT": "3"}), mock.patch.dict(
-            sys.modules,
-            {"agent": types.ModuleType("agent"), "agent.redact": types.SimpleNamespace(
-                redact_sensitive_text=lambda text, force=False: fake_redact(text))},
-        ), self.assertLogs("linear_agent_session", "ERROR") as logs:
-            plugin.replies.spawn_reask("q", "terminal").join(10)
-        self.assertIn("3", "\n".join(logs.output))
-        path = json.loads(self.record.read_text())["path"]
-        self.assertFalse(os.path.exists(path))
+    def test_a_failing_run_still_removes_its_query(self):
+        with mock.patch.dict(os.environ, {"REASK_EXIT": "3"}):
+            plugin.replies.spawn_reask("q", "terminal")
+            self.assertEqual(self.finished_run()["query"], "q")
 
     def test_a_missing_hermes_is_logged_and_never_raises(self):
         with mock.patch.dict(os.environ, {"HERMES_BIN": "/nonexistent/hermes", "PATH": "/nonexistent"}), \
@@ -273,7 +279,7 @@ class SpawnReaskTest(unittest.TestCase):
                 mock.patch.dict(sys.modules, {"agent": types.ModuleType("agent"), "agent.redact": types.SimpleNamespace(
                     redact_sensitive_text=lambda text, force=False: fake_redact(text))}), \
                 self.assertLogs("linear_agent_session", "ERROR"):
-            plugin.replies.spawn_reask("q", "terminal").join(10)
+            plugin.replies.spawn_reask("q", "terminal")
         self.assertFalse(self.record.exists())
 
 

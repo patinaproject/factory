@@ -122,43 +122,37 @@ def hermes_home() -> str:
     return str(get_hermes_home())
 
 
-def _run_reask(query: str, toolsets: str, redact: Callable[[str], str]) -> None:
+# The outer shell exits at once and the inner one is reparented, so the re-ask outlives a parent that exits first,
+# such as a one-shot replay, leaves no zombie behind, and still removes its query once Hermes exits.
+DETACH = '("$@"; rm -rf "$0") </dev/null >/dev/null 2>&1 &'
+
+
+def spawn_reask(query: str, toolsets: str, redact: Callable[[str], str] = blocks.hermes_redact) -> None:
+    """Start a fresh agent turn on the query in its own detached Hermes process."""
     directory: Optional[str] = None
     try:
+        command = [find_hermes(), "chat", "-Q", "--oneshot", "--query-file"]
         directory = tempfile.mkdtemp(prefix="linear-reask-")
         path = os.path.join(directory, "query.md")
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as handle:
             handle.write(query)
-        command = [find_hermes(), "chat", "-Q", "--oneshot", "--query-file", path]
+        command.append(path)
         if toolsets:
             command += ["-t", toolsets]
         command += ["--source", REASK_SOURCE]
-        done = subprocess.run(
-            command,
+        subprocess.run(
+            ["/bin/sh", "-c", DETACH, directory, *command],
             env={**os.environ, "HERMES_HOME": hermes_home()},
             stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
         )
-        if done.returncode != 0:
-            logger.error(
-                "linear-agent-session: the reply re-ask exited %s: %s",
-                done.returncode,
-                redact((done.stderr or "")[-500:]),
-            )
     except Exception as failure:
         logger.error("linear-agent-session: the reply re-ask failed: %s", redact(f"{type(failure).__name__}: {failure}"))
-    finally:
         if directory:
             shutil.rmtree(directory, ignore_errors=True)
-
-
-def spawn_reask(query: str, toolsets: str, redact: Callable[[str], str] = blocks.hermes_redact) -> threading.Thread:
-    """Run a fresh agent turn on the query in its own Hermes process, off the calling thread."""
-    thread = threading.Thread(target=_run_reask, args=(query, toolsets, redact), daemon=True)
-    thread.start()
-    return thread
 
 
 def make_turn_hook(
