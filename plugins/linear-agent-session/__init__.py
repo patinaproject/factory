@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, linear, missing_secret, tools, triage_exit
+from . import blocks, linear, missing_secret, replies, tools, triage_exit
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +47,12 @@ def register(ctx: Any) -> None:
             client = linear.client_from_env()
         return client
 
+    posts = replies.PostRecord()
     ctx.register_tool(
         name="linear_agent_activity",
         toolset=TOOLSET,
         schema=tools.ACTIVITY_SCHEMA,
-        handler=lambda args, **_: tools.run_activity(get_client, args),
+        handler=replies.make_activity_handler(posts, lambda args: tools.run_activity(get_client, args)),
         description=tools.ACTIVITY_SCHEMA["description"],
     )
     ctx.register_tool(
@@ -111,6 +112,7 @@ def register(ctx: Any) -> None:
         ),
     )
     ctx.register_hook("kanban_task_blocked", blocks.make_blocked_hook(get_client))
+    ctx.register_hook("post_llm_call", replies.make_turn_hook(posts, get_client))
     ctx.register_hook(
         "transform_api_error_classification", missing_secret.make_classification_hook(load_config_readonly, os.environ)
     )
