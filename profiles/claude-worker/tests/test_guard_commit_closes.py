@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.machinery
 import json
 import os
 import random
@@ -54,13 +55,14 @@ class GuardCommitClosesTest(GitFixture):
         git(self.tree, "commit", "-q", "-m", message)
 
     def guard(self, command: str = "python3 /w/scripts/push-signed", body: str | None = None,
-              gh_down: bool = False, tool: str = "Bash", extra_env: dict | None = None) -> subprocess.CompletedProcess:
+              gh_down: bool = False, tool: str = "Bash", extra_env: dict | None = None,
+              cwd: str | None = None) -> subprocess.CompletedProcess:
         env = {"PATH": os.environ["PATH"], "GH_BIN": str(self.gh), **(extra_env or {})}
         if body is not None:
             env["FAKE_PR_BODY"] = body
         if gh_down:
             env["FAKE_GH_DOWN"] = "1"
-        event = {"tool_name": tool, "cwd": str(self.tree), "tool_input": {"command": command}}
+        event = {"tool_name": tool, "cwd": cwd or str(self.tree), "tool_input": {"command": command}}
         return subprocess.run(
             [sys.executable, str(SCRIPTS / "guard-commit-closes")],
             input=json.dumps(event), env=env, capture_output=True, text=True, timeout=60,
@@ -453,6 +455,64 @@ class GuardCommitClosesTest(GitFixture):
                 result = self.guard(command=command, body="Part of #177")
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("`Part of #177`", result.stderr)
+
+    def test_a_path_through_a_missing_directory_is_unknown_and_the_commit_is_allowed(self) -> None:
+        """`nope/..` fails in bash and zsh, so the commit lands where the shell already was, not in the tree."""
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (self.tree / "sub").mkdir()
+        message = "git commit -m 'fix: #177 first slice'"
+        for command in [
+            f"cd {self.tree}/nope/.. ; {message}",
+            f"cd {self.tree}/nope/../sub ; {message}",
+            f"cd {self.tree}/sub/nope/../.. && {message}",
+            f"git -C {self.tree}/nope/.. {message[4:]}",
+            f"git -C {self.tree}/sub/nope/../.. {message[4:]}",
+        ]:
+            with self.subTest(command):
+                result = self.guard(command=command, body="Part of #177", cwd=str(elsewhere))
+                self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_a_commit_chained_after_a_commit_that_cannot_run_does_not_run_either(self) -> None:
+        """`git -C <not a repository> commit && git commit ...` stops at the first commit in bash and zsh."""
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        first = f"git -C {plain} commit -m 'chore: tidy'"
+        closing = "git commit -m 'fix: #177 first slice'"
+        for command, code in [(f"{first} && {closing}", 0), (f"{first} && git add . && {closing}", 0),
+                              (f"{first} ; {closing}", 2), (f"{first}\n{closing}", 2),
+                              (f"{first} && git status ; {closing}", 2)]:
+            with self.subTest(command):
+                result = self.guard(command=command, body="Part of #177")
+                self.assertEqual(result.returncode, code, result.stderr)
+
+    def test_a_path_through_existing_directories_is_still_judged(self) -> None:
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (self.tree / "sub").mkdir()
+        message = "git commit -m 'fix: #177 first slice'"
+        for command in [
+            f"cd {self.tree}/sub/.. && {message}",
+            f"git -C {self.tree}/sub/.. {message[4:]}",
+        ]:
+            with self.subTest(command):
+                result = self.guard(command=command, body="Part of #177", cwd=str(elsewhere))
+                self.assertEqual(result.returncode, 2)
+
+    def test_a_long_run_of_separators_is_checked_for_a_publish_in_well_under_a_second(self) -> None:
+        loader = importlib.machinery.SourceFileLoader("guard_commit_closes", str(SCRIPTS / "guard-commit-closes"))
+        sys.path.insert(0, str(SCRIPTS))
+        try:
+            guard = loader.load_module()
+        finally:
+            sys.path.remove(str(SCRIPTS))
+        for unit in ["\n", "&&", ";", "&", "| ", "( ", "\n  ", "&&\n", "x/"]:
+            command = unit * 20000
+            started = time.monotonic()
+            self.assertFalse(guard.publishes(command))
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.1, f"{unit!r} x 20000 took {elapsed:.2f} s")
+        self.assertTrue(guard.publishes("&&\n" * 20000 + "python3 push-signed"))
 
     def test_one_time_limit_covers_every_commit_in_a_call(self) -> None:
         """On 5eb95b9 each commit got its own limit, so four slow commits took four times as long."""
