@@ -28,6 +28,8 @@ LINEAR_EVENTS = ["AgentSessionEvent", "Issue"]
 OWNED_REFS_FILE = "owned-refs.json"
 TRIAGE_REFS_FILE = "triage-refs.json"
 READY_LABEL = "ready-for-agent"
+# Matches the role's label in any case, with any punctuation between its words, like claude-session's role_key.
+READY_LABEL_PATTERN = '(?i)"name": *"' + '[^a-z0-9"]*'.join(READY_LABEL.split("-")) + '"'
 FAILED_CONCLUSIONS = ["failure", "timed_out", "action_required", "startup_failure"]
 # A bot whose pull request comments repeat a result the route already keeps as a failed check_run or workflow_run, or
 # only announce a deploy. Triage records each of them on the card and changes nothing.
@@ -79,7 +81,7 @@ def linear_filters(app_user_id: str) -> list:
                     "all": [
                         {"field": "updatedFrom.labelIds", "exists": True},
                         {"field": "data.delegateId", "equals": app_user_id},
-                        {"field": "data.labels", "regex": f'"name": *"{READY_LABEL}"'},
+                        {"field": "data.labels", "regex": READY_LABEL_PATTERN},
                         {"not": owned("data.id")},
                     ]
                 },

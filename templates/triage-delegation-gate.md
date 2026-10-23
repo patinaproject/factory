@@ -3,7 +3,9 @@
 An issue gets an implementation card only after triage marks it
 `ready-for-agent`. `claude-session` refuses to start a card whose issue lacks
 the label, so never create one. Read the issue's `labels` from
-`linear_issue`, then take the first rule that matches:
+`linear_issue`. A label is a role's label whatever its case or punctuation, so
+`Ready for human` is `ready-for-human` and `Ready for agent` is
+`ready-for-agent`. Take the first rule that matches:
 
 1. The labels include `ready-for-human`. Post one `response` on this agent
    session saying that triage marked the issue for a person, so the factory
