@@ -29,9 +29,10 @@ Kanban cards. Three restarts in an hour is the budget. A missing broker token
 alone restarts nothing, because the gateway is working and a restart does not
 fix a broker user's token: the heartbeat stays quiet instead. A gateway that is
 not answering is launchd's to start, so the script restarts nothing then. It
-also restarts nothing while the lock file exists, `<root>/gateway.lock` unless
-`--lock` names another, because a person or an agent is deploying and holds the
-gateway.
+also restarts nothing while the lock file exists, `<root>/factory-gateway.lock`
+unless `--lock` names another, because a person or an agent is deploying and
+holds the gateway. Hermes' own `<root>/gateway.lock` is never that file: Hermes
+holds it for as long as the gateway runs.
 
 Only a healthy gateway earns a ping to the heartbeat URL, so a monitor that
 alerts when pings stop reports a spent budget, a held lock, a missing broker
@@ -67,7 +68,7 @@ RESTARTS_PER_HOUR = 3
 RESTART_WAIT_SECONDS = 1800
 STATE_FILE = "gateway-watch.json"
 HEARTBEAT_FILE = "gateway-heartbeat-url"
-LOCK_FILE = "gateway.lock"
+LOCK_FILE = "factory-gateway.lock"
 UPLOAD_SOCKET = "factory-uploads.sock"
 BROKER_CONFIG = Path("/Library/Application Support/factory-broker/broker.json")
 PROBE_SECONDS = 10
@@ -294,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes"))
     parser.add_argument("--port", type=int, default=8644, help="the webhook port (default 8644)")
-    parser.add_argument("--lock", type=Path, help="restart nothing while this file exists (default <root>/gateway.lock)")
+    parser.add_argument("--lock", type=Path, help="restart nothing while this file exists (default <root>/factory-gateway.lock)")
     parser.add_argument("--broker-config", type=Path, default=BROKER_CONFIG, help=argparse.SUPPRESS)
     parser.add_argument("--print-plist", action="store_true", help="print the launchd job that runs this script")
     args = parser.parse_args(argv)

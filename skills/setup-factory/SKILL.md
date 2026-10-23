@@ -1294,13 +1294,17 @@ token, a down gateway, and a down machine through a path that uses none of the
 helper's secrets. It needs no Infisical: it works for a factory whose secrets
 come from `.env`.
 
-**The gateway lock.** The watcher restarts nothing while `<root>/gateway.lock`
-exists. A person or an agent that deploys and restarts the gateway creates the
-file first, writing its purpose and the time, and removes it when the restart
-is done. A lock that outlives its deploy keeps the heartbeat quiet, which
-alerts a person. A machine whose deploys already hold another file passes
-`--lock <that file>` to `--print-plist`, and the plist then carries it. The
-real path stays in the private record.
+**The gateway lock.** The watcher restarts nothing while
+`<root>/factory-gateway.lock` exists. Hermes writes its own `<root>/gateway.lock`
+every time the gateway starts and keeps it while the gateway runs, so never
+create, edit, or delete that file, and never name it as the deploy lock. A
+person or an agent that deploys and restarts the gateway creates
+`<root>/factory-gateway.lock` first, writing its purpose and the time, and
+removes it when the restart is done. A lock that outlives its deploy keeps the
+heartbeat quiet, which alerts a person. A machine whose deploys already hold
+another file passes `--lock <that file>` to `--print-plist`, and the plist then
+carries it. The real path stays in the private record. `check-install` reports
+a watcher plist whose `--lock` is Hermes' own `gateway.lock`.
 
 > **HUMAN CHECKPOINT.** Ask the operator to create a dead-man's-switch monitor
 > that expects a ping every 5 minutes, with a grace period of 15 minutes,

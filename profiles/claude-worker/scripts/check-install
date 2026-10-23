@@ -260,6 +260,7 @@ SERVICES = (
     Service(12, "gateway watch", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist", scheduled=True),
 )
 # watch-gateway's own files in the root home. WATCH_INTERVAL and RESTARTS_PER_HOUR equal the script's.
+HERMES_GATEWAY_LOCK = "gateway.lock"
 WATCH_STATE = "gateway-watch.json"
 HEARTBEAT_FILE = "gateway-heartbeat-url"
 WATCH_INTERVAL = 5 * 60
@@ -752,6 +753,23 @@ def launchd_state(launchctl: str, domains: tuple, label: str) -> str | None:
     return None
 
 
+def hermes_lock_drifts(service: Service, plist: dict) -> list:
+    """Reads only --root and --lock from the arguments, because ProgramArguments can hold a token."""
+    args = [str(a) for a in plist.get("ProgramArguments", [])]
+
+    def value(flag: str) -> str | None:
+        return args[args.index(flag) + 1] if flag in args[:-1] else None
+
+    root, lock = value("--root"), value("--lock")
+    if root is None or lock is None or Path(lock) != Path(root) / HERMES_GATEWAY_LOCK:
+        return []
+    return [Drift(
+        "service", service.name,
+        f"its --lock is Hermes' own {lock}, which the running gateway always holds; "
+        f"name a factory-owned file or drop --lock (part {service.part})",
+    )]
+
+
 def check_services(launchd_root: Path, launchctl: str) -> list:
     drifts = []
     for service in SERVICES:
@@ -770,6 +788,7 @@ def check_services(launchd_root: Path, launchctl: str) -> list:
         # The plist's ProgramArguments can hold a token, so only Label and RunAtLoad are used.
         if plist.get("RunAtLoad") is not True:
             drifts.append(Drift("service", service.name, f"does not run at load (part {service.part})"))
+        drifts.extend(hermes_lock_drifts(service, plist))
         state = launchd_state(launchctl, service.domains(), plist["Label"])
         if state is None:
             drifts.append(Drift("service", service.name, f"is not loaded in launchd (part {service.part})"))
