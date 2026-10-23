@@ -103,6 +103,12 @@ ISSUE_LABELS_QUERY = """query IssueLabels($id: String!) {
   issue(id: $id) { labels { nodes { name } } }
 }"""
 
+# The team's labels and the workspace's own (no team) are the labels an issue of the team can carry.
+ISSUE_ROLE_LABELS_QUERY = """query IssueRoleLabels($id: String!) {
+  issue(id: $id) { team { labels(first: 250) { nodes { name isGroup retiredAt archivedAt } } } }
+  issueLabels(first: 250, filter: { team: { null: true } }) { nodes { name isGroup retiredAt archivedAt } }
+}"""
+
 ISSUE_DOCUMENTS_QUERY = """query IssueDocuments($id: String!) {
   viewer { id }
   issue(id: $id) { identifier documents(first: 100) { nodes { id title creator { id } } } }
@@ -144,6 +150,9 @@ ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdat
 
 CLOSED_STATE_TYPES = ("completed", "canceled")
 READY_STATE_NAME = "Todo"
+
+# The triage roles are the factory's own vocabulary; a workspace names each label as it likes.
+TRIAGE_ROLES = ("needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix")
 
 UrlOpen = Callable[..., Any]
 
@@ -300,6 +309,21 @@ class LinearClient:
     def issue_labels(self, id_or_identifier: str) -> list:
         return _label_names(self._graphql(ISSUE_LABELS_QUERY, {"id": id_or_identifier})["issue"])
 
+    def role_labels(self, id_or_identifier: str) -> dict:
+        """Each triage role's label as Linear names it for this issue, so text for people never names the role."""
+        data = self._graphql(ISSUE_ROLE_LABELS_QUERY, {"id": id_or_identifier})
+        if data["issue"] is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        available = [
+            label["name"]
+            for label in data["issue"]["team"]["labels"]["nodes"] + data["issueLabels"]["nodes"]
+            if not (label["isGroup"] or label["retiredAt"] or label["archivedAt"])
+        ]
+        by_key: dict = {}
+        for name in available:
+            by_key.setdefault(role_key(name), name)
+        return {role: by_key[role_key(role)] for role in TRIAGE_ROLES if role_key(role) in by_key}
+
     def issue_documents(self, id_or_identifier: str) -> dict:
         data = self._graphql(ISSUE_DOCUMENTS_QUERY, {"id": id_or_identifier})
         viewer = data["viewer"]["id"]
@@ -361,7 +385,7 @@ class LinearClient:
         current = {n["id"]: n for n in issue["labels"]["nodes"]}
         labels = dict(current)
         for name in remove_labels:
-            for label_id in [i for i, n in labels.items() if _name_key(n["name"]) == _name_key(name)]:
+            for label_id in [i for i, n in labels.items() if role_key(n["name"]) == role_key(name)]:
                 del labels[label_id]
         for name in add_labels:
             label = _by_name(known.values(), name, "label")
@@ -613,12 +637,13 @@ def _blocking_issues(relations: dict) -> list:
     ]
 
 
-def _name_key(name: str) -> str:
+def role_key(name: str) -> str:
+    """A role name or a label name without its case and punctuation, so `Won't fix` is `wontfix`."""
     return re.sub(r"[^a-z0-9]", "", name.casefold())
 
 
 def _by_name(nodes, name: str, kind: str) -> dict:
-    matches = [n for n in nodes if _name_key(n["name"]) == _name_key(name)]
+    matches = [n for n in nodes if role_key(n["name"]) == role_key(name)]
     exact = [n for n in matches if n["name"] == name]
     if len(exact) == 1 or len(matches) == 1:
         return (exact or matches)[0]

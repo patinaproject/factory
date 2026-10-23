@@ -293,7 +293,12 @@ class ClaudeSessionTest(GitFixture):
         state = json.loads((self.hermes_home / "linear-fake.json").read_text())
         (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, "labels": list(labels)}))
 
-    def test_an_implementation_card_without_ready_for_agent_is_refused_before_claude_starts(self) -> None:
+    def set_linear_state(self, **fields) -> None:
+        state = json.loads((self.hermes_home / "linear-fake.json").read_text())
+        (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, **fields}))
+
+    def test_an_implementation_card_without_ready_for_agent_is_refused_naming_the_live_label(self) -> None:
+        self.set_linear_state(team_labels=["Ready for agent", "Needs info"], workspace_labels=["Bug"])
         for labels in ((), ("bug", "needs-triage"), ("ready-for-human",), ("Ready for human",), ("Needs info",)):
             with self.subTest(labels=labels):
                 self.set_issue_labels(*labels)
@@ -301,11 +306,23 @@ class ClaudeSessionTest(GitFixture):
 
                 self.assertEqual(status, 2)
                 self.assertEqual(report, {"error": (
-                    "Linear issue ABC-123 does not carry ready-for-agent, so its implementation card does not start; "
-                    "it starts once the issue passes the readiness check"
+                    "Linear issue ABC-123 does not carry `Ready for agent`, so its implementation card does not "
+                    "start; it starts once the issue passes the readiness check"
                 )})
                 self.assertFalse(self.log.exists())
                 self.assertEqual(git(self.worktree, "rev-parse", "--abbrev-ref", "HEAD"), "abc-123-fix")
+
+    def test_the_refusal_names_the_role_when_linear_has_no_label_for_it(self) -> None:
+        self.set_issue_labels("bug")
+        self.set_linear_state(team_labels=["Needs info"], workspace_labels=[])
+
+        status, report = self.run_session(env={"HERMES_KANBAN_BOARD": "default"})
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": (
+            "Linear issue ABC-123 does not carry a label for the `ready-for-agent` role (Linear has none), "
+            "so its implementation card does not start; it starts once the issue passes the readiness check"
+        )})
 
     def test_an_implementation_card_with_ready_for_agent_starts(self) -> None:
         self.set_issue_labels("bug", "ready-for-agent")

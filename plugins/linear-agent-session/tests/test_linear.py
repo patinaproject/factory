@@ -554,7 +554,7 @@ class IssueTest(unittest.TestCase):
     }
 
     def test_issue_fields(self):
-        fake = FakeLinear([(200, self.RESPONSE)])
+        fake = FakeLinear([(200, self.RESPONSE), role_labels_response(team=["Ready for agent", "Bug"])])
         output = json.loads(tools.run_issue(lambda: make_client(fake), {"issue": "ABC-123"}))
         self.assertEqual(
             output,
@@ -571,6 +571,7 @@ class IssueTest(unittest.TestCase):
                 "stateType": "unstarted",
                 "delegate": "app-user-1",
                 "labels": ["bug", "ready-for-agent"],
+                "role_labels": {"ready-for-agent": "Ready for agent"},
                 "attachments": [
                     {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
                 ],
@@ -587,6 +588,12 @@ class IssueTest(unittest.TestCase):
             },
         )
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-123"})
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "2f9a6f0e-0000-4000-8000-000000000001"})
+
+    def test_an_issue_read_survives_a_failed_role_label_read(self):
+        fake = FakeLinear([(200, self.RESPONSE), (400, {"errors": [{"message": "Cannot query field"}]})])
+        output = json.loads(tools.run_issue(lambda: make_client(fake), {"issue": "ABC-123"}))
+        self.assertEqual((output["identifier"], output["role_labels"]), ("ABC-123", {}))
 
     def test_card_priority_inverts_the_linear_scale(self):
         expected = {0: ("No priority", 0), 1: ("Urgent", 4), 2: ("High", 3), 3: ("Medium", 2), 4: ("Low", 1)}
@@ -638,6 +645,64 @@ class IssueLabelsTest(unittest.TestCase):
         fake = FakeLinear([(200, {"data": {"issue": {"labels": labels}}})])
         self.assertEqual(make_client(fake).issue_labels("issue-uuid"), ["bug", "ready-for-agent"])
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "issue-uuid"})
+
+
+def role_labels_response(team=(), workspace=()):
+    def nodes(names):
+        return [{"name": n, "isGroup": False, "retiredAt": None, "archivedAt": None} for n in names]
+
+    return (200, {"data": {"issue": {"team": {"labels": {"nodes": nodes(team)}}},
+                           "issueLabels": {"nodes": nodes(workspace)}}})
+
+
+class RoleLabelsTest(unittest.TestCase):
+    def test_names_each_role_by_the_live_label_of_the_issue(self):
+        def label(name, **fields):
+            return {"name": name, "isGroup": False, "retiredAt": None, "archivedAt": None, **fields}
+
+        fake = FakeLinear([(200, {"data": {
+            "issue": {"team": {"labels": {"nodes": [
+                label("Triage", isGroup=True),
+                label("Needs info"),
+                label("Ready for agent"),
+                label("Ready for human", archivedAt="2026-01-01T00:00:00.000Z"),
+                label("Bug"),
+            ]}}},
+            "issueLabels": {"nodes": [
+                label("Needs triage"),
+                label("Won't fix"),
+                label("Ready for human", retiredAt="2026-01-01T00:00:00.000Z"),
+                label("Ready-for-human"),
+                label("wontfix"),
+            ]},
+        }})])
+
+        roles = make_client(fake).role_labels("issue-uuid")
+
+        self.assertEqual(roles, {
+            "needs-triage": "Needs triage",
+            "needs-info": "Needs info",
+            "ready-for-agent": "Ready for agent",
+            "ready-for-human": "Ready-for-human",
+            "wontfix": "Won't fix",
+        })
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "issue-uuid"})
+
+    def test_a_group_never_names_a_role_and_a_role_without_a_label_is_omitted(self):
+        group = {"name": "Needs info", "isGroup": True, "retiredAt": None, "archivedAt": None}
+        fake = FakeLinear([(200, {"data": {"issue": {"team": {"labels": {"nodes": [group]}}},
+                                           "issueLabels": {"nodes": []}}})])
+
+        self.assertEqual(make_client(fake).role_labels("issue-uuid"), {})
+
+    def test_an_issue_the_app_cannot_read_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"issue": None, "issueLabels": {"nodes": []}}})])
+        with self.assertRaisesRegex(linear.LinearError, "no issue issue-uuid"):
+            make_client(fake).role_labels("issue-uuid")
+
+    def test_role_key_ignores_case_and_punctuation(self):
+        self.assertEqual([linear.role_key(n) for n in ("Won't fix", "wontfix", "Ready for agent", "READY_FOR_AGENT")],
+                         ["wontfix", "wontfix", "readyforagent", "readyforagent"])
 
 
 def issue_states(state_type, states):
