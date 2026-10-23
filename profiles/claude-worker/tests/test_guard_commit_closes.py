@@ -10,6 +10,9 @@ import time
 from tests.support import SCRIPTS, GitFixture, git, with_interpreter
 
 REPO = "example-org/example-repo"
+# Git refuses to commit without an identity, and a CI runner has none configured.
+IDENTITY = {"GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com"}
 
 FAKE_GH = """#!/usr/bin/env python3
 import json, os, sys, time
@@ -67,7 +70,7 @@ class GuardCommitClosesTest(GitFixture):
 
         def shell(command: str) -> subprocess.CompletedProcess:
             return subprocess.run(["sh", "-c", command], cwd=self.tree, capture_output=True, text=True,
-                                  env={**os.environ, "GIT_EDITOR": "true"}, timeout=60)
+                                  env={**os.environ, **IDENTITY, "GIT_EDITOR": "true"}, timeout=60)
 
         stopped = shell(rebase)
         self.assertEqual(stopped.returncode, 0, stopped.stderr)
@@ -162,7 +165,8 @@ class GuardCommitClosesTest(GitFixture):
             git(other, "commit", "-q", "-am", "feat: #60 upstream readme (#61)")
             git(other, "push", "-q", "origin", "HEAD:refs/heads/main")
         git(self.tree, "fetch", "-q", "origin")
-        merged = subprocess.run(["git", "merge", "-q", "--no-edit", "origin/main"], cwd=self.tree, capture_output=True)
+        merged = subprocess.run(["git", "merge", "-q", "--no-edit", "origin/main"], cwd=self.tree, capture_output=True,
+                                env={**os.environ, **IDENTITY})
         self.assertEqual(merged.returncode != 0, conflict)
         if conflict:
             (self.tree / "README.md").write_text("resolved by hand\n")
