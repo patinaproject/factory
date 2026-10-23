@@ -6,6 +6,7 @@ appended to $HERMES_HOME/linear-fake.log as one JSON line, and every token
 request issues minted-<n>, which Linear then accepts unless reject_all is set.
 An issue's labels come from its `labels` list, `["ready-for-agent"]` when unset, and its delegate
 from `delegate`, none when unset; `hidden` makes Linear return no issue.
+The labels the issue can carry come from `team_labels` and `workspace_labels`, lists of names, none when unset.
 Its Documents come from its `documents` list of {id, title, creator}, and a
 DocumentUpdate rewrites the title there, `documents_error` fails the read, and
 `documents_timeout` times it out.
@@ -51,7 +52,13 @@ def _fake_urlopen(request, timeout=None):
     elif request.get_header("Authorization", "").removeprefix("Bearer ") in state["accepted"]:
         body = json.loads(request.data.decode())
         query = body["query"]
-        if "IssueLabels" in query:
+        if "IssueRoleLabels" in query:
+            def nodes(names):
+                return [{"name": n, "isGroup": False, "retiredAt": None, "archivedAt": None} for n in names]
+            team = {"labels": {"nodes": nodes(state.get("team_labels", []))}}
+            response = _Response(200, {"data": {"issue": {"team": team},
+                                                "issueLabels": {"nodes": nodes(state.get("workspace_labels", []))}}})
+        elif "IssueLabels" in query:
             labels = [{"name": name} for name in state.get("labels", ["ready-for-agent"])]
             response = _Response(200, {"data": {"issue": {"labels": {"nodes": labels}}}})
         elif "IssueDelegate" in query:
