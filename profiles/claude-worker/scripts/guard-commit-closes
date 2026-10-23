@@ -8,9 +8,12 @@ request for good. A commit closes an issue when its type is `fix` (`fix: #N`) or
 The hook checks twice. A `git commit` whose message the command spells out (`-m`, `-F <file>`, or a
 heredoc) is refused when it would close an issue the open pull request's body does not, so the bad commit
 is never made. A `push-signed` call is refused when any commit not yet on the remote branch does, naming a
-local rewrite that works under Claude Code's `GIT_EDITOR=true`. A commit whose message is not in the
-command, such as one written in an editor, is left to the push-time check. With no open pull request there is no body to
-compare, and the check in the pull request workflow decides.
+local rewrite that works under Claude Code's `GIT_EDITOR=true`.
+
+The commit-time check refuses only when it knows both the message and an open pull request body that leaves
+out an issue the message closes. Everything else allows the commit, whether a lookup failed, timed out, or
+found no remote or pull request, or the message or directory is unknown. The push-time check and the pull
+request workflow decide those. The push-time check still refuses when it cannot read the branch.
 
 Exit 0 allows the call. Exit 2 refuses it and Claude Code shows stderr to the model.
 """
@@ -36,9 +39,10 @@ DEFAULT_SECONDS = "30"
 # VAR=value prefixes, an optional python interpreter with its options, then the script, bare or quoted.
 # `grep push-signed` and `cat .../push-signed` do not run it.
 WRAPPERS = (
-    r"(?:(?:\S*/)?(?:env|time|nice|command|exec)\s+|timeout\s+(?:-[sk]\s+\S+\s+|-\S+\s+)*[0-9.]+[smhd]?\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"(?:(?:\S*/)?(?:env|time|command|exec)\s+|(?:\S*/)?nice\s+(?:-n\s*\S+\s+|-\S*\s+)*|timeout\s+(?:-[sk]\s+\S+\s+|-\S+\s+)*[0-9.]+[smhd]?\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
 )
-COMMAND_START = r"(?:^|[;&|(]|\n)\s*"
+# Shell keywords that put a command first: `if push-signed; then`, `! push-signed`, `then push-signed`.
+COMMAND_START = r"(?:^|[;&|(]|\n)\s*(?:(?:if|then|else|elif|while|until|do|!|\{)\s+)*"
 PUBLISH = re.compile(
     COMMAND_START + WRAPPERS + r"(?:\S*/)?"
     r"(?:\S*python[0-9.]*\s+(?:-[XW]\s+\S+\s+|-[A-Za-z]+\s+)*)?[\"']?\S*push-signed[\"']?(?:\s|$|[;&|)])"
@@ -139,8 +143,8 @@ def might_close(message: str) -> bool:
 # A commit message written in the command
 
 
-def segments(command: str) -> list[list[str]]:
-    """The command's simple commands as word lists, or [] when the shell text does not tokenize."""
+def segments(command: str) -> list[list[str] | str]:
+    """The command's simple commands as word lists, with "(" and ")" between them, or [] when the shell text does not tokenize."""
     lexer = shlex.shlex(command, posix=True, punctuation_chars="".join(SEPARATORS))
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
@@ -148,9 +152,10 @@ def segments(command: str) -> list[list[str]]:
         words = list(lexer)
     except ValueError:
         return []
-    found: list[list[str]] = [[]]
+    found: list[list[str] | str] = [[]]
     for word in words:
         if set(word) <= SEPARATORS:
+            found.extend(char for char in word if char in "()")
             found.append([])
         else:
             found[-1].append(word)
@@ -201,7 +206,7 @@ def commit_options(args: list[str]) -> list[tuple[str, str]] | None:
 
 def change_directory(cwd: str | None, target: str) -> str | None:
     """`target` under `cwd`, or None when the shell would expand or resolve it differently (`~`, `$VAR`, a glob, `cd -`)."""
-    if cwd is None or target == "-" or target.startswith("~") or re.search(r"[$`*?\[]", target):
+    if cwd is None or target.startswith(("-", "~")) or re.search(r"[$`*?\[]", target):
         return None
     return os.path.join(cwd, target)
 
@@ -241,30 +246,43 @@ def commit_message(words: list[str], cwd: str | None) -> tuple[str, str] | None:
     return cwd, "\n\n".join(messages)
 
 
+def commit_problems(words: list[str], cwd: str | None) -> list[str]:
+    """The refusals for one simple command: only when it spells out a closing message and the branch's open pull request body leaves an issue it closes out."""
+    found = commit_message(words, cwd)
+    if found is None or not might_close(found[1]):
+        return []
+    where, message = found
+    clock = Clock()
+    branch = run(["git", "branch", "--show-current"], where, clock).strip()
+    pull = pull_request(branch, where, clock) if branch else None
+    if pull is None:
+        return []
+    repo, in_body = pull
+    return [COMMIT_REFUSAL.format(ref=ref) for ref in unclosed(message, repo, in_body)]
+
+
 def commit_refusals(command: str, cwd: str | None) -> list[str]:
+    """Refuse a commit only when its message and the open pull request's body are both known.
+
+    This is the one place that decides it. Every other outcome allows the commit: a failed or slow lookup
+    (git, gh, no remote, no pull request), an unreadable or unparsable message, a directory that does not
+    resolve. The push-time check and the pull request check are the backstop, so a lookup that fails
+    here must never stop a commit, and no lookup added later can.
+    """
     problems = []
-    for words in segments(command):
-        if words[0] == "cd" and len(words) == 2:
-            cwd = change_directory(cwd, words[1])
-            continue
-        found = commit_message(words, cwd)
-        if found is None or not might_close(found[1]):
-            continue
-        where, message = found
-        if not os.path.isdir(where):
-            continue
-        clock = Clock()
-        try:
-            branch = run(["git", "branch", "--show-current"], where, clock).strip()
-        except TimedOut:
-            raise
-        except Unreadable:
-            continue
-        pull = pull_request(branch, where, clock) if branch else None
-        if pull is None:
-            continue
-        repo, in_body = pull
-        problems += [COMMIT_REFUSAL.format(ref=ref) for ref in unclosed(message, repo, in_body)]
+    saved: list[str | None] = []
+    for item in segments(command):
+        if item == "(":
+            saved.append(cwd)
+        elif item == ")":
+            cwd = saved.pop() if saved else cwd
+        elif item[0] in ("cd", "pushd", "popd"):
+            cwd = change_directory(cwd, item[1]) if item[0] != "popd" and len(item) == 2 else None
+        else:
+            try:
+                problems += commit_problems(item, cwd)
+            except Exception:
+                continue
     return problems
 
 
@@ -314,8 +332,8 @@ def decide(event: dict) -> tuple[int, str]:
         return 0, ""
     command = (event.get("tool_input") or {}).get("command") or ""
     cwd = event.get("cwd") or os.getcwd()
+    problems = commit_refusals(command, cwd)
     try:
-        problems = commit_refusals(command, cwd)
         if not problems and publishes(command):
             problems = publish_refusals(cwd)
     except (Unreadable, json.JSONDecodeError, KeyError) as failure:

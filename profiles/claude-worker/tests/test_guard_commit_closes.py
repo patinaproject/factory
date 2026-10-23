@@ -22,6 +22,13 @@ if os.environ.get("FAKE_GH_SLOW"):
 if os.environ.get("FAKE_GH_DOWN"):
     sys.stderr.write("gh: connection refused\\n")
     sys.exit(1)
+call = " ".join(args[:2])
+if os.environ.get("FAKE_GH_FAIL") == call:
+    sys.stderr.write("gh: no GitHub remote\\n")
+    sys.exit(1)
+if os.environ.get("FAKE_GH_GARBAGE") == call:
+    print("not json")
+    sys.exit(0)
 if args[:2] == ["repo", "view"]:
     print(json.dumps({"nameWithOwner": "example-org/example-repo"}))
 elif args[:2] == ["pr", "list"]:
@@ -324,6 +331,10 @@ class GuardCommitClosesTest(GitFixture):
             "cd /nonexistent/zzz && git commit -m 'fix: #177 first slice'",
             "git -C /nonexistent/zzz commit -m 'fix: #177 first slice'",
             "cd ../nonexistent && git commit -m 'fix: #177 first slice'",
+            "cd -P /nonexistent && git commit -m 'fix: #177 first slice'",
+            "cd && git commit -m 'fix: #177 first slice'",
+            "pushd /nonexistent/zzz >/dev/null && git commit -m 'fix: #177 first slice'",
+            "pushd /nonexistent/zzz >/dev/null; popd >/dev/null; git commit -m 'fix: #177 first slice'",
             f"cd {self.tree} && cd \"$W\" && git commit -m 'fix: #177 first slice'",
         ]:
             for body in (None, "Part of #177"):
@@ -384,3 +395,78 @@ class GuardCommitClosesTest(GitFixture):
             "bash script.sh 'python3 push-signed'",
         ]:
             self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 0, command)
+
+    def test_a_directory_change_inside_parentheses_ends_with_them(self) -> None:
+        command = "(cd /nonexistent/zzz && true); git commit -m 'fix: #177 first slice'"
+        nested = "(cd /nonexistent/zzz && (cd / ) && true) && git commit -m 'fix: #177 first slice'"
+        inside = "(cd /nonexistent/zzz && git commit -m 'fix: #177 first slice')"
+
+        self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 2)
+        self.assertEqual(self.guard(command=nested, body="Part of #177").returncode, 2)
+        self.assertEqual(self.guard(command=inside, body="Part of #177").returncode, 0)
+
+    def test_nice_if_and_negation_before_push_signed_still_publish(self) -> None:
+        self.commit("fix: #177 first slice")
+        for command in [
+            "nice python3 /w/scripts/push-signed",
+            "nice -n 5 python3 /w/scripts/push-signed",
+            "nice -5 /w/scripts/push-signed",
+            "if true; then python3 /w/scripts/push-signed; fi",
+            "if python3 /w/scripts/push-signed; then echo ok; fi",
+            "! python3 /w/scripts/push-signed",
+            "false || ! python3 /w/scripts/push-signed",
+            "while true; do python3 /w/scripts/push-signed; break; done",
+        ]:
+            self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 2, command)
+        for command in [
+            "if grep push-signed README.md; then echo ok; fi",
+            "nice -n 5 grep push-signed README.md",
+            "! grep push-signed README.md",
+            "echo if python3 /w/scripts/push-signed",
+        ]:
+            self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 0, command)
+
+    def shim(self, name: str, body: str) -> dict[str, str]:
+        directory = self.tmp / f"shim-{name}"
+        directory.mkdir()
+        (directory / "git").write_text(f"#!/bin/sh\n{body}\n")
+        os.chmod(directory / "git", 0o755)
+        return {"PATH": f"{directory}:{os.environ['PATH']}"}
+
+    def test_every_commit_time_lookup_failure_allows_the_commit(self) -> None:
+        """The commit-time check refuses only when it knows the message and the open pull request's body. The push-time check and CI are the backstop."""
+        (self.tree / "bad.txt").write_bytes(b"fix: #177 \xff\xfe first slice\n")
+        message = "git commit -m 'fix: #177 first slice'"
+        failures = {
+            "git fails": (message, self.shim("fails", "exit 1")),
+            "git hangs": (message, {**self.shim("hangs", "sleep 30"), "GUARD_COMMIT_CLOSES_SECONDS": "2"}),
+            "gh repo view fails": (message, {"FAKE_GH_FAIL": "repo view"}),
+            "gh pr list fails": (message, {"FAKE_GH_FAIL": "pr list"}),
+            "gh is down": (message, {"FAKE_GH_DOWN": "1"}),
+            "gh is not installed": (message, {"GH_BIN": "/nonexistent/gh"}),
+            "gh repo view prints no json": (message, {"FAKE_GH_GARBAGE": "repo view"}),
+            "gh pr list prints no json": (message, {"FAKE_GH_GARBAGE": "pr list"}),
+            "gh is slow": (message, {"FAKE_GH_SLOW": "30", "GUARD_COMMIT_CLOSES_SECONDS": "2"}),
+            "the time limit is not a number": (message, {"GUARD_COMMIT_CLOSES_SECONDS": "soon"}),
+            "the message file is not text": ("git commit -F bad.txt", {}),
+            "the message file is missing": ("git commit -F missing.txt", {}),
+            "the command does not parse": ("git commit -m 'fix: #177 first slice", {}),
+        }
+        for name, (command, env) in failures.items():
+            with self.subTest(name):
+                result = self.guard(command=command, body="Part of #177", extra_env=env)
+                self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_a_commit_with_no_remote_is_allowed(self) -> None:
+        git(self.tree, "remote", "remove", "origin")
+
+        result = self.guard(command="git commit -m 'fix: #177 first slice'", extra_env={"FAKE_GH_FAIL": "repo view"})
+
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_a_lookup_failure_in_one_commit_does_not_hide_a_refusal_in_another(self) -> None:
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        command = f"git -C {elsewhere} commit -m 'fix: #177 a' ; git commit -m 'fix: #177 b'"
+
+        self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 2)
