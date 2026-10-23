@@ -312,6 +312,9 @@ After each run, read the first line of the result line's `result`:
   `agentSessions` entry that `linear_issue` returns. When a person delegated
   the issue after the card was created, that is the delegation's session, so
   the response reaches the delegator.
+  Any text you write to people names a triage label as Linear shows it, from
+  the `role_labels` that `linear_issue` returns, never by its role such as
+  `ready-for-agent`.
 - Anything else: resume Claude once with a message file asking it to end
   with one of those first lines. When the next result still has none, follow
   step 6.

@@ -175,7 +175,8 @@ TRIAGE_RULE = (
     "titles other Documents with one. For a public repository synced to Linear, the Documents stay on the Linear issue and "
     "the roles are written as GitHub labels, because GitHub is canonical.\n\n"
     "Apply only category and state roles. A role's label may differ in case and punctuation, such as `Ready for agent` "
-    "for `ready-for-agent`. Never change the issue's status, assignee, or delegate, with one "
+    "for `ready-for-agent`. In Triage notes, the Agent brief, and every message to people, name a label as Linear shows "
+    "it (read it with the Linear MCP, or from `role_labels` of `linear_issue`), never by its role. Never change the issue's status, assignee, or delegate, with one "
     "exception: when the issue is delegated to the factory's agent app and passes as `ready-for-agent`, move "
     "it to `Todo`. Recommend `wontfix` in `Triage notes` and never apply it.\n\n"
     "When the playbook waits for people, update `Triage notes` under \"still needed\", then end your turn. Make "
@@ -759,11 +760,6 @@ def triage_mentions(client, issue_id: str, identifier: str) -> str:
             "only the reporter can answer, such as steps to reproduce or their environment.")
 
 
-def role_key(name: str) -> str:
-    """A role name or a label name without its case and punctuation, so `Won't fix` is `wontfix`."""
-    return re.sub(r"[^a-z0-9]", "", name.casefold())
-
-
 def require_ready(client, issue_id: str, identifier: str) -> None:
     import linear
 
@@ -771,11 +767,17 @@ def require_ready(client, issue_id: str, identifier: str) -> None:
         labels = client.issue_labels(issue_id)
     except linear.LinearError as error:
         raise Refusal(f"reading the labels of Linear issue {identifier} failed: {error}") from None
-    if role_key(READY_LABEL) not in map(role_key, labels):
-        raise Refusal(
-            f"Linear issue {identifier} does not carry {READY_LABEL}, so its implementation card does not start; "
-            "it starts once the issue passes the readiness check"
-        )
+    if linear.role_key(READY_LABEL) in map(linear.role_key, labels):
+        return
+    try:
+        live = client.role_labels(issue_id).get(READY_LABEL)
+    except linear.LinearError as error:
+        raise Refusal(f"reading the labels of Linear issue {identifier} failed: {error}") from None
+    wanted = f"`{live}`" if live else f"a label for the `{READY_LABEL}` role (Linear has none)"
+    raise Refusal(
+        f"Linear issue {identifier} does not carry {wanted}, so its implementation card does not start; "
+        "it starts once the issue passes the readiness check"
+    )
 
 
 def triage_activity(client, issue_id: str, result: str | None) -> str | None:
@@ -784,12 +786,13 @@ def triage_activity(client, issue_id: str, result: str | None) -> str | None:
     first = (result or "").partition("\n")[0]
     if not first.startswith(TRIAGE_OUTCOME):
         return None
-    role = role_key(first.removeprefix(TRIAGE_OUTCOME))
-    if role not in map(role_key, TRIAGE_ROLES):
-        return None
-    if role != role_key(READY_LABEL):
-        return "response"
     import linear
+
+    role = linear.role_key(first.removeprefix(TRIAGE_OUTCOME))
+    if role not in map(linear.role_key, TRIAGE_ROLES):
+        return None
+    if role != linear.role_key(READY_LABEL):
+        return "response"
 
     try:
         return "thought" if client.delegated_to_self(issue_id) else "response"
