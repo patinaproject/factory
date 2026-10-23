@@ -23,8 +23,8 @@ This is a replay of a webhook delivery that arrived at {delivered_at} and could 
 Treat {delivered_at} as the current time. Wherever a step compares with the current time, such as a freshness check, use {delivered_at} and not `date -u`.
 
 """
-# The check reads two Kanban boards and the issue, and archives with three `hermes kanban` calls.
-TRIAGE_EXIT_TIMEOUT_SECONDS = 180
+# Above the check's own worst case: three `hermes` reads of up to 60 s each, the live issue read, and a 120 s archive.
+TRIAGE_EXIT_TIMEOUT_SECONDS = 360
 SECRET_PATTERNS = (
     re.compile(r"lin_(?:api|oauth)_\w+"),
     re.compile(r"gh[pousr]_\w+"),
