@@ -10,10 +10,11 @@ heredoc) is refused when it would close an issue the open pull request's body do
 is never made. A `push-signed` call is refused when any commit not yet on the remote branch does, naming a
 local rewrite that works under Claude Code's `GIT_EDITOR=true`.
 
-The commit-time check refuses only when it knows both the message and an open pull request body that leaves
-out an issue the message closes. Everything else allows the commit, whether a lookup failed, timed out, or
-found no remote or pull request, or the message or directory is unknown. The push-time check and the pull
-request workflow decide those. The push-time check still refuses when it cannot read the branch.
+The commit-time check refuses only when the whole command fits the small grammar written out above `Word` and an
+open pull request body leaves out an issue the message closes. Everything else allows the commit: a command
+outside the grammar, a lookup that failed, timed out, or found no remote or pull request. The push-time
+check and the pull request workflow decide those. The push-time check still refuses when it cannot read
+the branch. One deadline covers the whole call.
 
 Exit 0 allows the call. Exit 2 refuses it and Claude Code shows stderr to the model.
 """
@@ -24,11 +25,11 @@ import json
 import math
 import os
 import re
-import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import card_branch
 import check_title_closes
@@ -51,8 +52,6 @@ PUBLISH = re.compile(
 SHELL_C = re.compile(
     COMMAND_START + WRAPPERS + r"(?:\S*/)?(?:ba|z|da|k)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+([\"'])(.*)\1", re.DOTALL
 )
-SEPARATORS = set(";&|()<>\n")
-HEREDOC = re.compile(r"\$\(cat\s*<<(-?)\s*(['\"]?)(\w+)\2\n(.*?)\n\t*\3\s*\)", re.DOTALL)
 RECORD_END = "\x1e"
 FIELD = "\x1f"
 PUBLISH_REFUSAL = (
@@ -141,148 +140,252 @@ def might_close(message: str) -> bool:
 
 
 # A commit message written in the command
+#
+# The commit-time check reads the command with a small grammar it fully understands, and judges a commit only
+# when the whole command fits it. Anything else is unknown and allows the commit, because reading it wrong
+# would refuse a commit that never runs, or judge it in the wrong repository. The grammar:
+#
+#   command  = segment, joined by `&&`, `;`, or newlines
+#   segment  = `cd <path>` | [NAME=value ...] `git` [`-C <path>`] (`commit` | `add` | `status`) <arguments>
+#   message  = `-m`/`--message` <words>, one `-F`/`--file` <file>, or `-m "$(cat <<'EOF' ... EOF)"`
+#
+# A word is unquoted safe characters or quoted text with no expansion. NAME is never `GIT_*`, a path never
+# holds `~`, `$`, or a glob, and a `cd` whose logical and physical targets differ is unknown.
 
 
-def segments(command: str) -> list[list[str] | str]:
-    """The command's simple commands as word lists, with "(" and ")" between them, or [] when the shell text does not tokenize."""
-    lexer = shlex.shlex(command, posix=True, punctuation_chars="".join(SEPARATORS))
-    lexer.whitespace = " \t\r"
-    lexer.whitespace_split = True
-    try:
-        words = list(lexer)
-    except ValueError:
-        return []
-    found: list[list[str] | str] = [[]]
-    for word in words:
-        if set(word) <= SEPARATORS:
-            found.extend(char for char in word if char in "()")
-            found.append([])
-        else:
-            found[-1].append(word)
-    return [segment for segment in found if segment]
+class Word(NamedTuple):
+    text: str
+    raw: str
+    heredoc: bool = False
 
 
-def literal(value: str) -> str | None:
-    """A message argument's text, reading a `$(cat <<EOF ...)` heredoc; None when the shell would expand it."""
-    heredoc = HEREDOC.fullmatch(value)
-    if heredoc:
-        dash, quote, _, body = heredoc.groups()
-        if dash:
-            body = "\n".join(line.lstrip("\t") for line in body.split("\n"))
-        return None if not quote and re.search(r"[$`\\]", body) else body
-    return None if re.search(r"[$`]", value) else value
+SEPARATOR = object()
+UNQUOTED = re.compile(r"[A-Za-z0-9_./=:,+@%^-]+")
+HEREDOC_START = re.compile(r"\"\$\(cat <<(?:'(\w+)'|\"(\w+)\")\n")
+HEREDOC_END = re.compile(r"\s*\)\"")
+WORD_END = " \t\n;&"
+ASSIGNMENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=")
+COMMIT_FLAGS = {"--all", "--quiet", "--signoff", "--no-verify", "--amend", "--allow-empty", "--verbose"}
+COMMIT_SHORT_FLAGS = set("aqsnv")
+PATH_EXPANSION = re.compile(r"[~$`*?\[\]{}\\\x00]")
 
 
-def commit_options(args: list[str]) -> list[tuple[str, str]] | None:
-    """`git commit` arguments as (option, value) pairs for the options that set its message, or None when it takes the message from elsewhere."""
-    found = []
-    while args:
-        arg, args = args[0], args[1:]
-        if arg == "--":
+def heredoc(command: str, start: int) -> tuple[str, int] | None:
+    """The body and end of a `"$(cat <<'EOF' ... EOF)"` word starting at `start`, else None."""
+    opened = HEREDOC_START.match(command, start)
+    if not opened:
+        return None
+    delimiter = opened[1] or opened[2]
+    line = opened.end()
+    while True:
+        newline = command.find("\n", line)
+        if newline < 0:
+            return None
+        if command[line:newline] == delimiter:
             break
-        if arg.startswith("--"):
-            name, equals, value = arg.partition("=")
-            option = {"--message": "m", "--file": "F", "--template": "t"}.get(name)
-            if name.startswith(("--reuse-message", "--reedit-message", "--fixup", "--squash")):
+        line = newline + 1
+    closed = HEREDOC_END.match(command, newline)
+    return (command[opened.end():line], closed.end()) if closed else None
+
+
+def tokens(command: str) -> list | None:
+    """The command's words and separators, or None when it holds anything outside the grammar."""
+    found: list = []
+    at = 0
+    while at < len(command):
+        char = command[at]
+        if char in " \t":
+            at += 1
+        elif char in "\n;":
+            if command.startswith(";;", at):
                 return None
-        elif arg.startswith("-") and len(arg) > 1:
-            hit = next((i for i, flag in enumerate(arg[1:], 1) if flag in "mFtCc"), None)
-            if hit is None:
-                continue
-            option, value, equals = arg[hit], arg[hit + 1:], arg[hit + 1:]
-            if option in "Cc":
-                return None
+            found.append(SEPARATOR if char == ";" else "\n")
+            at += 1
+        elif command.startswith("&&", at):
+            found.append("&&")
+            at += 2
+        elif char == "&":
+            return None
         else:
-            continue
-        if option is None:
-            continue
-        if not equals:
-            if not args:
-                return None
-            value, args = args[0], args[1:]
-        found.append((option, value))
+            spelled = heredoc(command, at)
+            if spelled:
+                body, end = spelled
+                if end < len(command) and command[end] not in WORD_END:
+                    return None
+                found.append(Word(body, command[at:end], heredoc=True))
+                at = end
+                continue
+            text, start = "", at
+            while at < len(command) and command[at] not in WORD_END:
+                quote = command[at]
+                if quote in "'\"":
+                    close = command.find(quote, at + 1)
+                    inner = command[at + 1:close]
+                    if close < 0 or "\x00" in inner or (quote == '"' and re.search(r"[$`\\]", inner)):
+                        return None
+                    text, at = text + inner, close + 1
+                    continue
+                plain = UNQUOTED.match(command, at)
+                if not plain:
+                    return None
+                text, at = text + plain[0], plain.end()
+            found.append(Word(text, command[start:at]))
     return found
 
 
-def change_directory(cwd: str | None, target: str) -> str | None:
-    """`target` under `cwd`, or None when the shell would expand or resolve it differently (`~`, `$VAR`, a glob, `cd -`)."""
-    if cwd is None or target.startswith(("-", "~")) or re.search(r"[$`*?\[]", target):
+def simple_commands(command: str) -> list[list[Word]] | None:
+    """The command's segments as word lists, or None when a separator is out of place."""
+    segments: list[list[Word]] = []
+    current: list[Word] = []
+    dangling = False
+    found = tokens(command)
+    if found is None:
         return None
-    return os.path.join(cwd, target)
+    for token in found:
+        if isinstance(token, Word):
+            current.append(token)
+            continue
+        if not current:
+            if token != "\n":
+                return None
+            continue
+        segments.append(current)
+        current, dangling = [], token == "&&"
+    if current:
+        segments.append(current)
+    elif dangling:
+        return None
+    return segments
 
 
-def commit_message(words: list[str], cwd: str | None) -> tuple[str, str] | None:
-    """The directory and message of a `git commit` that spells out its message, else None.
+def plain_path(word: Word) -> str | None:
+    if word.heredoc or not word.text or word.text.startswith("-") or PATH_EXPANSION.search(word.text):
+        return None
+    return word.text
 
-    None also means the commit's directory is not known, so the push-time check judges that commit.
-    """
-    while words and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+
+def change_directory(cwd: str, words: list[Word]) -> str | None:
+    """Where `cd <path>` lands, or None when the shell could land elsewhere: CDPATH, or a `..` past a symlink."""
+    target = plain_path(words[1]) if len(words) == 2 else None
+    if target is None or (os.environ.get("CDPATH") and not os.path.isabs(target)):
+        return None
+    logical = os.path.normpath(os.path.join(cwd, target))
+    physical = os.path.realpath(os.path.join(cwd, target))
+    if not os.path.isdir(physical) or os.path.realpath(logical) != physical:
+        return None
+    return logical
+
+
+def git_call(words: list[Word], cwd: str) -> tuple[str, list[Word], str] | None:
+    """The subcommand, its arguments, and its directory for `[NAME=value ...] git [-C <path>] <subcommand>`."""
+    while words and not words[0].heredoc and ASSIGNMENT.match(words[0].raw):
+        if ASSIGNMENT.match(words[0].raw)[1].startswith("GIT_"):
+            return None
         words = words[1:]
-    if not words or Path(words[0]).name != "git":
+    if len(words) < 2 or words[0].heredoc or words[0].text != "git":
         return None
     rest = words[1:]
-    while rest and rest[0].startswith("-"):
-        option, rest = rest[0], rest[1:]
-        if option in ("-C", "-c") and rest:
-            cwd = change_directory(cwd, rest[0]) if option == "-C" else cwd
-            rest = rest[1:]
-    if not rest or rest[0] != "commit" or cwd is None:
+    if rest[0].text == "-C" and not rest[0].heredoc:
+        target = plain_path(rest[1]) if len(rest) > 2 else None
+        if target is None:
+            return None
+        cwd = os.path.realpath(os.path.join(cwd, target))
+        if not os.path.isdir(cwd):
+            return None
+        rest = rest[2:]
+    if rest[0].heredoc:
         return None
-    options = commit_options(rest[1:])
-    messages = []
-    for option, value in options or []:
-        text = literal(value)
-        if option == "F":
-            if value == "-" or text is None:
+    return rest[0].text, rest[1:], cwd
+
+
+def commit_message(args: list[Word], cwd: str) -> str | None:
+    """The message a `git commit` with these arguments records, or None when it is not spelled out in the grammar."""
+    messages: list[Word] = []
+    files: list[Word] = []
+    args = list(args)
+    while args:
+        word = args.pop(0)
+        if word.heredoc:
+            return None
+        if word.text == "--":
+            break
+        if word.text.startswith("--"):
+            name, equals, value = word.text.partition("=")
+            if name not in ("--message", "--file"):
+                if word.text not in COMMIT_FLAGS:
+                    return None
+                continue
+            if not equals and not args:
                 return None
-            try:
-                text = Path(cwd, text).read_text()
-            except OSError:
-                return None
-        if option != "t":
-            messages.append(text)
-    if not messages or None in messages:
+            (messages if name == "--message" else files).append(Word(value, value) if equals else args.pop(0))
+        elif word.text.startswith("-") and len(word.text) > 1:
+            for at, flag in enumerate(word.text[1:], 2):
+                if flag in "mF":
+                    if at == len(word.text) and not args:
+                        return None
+                    value = word.text[at:]
+                    (messages if flag == "m" else files).append(Word(value, value) if value else args.pop(0))
+                    break
+                if flag not in COMMIT_SHORT_FLAGS:
+                    return None
+    if any(word.heredoc for word in args + files) or (messages and files) or len(files) > 1:
         return None
-    return cwd, "\n\n".join(messages)
+    if files:
+        path = plain_path(files[0])
+        if path is None:
+            return None
+        try:
+            return Path(cwd, path).read_text()
+        except (OSError, UnicodeDecodeError):
+            return None
+    return "\n\n".join(word.text for word in messages) if messages else None
 
 
-def commit_problems(words: list[str], cwd: str | None) -> list[str]:
-    """The refusals for one simple command: only when it spells out a closing message and the branch's open pull request body leaves an issue it closes out."""
-    found = commit_message(words, cwd)
-    if found is None or not might_close(found[1]):
-        return []
-    where, message = found
-    clock = Clock()
-    branch = run(["git", "branch", "--show-current"], where, clock).strip()
-    pull = pull_request(branch, where, clock) if branch else None
-    if pull is None:
-        return []
-    repo, in_body = pull
-    return [COMMIT_REFUSAL.format(ref=ref) for ref in unclosed(message, repo, in_body)]
+def spelled_commits(command: str, cwd: str) -> list[tuple[str, str]] | None:
+    """Each commit the command makes, as (directory, message), when the whole command fits the grammar, else None."""
+    segments = simple_commands(command)
+    if segments is None:
+        return None
+    commits = []
+    for words in segments:
+        if words[0].text == "cd" and not words[0].heredoc:
+            cwd = change_directory(cwd, words)
+            if cwd is None:
+                return None
+            continue
+        call = git_call(words, cwd)
+        if call is None:
+            return None
+        subcommand, args, directory = call
+        if subcommand in ("add", "status") and not any(word.heredoc for word in args):
+            continue
+        message = commit_message(args, directory) if subcommand == "commit" else None
+        if message is None:
+            return None
+        commits.append((directory, message))
+    return commits
 
 
-def commit_refusals(command: str, cwd: str | None) -> list[str]:
-    """Refuse a commit only when its message and the open pull request's body are both known.
+def commit_refusals(command: str, cwd: str, clock: Clock) -> list[str]:
+    """Refuse a commit only when the command fits the grammar and the open pull request body leaves out an issue its message closes.
 
-    This is the one place that decides it. Every other outcome allows the commit: a failed or slow lookup
-    (git, gh, no remote, no pull request), an unreadable or unparsable message, a directory that does not
-    resolve. The push-time check and the pull request check are the backstop, so a lookup that fails
+    This is the one place that decides it. Every other outcome allows the commit: a command outside the
+    grammar, a failed or slow lookup (git, gh, no remote, no pull request), or a directory that is not a
+    repository. The push-time check and the pull request check are the backstop, so a lookup that fails
     here must never stop a commit, and no lookup added later can.
     """
     problems = []
-    saved: list[str | None] = []
-    for item in segments(command):
-        if item == "(":
-            saved.append(cwd)
-        elif item == ")":
-            cwd = saved.pop() if saved else cwd
-        elif item[0] in ("cd", "pushd", "popd"):
-            cwd = change_directory(cwd, item[1]) if item[0] != "popd" and len(item) == 2 else None
-        else:
-            try:
-                problems += commit_problems(item, cwd)
-            except Exception:
-                continue
+    for where, message in spelled_commits(command, cwd) or []:
+        if not might_close(message):
+            continue
+        try:
+            branch = run(["git", "branch", "--show-current"], where, clock).strip()
+            pull = pull_request(branch, where, clock) if branch else None
+        except Exception:
+            continue
+        if pull is not None:
+            repo, in_body = pull
+            problems += [COMMIT_REFUSAL.format(ref=ref) for ref in unclosed(message, repo, in_body)]
     return problems
 
 
@@ -311,8 +414,7 @@ def unpublished(cwd: str, clock: Clock) -> tuple[str, str, list[tuple[str, str]]
     return branch, base, commits, any(len(parents.split()) > 1 for _, parents, _ in records)
 
 
-def publish_refusals(cwd: str) -> list[str]:
-    clock = Clock()
+def publish_refusals(cwd: str, clock: Clock) -> list[str]:
     branch, base, commits, merged = unpublished(cwd, clock)
     if not commits:
         return []
@@ -332,10 +434,17 @@ def decide(event: dict) -> tuple[int, str]:
         return 0, ""
     command = (event.get("tool_input") or {}).get("command") or ""
     cwd = event.get("cwd") or os.getcwd()
-    problems = commit_refusals(command, cwd)
+    try:
+        # One deadline for the whole call, however many commits it judges.
+        clock = Clock()
+    except Unreadable as failure:
+        clock, bad_budget = None, failure
+    problems = commit_refusals(command, cwd, clock) if clock else []
     try:
         if not problems and publishes(command):
-            problems = publish_refusals(cwd)
+            if clock is None:
+                raise bad_budget
+            problems = publish_refusals(cwd, clock)
     except (Unreadable, json.JSONDecodeError, KeyError) as failure:
         return 2, f"Refused: the commit closing check could not read the branch or its pull request ({failure}). Run the command again."
     return (2, "\n".join(problems)) if problems else (0, "")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -291,7 +292,7 @@ class GuardCommitClosesTest(GitFixture):
             "git commit -am 'fix: #177 first slice'",
             "git commit --message='fix: #177 first slice'",
             "git commit -m 'feat: #177 first slice' -m 'Closes #177'",
-            f"cd {self.tree} && git add . && GIT_X=1 git commit -q -m 'fix(guard): #177 first slice'",
+            f"cd {self.tree} && git add . && X=1 git commit -q -m 'fix(guard): #177 first slice'",
             heredoc,
         ]:
             result = self.guard(command=command, body="Part of #177\n\nCloses #247")
@@ -396,14 +397,116 @@ class GuardCommitClosesTest(GitFixture):
         ]:
             self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 0, command)
 
-    def test_a_directory_change_inside_parentheses_ends_with_them(self) -> None:
-        command = "(cd /nonexistent/zzz && true); git commit -m 'fix: #177 first slice'"
-        nested = "(cd /nonexistent/zzz && (cd / ) && true) && git commit -m 'fix: #177 first slice'"
-        inside = "(cd /nonexistent/zzz && git commit -m 'fix: #177 first slice')"
+    def test_a_command_outside_the_commit_grammar_is_allowed(self) -> None:
+        """Each of these failed on 5eb95b9, which read text it did not understand as commands."""
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        closing = "git commit -m 'fix: #177 first slice'"
+        for command in [
+            f"cat > notes.txt <<'EOF'\n{closing}\nEOF",
+            f"python3 - <<'EOF'\n{closing}\nEOF",
+            f"{{ cd {elsewhere}; {closing}; }}",
+            f"(cd {elsewhere} && {closing})",
+            f"(cd {elsewhere}); {closing}",
+            f"builtin cd {elsewhere} && {closing}",
+            f"command cd {elsewhere} && {closing}",
+            f"GIT_DIR={elsewhere}/.git {closing}",
+            f"git --git-dir={elsewhere}/.git commit -m 'fix: #177 first slice'",
+            f"git --work-tree={elsewhere} commit -m 'fix: #177 first slice'",
+            "git commit --dry-run -m 'fix: #177 first slice'",
+            f"{closing} | cat",
+            f"{closing} || true",
+            f"{closing} &",
+            f"{closing} > /dev/null",
+            f"echo $(pwd) && {closing}",
+            f"echo `pwd` && {closing}",
+            "git commit -m \"fix: #177 $(date)\"",
+        ]:
+            with self.subTest(command):
+                result = self.guard(command=command, body="Part of #177")
+                self.assertEqual((result.returncode, result.stderr), (0, ""))
 
-        self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 2)
-        self.assertEqual(self.guard(command=nested, body="Part of #177").returncode, 2)
-        self.assertEqual(self.guard(command=inside, body="Part of #177").returncode, 0)
+    def test_a_cd_whose_logical_and_physical_targets_differ_is_allowed(self) -> None:
+        outer = self.tmp / "outer"
+        outer.mkdir()
+        (self.tree / "sub").mkdir()
+        (outer / "link").symlink_to(self.tree / "sub")
+        command = "cd link/.. && git commit -m 'fix: #177 first slice'"
+
+        event = {"tool_name": "Bash", "cwd": str(outer), "tool_input": {"command": command}}
+        result = subprocess.run([sys.executable, str(SCRIPTS / "guard-commit-closes")], input=json.dumps(event),
+                                env={"PATH": os.environ["PATH"], "GH_BIN": str(self.gh), "FAKE_PR_BODY": "Part of #177"},
+                                capture_output=True, text=True, timeout=60)
+
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_a_cd_into_the_worktree_then_a_closing_commit_is_refused(self) -> None:
+        (self.tree / "sub").mkdir()
+        for command in [
+            f"cd {self.tree} && git commit -m 'fix: #177 first slice'",
+            f"cd {self.tree}\ngit add -A\ngit commit -am 'fix: #177 first slice'",
+            "cd sub && git commit -m 'fix: #177 first slice'",
+            f"git -C {self.tree}/sub commit --amend -m 'fix: #177 first slice'",
+            "git commit -m \"$(cat <<'EOF'\nfeat: #177 slice\n\nCloses #177\nEOF\n)\"",
+        ]:
+            with self.subTest(command):
+                result = self.guard(command=command, body="Part of #177")
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("`Part of #177`", result.stderr)
+
+    def test_one_time_limit_covers_every_commit_in_a_call(self) -> None:
+        """On 5eb95b9 each commit got its own limit, so four slow commits took four times as long."""
+        command = " && ".join(["git commit -m 'fix: #177 slice'"] * 4)
+        started = time.monotonic()
+
+        result = self.guard(command=command, body="Part of #177",
+                            extra_env={"FAKE_GH_SLOW": "1.5", "GUARD_COMMIT_CLOSES_SECONDS": "2"})
+
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_the_guard_refuses_a_generated_command_only_when_it_fits_the_grammar(self) -> None:
+        """Mix commands the grammar knows with risky ones, seeded, and refuse exactly the known ones that commit."""
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (self.tree / "sub").mkdir()
+        commit = "git commit -m 'fix: #177 x'"
+        known = [
+            (f"cd {self.tree}", False), (f"cd {self.tree}/sub", False), ("cd .", False), ("git add .", False),
+            ("git status", False), (commit, True), ("X=1 git commit -qm \"fix: #177 x\"", True),
+            (f"git -C {self.tree} commit -am 'fix: #177 x'", True),
+            ("git commit -m \"$(cat <<'EOF'\nfix: #177 x\nEOF\n)\"", True),
+            ("git commit -m 'feat: #177 x' -m 'Closes #177'", True),
+        ]
+        risky = [
+            f"{{ cd {elsewhere}; }}", f"( cd {elsewhere} )", f"builtin cd {elsewhere}", f"command cd {elsewhere}",
+            "cd ~", "cd -", "cd \"$HOME\"", "cd -P .", f"pushd {elsewhere}",
+            f"GIT_DIR={elsewhere} {commit}", f"git --git-dir={elsewhere} commit -m 'fix: #177 x'",
+            f"git --work-tree={elsewhere} commit -m 'fix: #177 x'", "git commit --dry-run -m 'fix: #177 x'",
+            "git commit --amend --no-edit", "git -C \"$D\" commit -m 'fix: #177 x'", "git commit -C HEAD",
+            f"cat > f <<'EOF'\n{commit}\nEOF", f"python3 - <<'EOF'\n{commit}\nEOF", f"echo $({commit})",
+            f"echo `{commit}`", "true", "echo 'fix: #177 x'", "git commit -m 'fix: #177 x", "git commit -m \"$M\"",
+            "git log *", "git push",
+        ]
+        separators = [("&&", True), (";", True), ("\n", True), ("||", False), ("|", False), ("&", False)]
+        rng = random.Random(291)
+        for _ in range(120):
+            pieces, fits, commits = [], True, False
+            for index in range(rng.randint(1, 4)):
+                if index:
+                    separator, ok = rng.choice(separators)
+                    pieces.append(f" {separator} " if separator != "\n" else "\n")
+                    fits &= ok
+                if rng.random() < 0.6:
+                    text, closes = rng.choice(known)
+                    commits |= closes
+                else:
+                    text = rng.choice(risky)
+                    fits = False
+                pieces.append(text)
+            command = "".join(pieces)
+            with self.subTest(command):
+                self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 2 if fits and commits else 0)
 
     def test_nice_if_and_negation_before_push_signed_still_publish(self) -> None:
         self.commit("fix: #177 first slice")
