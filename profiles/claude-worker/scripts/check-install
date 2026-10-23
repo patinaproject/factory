@@ -758,10 +758,19 @@ def hermes_lock_drifts(service: Service, plist: dict) -> list:
     args = [str(a) for a in plist.get("ProgramArguments", [])]
 
     def value(flag: str) -> str | None:
-        return args[args.index(flag) + 1] if flag in args[:-1] else None
+        for i, arg in enumerate(args):
+            if arg.startswith(flag + "="):
+                return arg[len(flag) + 1:]
+            if arg == flag and i + 1 < len(args):
+                return args[i + 1]
+        return None
 
-    root, lock = value("--root"), value("--lock")
-    if root is None or lock is None or Path(lock) != Path(root) / HERMES_GATEWAY_LOCK:
+    lock = value("--lock")
+    if lock is None:
+        return []
+    # watch-gateway's own default root, so a missing --root names the same directory.
+    root = value("--root") or os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+    if Path(lock).resolve() != (Path(root) / HERMES_GATEWAY_LOCK).resolve():
         return []
     return [Drift(
         "service", service.name,
@@ -785,7 +794,8 @@ def check_services(launchd_root: Path, launchctl: str) -> list:
         except (OSError, plistlib.InvalidFileException) as exc:
             drifts.append(Drift("service", service.name, f"cannot read {plists[0]}: {exc.__class__.__name__}"))
             continue
-        # The plist's ProgramArguments can hold a token, so only Label and RunAtLoad are used.
+        # The plist's ProgramArguments can hold a token, so only Label and RunAtLoad are read here;
+        # hermes_lock_drifts reads --root and --lock and nothing else.
         if plist.get("RunAtLoad") is not True:
             drifts.append(Drift("service", service.name, f"does not run at load (part {service.part})"))
         drifts.extend(hermes_lock_drifts(service, plist))
