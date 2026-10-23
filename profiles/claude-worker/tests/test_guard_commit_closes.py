@@ -499,6 +499,20 @@ class GuardCommitClosesTest(GitFixture):
                 result = self.guard(command=command, body="Part of #177", cwd=str(elsewhere))
                 self.assertEqual(result.returncode, 2)
 
+    def test_a_commit_chained_after_a_cd_into_a_symlink_to_the_tree_is_refused(self) -> None:
+        """Git walks the physical path, so both commits land in the tree; #316 walked `link` and found no `.git`."""
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        (self.tree / "sub").mkdir()
+        (plain / "link").symlink_to(self.tree / "sub")
+        command = ("cd link && git commit --allow-empty -m 'chore: tidy' "
+                   "&& git commit --allow-empty -m 'fix: #177 first slice'")
+
+        result = self.guard(command=command, body="Part of #177", cwd=str(plain))
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("`Part of #177`", result.stderr)
+
     def test_a_long_run_of_separators_is_checked_for_a_publish_in_well_under_a_second(self) -> None:
         loader = importlib.machinery.SourceFileLoader("guard_commit_closes", str(SCRIPTS / "guard-commit-closes"))
         sys.path.insert(0, str(SCRIPTS))
