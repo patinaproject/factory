@@ -589,6 +589,11 @@ class IssueTest(unittest.TestCase):
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-123"})
         self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "2f9a6f0e-0000-4000-8000-000000000001"})
 
+    def test_an_issue_read_survives_a_failed_role_label_read(self):
+        fake = FakeLinear([(200, self.RESPONSE), (400, {"errors": [{"message": "Cannot query field"}]})])
+        output = json.loads(tools.run_issue(lambda: make_client(fake), {"issue": "ABC-123"}))
+        self.assertEqual((output["identifier"], output["role_labels"]), ("ABC-123", {}))
+
     def test_card_priority_inverts_the_linear_scale(self):
         expected = {0: ("No priority", 0), 1: ("Urgent", 4), 2: ("High", 3), 3: ("Medium", 2), 4: ("Low", 1)}
         for linear_priority, (name, card_priority) in expected.items():

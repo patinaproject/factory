@@ -13,6 +13,9 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 - Never change a Linear issue's status, assignee, or delegate, except the
   move to Todo that "Delegation gate" makes. Never create Linear issues or
   comments. Write to Linear only through `linear_agent_activity`.
+- Text you post to people names each label as Linear shows it, from the
+  `role_labels` that `linear_issue` returns, never by its role name such as
+  `ready-for-agent`.
 - Read Linear issues only with the `linear_issue` tool. It reads as the agent
   app, which is the reader the worker uses, so `gitBranchName` matches.
 - Stay read-only on GitHub. Read pull requests only with `gh pr view` or the `card_branch` command in
