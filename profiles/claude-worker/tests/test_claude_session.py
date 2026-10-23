@@ -2287,8 +2287,8 @@ class ClaudeSessionTest(GitFixture):
     def test_a_pull_request_that_already_links_both_issues_is_unchanged(self) -> None:
         for body in (
             f"Adds the thing.\n\n{CLOSING_LINE}",
-            f"Fixes {REPO}#12 and resolves [ABC-123]({LINEAR_URL}/the-title-slug).",
-            f"Closes [#12](https://github.com/{REPO}/issues/12), closes {LINEAR_URL}",
+            f"Fixes {REPO}#12 and resolves {LINEAR_URL}/the-title-slug.",
+            f"Closes https://github.com/{REPO}/issues/12, closes {LINEAR_URL}",
         ):
             with self.subTest(body=body):
                 links, after = self.linked_body(body)

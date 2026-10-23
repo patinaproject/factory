@@ -54,38 +54,16 @@ jobs:
           ignoreLabels: |
             dependencies
 
-      - name: Check for closing keyword in PR body
-        if: "${{ github.event.pull_request.user.login != 'dependabot[bot]' }}"
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: |
-          if [ -z "$PR_BODY" ]; then
-            echo '::error::PR body is empty. Add "Closes #N".'
-            exit 1
-          fi
-          # Strip HTML comments, fenced code blocks, inline code, strikethrough, blockquotes.
-          BT=$(printf '\x60')
-          # shellcheck disable=SC2016
-          sanitized=$(printf '%s' "$PR_BODY" \
-            | sed -E 's/<!--([^-]|-[^-])*-->//g' \
-            | awk -v bt="$BT" 'BEGIN{fence=bt bt bt} $0 ~ "^" fence {toggle=!toggle; next} !toggle' \
-            | sed -E "s/${BT}[^${BT}]*${BT}//g" \
-            | sed -E 's/~~[^~]*~~//g')
-          sanitized=$(printf '%s' "$sanitized" | grep -vE '^[[:space:]]*>' || true)
-          # GitHub Apps may qualify same-repository references as owner/repo#N.
-          normalized="${sanitized//$GITHUB_REPOSITORY#/#}"
-          if printf '%s' "$normalized" | grep -qE \
-            '(^|[^A-Za-z])(Closes|Fixes|Resolves)[ \t]+#[1-9][0-9]*([^0-9A-Za-z_]|$)'; then
-            echo "GitHub issue-closing reference found."
-            exit 0
-          fi
-          echo '::error::PR body must contain "Closes #N", "Fixes #N", or "Resolves #N" outside code blocks, HTML comments, strikethrough, and blockquotes.'
-          exit 1
-
       - name: Check out repository
         if: "${{ github.event.pull_request.user.login != 'dependabot[bot]' }}"
         # actions/checkout@v4.3.1
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Check for closing keyword in PR body
+        if: "${{ github.event.pull_request.user.login != 'dependabot[bot]' }}"
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 profiles/claude-worker/scripts/closing.py
 
       - name: Check for the Linear closing line of each synced issue
         if: "${{ github.event.pull_request.user.login != 'dependabot[bot]' }}"
