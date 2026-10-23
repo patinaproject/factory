@@ -318,12 +318,12 @@ FAKE_HERMES = textwrap.dedent(
     """\
     import json, os, sys
     args = sys.argv[1:]
+    with open(os.environ["HERMES_LOG"], "a") as log:
+        log.write(json.dumps(args) + "\\n")
     if args[:2] == ["config", "get"]:
         assert args[2:] == ["plugins.entries.linear-agent-session.settings.app_user_id", "--json"], args
         print(json.dumps(os.environ["FAKE_APP_USER_ID"]))
         sys.exit(0)
-    with open(os.environ["HERMES_LOG"], "a") as log:
-        log.write(json.dumps(args) + "\\n")
     assert args[0] == "kanban" and args[-2:] == ["list", "--json"], args
     board = args[2] if args[1] == "--board" else "default"
     print(json.dumps(json.load(open(os.environ["FAKE_BOARDS"]))[board]))
@@ -373,6 +373,10 @@ class TriageExitCliTest(unittest.TestCase):
     def archived(self):
         return [json.loads(line) for line in self.archive_log.read_text().splitlines()] if self.archive_log.exists() else []
 
+    def hermes_calls(self):
+        log = self.home / "hermes.log"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
     def run_cli(self, payload):
         path = self.home / "payload.json"
         path.write_text(json.dumps(payload))
@@ -391,6 +395,7 @@ class TriageExitCliTest(unittest.TestCase):
 
         self.assertEqual((code, output), (0, {"handled": True, "action": "archive", "task_id": "t_triage"}))
         self.assertEqual(self.archived(), [["--board", "triage", "t_triage"]])
+        self.assertEqual(self.hermes_calls()[0], ["config", "get", "plugins.entries.linear-agent-session.settings.app_user_id", "--json"])
 
     def test_a_replayed_delivery_that_needs_a_decision_is_not_handled(self):
         self.seed([card("t_triage", "ready")], default=[card("t_work", "review")])
@@ -418,7 +423,7 @@ class TriageExitCliTest(unittest.TestCase):
             with self.subTest(name):
                 code, output = self.run_cli(payload)
                 self.assertEqual((code, output["handled"], output["action"]), (0, False, "pass"))
-        self.assertFalse((self.home / "hermes.log").exists())
+        self.assertEqual(self.hermes_calls(), [])
         self.assertEqual(self.archived(), [])
 
     def test_an_unreadable_board_is_not_handled(self):
