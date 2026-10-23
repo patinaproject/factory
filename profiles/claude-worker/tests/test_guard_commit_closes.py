@@ -97,7 +97,7 @@ class GuardCommitClosesTest(GitFixture):
         self.assertEqual(result.returncode, 2)
         self.assertIn("#177", result.stderr)
         self.assertNotIn("#247", result.stderr)
-        self.assertIn("git reset --soft origin/main", result.stderr)
+        self.assertIn(f"git reset --soft {git(self.tree, 'merge-base', 'HEAD', 'origin/main')}", result.stderr)
         self.assertIn("feat", result.stderr)
 
     def test_publishing_a_commit_for_an_issue_the_body_closes_is_allowed(self) -> None:
@@ -312,5 +312,75 @@ class GuardCommitClosesTest(GitFixture):
             "git commit --amend --no-edit",
             "git commit -m \"$MESSAGE\"",
             "git commit -C HEAD",
+        ]:
+            self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 0, command)
+
+    def test_a_commit_whose_directory_cannot_be_resolved_is_skipped_not_refused(self) -> None:
+        for command in [
+            "cd ~/x && git commit -m 'fix: #177 first slice'",
+            'cd "$W" && git commit -m \'fix: #177 first slice\'',
+            'git -C "$D" commit -m \'fix: #177 first slice\'',
+            "git -C ~/x commit -m 'fix: #177 first slice'",
+            "cd /nonexistent/zzz && git commit -m 'fix: #177 first slice'",
+            "git -C /nonexistent/zzz commit -m 'fix: #177 first slice'",
+            "cd ../nonexistent && git commit -m 'fix: #177 first slice'",
+            f"cd {self.tree} && cd \"$W\" && git commit -m 'fix: #177 first slice'",
+        ]:
+            for body in (None, "Part of #177"):
+                result = self.guard(command=command, body=body)
+                self.assertEqual(result.returncode, 0, f"{command} {body}: {result.stderr}")
+
+    def test_a_commit_in_a_directory_that_is_not_a_repository_is_skipped(self) -> None:
+        plain = self.tmp / "plain"
+        plain.mkdir()
+
+        result = self.guard(command=f"cd {plain} && git commit -m 'fix: #177 first slice'", body="Part of #177")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_resolvable_directory_is_still_checked(self) -> None:
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+
+        result = self.guard(command=f"cd {elsewhere} && git -C {self.tree} commit -m 'fix: #177 first slice'", body="Part of #177")
+
+        self.assertEqual(result.returncode, 2)
+
+    def test_the_flat_advice_resets_to_the_merge_base_when_main_moved_ahead(self) -> None:
+        self.commit("fix: #177 first slice")
+        self.push_upstream_commit("feat: #50 other work (#51)")
+        git(self.tree, "fetch", "-q", "origin")
+        base = git(self.tree, "merge-base", "HEAD", "origin/main")
+
+        result = self.guard(body="Part of #177")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(f"git reset --soft {base}", result.stderr)
+        self.assertNotIn("origin/main", result.stderr)
+        subprocess.run(["git", "reset", "--soft", base], cwd=self.tree, check=True)
+        self.assertEqual(git(self.tree, "diff", "--name-only", base, "HEAD"), "")
+        self.assertEqual(git(self.tree, "diff", "--name-only", "--cached"), "work.txt")
+
+    def test_more_forms_of_a_push_signed_call_publish(self) -> None:
+        self.commit("fix: #177 first slice")
+        for command in [
+            "time python3 /w/scripts/push-signed",
+            "timeout 120 python3 /w/scripts/push-signed",
+            "timeout -s KILL 2m python3 /w/scripts/push-signed",
+            "python3 -X utf8 /w/scripts/push-signed",
+            "python3 -W ignore /w/scripts/push-signed",
+            "time env GH_CONFIG_DIR=/x python3 /w/scripts/push-signed",
+            "bash -c 'python3 /w/scripts/push-signed'",
+            'bash -c "cd /w && python3 /w/scripts/push-signed"',
+            "/bin/sh -c 'GH_CONFIG_DIR=/x python3 /w/scripts/push-signed'",
+            "bash -lc 'python3 /w/scripts/push-signed'",
+        ]:
+            self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 2, command)
+        for command in [
+            "time grep push-signed README.md",
+            "timeout 5 cat /w/scripts/push-signed",
+            "bash -c 'grep push-signed README.md'",
+            "bash -c 'echo python3 push-signed'",
+            "bash script.sh 'python3 push-signed'",
         ]:
             self.assertEqual(self.guard(command=command, body="Part of #177").returncode, 0, command)

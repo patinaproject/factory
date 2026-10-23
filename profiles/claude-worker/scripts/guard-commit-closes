@@ -32,12 +32,20 @@ import check_title_closes
 
 # Claude Code waits 600 s for a hook by default; the guard answers well inside that, or refuses.
 DEFAULT_SECONDS = "30"
-# A command that runs push-signed: at the start of a shell command, optional `env` and VAR=value prefixes,
-# an optional python interpreter with its options, then the script, bare or quoted.
+# A command that runs push-signed: at the start of a shell command, any of `env`, `time`, `timeout N`, and
+# VAR=value prefixes, an optional python interpreter with its options, then the script, bare or quoted.
 # `grep push-signed` and `cat .../push-signed` do not run it.
+WRAPPERS = (
+    r"(?:(?:\S*/)?(?:env|time|nice|command|exec)\s+|timeout\s+(?:-[sk]\s+\S+\s+|-\S+\s+)*[0-9.]+[smhd]?\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+)
+COMMAND_START = r"(?:^|[;&|(]|\n)\s*"
 PUBLISH = re.compile(
-    r"(?:^|[;&|(]|\n)\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
-    r"(?:\S*python[0-9.]*\s+(?:-[A-Za-z]+\s+)*)?[\"']?\S*push-signed[\"']?(?:\s|$|[;&|)])"
+    COMMAND_START + WRAPPERS + r"(?:\S*/)?"
+    r"(?:\S*python[0-9.]*\s+(?:-[XW]\s+\S+\s+|-[A-Za-z]+\s+)*)?[\"']?\S*push-signed[\"']?(?:\s|$|[;&|)])"
+)
+# `bash -c '...'`: the quoted text is a command line of its own.
+SHELL_C = re.compile(
+    COMMAND_START + WRAPPERS + r"(?:\S*/)?(?:ba|z|da|k)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+([\"'])(.*)\1", re.DOTALL
 )
 SEPARATORS = set(";&|()<>\n")
 HEREDOC = re.compile(r"\$\(cat\s*<<(-?)\s*(['\"]?)(\w+)\2\n(.*?)\n\t*\3\s*\)", re.DOTALL)
@@ -72,6 +80,14 @@ class Unreadable(Exception):
     pass
 
 
+class TimedOut(Unreadable):
+    pass
+
+
+def publishes(command: str) -> bool:
+    return bool(PUBLISH.search(command)) or any(PUBLISH.search(inner[2]) for inner in SHELL_C.finditer(command))
+
+
 class Clock:
     """One deadline for the whole guard, so the calls together never outlast the budget."""
 
@@ -88,7 +104,7 @@ class Clock:
     def left(self) -> float:
         remaining = self.end - time.monotonic()
         if remaining <= 0:
-            raise Unreadable(f"it ran past its {self.budget:g} s time limit")
+            raise TimedOut(f"it ran past its {self.budget:g} s time limit")
         return remaining
 
 
@@ -96,7 +112,7 @@ def run(args: list[str], cwd: str, clock: Clock) -> str:
     try:
         proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=clock.left())
     except subprocess.TimeoutExpired as failure:
-        raise Unreadable(f"{args[0]} ran past the {clock.budget:g} s time limit") from failure
+        raise TimedOut(f"{args[0]} ran past the {clock.budget:g} s time limit") from failure
     except OSError as failure:
         raise Unreadable(f"{args[0]} could not run: {failure.strerror or failure}") from failure
     if proc.returncode != 0:
@@ -183,8 +199,18 @@ def commit_options(args: list[str]) -> list[tuple[str, str]] | None:
     return found
 
 
-def commit_message(words: list[str], cwd: str) -> tuple[str, str] | None:
-    """The directory and message of a `git commit` that spells out its message, else None."""
+def change_directory(cwd: str | None, target: str) -> str | None:
+    """`target` under `cwd`, or None when the shell would expand or resolve it differently (`~`, `$VAR`, a glob, `cd -`)."""
+    if cwd is None or target == "-" or target.startswith("~") or re.search(r"[$`*?\[]", target):
+        return None
+    return os.path.join(cwd, target)
+
+
+def commit_message(words: list[str], cwd: str | None) -> tuple[str, str] | None:
+    """The directory and message of a `git commit` that spells out its message, else None.
+
+    None also means the commit's directory is not known, so the push-time check judges that commit.
+    """
     while words and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[0]):
         words = words[1:]
     if not words or Path(words[0]).name != "git":
@@ -193,9 +219,9 @@ def commit_message(words: list[str], cwd: str) -> tuple[str, str] | None:
     while rest and rest[0].startswith("-"):
         option, rest = rest[0], rest[1:]
         if option in ("-C", "-c") and rest:
-            cwd = os.path.join(cwd, rest[0]) if option == "-C" else cwd
+            cwd = change_directory(cwd, rest[0]) if option == "-C" else cwd
             rest = rest[1:]
-    if not rest or rest[0] != "commit":
+    if not rest or rest[0] != "commit" or cwd is None:
         return None
     options = commit_options(rest[1:])
     messages = []
@@ -215,18 +241,25 @@ def commit_message(words: list[str], cwd: str) -> tuple[str, str] | None:
     return cwd, "\n\n".join(messages)
 
 
-def commit_refusals(command: str, cwd: str) -> list[str]:
+def commit_refusals(command: str, cwd: str | None) -> list[str]:
     problems = []
     for words in segments(command):
         if words[0] == "cd" and len(words) == 2:
-            cwd = os.path.join(cwd, words[1])
+            cwd = change_directory(cwd, words[1])
             continue
         found = commit_message(words, cwd)
         if found is None or not might_close(found[1]):
             continue
         where, message = found
+        if not os.path.isdir(where):
+            continue
         clock = Clock()
-        branch = run(["git", "branch", "--show-current"], where, clock).strip()
+        try:
+            branch = run(["git", "branch", "--show-current"], where, clock).strip()
+        except TimedOut:
+            raise
+        except Unreadable:
+            continue
         pull = pull_request(branch, where, clock) if branch else None
         if pull is None:
             continue
@@ -239,7 +272,7 @@ def commit_refusals(command: str, cwd: str) -> list[str]:
 
 
 def unpublished(cwd: str, clock: Clock) -> tuple[str, str, list[tuple[str, str]], bool]:
-    """The branch, the ref its unpublished commits follow (the remote branch, else the default branch), those commits as (sha, message) pairs, and whether one is a merge.
+    """The branch, the ref its unpublished commits follow (the remote branch, else the merge base with the default branch, which a moved-ahead default branch leaves behind it), those commits as (sha, message) pairs, and whether one is a merge.
 
     Commits that the default branch holds came in through a local merge of it and are not the branch's own,
     just as the pull request's commit list leaves out base commits.
@@ -251,9 +284,9 @@ def unpublished(cwd: str, clock: Clock) -> tuple[str, str, list[tuple[str, str]]
         run(["git", "rev-parse", "--verify", "--quiet", remote], cwd, clock)
         base = remote
     except Unreadable as failure:
-        if "time limit" in str(failure):
+        if isinstance(failure, TimedOut):
             raise
-        base = default
+        base = run(["git", "merge-base", "HEAD", default], cwd, clock).strip()
     log = run(["git", "log", "--reverse", f"--format=%h{FIELD}%P{FIELD}%B{RECORD_END}", "HEAD", f"^{base}", f"^{default}"], cwd, clock)
     records = [record.strip("\n").split(FIELD, 2) for record in log.split(RECORD_END) if record.strip()]
     commits = [(sha, message) for sha, _, message in records]
@@ -283,7 +316,7 @@ def decide(event: dict) -> tuple[int, str]:
     cwd = event.get("cwd") or os.getcwd()
     try:
         problems = commit_refusals(command, cwd)
-        if not problems and PUBLISH.search(command):
+        if not problems and publishes(command):
             problems = publish_refusals(cwd)
     except (Unreadable, json.JSONDecodeError, KeyError) as failure:
         return 2, f"Refused: the commit closing check could not read the branch or its pull request ({failure}). Run the command again."
