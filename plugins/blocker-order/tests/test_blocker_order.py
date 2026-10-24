@@ -10,9 +10,13 @@ from pathlib import Path
 from unittest import mock
 
 PLUGIN = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location("blocker_order", PLUGIN / "__init__.py")
+_spec = importlib.util.spec_from_file_location(
+    "blocker_order", PLUGIN / "__init__.py", submodule_search_locations=[str(PLUGIN)]
+)
 order = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = order
 _spec.loader.exec_module(order)
+result_line = order.result_line
 
 sys.path.insert(0, str(PLUGIN.parents[1] / "profiles" / "claude-worker" / "scripts"))
 import blockers  # noqa: E402
@@ -99,7 +103,7 @@ def process_result(*lines: str) -> str:
 
 
 def waiting(*cards: str) -> str:
-    return json.dumps({"waiting_on": list(cards)})
+    return result_line.line(result_line.Waiting(cards))
 
 
 class Hooked(unittest.TestCase):
@@ -277,8 +281,43 @@ class HookTest(Hooked):
         self.assertEqual(self.board.calls, [])
 
 
+SESSION = result_line.Session(
+    session_id="s", resumed=True, reason="resumed", worktree="/w", branch="abc-1-fix",
+    adopted=None, superseded=None, issue_links=None, triage_documents=None,
+)
+
+
+def outcome(result: str) -> result_line.Outcome:
+    return result_line.Outcome(subtype="success", num_turns=3, result=result, usage=None, first_context_tokens=None)
+
+
 def report(result: str) -> str:
-    return json.dumps({"session_id": "s", "resumed": True, "subtype": "success", "num_turns": 3, "result": result})
+    return result_line.line(result_line.Done(SESSION, outcome(result)))
+
+
+class ResultLineTest(unittest.TestCase):
+    def test_every_report_reads_back_as_written(self):
+        reports = {
+            "waiting": result_line.Waiting(("t_a", "t_b")),
+            "done": result_line.Done(SESSION, outcome("Opened the pull request."), blocker_error="Linear said no"),
+            "needs input": result_line.Done(SESSION, outcome("Needs input: which one?")),
+            "triage without an activity": result_line.Done(SESSION, outcome("Triage outcome: done"), activity=None),
+            "triage": result_line.Done(SESSION, outcome("Triage outcome: wontfix"), activity="response"),
+            "failed without output": result_line.Failed("claude exited 1 without JSON output: boom", SESSION),
+            "failed": result_line.Failed("claude run ended with error_during_execution (exit 0)", SESSION, outcome(None)),
+            "refused": result_line.Refused("another claude-session holds /w"),
+            "refused, transient": result_line.Refused("Linear token: the broker is busy", transient=True),
+        }
+        for name, written in reports.items():
+            with self.subTest(name):
+                self.assertEqual(result_line.last(f"log line\n{result_line.line(written)}\n"), written)
+
+    def test_only_a_run_whose_result_asks_for_input_needs_input(self):
+        self.assertEqual(result_line.needs_input(result_line.Done(SESSION, outcome("Needs input: a?"))), "Needs input: a?")
+        self.assertEqual(result_line.needs_input(result_line.Failed("x", SESSION, outcome("Needs input: a?"))), "Needs input: a?")
+        self.assertIsNone(result_line.needs_input(result_line.Done(SESSION, outcome("Needs input later"))))
+        self.assertIsNone(result_line.needs_input(result_line.Refused("Needs input: a?")))
+        self.assertIsNone(result_line.needs_input(None))
 
 
 class NeedsInputTest(Hooked):

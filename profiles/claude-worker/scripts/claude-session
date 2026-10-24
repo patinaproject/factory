@@ -676,22 +676,22 @@ def check_toolchain(repo: dict, worktree: Path) -> None:
             )
 
 
-def plugin_module(name: str):
-    """A module of the worker home's linear-agent-session plugin: `linear`, or `broker_client` for the gateway's broker."""
+def plugin_module(plugin: str, name: str):
+    """Module `name` of the worker home's copy of `plugin`, such as linear-agent-session's `linear`."""
     home = os.environ.get("HERMES_HOME")
     if not home:
-        raise Refusal("HERMES_HOME is not set; claude-session reads the Linear token through the worker home's plugin")
-    plugin = Path(home) / "plugins" / "linear-agent-session"
-    if not (plugin / f"{name}.py").is_file():
-        raise Refusal(f"the linear-agent-session plugin is not installed in {home}")
-    if str(plugin) not in sys.path:
-        sys.path.insert(0, str(plugin))
+        raise Refusal(f"HERMES_HOME is not set; claude-session imports {name} from the worker home's {plugin} plugin")
+    path = Path(home) / "plugins" / plugin
+    if not (path / f"{name}.py").is_file():
+        raise Refusal(f"the {plugin} plugin is not installed in {home}")
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
     return importlib.import_module(name)
 
 
 def linear_access() -> tuple:
     """A client and a token from the worker home's linear-agent-session plugin, which gets tokens from the gateway's broker."""
-    linear = plugin_module("linear")
+    linear = plugin_module("linear-agent-session", "linear")
     try:
         client = linear.client_from_env()
         return client, client.access_token()
@@ -716,7 +716,7 @@ def title_triage_documents(client, issue_id: str) -> dict:
     The result goes in the run's report and never changes its status: a failure here must not lose the
     triage outcome that the worker relays.
     """
-    linear = plugin_module("linear")
+    linear = plugin_module("linear-agent-session", "linear")
 
     try:
         issue = client.issue_documents(issue_id)
@@ -737,7 +737,7 @@ def title_triage_documents(client, issue_id: str) -> dict:
 
 def triage_mentions(client, issue_id: str, identifier: str) -> str:
     """Resolved here, not by the model, because a team can list several triage people and the model picked one."""
-    linear = plugin_module("linear")
+    linear = plugin_module("linear-agent-session", "linear")
 
     try:
         people = client.triage_people(issue_id)
@@ -757,7 +757,7 @@ def triage_mentions(client, issue_id: str, identifier: str) -> str:
 
 
 def require_ready(client, issue_id: str, identifier: str) -> None:
-    linear = plugin_module("linear")
+    linear = plugin_module("linear-agent-session", "linear")
 
     try:
         labels = client.issue_labels(issue_id)
@@ -782,7 +782,7 @@ def triage_activity(client, issue_id: str, result: str | None) -> str | None:
     first = (result or "").partition("\n")[0]
     if not first.startswith(TRIAGE_OUTCOME):
         return None
-    linear = plugin_module("linear")
+    linear = plugin_module("linear-agent-session", "linear")
 
     role = linear.role_key(first.removeprefix(TRIAGE_OUTCOME))
     if role not in map(linear.role_key, TRIAGE_ROLES):
@@ -864,7 +864,7 @@ def factory_mcp_servers(transport: dict) -> dict:
 def require_mcp_tokens(servers: dict) -> None:
     if not servers:
         return
-    broker_client = plugin_module("broker_client")
+    broker_client = plugin_module("linear-agent-session", "broker_client")
 
     try:
         status = broker_client.status(broker_client.socket_path(os.environ))
@@ -1164,7 +1164,9 @@ def end_run(proc: subprocess.Popen) -> set[int]:
     return leftovers
 
 
-def run(args: argparse.Namespace) -> tuple[int, dict]:
+def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
+    import result_line
+
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
         raise Refusal("HERMES_KANBAN_WORKSPACE is not set; claude-session runs only inside a Kanban worker")
@@ -1213,7 +1215,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         if not triage and plan.reason == "new":
             waiting, blocker_error = blocker_wait(client, args.issue_id, args.ignore_blockers)
             if waiting:
-                return 0, {"waiting_on": waiting}
+                return 0, result_line.Waiting(tuple(waiting))
 
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         login = (settings.get("github") or {}).get("login")
@@ -1258,18 +1260,24 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
         first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
 
-    report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None, "superseded": superseded, "issue_links": links, "triage_documents": documents}
-    if blocker_error:
-        report["blocker_error"] = blocker_error
+    session = result_line.Session(
+        session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
+        adopted=adopted._asdict() if adopted else None, superseded=superseded, issue_links=links,
+        triage_documents=documents,
+    )
     if output is None:
-        return 1, {"error": f"claude exited {exit_code} without JSON output: {detail}", **report}
-    report.update(subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"))
-    report.update(usage=model_usage(output), first_context_tokens=first)
-    if report["subtype"] not in COMPLETED_SUBTYPES:
-        return 1, {"error": f"claude run ended with {report['subtype']} (exit {exit_code})", **report}
-    if triage:
-        report["activity"] = triage_activity(client, args.issue_id, report["result"])
-    return 0, report
+        error = f"claude exited {exit_code} without JSON output: {detail}"
+        return 1, result_line.Failed(error, session, blocker_error=blocker_error)
+    outcome = result_line.Outcome(
+        subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"),
+        usage=model_usage(output), first_context_tokens=first,
+    )
+    if outcome.subtype not in COMPLETED_SUBTYPES:
+        error = f"claude run ended with {outcome.subtype} (exit {exit_code})"
+        return 1, result_line.Failed(error, session, outcome, blocker_error)
+    if not triage:
+        return 0, result_line.Done(session, outcome, blocker_error)
+    return 0, result_line.Done(session, outcome, blocker_error, triage_activity(client, args.issue_id, outcome.result))
 
 
 def read_init(proc: subprocess.Popen, timeout: float) -> dict | None:
@@ -1361,16 +1369,23 @@ def main() -> int:
         if missing:
             parser.error("the following arguments are required: " + ", ".join(f"--{f.replace('_', '-')}" for f in missing))
     try:
+        result_line = plugin_module("blocker-order", "result_line")
+    except Refusal as refusal:
+        # Without the plugin no hook reads the line, so this error reaches only the worker.
+        print(json.dumps({"error": str(refusal)}))
+        return 2
+
+    try:
         status, report = mcp_status(args) if args.mcp_status else run(args)
     except Stopped as stopped:
         signal.signal(stopped.signum, signal.SIG_DFL)
         os.kill(os.getpid(), stopped.signum)
         raise
     except Refusal as refusal:
-        status, report = 2, {"error": str(refusal), **({"transient": True} if refusal.transient else {})}
+        status, report = 2, result_line.Refused(str(refusal), refusal.transient)
     except Exception as error:
-        status, report = 1, {"error": f"{type(error).__name__}: {error}"}
-    print(json.dumps(report))
+        status, report = 1, result_line.Refused(f"{type(error).__name__}: {error}")
+    print(json.dumps(report) if isinstance(report, dict) else result_line.line(report))
     return status
 
 
