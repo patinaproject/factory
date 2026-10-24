@@ -134,6 +134,16 @@ ISSUE_STATES_QUERY = """query IssueStates($id: String!) {
   }
 }"""
 
+ISSUE_EDIT_QUERY = """query IssueEdit($id: String!) {
+  issue(id: $id) {
+    id identifier
+    state { name }
+    labels { nodes { id name parent { id } } }
+    team { states { nodes { id name } } labels(first: 250) { nodes { id name isGroup parent { id } } } }
+  }
+  issueLabels(first: 250, filter: { team: { null: true } }) { nodes { id name isGroup parent { id } } }
+}"""
+
 ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
 }"""
@@ -365,6 +375,47 @@ class LinearClient:
             raise LinearError("issueUpdate reported success: false")
         return {**result, "moved": True, "state": target["name"]}
 
+    def edit_issue(
+        self, id_or_identifier: str, *, add_labels: list = (), remove_labels: list = (), state: Optional[str] = None
+    ) -> dict:
+        """Add and remove labels and set the status by name, matched whatever their case and punctuation.
+
+        An added label replaces the issue's other labels in its group, because Linear allows one per group."""
+        data = self._graphql(ISSUE_EDIT_QUERY, {"id": id_or_identifier})
+        issue = data["issue"]
+        if issue is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        known = {n["id"]: n for n in issue["team"]["labels"]["nodes"] + data["issueLabels"]["nodes"]}
+        current = {n["id"]: n for n in issue["labels"]["nodes"]}
+        labels = dict(current)
+        for name in remove_labels:
+            for label_id in [i for i, n in labels.items() if role_key(n["name"]) == role_key(name)]:
+                del labels[label_id]
+        for name in add_labels:
+            label = _by_name(known.values(), name, "label")
+            if label["isGroup"]:
+                raise LinearError(f"{label['name']} is a label group; name one of its labels")
+            group = (label["parent"] or {}).get("id")
+            if group:
+                labels = {i: n for i, n in labels.items() if (n["parent"] or {}).get("id") != group}
+            labels[label["id"]] = label
+        update: dict = {}
+        if labels.keys() != current.keys():
+            update["labelIds"] = sorted(labels)
+        target = _by_name(issue["team"]["states"]["nodes"], state, "status") if state else None
+        if target and target["name"] != issue["state"]["name"]:
+            update["stateId"] = target["id"]
+        if update:
+            payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": update})
+            if not payload["issueUpdate"]["success"]:
+                raise LinearError("issueUpdate reported success: false")
+        return {
+            "identifier": issue["identifier"],
+            "changed": bool(update),
+            "labels": sorted(n["name"] for n in labels.values()),
+            "state": target["name"] if target else issue["state"]["name"],
+        }
+
     def list_delegated_issues(self, *, include_closed: bool = False) -> list:
         issue_filter: dict = {"delegate": {"isMe": {"eq": True}}}
         if not include_closed:
@@ -593,6 +644,17 @@ def _blocking_issues(relations: dict) -> list:
 def role_key(name: str) -> str:
     """A role name or a label name without its case and punctuation, so `Won't fix` is `wontfix`."""
     return re.sub(r"[^a-z0-9]", "", name.casefold())
+
+
+def _by_name(nodes, name: str, kind: str) -> dict:
+    matches = [n for n in nodes if role_key(n["name"]) == role_key(name)]
+    exact = [n for n in matches if n["name"] == name]
+    if len(exact) == 1 or len(matches) == 1:
+        return (exact or matches)[0]
+    if matches:
+        raise LinearError(f"more than one {kind} matches {name!r}: " + ", ".join(sorted(n["name"] for n in matches)))
+    names = ", ".join(sorted({n["name"] for n in nodes if not n.get("isGroup")}))
+    raise LinearError(f"no {kind} named {name!r}; the issue's team has: {names}")
 
 
 def _label_names(issue: dict) -> list:

@@ -482,6 +482,14 @@ class PromptSubstitutionTest(unittest.TestCase):
         change = " ".join(self.prompts["linear"][self.prompts["linear"].index("## Issue change") :].split())
         self.assertLess(change.index("the previous labels above"), change.index("in the last five minutes"))
 
+    def test_a_reply_asking_for_a_label_or_status_change_is_applied_before_any_card_step(self):
+        prompt = self.prompts["linear"]
+        reply = prompt[prompt.index("## Prompt") : prompt.index("## Requested issue change")]
+        self.assertLess(reply.index('Follow "Requested issue change"'), reply.index("\n1. "))
+        change = prompt[prompt.index("## Requested issue change") : prompt.index("## Triage card reply")]
+        self.assertIn("`linear_issue_edit`", change)
+        self.assertNotIn("hermes kanban", change)
+
     def test_the_gate_answers_ready_for_human_and_unready_issues_without_a_card(self):
         gate = render.delegation_gate_section()
         rules = [gate[gate.index(f"\n{n}. ") : gate.index(f"\n{n + 1}. ") if n < 3 else len(gate)] for n in (1, 2, 3)]
