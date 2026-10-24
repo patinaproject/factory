@@ -1267,9 +1267,10 @@ def root_mcp_connects(root: Path, hermes: str, server: str) -> bool:
 
 
 READ_MCP_SERVERS = (
-    "import json, sys, yaml\n"
+    "import json, sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
-    "cfg = yaml.safe_load(open(sys.argv[2])) or {}\n"
+    "from ruamel.yaml import YAML\n"
+    "cfg = YAML(typ='safe', pure=True).load(open(sys.argv[2])) or {}\n"
     "assert isinstance(cfg, dict), 'config.yaml is not a mapping'\n"
     "print(json.dumps(cfg.get('mcp_servers')))\n"
 )
@@ -1279,7 +1280,7 @@ def root_mcp_servers(root: Path):
     """The root home's mcp_servers as config.yaml writes it, with no ${VAR} expansion.
 
     `hermes config get` expands every ${VAR} to its value, so it cannot show whether a header holds a
-    reference or a literal. Parses the file with the store Python's PyYAML. A missing file is check_config's to report. Raises Refusal on a failure.
+    reference or a literal. Parses the file with the Hermes environment's ruamel.yaml, which has no PyYAML. A missing file is check_config's to report. Raises Refusal on a failure.
     """
     config = root / "config.yaml"
     if not config.is_file():

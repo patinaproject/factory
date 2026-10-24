@@ -1679,6 +1679,16 @@ if sys.argv[1:3] == ["mcp", "test"]:
 sys.exit("check-install must read mcp_servers from config.yaml, not from hermes: " + " ".join(sys.argv[1:]))
 """
 
+FAKE_RUAMEL = """import json
+
+
+class YAML:
+    def __init__(self, typ="rt", pure=False):
+        assert typ == "safe" and pure is True
+    def load(self, stream):
+        return json.load(stream)
+"""
+
 SECRET = "sntryu_0123456789abcdef"
 ROOT_SERVER = {
     "url": "https://mcp.example/mcp/<org>",
@@ -1701,7 +1711,9 @@ class CheckRootMcpServersTest(unittest.TestCase):
         (self.root / "tools" / "py" / "bin" / "python3").symlink_to(sys.executable)
         (self.root / "tools" / "facts.json").write_text(json.dumps({"packages": {"python": {"entry": "py"}}}))
         env = self.tmp / "env"
-        (env / "lib" / "python3" / "site-packages").mkdir(parents=True)
+        site = env / "lib" / "python3" / "site-packages"
+        (site / "ruamel" / "yaml").mkdir(parents=True)
+        (site / "ruamel" / "yaml" / "__init__.py").write_text(FAKE_RUAMEL)
         (self.root / "installs" / "one").mkdir(parents=True)
         (self.root / "installs" / "one" / "facts.json").write_text(
             json.dumps({"packages": {"venv": {"environment": str(env)}}})
@@ -1742,17 +1754,14 @@ class CheckRootMcpServersTest(unittest.TestCase):
         self.assertEqual(self.check({"sentry": {**ROOT_SERVER, "sampling": {}, "enabled": False}}, connects=()), [])
 
     def test_no_servers_is_silent(self) -> None:
-        (self.root / "config.yaml").write_text("model: x\n")
+        (self.root / "config.yaml").write_text('{"model": "x"}')
         self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
 
     def test_a_missing_config_is_check_configs_to_report(self) -> None:
         self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
 
     def test_a_reference_is_never_expanded_and_never_reported(self) -> None:
-        (self.root / "config.yaml").write_text(
-            "mcp_servers:\n  sentry:\n    url: https://mcp.example/mcp\n    headers:\n"
-            "      Authorization: Sentry-Bearer ${SENTRY_ACCESS_TOKEN}\n    sampling:\n      enabled: false\n"
-        )
+        (self.root / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
         (self.root / "connects.json").write_text('["sentry"]')
         with mock.patch.dict(os.environ, {"SENTRY_ACCESS_TOKEN": SECRET}):
             self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
