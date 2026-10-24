@@ -73,7 +73,7 @@ below first, and ask only when it prints nothing:
 | SST app, stage, Cloudflare account, and zone | `find ~ -maxdepth 4 -name 'sst.config.ts' -not -path '*/node_modules/*'`, then the stage configuration in that app. `dig +short <hostname>` shows whether the hostname already points at Cloudflare |
 | Existing tunnel | The `cloudflared` system service. On macOS, find its plist with `ls /Library/LaunchDaemons/*cloudflared*` and read only `Label` and `Program` with `plutil -extract <key> raw <plist>`, falling back to `ProgramArguments.0` when `Program` is absent. Never print full `launchctl print` output or any `ProgramArguments` entry after index 0, which can hold the tunnel token. Use the filtered check in [`references/cloudflare-sst.md`](references/cloudflare-sst.md) |
 | Slack workspace and channels | The connected Slack account, and the `SLACK_*` key names in `<home>/.env` or the secret source. Read key names only |
-| `kanban.max_in_progress` and the webhook port | `hermes config get kanban.max_in_progress` and `hermes config get platforms.webhook.extra.port` |
+| `kanban.max_in_progress`, `kanban.max_spawn`, and the webhook port | `hermes config get kanban.max_in_progress`, `hermes config get kanban.max_spawn`, and `hermes config get platforms.webhook.extra.port` |
 
 When `gh` or `hermes` is not on the session's `PATH`, call it by its full
 path, such as `~/.local/bin/gh`. Never run any of these with `--raw`, which
@@ -88,7 +88,8 @@ your task notes, not in the repository.
 | Hermes release tag to pin, `v0.21.4` or later | Hermes |
 | Model alias for Hermes' own agent loop, for example `sonnet` | Model provider |
 | Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
-| `kanban.max_in_progress` | Kanban |
+| `kanban.max_in_progress`, how many workers may run at once on the host | Kanban |
+| `kanban.max_spawn`, how many workers the default board may run at once | Kanban |
 | `triage.max_running`, how many triage cards may run at once | Kanban |
 | Factory hostname, Cloudflare account, and zone | Ingress |
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
@@ -130,7 +131,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `GITHUB_UPLOAD_TOKEN`, the operator's upload-only token | The factory's Infisical folder only, entered by the operator. The gateway loads it. Neither `.env` holds it, and the broker never hands it out |
 | `platforms.factory_uploads.enabled` and `platforms.factory_uploads.extra.repositories` | `<home>/config.yaml` only |
 | `plugins.entries.team.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
-| `kanban.max_in_progress`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
+| `kanban.max_in_progress`, `kanban.max_spawn`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
 | The `default` and `triage` boards' `default_workdir` | Kanban board metadata, not `config.yaml` |
 
@@ -603,7 +604,7 @@ runs `/Library/Developer/CommandLineTools/usr/bin/python3`, not
    >
    > ```sh
    > cat "/Library/Application Support/factory-broker/installed-commit"
-   > git diff <installed>..<sha> -- plugins/factory-uploads plugins/linear-agent-session/linear.py skills/setup-factory/scripts/setup-broker-user
+   > git diff <installed>..<sha> -- plugins/factory-uploads plugins/linear-agent-session/linear.py plugins/linear-agent-session/broker_client.py skills/setup-factory/scripts/setup-broker-user
    > ```
    >
    > Then ask them to run, in their own terminal:
@@ -1000,6 +1001,7 @@ Continue only when
 
 ```sh
 hermes config set kanban.max_in_progress <n>
+hermes config set kanban.max_spawn <m>
 hermes config set kanban.review_dispatch false
 hermes config set kanban.auto_decompose false
 hermes kanban boards set-default-workdir default <path of the default repository>
@@ -1024,6 +1026,21 @@ same playbook in every repository, whatever that repository vendors.
 `claude-session` refuses a triage card when the file is missing, and
 `check-install` reports it. Update the checkout to the factory's default
 branch to restore it.
+
+Reserve worker slots for triage. Hermes applies `kanban.max_in_progress` to
+the whole host and `kanban.max_spawn` to each board's own running count. The
+dispatcher ticks the `default` board first, so with `max_spawn` at the host
+limit it takes every free slot and triage cards wait. Set `<m>` so that
+`kanban.max_spawn + triage.max_running <= kanban.max_in_progress` and
+`triage.max_running <= kanban.max_spawn`. The slots left for triage stay empty
+when no triage card waits. The gateway reads `kanban.max_spawn` only when it
+starts, so a change needs `restart-gateway`. Under `elevated` memory pressure
+Hermes allows one spawn per tick and the `default` board takes it, so a triage
+card can still wait. `check-install` reports a triage card that stays assigned
+in `ready` for 30 minutes or more. The rule assumes that only the `default` and
+`triage` boards exist, because `max_spawn` applies to every board, and that the
+gateway never sets `HERMES_KANBAN_DB`. `check-install` reports a value that
+breaks the rule.
 
 A worker hands a card with a merge-ready pull request to the `review` lane.
 With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,
@@ -1378,9 +1395,9 @@ factory, do these before the restart:
 - Check `kanban.max_spawn`. It caps the running cards the gateway's dispatcher
   allows, so `0` means the dispatcher never starts a card. An older factory can
   set it to `0` because its own triage started cards. Factory triage only
-  queues cards, so set `kanban.max_spawn` to the same value as
-  `kanban.max_in_progress`. To keep the dispatcher from also starting the older
-  factory's cards, set `kanban.dispatch_profiles` to `[claude-worker]`. Confirm
+  queues cards, so set `kanban.max_spawn` as part 10 describes, at most
+  `kanban.max_in_progress` minus `triage.max_running`. To keep the dispatcher
+  from also starting the older factory's cards, set `kanban.dispatch_profiles` to `[claude-worker]`. Confirm
   with `hermes kanban dispatch --dry-run --json`: `spawned` lists only
   `claude-worker` cards.
 - `hermes gateway restart` waits for chat work and in-process cron jobs, and
@@ -1518,8 +1535,10 @@ each check. Report each result.
     `git -C <repo> worktree add` can check that branch out even when the
     archived card kept a dirty worktree.
 11. A mention without delegation gets an answer and creates no card.
-12. No more than `kanban.max_in_progress` workers run at once, and no `claude`
-    process runs outside a Kanban worker.
+12. No more than `kanban.max_in_progress` workers run at once, no more than
+    `kanban.max_spawn` of them on the `default` board, and no `claude`
+    process runs outside a Kanban worker. A triage card never stays assigned in
+    `ready` for 30 minutes.
 13. `git -C <install> status --porcelain` still prints nothing, and `HEAD` is
     still the pinned tag.
 14. `git -C <repo> status --porcelain` prints nothing. This repository holds no
@@ -1849,6 +1868,13 @@ Hermes process starts. The new helper also writes
    cards to close. The reverse order drops every closure until the next
    cron run. `check-install` reports a route that filters on issue ids while
    the file holds none.
+   - A `config kanban.max_spawn` or `config kanban.max_in_progress` line, or a
+     `kanban capacity` line: set the keys as part 10 describes. The gateway
+     reads `kanban.max_spawn` only when it starts, so restart it with
+     `restart-gateway` afterwards.
+   - A `stranded triage card` line: the `default` board is probably holding
+     every worker slot. Check the capacity rule first, then
+     `hermes kanban dispatch --dry-run --json`.
    - A `kanban board <name>` line: run the part 10 Kanban commands before the
      profile update. For a missing `triage` board, run
      `hermes kanban boards create triage --name Triage --default-workdir <path of the default repository>`.

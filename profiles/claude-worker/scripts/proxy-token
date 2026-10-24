@@ -28,11 +28,11 @@ def main() -> int:
         print("proxy-token: HERMES_HOME is not set; claude-session sets it to the worker home", file=sys.stderr)
         return 1
     sys.path.insert(0, str(Path(home) / "plugins" / "linear-agent-session"))
-    import linear
+    import broker_client
 
     try:
-        reply = linear.broker_request(linear.broker_socket_path({"HERMES_HOME": home}), "proxy_token")
-    except linear.LinearError as error:
+        reply = broker_client.request(broker_client.socket_path({"HERMES_HOME": home}), "proxy_token")
+    except broker_client.BrokerError as error:
         print(f"proxy-token: {error}", file=sys.stderr)
         return 1
     print(reply["token"])

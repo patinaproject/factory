@@ -15,6 +15,7 @@ import sys
 from typing import Any, Callable
 
 import card_branch
+import closing
 
 LINKBACK_AUTHOR = "linear-code[bot]"
 LINKBACK_MARKER = "<!-- linear-linkback -->"
@@ -32,7 +33,7 @@ def linear_issue(gh: Callable[..., Any], repo: str, number: str) -> str | None:
 
 
 def missing(gh: Callable[..., Any], repo: str, body: str) -> list[str]:
-    refs = card_branch.closes(body, repo)
+    refs = closing.closes(body, repo)
     problems = []
     for ref in sorted(ref for ref in refs if ref.startswith("#")):
         identifier = linear_issue(gh, repo, ref[1:])

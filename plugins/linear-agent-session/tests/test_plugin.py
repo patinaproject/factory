@@ -143,6 +143,52 @@ class DispatchHookTest(unittest.TestCase):
         self.assertLess(elapsed, 0.5)
 
 
+def reply_event(body, signal=None):
+    payload = session_event("prompted", signal=signal)
+    payload["agentActivity"]["content"]["body"] = body
+    return event(payload)
+
+
+LUKE = '<user id="user-luke" notify>luke</user>'
+AGENT = '<user id="app-user-1" notify>Goodyear</user>'
+SKIP_TEAMMATE = {"action": "skip", "reason": "the session reply mentions teammates and not the agent"}
+
+
+class TeammateReplyTest(unittest.TestCase):
+    def test_a_reply_that_mentions_only_teammates_gets_no_acknowledgement_or_turn(self):
+        for body in (f"{LUKE} what do you think we should do?", f"{LUKE} and <user id=\"user-hill\">hill</user>, thoughts?"):
+            with self.subTest(body):
+                client = RecordingClient()
+                with self.assertLogs("linear_agent_session", "INFO"):
+                    self.assertEqual(run_hook(reply_event(body), client), SKIP_TEAMMATE)
+                self.assertEqual(client.calls, [])
+
+    def test_a_reply_for_the_agent_reaches_it(self):
+        cases = {
+            "no mention": "please continue",
+            "agent mentioned": f"{AGENT} ask {LUKE} about this",
+            "no body": None,
+        }
+        for name, body in cases.items():
+            with self.subTest(name):
+                client = RecordingClient()
+                self.assertIsNone(run_hook(reply_event(body), client))
+                self.assertEqual(client.calls, [ACK])
+
+    def test_a_stop_that_mentions_a_teammate_still_stops(self):
+        client = RecordingClient()
+        self.assertIsNone(run_hook(reply_event(f"{LUKE} stopping this", signal="stop"), client))
+        self.assertEqual(client.calls, [])
+
+    def test_another_route_is_not_filtered(self):
+        client = RecordingClient()
+        hook = plugin.make_dispatch_hook(lambda: client, lambda: "linear", lambda: RESOLVED_CONFIG, no_triage_exit)
+        evt = reply_event(f"{LUKE} thoughts?")
+        evt.source.user_id = "webhook:github"
+        self.assertIsNone(asyncio.run(hook(event=evt)))
+        self.assertEqual(client.calls, [])
+
+
 class SecretGuardTest(unittest.TestCase):
     def test_unresolved_secret_skips_without_acknowledging(self):
         config = webhook_config(
@@ -387,7 +433,7 @@ class CliTest(unittest.TestCase):
             root = os.path.realpath(tmp)
             worker = os.path.join(root, "profiles", "claude-worker")
             os.makedirs(worker)
-            broker = FakeBroker(os.path.join(root, "factory-uploads.sock"), [BUSY, linear_token("brokered-1")])
+            broker = FakeBroker(os.path.join(root, "factory-uploads.sock"), linear_token=[BUSY, linear_token("brokered-1")])
             self.addCleanup(broker.close)
             with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": "", "LINEAR_CLIENT_SECRET": "", "HERMES_HOME": worker}), \
                     mock.patch("urllib.request.urlopen", fake), mock.patch("time.sleep"), contextlib.redirect_stdout(out):

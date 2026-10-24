@@ -8,7 +8,6 @@ import io
 import json
 import plistlib
 import shutil
-import socket
 import sys
 import tempfile
 import threading
@@ -18,6 +17,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "watch-gateway"
+REPO = SCRIPT.parents[3]
+sys.path.insert(0, str(REPO / "plugins" / "linear-agent-session" / "tests"))
+from fake_broker import FakeBroker  # noqa: E402
 loader = importlib.machinery.SourceFileLoader("watch_gateway", str(SCRIPT))
 watch_gateway = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 sys.modules[loader.name] = watch_gateway
@@ -117,27 +119,8 @@ class HeartbeatHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-class FakeBroker:
-    def __init__(self, path: Path) -> None:
-        self.token_present = True
-        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.server.bind(str(path))
-        self.server.listen()
-        threading.Thread(target=self.serve, daemon=True).start()
-
-    def serve(self) -> None:
-        while True:
-            try:
-                client, _ = self.server.accept()
-            except OSError:
-                return
-            with client:
-                client.recv(4096)
-                reply = {"ok": True, "token_present": self.token_present}
-                client.sendall(json.dumps(reply).encode() + b"\n")
-
-    def close(self) -> None:
-        self.server.close()
+def holding(token_present: bool = True) -> list:
+    return [{"ok": True, "token_present": token_present}]
 
 
 def serve(server: ThreadingHTTPServer) -> int:
@@ -159,7 +142,10 @@ class WatchGatewayTest(unittest.TestCase):
         self.addCleanup(self.beat.shutdown)
         (self.root / watch_gateway.HEARTBEAT_FILE).write_text(f"http://127.0.0.1:{beat_port}{HEARTBEAT_PATH}\n")
         (self.root / "config.yaml").write_text(CONFIG.format(route="linear"))
-        self.broker = FakeBroker(self.root / watch_gateway.UPLOAD_SOCKET)
+        plugin = self.root / "plugins" / "linear-agent-session"
+        plugin.mkdir(parents=True)
+        (plugin / "broker_client.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "broker_client.py")
+        self.broker = FakeBroker(self.root / watch_gateway.UPLOAD_SOCKET, status=holding())
         self.addCleanup(self.broker.close)
         self.broker_config = self.root / "no-broker-user.json"
         self.lock = self.root / watch_gateway.LOCK_FILE
@@ -230,7 +216,7 @@ class WatchGatewayTest(unittest.TestCase):
         self.assertEqual((self.restarts, self.beat.paths), (0, [HEARTBEAT_PATH]))
 
     def test_a_missing_broker_token_alone_alerts_without_restarting_a_working_gateway(self) -> None:
-        self.broker.token_present = False
+        self.broker.answers["status"] = holding(False)
 
         outputs = [self.tick() for _ in range(5)]
 
@@ -239,19 +225,36 @@ class WatchGatewayTest(unittest.TestCase):
         self.assertEqual(self.state()["restarts"], [])
 
     def test_a_missing_broker_token_with_an_unresolved_route_secret_still_restarts_once(self) -> None:
-        self.broker.token_present = False
+        self.broker.answers["status"] = holding(False)
         self.gateway.unresolved = {"github"}
 
         self.tick()
 
         self.assertEqual(self.restarts, 1)
 
+    def test_a_root_home_without_the_broker_client_is_neither_restarted_nor_pinged(self) -> None:
+        (self.root / "plugins" / "linear-agent-session" / "broker_client.py").unlink()
+
+        output = self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths, self.broker.requests), (0, [], []))
+        self.assertIn("broker_client.py cannot be loaded, so the upload broker is not asked", output)
+
+    def test_a_broker_client_that_does_not_load_is_reported_not_raised(self) -> None:
+        client = self.root / "plugins" / "linear-agent-session" / "broker_client.py"
+        client.unlink()
+        client.write_text("def broken(:\n")
+
+        output = self.tick()
+
+        self.assertEqual((self.restarts, self.beat.paths), (0, []))
+        self.assertIn("broker_client.py cannot be loaded, so the upload broker is not asked", output)
+
     def test_the_broker_user_socket_named_by_its_config_is_the_one_probed(self) -> None:
         self.broker.close()
-        (self.root / watch_gateway.UPLOAD_SOCKET).unlink()
         run = self.root / "run"
         run.mkdir()
-        service = FakeBroker(run / "factory-uploads.sock")
+        service = FakeBroker(run / "factory-uploads.sock", status=holding())
         self.addCleanup(service.close)
         self.broker_config.write_text(json.dumps({"socket": str(run / "factory-uploads.sock")}))
 
@@ -261,11 +264,10 @@ class WatchGatewayTest(unittest.TestCase):
 
     def test_a_broker_user_without_a_token_is_never_restarted_for_it(self) -> None:
         self.broker.close()
-        (self.root / watch_gateway.UPLOAD_SOCKET).unlink()
         run = self.root / "run"
         run.mkdir()
-        service = FakeBroker(run / "factory-uploads.sock")
-        service.token_present = False
+        service = FakeBroker(run / "factory-uploads.sock", status=holding())
+        service.answers["status"] = holding(False)
         self.addCleanup(service.close)
         self.broker_config.write_text(json.dumps({"socket": str(run / "factory-uploads.sock")}))
 
@@ -276,11 +278,11 @@ class WatchGatewayTest(unittest.TestCase):
 
     def test_a_restart_that_applies_the_secrets_makes_the_next_check_healthy_without_a_person(self) -> None:
         self.gateway.unresolved = {"linear", "github"}
-        self.broker.token_present = False
+        self.broker.answers["status"] = holding(False)
 
         def apply_secrets() -> None:
             self.gateway.unresolved = set()
-            self.broker.token_present = True
+            self.broker.answers["status"] = holding(True)
 
         self.restart_effect = apply_secrets
 

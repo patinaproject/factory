@@ -7,19 +7,17 @@ import json
 import os
 import plistlib
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, SCRIPTS, git, with_interpreter
+from tests.support import REPO, SCRIPTS, FakeBroker, git, with_interpreter
 
 ROUTE_KEY = "platforms.webhook.extra.routes.linear"
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
@@ -83,6 +81,7 @@ ROOT_CONFIG = {
     "plugins.entries.linear-agent-session.settings": SETTINGS,
     MAX_RUNNING_KEY: 2,
     "kanban.max_in_progress": 4,
+    "kanban.max_spawn": 2,
     "kanban.review_dispatch": False,
     "kanban.auto_decompose": False,
     "streaming.enabled": True,
@@ -147,48 +146,15 @@ REPO_FILES = {
 }
 
 
-class FakeBroker:
-    """A Unix socket that answers each request with `reply` and records what it was sent."""
-
-    def __init__(self, path: Path, reply: bytes):
-        self.requests: list = []
-        self.reply = reply
-        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.server.bind(str(path))
-        self.server.listen()
-        self.thread = threading.Thread(target=self.serve, daemon=True)
-        self.thread.start()
-
-    def serve(self) -> None:
-        while True:
-            try:
-                client, _ = self.server.accept()
-            except OSError:
-                return
-            with client:
-                request = b""
-                while not request.endswith(b"\n"):
-                    chunk = client.recv(4096)
-                    if not chunk:
-                        break
-                    request += chunk
-                self.requests.append(request)
-                client.sendall(self.reply)
-
-    def close(self) -> None:
-        self.server.close()
-
-
 STATUS = {
     "ok": True, "token_present": True, "linear_ready": True, "proxy_token_present": True, "github_app_ready": True,
     "last_state": None,
 }
-OK_STATUS = json.dumps(STATUS).encode() + b"\n"
 
 
 class CheckInstallTest(unittest.TestCase):
-    def broker(self, reply: bytes = OK_STATUS) -> FakeBroker:
-        broker = FakeBroker(self.root / "factory-uploads.sock", reply)
+    def broker(self) -> FakeBroker:
+        broker = FakeBroker(self.root / "factory-uploads.sock", status=[STATUS])
         self.addCleanup(broker.close)
         return broker
 
@@ -212,6 +178,10 @@ class CheckInstallTest(unittest.TestCase):
             self.install(home, "plugins/p1/__init__.py", "plugin\n")
             self.install(home, f"plugins/factory-secret-names/{SECRET_NAMES}", SECRET_NAMES_MANIFEST)
         self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
+        (self.root / "plugins" / "linear-agent-session").mkdir(parents=True)
+        (self.root / "plugins" / "linear-agent-session" / "broker_client.py").symlink_to(
+            REPO / "plugins" / "linear-agent-session" / "broker_client.py"
+        )
         self.install(self.root, "plugins/team/__init__.py", "team\n")
         self.install(self.root, "plugins/webhook-retry/__init__.py", "retry\n")
         self.install(self.worker, "SOUL.md", "soul\n")
@@ -576,19 +546,19 @@ class CheckInstallTest(unittest.TestCase):
     def test_healthy_broker_gets_only_a_status_request(self) -> None:
         self.assertEqual(self.check(), (0, ""))
 
-        self.assertEqual(self.uploads.requests, [b'{"op":"status"}\n'])
+        self.assertEqual(self.uploads.bodies, [{"op": "status"}])
 
     def test_broker_that_is_not_listening(self) -> None:
         self.uploads.close()
-        (self.root / "factory-uploads.sock").unlink()
 
         self.assertEqual(
             self.check(),
-            (1, f"upload broker {self.root}/factory-uploads.sock: is unreachable: no broker is listening on it (part 5)\n"),
+            (1, f"upload broker {self.root}/factory-uploads.sock: is unreachable: the gateway's broker at "
+                f"{self.root}/factory-uploads.sock did not answer: No such file or directory (part 5)\n"),
         )
 
     def test_broker_without_a_token(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "token_present": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "token_present": False}]
 
         self.assertEqual(
             self.check(),
@@ -600,7 +570,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_linear_credentials_leaves_every_worker_without_linear(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "linear_ready": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "linear_ready": False}]
 
         self.assertEqual(
             self.check(),
@@ -612,7 +582,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_the_github_app_leaves_the_workers_gh_to_expire(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "github_app_ready": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "github_app_ready": False}]
 
         self.assertEqual(
             self.check(),
@@ -624,7 +594,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_the_proxy_token_matters_only_when_one_is_configured(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "proxy_token_present": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "proxy_token_present": False}]
         self.assertEqual(self.check(), (0, ""))
 
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
@@ -639,7 +609,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_an_mcp_token_matters_only_for_a_configured_server(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True, "posthog": False}}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True, "posthog": False}}]
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "SENTRY_ACCESS_TOKEN"})
         self.assertEqual(self.check(), (0, ""))
 
@@ -659,7 +629,7 @@ class CheckInstallTest(unittest.TestCase):
     def test_broker_that_does_not_answer_a_status_request_properly(self) -> None:
         for reply in (b"not json\n", b'{"ok": false}\n', b"[]\n", b""):
             with self.subTest(reply=reply):
-                self.uploads.reply = reply
+                self.uploads.answers["status"] = [reply]
 
                 code, out = self.check()
 
@@ -713,8 +683,30 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"config model.default in {self.root}: is not set to the operator's model alias (part 4)\n"
-                f"config kanban.max_in_progress in {self.root}: is not set to the operator's card limit (part 10)\n"),
+                f"config kanban.max_in_progress in {self.root}: is not a positive card limit (part 10)\n"),
         )
+
+    def test_capacity_limits_that_are_not_positive_integers(self) -> None:
+        for bad in (True, 2.0, "8", 0, None):
+            with self.subTest(bad=bad):
+                config = {**ROOT_CONFIG, "kanban.max_in_progress": bad, "kanban.max_spawn": bad}
+                if bad is None:
+                    del config["kanban.max_in_progress"], config["kanban.max_spawn"]
+                self.config(self.root, config)
+
+                self.assertEqual(self.check(), (1, (
+                    f"config kanban.max_in_progress in {self.root}: is not a positive card limit (part 10)\n"
+                    f"config kanban.max_spawn in {self.root}: is not a positive limit on worker spawns per board "
+                    "(part 10)\n"
+                )))
+
+    def test_capacity_that_leaves_triage_no_reserved_slot(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "kanban.max_spawn": 3})
+
+        self.assertEqual(self.check(), (1, (
+            "kanban capacity kanban.max_spawn: 3 plus triage.max_running 2 is more than kanban.max_in_progress 4, so "
+            "the default board can take every slot triage needs (part 10)\n"
+        )))
 
     def test_factory_settings_that_differ_between_homes(self) -> None:
         settings = {**SETTINGS, "app_user_id": "u2"}
@@ -797,7 +789,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertNotIn("s3cr3t", out)
 
     def test_an_mcp_token_in_the_worker_env_is_reported_by_name_only(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True}}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "SENTRY_ACCESS_TOKEN"})
         self.install(self.worker, ".env", "SENTRY_ACCESS_TOKEN=s3cr3t-6\n")
 
@@ -811,7 +803,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertNotIn("s3cr3t", out)
 
     def test_an_mcp_token_variable_hermes_would_pass_to_every_process(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True}}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "OTHER_SENTRY_TOKEN"})
 
         self.assertEqual(
@@ -1082,15 +1074,33 @@ class CheckInstallTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as board:
             board.execute(f"CREATE TABLE tasks ({columns})")
+            board.execute("CREATE TABLE task_events (task_id, kind, created_at)")
         board.close()
         return path
 
     def test_board_databases_that_hold_the_columns_the_blocker_check_reads_are_silent(self) -> None:
-        columns = "id, title, body, branch_name, status, assignee"
+        columns = "id, title, body, branch_name, status, assignee, claim_lock, created_at"
         self.kanban_database(self.root / "kanban.db", columns)
         self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", columns)
 
         self.assertEqual(self.check(), (0, ""))
+
+    def test_a_triage_board_with_a_stranded_card_is_reported_by_the_full_check(self) -> None:
+        board = self.kanban_database(
+            self.root / "kanban" / "boards" / "triage" / "kanban.db",
+            "id, title, body, branch_name, status, assignee, claim_lock, created_at",
+        )
+        with sqlite3.connect(board) as db:
+            db.execute(
+                "INSERT INTO tasks (id, status, assignee, created_at) VALUES ('t_old', 'ready', 'claude-worker', ?)",
+                (time.time() - 3 * 3600 - 30,),
+            )
+        db.close()
+
+        self.assertEqual(self.check(), (1, (
+            f"stranded triage card t_old: has waited 180 minutes in ready with an assignee and "
+            "no worker, so the default board is probably holding every worker slot (part 10)\n"
+        )))
 
     def test_a_board_database_missing_a_column_the_blocker_check_reads(self) -> None:
         triage = self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", "id, title, body, state")
@@ -1098,6 +1108,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (1, (
             f"kanban board database {triage}: has no tasks.branch_name, tasks.status, so a card cannot wait for "
             "its blockers (part 15, check 29)\n"
+            f"stranded triage card check {triage}: cannot be read: no such column: t.created_at (part 10)\n"
         )))
 
     def test_a_board_database_that_cannot_be_read(self) -> None:
@@ -1413,6 +1424,133 @@ class CheckInstallTest(unittest.TestCase):
         proc = subprocess.run([sys.executable, str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True)
 
         self.assertEqual((proc.returncode, proc.stdout), (2, ""))
+
+
+class CheckTriageCapacityTest(unittest.TestCase):
+    def rows(self, max_spawn, max_in_progress, max_running) -> list:
+        return [str(d) for d in check_install.check_triage_capacity(max_spawn, max_in_progress, max_running)]
+
+    def test_limits_that_fit_report_nothing(self) -> None:
+        self.assertEqual(self.rows(2, 4, 2), [])
+        self.assertEqual(self.rows(3, 4, 1), [])
+
+    def test_the_spawn_cap_and_triage_cap_together_exceed_the_host_limit(self) -> None:
+        self.assertEqual(self.rows(3, 4, 2), [(
+            "kanban capacity kanban.max_spawn: 3 plus triage.max_running 2 is more than kanban.max_in_progress 4, so "
+            "the default board can take every slot triage needs (part 10)"
+        )])
+
+    def test_the_triage_cap_exceeds_the_spawn_cap(self) -> None:
+        self.assertEqual(self.rows(1, 4, 2), [(
+            "kanban capacity kanban.max_spawn: triage.max_running 2 is more than kanban.max_spawn 1, so triage cannot run "
+            "that many cards on its own board (part 10)"
+        )])
+
+    def test_both_rules_report_separately(self) -> None:
+        self.assertEqual(len(self.rows(2, 3, 3)), 2)
+
+    def test_a_value_that_is_not_a_positive_integer_reports_nothing(self) -> None:
+        for bad in (True, 2.0, "8", 0, -1, None):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.rows(bad, 4, 2), [])
+                self.assertEqual(self.rows(2, bad, 2), [])
+                self.assertEqual(self.rows(2, 4, bad), [])
+
+
+class CheckStrandedTriageTest(unittest.TestCase):
+    NOW = 1_000_000.0
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "hermes"
+        self.path = self.root / "kanban" / "boards" / "triage" / "kanban.db"
+        self.path.parent.mkdir(parents=True)
+        self.db = sqlite3.connect(self.path)
+        self.addCleanup(self.db.close)
+        self.db.execute("CREATE TABLE tasks (id, assignee, status, created_at, claim_lock)")
+        self.db.execute("CREATE TABLE task_events (task_id, kind, created_at)")
+
+    def card(self, id: str, *, assignee="claude-worker", status="ready", age=3600, claim=None, events=()) -> None:
+        self.db.execute(
+            "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)", (id, assignee, status, self.NOW - age * 60, claim)
+        )
+        for kind, event_age in events:
+            self.db.execute("INSERT INTO task_events VALUES (?, ?, ?)", (id, kind, self.NOW - event_age * 60))
+        self.db.commit()
+
+    def rows(self) -> list:
+        return [str(d) for d in check_install.check_stranded_triage(self.root, self.NOW)]
+
+    def test_an_assigned_ready_card_with_no_claim_past_the_threshold(self) -> None:
+        self.card("t_stuck", age=95)
+
+        self.assertEqual(self.rows(), [(
+            "stranded triage card t_stuck: has waited 95 minutes in ready with an assignee and no worker, so "
+            "the default board is probably holding every worker slot (part 10)"
+        )])
+
+    def test_a_card_that_waits_for_an_assignee_is_not_stranded(self) -> None:
+        self.card("t_none", assignee=None)
+        self.card("t_blank", assignee="  ")
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_claimed_card_is_not_stranded(self) -> None:
+        self.card("t_claimed", claim="lock-1")
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_card_in_another_status_is_not_stranded(self) -> None:
+        self.card("t_run", status="running")
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_card_under_the_threshold_is_not_stranded(self) -> None:
+        self.card("t_new", age=29)
+
+        self.assertEqual(self.rows(), [])
+
+    def test_the_wait_starts_at_the_threshold(self) -> None:
+        self.card("t_edge", age=30)
+
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_the_latest_event_sets_the_wait(self) -> None:
+        self.card("t_assigned", age=300, events=[("created", 300), ("assigned", 10)])
+        self.card("t_promoted", age=300, events=[("created", 300), ("promoted", 45)])
+
+        self.assertEqual(self.rows(), [(
+            "stranded triage card t_promoted: has waited 45 minutes in ready with an assignee and no worker, so "
+            "the default board is probably holding every worker slot (part 10)"
+        )])
+
+    def test_other_events_do_not_reset_the_wait(self) -> None:
+        self.card("t_comment", age=300, events=[("commented", 1)])
+
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_a_card_with_no_events_waits_from_its_creation(self) -> None:
+        self.card("t_bare", age=40)
+
+        self.assertEqual(self.rows(), [
+            "stranded triage card t_bare: has waited 40 minutes in ready with an assignee and no worker, so "
+            "the default board is probably holding every worker slot (part 10)"
+        ])
+
+    def test_a_missing_database_is_silent(self) -> None:
+        self.path.unlink()
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_database_that_cannot_be_read_is_reported(self) -> None:
+        self.db.close()
+        self.path.write_text("not a database")
+
+        rows = self.rows()
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].startswith(f"stranded triage card check {self.path}: cannot be read: "))
 
 
 class Launchd:

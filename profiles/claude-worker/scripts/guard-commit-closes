@@ -31,8 +31,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-import card_branch
-import check_title_closes
+import closing
 
 # Claude Code waits 600 s for a hook by default; the guard answers well inside that, or refuses.
 DEFAULT_SECONDS = "30"
@@ -40,17 +39,18 @@ DEFAULT_SECONDS = "30"
 # VAR=value prefixes, an optional python interpreter with its options, then the script, bare or quoted.
 # `grep push-signed` and `cat .../push-signed` do not run it.
 WRAPPERS = (
-    r"(?:(?:\S*/)?(?:env|time|command|exec)\s+|(?:\S*/)?nice\s+(?:-n\s*\S+\s+|-\S*\s+)*|timeout\s+(?:-[sk]\s+\S+\s+|-\S+\s+)*[0-9.]+[smhd]?\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"(?:(?:[^\s;&|()]*/)?(?:env|time|command|exec)\s+|(?:[^\s;&|()]*/)?nice\s+(?:-n\s*[^\s;&|()]+\s+|-[^\s;&|()]*\s+)*|timeout\s+(?:-[sk]\s+[^\s;&|()]+\s+|-[^\s;&|()]+\s+)*[0-9.]+[smhd]?\s+|[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]*\s+)*"
 )
 # Shell keywords that put a command first: `if push-signed; then`, `! push-signed`, `then push-signed`.
-COMMAND_START = r"(?:^|[;&|(]|\n)\s*(?:(?:if|then|else|elif|while|until|do|!|\{)\s+)*"
+# `[^\S\n]*` stops at a newline, which starts a command of its own, so a run of separators costs linear time.
+COMMAND_START = r"(?:^|[;&|(]|\n)[^\S\n]*(?:(?:if|then|else|elif|while|until|do|!|\{)[^\S\n]+)*"
 PUBLISH = re.compile(
-    COMMAND_START + WRAPPERS + r"(?:\S*/)?"
-    r"(?:\S*python[0-9.]*\s+(?:-[XW]\s+\S+\s+|-[A-Za-z]+\s+)*)?[\"']?\S*push-signed[\"']?(?:\s|$|[;&|)])"
+    COMMAND_START + WRAPPERS +
+    r"(?:[^\s;&|()]*python[0-9.]*\s+(?:-[XW]\s+[^\s;&|()]+\s+|-[A-Za-z]+\s+)*)?[\"']?[^\s;&|()]*push-signed[\"']?(?:\s|$|[;&|)])"
 )
 # `bash -c '...'`: the quoted text is a command line of its own.
 SHELL_C = re.compile(
-    COMMAND_START + WRAPPERS + r"(?:\S*/)?(?:ba|z|da|k)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+([\"'])(.*)\1", re.DOTALL
+    COMMAND_START + WRAPPERS + r"(?:[^\s;&|()]*/)?(?:ba|z|da|k)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+([\"'])(.*)\1", re.DOTALL
 )
 RECORD_END = "\x1e"
 FIELD = "\x1f"
@@ -128,15 +128,11 @@ def pull_request(branch: str, cwd: str, clock: Clock) -> tuple[str, set[str]] | 
     gh = os.environ.get("GH_BIN", "gh")
     repo = json.loads(run([gh, "repo", "view", "--json", "nameWithOwner"], cwd, clock))["nameWithOwner"]
     pulls = json.loads(run([gh, "pr", "list", "--head", branch, "--state", "open", "--json", "body", "--limit", "1"], cwd, clock))
-    return (repo, card_branch.closes(pulls[0]["body"] or "", repo)) if pulls else None
+    return (repo, closing.closes(pulls[0]["body"] or "", repo)) if pulls else None
 
 
 def unclosed(message: str, repo: str, in_body: set[str]) -> list[str]:
-    return sorted(check_title_closes.title_closes(message, repo) - in_body, key=lambda ref: int(ref[1:]))
-
-
-def might_close(message: str) -> bool:
-    return bool(check_title_closes.FIX_TYPE.match(message) or card_branch.CLOSING.search(message))
+    return sorted(closing.message_closes(message, repo) - in_body, key=lambda ref: int(ref[1:]))
 
 
 # A commit message written in the command
@@ -233,11 +229,12 @@ def tokens(command: str) -> list | None:
     return found
 
 
-def simple_commands(command: str) -> list[list[Word]] | None:
-    """The command's segments as word lists, or None when a separator is out of place."""
-    segments: list[list[Word]] = []
+def simple_commands(command: str) -> list[tuple[bool, list[Word]]] | None:
+    """The command's segments as (runs only if the one before it succeeds, words), or None when a separator is out of place."""
+    segments: list[tuple[bool, list[Word]]] = []
     current: list[Word] = []
     dangling = False
+    chained = False
     found = tokens(command)
     if found is None:
         return None
@@ -249,13 +246,29 @@ def simple_commands(command: str) -> list[list[Word]] | None:
             if token != "\n":
                 return None
             continue
-        segments.append(current)
+        segments.append((chained, current))
         current, dangling = [], token == "&&"
+        chained = dangling
     if current:
-        segments.append(current)
+        segments.append((chained, current))
     elif dangling:
         return None
     return segments
+
+
+def in_repository(directory: str) -> bool:
+    """Whether a commit here can run at all: a `.git` in the directory or above it, GIT_DIR being refused earlier.
+
+    Git walks the physical path, so a `cd` into a symlink is resolved first.
+    """
+    directory = os.path.realpath(directory)
+    while True:
+        if os.path.exists(os.path.join(directory, ".git")):
+            return True
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return False
+        directory = parent
 
 
 def plain_path(word: Word) -> str | None:
@@ -264,14 +277,22 @@ def plain_path(word: Word) -> str | None:
     return word.text
 
 
+def existing_realpath(path: str) -> str | None:
+    """The resolved path, or None when a component is missing: `nope/..` fails in the shell, but realpath collapses it."""
+    try:
+        return os.path.realpath(path, strict=True)
+    except OSError:
+        return None
+
+
 def change_directory(cwd: str, words: list[Word]) -> str | None:
     """Where `cd <path>` lands, or None when the shell could land elsewhere: CDPATH, or a `..` past a symlink."""
     target = plain_path(words[1]) if len(words) == 2 else None
     if target is None or (os.environ.get("CDPATH") and not os.path.isabs(target)):
         return None
     logical = os.path.normpath(os.path.join(cwd, target))
-    physical = os.path.realpath(os.path.join(cwd, target))
-    if not os.path.isdir(physical) or os.path.realpath(logical) != physical:
+    physical = existing_realpath(os.path.join(cwd, target))
+    if physical is None or not os.path.isdir(physical) or os.path.realpath(logical) != physical:
         return None
     return logical
 
@@ -289,8 +310,8 @@ def git_call(words: list[Word], cwd: str) -> tuple[str, list[Word], str] | None:
         target = plain_path(rest[1]) if len(rest) > 2 else None
         if target is None:
             return None
-        cwd = os.path.realpath(os.path.join(cwd, target))
-        if not os.path.isdir(cwd):
+        cwd = existing_realpath(os.path.join(cwd, target))
+        if cwd is None or not os.path.isdir(cwd):
             return None
         rest = rest[2:]
     if rest[0].heredoc:
@@ -347,7 +368,11 @@ def spelled_commits(command: str, cwd: str) -> list[tuple[str, str]] | None:
     if segments is None:
         return None
     commits = []
-    for words in segments:
+    failed = False
+    for chained, words in segments:
+        if chained and failed:
+            continue
+        failed = False
         if words[0].text == "cd" and not words[0].heredoc:
             cwd = change_directory(cwd, words)
             if cwd is None:
@@ -363,6 +388,7 @@ def spelled_commits(command: str, cwd: str) -> list[tuple[str, str]] | None:
         if message is None:
             return None
         commits.append((directory, message))
+        failed = not in_repository(directory)
     return commits
 
 
@@ -376,7 +402,7 @@ def commit_refusals(command: str, cwd: str, clock: Clock) -> list[str]:
     """
     problems = []
     for where, message in spelled_commits(command, cwd) or []:
-        if not might_close(message):
+        if not closing.might_close(message):
             continue
         try:
             branch = run(["git", "branch", "--show-current"], where, clock).strip()

@@ -168,7 +168,7 @@ class ClaudeSessionTest(GitFixture):
         self.set_comments()
 
     def start_broker(self, **answers: list) -> FakeBroker:
-        broker = FakeBroker(self.tmp / "hermes", **answers)
+        broker = FakeBroker(self.tmp / "hermes" / "factory-uploads.sock", **answers)
         self.addCleanup(broker.close)
         return broker
 
