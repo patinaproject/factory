@@ -126,6 +126,7 @@ class PlanTest(unittest.TestCase):
             "write  /Library/Application Support/factory-broker/lib/factory_uploads/upload_token.py root:wheel 0644",
             "write  /Library/Application Support/factory-broker/lib/factory_uploads/secret-names.yaml root:wheel 0644",
             "write  /Library/Application Support/factory-broker/lib/linear.py root:wheel 0644",
+            "write  /Library/Application Support/factory-broker/lib/broker_client.py root:wheel 0644",
             "write  /Library/Application Support/factory-broker/setup-broker-user root:wheel 0644",
             "write  /Library/Application Support/factory-broker/broker.json root:wheel 0644",
             "write  /Library/LaunchDaemons/local.factory-broker.plist root:wheel 0644",
@@ -550,7 +551,7 @@ class InstallTest(unittest.TestCase):
         self.assertIn("-older code", shown)
         self.assertIn(
             f"git diff {COMMIT}..{NEXT_COMMIT} -- plugins/factory-uploads plugins/factory-secret-names/plugin.yaml plugins/linear-agent-session/linear.py "
-            "skills/setup-factory/scripts/setup-broker-user",
+            "plugins/linear-agent-session/broker_client.py skills/setup-factory/scripts/setup-broker-user",
             shown,
         )
 

@@ -433,7 +433,7 @@ class CliTest(unittest.TestCase):
             root = os.path.realpath(tmp)
             worker = os.path.join(root, "profiles", "claude-worker")
             os.makedirs(worker)
-            broker = FakeBroker(os.path.join(root, "factory-uploads.sock"), [BUSY, linear_token("brokered-1")])
+            broker = FakeBroker(os.path.join(root, "factory-uploads.sock"), linear_token=[BUSY, linear_token("brokered-1")])
             self.addCleanup(broker.close)
             with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": "", "LINEAR_CLIENT_SECRET": "", "HERMES_HOME": worker}), \
                     mock.patch("urllib.request.urlopen", fake), mock.patch("time.sleep"), contextlib.redirect_stdout(out):

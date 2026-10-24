@@ -72,7 +72,6 @@ import plistlib
 import pwd
 import re
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -505,51 +504,43 @@ def check_config(home_paths: dict, hermes: str, table: tuple = CONFIG) -> list:
     return drifts
 
 
-UPLOAD_SOCKET = "factory-uploads.sock"
 UPLOAD_STATUS_SECONDS = 5
+BROKER_CLIENT = Path("plugins/linear-agent-session/broker_client.py")
 
 
 def check_upload_broker(root: Path, token_env: str, mcp_envs: dict) -> list:
     """Ask the root home's broker for its status. Sends no upload, asks for no token, and reports no value."""
-    path = root / UPLOAD_SOCKET
+    try:
+        spec = importlib.util.spec_from_file_location("broker_client", root / BROKER_CLIENT)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+    except (OSError, SyntaxError, ImportError):
+        return [Drift("upload broker", str(root / BROKER_CLIENT), "cannot be loaded, so the broker is not asked (part 5)")]
+    path = root / client.SOCKET_NAME
 
     def drift(detail: str) -> list:
         return [Drift("upload broker", str(path), f"{detail} (part 5)")]
 
-    reply = b""
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(UPLOAD_STATUS_SECONDS)
-            client.connect(str(path))
-            client.sendall(b'{"op":"status"}\n')
-            while not reply.endswith(b"\n") and len(reply) < 65536:
-                chunk = client.recv(4096)
-                if not chunk:
-                    break
-                reply += chunk
-    except OSError:
-        return drift("is unreachable: no broker is listening on it")
-    try:
-        status = json.loads(reply)
-    except ValueError:
-        return drift("did not answer a status request with JSON")
-    if not isinstance(status, dict) or status.get("ok") is not True:
-        return drift("did not answer a status request with ok")
+        status = client.status(str(path), timeout=UPLOAD_STATUS_SECONDS)
+    except client.BrokerUnavailable as error:
+        return drift(f"is unreachable: {error}")
+    except client.BrokerError as error:
+        return drift(f"did not answer a status request with ok: {error}")
     drifts = []
-    if status.get("token_present") is not True:
+    if not status.token_present:
         drifts += drift("reports token_present false: the broker holds no upload token")
-    if status.get("linear_ready") is not True:
+    if not status.linear_ready:
         drifts += drift("reports linear_ready false: the broker holds no Linear app credentials, so no worker reaches Linear")
-    if status.get("github_app_ready") is not True:
+    if not status.github_app_ready:
         drifts += drift(
             "reports github_app_ready false: the broker cannot mint the GitHub App installation token, "
             "so the worker's gh login expires within the hour"
         )
-    if token_env and status.get("proxy_token_present") is not True:
+    if token_env and not status.proxy_token_present:
         drifts += drift(f"reports proxy_token_present false: the broker holds no {token_env}, so no worker reaches the proxy")
-    present = status.get("mcp_tokens_present") or {}
     for server, name in sorted(mcp_envs.items()):
-        if present.get(server) is not True:
+        if not status.mcp_tokens_present.get(server):
             drifts += drift(f"holds no token for the {server} MCP server: the broker holds no {name}, so every worker run is refused")
     return drifts
 
@@ -867,7 +858,9 @@ BROKER_FILES = {
     "factory_uploads/upload_token.py": "plugins/factory-uploads/upload_token.py",
     "factory_uploads/secret-names.yaml": "plugins/factory-secret-names/plugin.yaml",
     "linear.py": "plugins/linear-agent-session/linear.py",
+    "broker_client.py": "plugins/linear-agent-session/broker_client.py",
 }
+BROKER_SOCKET_LINK = "factory-uploads.sock"
 BROKER_KEYS = ("user", "group", "label", "lib", "socket", "home", "allowed_uids")
 NO_SHELL = "/usr/bin/false"
 
@@ -959,9 +952,7 @@ def check_broker_user(
             if info.st_uid != user.pw_uid or (gid is not None and info.st_gid != gid) or info.st_mode & 0o7777 != mode:
                 drifts.append(drift(f"{path} is not {config['user']}'s with mode {mode:04o}"))
 
-    blobs = {
-        **commit.files("plugins/factory-uploads"), **commit.files(SECRET_NAMES), **commit.files("plugins/linear-agent-session/linear.py"),
-    }
+    blobs = {path: blob for source in BROKER_FILES.values() for path, blob in commit.files(source).items()}
     for target, source in BROKER_FILES.items():
         installed = lib / target
         if installed.is_file() and installed.read_bytes() != commit.blob(blobs[source]):
@@ -990,7 +981,7 @@ def check_broker_user(
             f"{local(github['private_key_path'])} is readable by {accounts.me}, so a factory process could read the GitHub App key"
         ))
 
-    link = root / UPLOAD_SOCKET
+    link = root / BROKER_SOCKET_LINK
     if not link.is_symlink() or os.readlink(link) != config["socket"]:
         drifts.append(drift(f"{link} is not a link to {config['socket']}"))
     for name in broker_only_names(commit):

@@ -27,11 +27,11 @@ def main() -> int:
         print("mcp-headers: HERMES_HOME is not set; claude-session sets it to the worker home", file=sys.stderr)
         return 1
     sys.path.insert(0, str(Path(home) / "plugins" / "linear-agent-session"))
-    import linear
+    import broker_client
 
     try:
-        reply = linear.broker_request(linear.broker_socket_path({"HERMES_HOME": home}), "mcp_token", server=server)
-    except linear.LinearError as error:
+        reply = broker_client.request(broker_client.socket_path({"HERMES_HOME": home}), "mcp_token", server=server)
+    except broker_client.BrokerError as error:
         print(f"mcp-headers: {error}", file=sys.stderr)
         return 1
     print(json.dumps({"Authorization": f"{scheme} {reply['token']}"}))

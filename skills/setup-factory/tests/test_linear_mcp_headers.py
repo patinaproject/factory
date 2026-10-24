@@ -51,6 +51,7 @@ class LinearMcpHeadersTest(unittest.TestCase):
         linear_py = self.home / "plugins" / "linear-agent-session" / "linear.py"
         linear_py.unlink()
         linear_py.symlink_to(STAGED_LINEAR)
+        linear_py.with_name("broker_client.py").symlink_to(STAGED_LINEAR.parents[1] / "broker_client.py")
         (self.home / "linear-fake.json").write_text(json.dumps({"accepted": accepted}))
         (self.home / ".env").write_text("LINEAR_CLIENT_ID=id1\nLINEAR_CLIENT_SECRET=secret1\n")
         cache = self.home / "plugin-data" / "linear-agent-session" / "token.json"
