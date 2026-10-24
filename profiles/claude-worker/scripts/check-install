@@ -28,7 +28,10 @@ connected and not in claude_session.disabled_mcp_servers. It
 also checks that the Triage board exists and anchors its worktrees at the
 default repository, that the source checkout vendors the triage playbook that
 claude-session gives triage cards, and that the triage refs file is as fresh as
-the owned refs. When any difference is
+the owned refs. It checks that the default board cannot take the worker slots triage needs
+(kanban.max_spawn plus triage.max_running within kanban.max_in_progress, and triage.max_running
+within kanban.max_spawn) and reports a triage card that has stayed assigned in ready, with no worker,
+for 30 minutes or more. When any difference is
 reported and the source checkout is not at origin/HEAD, the last line names
 that checkout. It gives the fast-forward command only when the checkout is
 behind, on the default branch, and clean. --ref turns the line off, because
@@ -89,6 +92,9 @@ PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
 OWNED_REFS = "owned-refs.json"
 TRIAGE_REFS = "triage-refs.json"
 TRIAGE_BOARD = "triage"
+STRANDED_MINUTES = 30  # Hermes' own threshold for a card stranded in ready
+# Hermes' events that start a card's wait in ready; `assigned` is the dispatch-triage assignment.
+WAIT_EVENTS = ("created", "promoted", "reclaimed", "unblocked", "assigned")
 LINEAR_ISSUE_FIELD = "data.id"
 LINEAR_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Deliver values that name no platform, so no home channel is needed.
@@ -149,8 +155,12 @@ def declared(what: str, *, besides: tuple = ()) -> Want:
     return Want(lambda live: live not in (None, "", *besides), what)
 
 
+def is_limit(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def positive_int(what: str) -> Want:
-    return Want(lambda live: isinstance(live, int) and not isinstance(live, bool) and live > 0, what)
+    return Want(is_limit, what)
 
 
 def non_empty_list(what: str) -> Want:
@@ -215,7 +225,8 @@ CONFIG = (
         10, f"{SETTINGS_KEY}.triage.max_running", BOTH, positive_int("a positive limit on running triage cards"),
         same_in_homes=True,
     ),
-    ConfigKey(10, "kanban.max_in_progress", (ROOT,), declared("set to the operator's card limit")),
+    ConfigKey(10, "kanban.max_in_progress", (ROOT,), positive_int("a positive card limit")),
+    ConfigKey(10, "kanban.max_spawn", (ROOT,), positive_int("a positive limit on worker spawns per board")),
     ConfigKey(10, "kanban.review_dispatch", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.auto_decompose", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.default_assignee", (ROOT,), unset()),
@@ -1023,6 +1034,60 @@ def check_triage_board(root: Path, hermes: str, settings) -> list:
     return []
 
 
+def check_triage_capacity(max_spawn, max_in_progress, max_running) -> list:
+    """Hermes counts `max_spawn` per board and `max_in_progress` per host, and ticks `default` first.
+
+    Keys that are not positive integers are the CONFIG rows' to report."""
+    if not all(is_limit(value) for value in (max_spawn, max_in_progress, max_running)):
+        return []
+    drifts = []
+    if max_spawn + max_running > max_in_progress:
+        drifts.append(Drift(
+            "kanban capacity", "kanban.max_spawn",
+            f"{max_spawn} plus triage.max_running {max_running} is more than kanban.max_in_progress "
+            f"{max_in_progress}, so the default board can take every slot triage needs (part 10)",
+        ))
+    if max_running > max_spawn:
+        drifts.append(Drift(
+            "kanban capacity", "kanban.max_spawn",
+            f"triage.max_running {max_running} is more than kanban.max_spawn {max_spawn}, so triage cannot run "
+            "that many cards on its own board (part 10)",
+        ))
+    return drifts
+
+
+def triage_max_running(settings):
+    triage = settings.get("triage") if isinstance(settings, dict) else None
+    return triage.get("max_running") if isinstance(triage, dict) else None
+
+
+def check_stranded_triage(root: Path, now: float) -> list:
+    """A triage card that Hermes' dispatcher has left assigned in `ready`, which a starved board looks like."""
+    path = root / "kanban" / "boards" / TRIAGE_BOARD / "kanban.db"
+    if not path.is_file():
+        return []
+    events = ", ".join(f"'{kind}'" for kind in WAIT_EVENTS)
+    sql = (
+        "SELECT t.id AS id, COALESCE((SELECT MAX(e.created_at) FROM task_events e "
+        f"WHERE e.task_id = t.id AND e.kind IN ({events})), t.created_at) AS since "
+        "FROM tasks t WHERE t.status = 'ready' AND COALESCE(t.claim_lock, '') = '' "
+        "AND TRIM(COALESCE(t.assignee, '')) != '' ORDER BY t.id"
+    )
+    try:
+        cards = kanban_board.read(str(path), sql)
+    except sqlite3.Error as error:
+        return [Drift("stranded triage card check", path, f"cannot be read: {error} (part 10)")]
+    return [
+        Drift(
+            "stranded triage card", card["id"],
+            f"has waited {int((now - card['since']) // 60)} minutes in ready with an assignee and no worker, "
+            "so the default board is probably holding every worker slot (part 10)",
+        )
+        for card in cards
+        if now - card["since"] >= STRANDED_MINUTES * 60
+    ]
+
+
 def check_kanban_boards(root: Path) -> list:
     """Probe every board database the way `claude-session` reads it, for the columns its blocker check needs.
 
@@ -1357,6 +1422,12 @@ def main() -> int:
             *check_owned_refs(root),
             *check_triage_board(root, hermes, settings),
             *check_kanban_boards(root),
+            *check_triage_capacity(
+                config_value(root, hermes, "kanban.max_spawn"),
+                config_value(root, hermes, "kanban.max_in_progress"),
+                triage_max_running(settings),
+            ),
+            *check_stranded_triage(root, time.time()),
             *check_triage_playbook(repo),
             *check_checkouts(settings),
             *check_team_skills(
