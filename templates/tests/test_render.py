@@ -319,6 +319,13 @@ class LinearPayloadTest(unittest.TestCase):
         self.assertLess(skip, undelegated.index("Post no activity, create no card, and stop."))
         self.assertLess(skip, undelegated.index("`response`"))
 
+    def test_a_reply_on_an_undelegated_issue_with_no_card_is_answered(self):
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        section = " ".join(prompt[prompt.index("## Prompt\n") : prompt.index("## Triage card reply\n")].split())
+        no_card = section[section.index("If there is none") : section.index("2. ")]
+        self.assertLess(no_card.index(f"is not `{SETTINGS['app_user_id']}`"), no_card.index("`response`"))
+        self.assertLess(no_card.index("`response`"), no_card.index('"Session created"'))
+
     def test_only_a_session_a_person_opened_defers_a_delegation_to_session_created(self):
         prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
         change = " ".join(prompt[prompt.index("## Issue change") :].split())

@@ -208,8 +208,16 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
 
 1. Read the issue with `linear_issue`. If it has a triage card whose status
    is not `done`, follow "Triage card reply" below and stop. Otherwise find
-   its card. If there is none, handle the event as "Session created" and
-   stop.
+   its card. If there is none and its `delegate` is null or is not
+   `<<app_user_id>>`, a person still wrote to you, whoever opened the
+   session. If the reply block above still holds a dotted name in braces,
+   read the reply with `linear_agent_activity_read` as step 2 says; when it
+   finds none, post a `thought` on this agent session asking the human to
+   send the reply again, and stop. Answer the reply in one `response`
+   activity on this agent session, from the reply and the issue. Create no
+   card and stop. If there
+   is none and the issue is delegated, handle the event as "Session created"
+   and stop.
 2. If the reply block above still holds a dotted name in braces, call
    `linear_agent_activity_read` with `agent_activity_id` set to the activity
    id above, or with `agent_session_id` set to the agent session above when
