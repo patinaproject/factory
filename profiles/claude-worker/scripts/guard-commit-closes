@@ -31,8 +31,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-import card_branch
-import check_title_closes
+import closing
 
 # Claude Code waits 600 s for a hook by default; the guard answers well inside that, or refuses.
 DEFAULT_SECONDS = "30"
@@ -129,15 +128,11 @@ def pull_request(branch: str, cwd: str, clock: Clock) -> tuple[str, set[str]] | 
     gh = os.environ.get("GH_BIN", "gh")
     repo = json.loads(run([gh, "repo", "view", "--json", "nameWithOwner"], cwd, clock))["nameWithOwner"]
     pulls = json.loads(run([gh, "pr", "list", "--head", branch, "--state", "open", "--json", "body", "--limit", "1"], cwd, clock))
-    return (repo, card_branch.closes(pulls[0]["body"] or "", repo)) if pulls else None
+    return (repo, closing.closes(pulls[0]["body"] or "", repo)) if pulls else None
 
 
 def unclosed(message: str, repo: str, in_body: set[str]) -> list[str]:
-    return sorted(check_title_closes.title_closes(message, repo) - in_body, key=lambda ref: int(ref[1:]))
-
-
-def might_close(message: str) -> bool:
-    return bool(check_title_closes.FIX_TYPE.match(message) or card_branch.CLOSING.search(message))
+    return sorted(closing.message_closes(message, repo) - in_body, key=lambda ref: int(ref[1:]))
 
 
 # A commit message written in the command
@@ -407,7 +402,7 @@ def commit_refusals(command: str, cwd: str, clock: Clock) -> list[str]:
     """
     problems = []
     for where, message in spelled_commits(command, cwd) or []:
-        if not might_close(message):
+        if not closing.might_close(message):
             continue
         try:
             branch = run(["git", "branch", "--show-current"], where, clock).strip()

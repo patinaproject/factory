@@ -27,21 +27,10 @@ from enum import Enum
 from typing import Any, Callable, Mapping, NamedTuple
 from urllib.parse import quote
 
+import closing
+
 TAKEOVER_SUFFIX = "-takeover"
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
-ISSUE_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/([0-9]+)$")
-IDENTIFIER = re.compile(r"^[A-Z][A-Z0-9]*-[1-9][0-9]*$")
-NUMBER = re.compile(r"^#([1-9][0-9]*)$")
-# GitHub's closing keywords, which Linear also reads, followed by `#n`, `owner/name#n`, a GitHub issue URL,
-# a Linear identifier, or a Linear issue URL.
-CLOSING = re.compile(
-    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[ \t]*:?[ \t]+"
-    r"(?:(?P<repo>[\w.-]+/[\w.-]+)?#(?P<number>[1-9][0-9]*)\b"
-    r"|https://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/(?P<url_number>[1-9][0-9]*)\b"
-    r"|(?:https://linear\.app/[\w-]+/issue/)?(?P<identifier>[A-Z][A-Z0-9]*-[1-9][0-9]*)\b)",
-    re.IGNORECASE,
-)
-QUOTED = re.compile(r"<!--.*?-->|^(```|~~~).*?^\1|`[^`\n]*`|~~.*?~~|^[ \t]*>.*?$", re.DOTALL | re.MULTILINE)
 SERVER_ERROR = re.compile(r"\bHTTP 5[0-9][0-9]\b")
 WRITE_OPTIONS = ("-X", "--method", "-f", "--raw-field", "-F", "--field", "--input")
 RETRY_DELAYS = (1, 2)
@@ -155,32 +144,6 @@ def choose(git_branch: str, pulls: list[Pull], owners: Mapping[str, Owner | None
     )
 
 
-def reference(text: str, repo: str) -> str:
-    """`#n` for an issue of `repo`, given as `#n` or its URL, or a Linear identifier in upper case."""
-    issue = ISSUE_URL.match(text)
-    if issue and issue.group(1).lower() == repo.lower():
-        return "#" + issue.group(2)
-    if NUMBER.match(text) or IDENTIFIER.match(text.upper()):
-        return text.upper()
-    raise GhFailed(f"--closes {text} is not a Linear identifier, #n, or an issue URL in {repo}")
-
-
-def closes(body: str | None, repo: str) -> set[str]:
-    """The references that a pull request body closes, written as `reference` writes them.
-
-    Code, HTML comments, struck-out text, and blockquotes close nothing, as in the pull request workflow's check. An issue of another repository is left out.
-    """
-    found = set()
-    for match in CLOSING.finditer(QUOTED.sub("", body or "")):
-        if match["identifier"]:
-            found.add(match["identifier"].upper())
-            continue
-        other = match["repo"] or match["url_repo"]
-        if other is None or other.lower() == repo.lower():
-            found.add("#" + (match["number"] or match["url_number"]))
-    return found
-
-
 def run_gh(*args: str) -> Any:
     """Call `gh api`, retrying a server error only when the call reads, so a write is never sent twice."""
     gh = os.environ.get("GH_BIN", "gh")
@@ -238,7 +201,7 @@ def closing_pulls(gh: Callable[..., Any], repo: str, app: str, refs: set[str]) -
     while batch := gh(f"repos/{repo}/pulls?state=open&per_page=100&page={page}"):
         pulls += [
             parse_pull(data["html_url"], data, repo) for data in batch
-            if is_app(data["user"]["login"], app) and closes(data["body"], repo) & refs
+            if is_app(data["user"]["login"], app) and closing.closes(data["body"], repo) & refs
         ]
         page += 1
     return pulls
@@ -256,7 +219,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        refs = {reference(text, args.repo) for text in args.closes}
+        refs = {closing.reference(text, args.repo) for text in args.closes}
+    except ValueError as failure:
+        print(json.dumps({"error": f"--closes {failure}"}))
+        return 1
+    try:
         linked = read_pulls(run_gh, args.repo, args.pull)
         found = closing_pulls(run_gh, args.repo, args.app, refs) if refs else []
         names = {args.git_branch, args.git_branch + TAKEOVER_SUFFIX}
