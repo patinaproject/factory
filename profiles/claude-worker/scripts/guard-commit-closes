@@ -262,7 +262,11 @@ def simple_commands(command: str) -> list[tuple[bool, list[Word]]] | None:
 
 
 def in_repository(directory: str) -> bool:
-    """Whether a commit here can run at all: a `.git` in the directory or above it, GIT_DIR being refused earlier."""
+    """Whether a commit here can run at all: a `.git` in the directory or above it, GIT_DIR being refused earlier.
+
+    Git walks the physical path, so a `cd` into a symlink is resolved first.
+    """
+    directory = os.path.realpath(directory)
     while True:
         if os.path.exists(os.path.join(directory, ".git")):
             return True
