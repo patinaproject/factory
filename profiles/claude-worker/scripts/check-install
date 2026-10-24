@@ -474,10 +474,10 @@ def check_dashboard(root: Path, hermes: str) -> list:
     return drifts
 
 
-def config_value(home: Path, hermes: str, key: str, raw: bool = False):
+def config_value(home: Path, hermes: str, key: str):
     # Without --raw, Hermes masks secrets. Values are compared here and never printed.
     proc = subprocess.run(
-        [hermes, "config", "get", key, "--json", *(["--raw"] if raw else [])], env={**os.environ, "HERMES_HOME": str(home)},
+        [hermes, "config", "get", key, "--json"], env={**os.environ, "HERMES_HOME": str(home)},
         capture_output=True, text=True,
     )
     if proc.returncode == 0:
@@ -1266,13 +1266,43 @@ def root_mcp_connects(root: Path, hermes: str, server: str) -> bool:
     return proc.returncode == 0
 
 
+READ_MCP_SERVERS = (
+    "import json, sys, yaml\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "cfg = yaml.safe_load(open(sys.argv[2])) or {}\n"
+    "assert isinstance(cfg, dict), 'config.yaml is not a mapping'\n"
+    "print(json.dumps(cfg.get('mcp_servers')))\n"
+)
+
+
+def root_mcp_servers(root: Path):
+    """The root home's mcp_servers as config.yaml writes it, with no ${VAR} expansion.
+
+    `hermes config get` expands every ${VAR} to its value, so it cannot show whether a header holds a
+    reference or a literal. Parses the file with the store Python's PyYAML. A missing file is check_config's to report. Raises Refusal on a failure.
+    """
+    config = root / "config.yaml"
+    if not config.is_file():
+        return None
+    python, site = hermes_python(root)
+    proc = subprocess.run(
+        [str(python), "-I", "-B", "-c", READ_MCP_SERVERS, str(site), str(config)],
+        env={"PATH": os.environ.get("PATH", "")}, capture_output=True, text=True, timeout=HERMES_TOOLS_SECONDS,
+    )
+    if proc.returncode != 0:
+        lines = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
+        raise Refusal(f"cannot read mcp_servers from {config}: {lines[-1] if lines else proc.returncode}")
+    return json.loads(proc.stdout)
+
+
 def check_root_mcp_servers(root: Path, hermes: str) -> list:
     """Report each enabled root-home MCP server that does not connect, samples, or holds a literal header.
 
-    Reads mcp_servers from the root home's config.yaml, raw, so a masked value cannot pass for a reference.
-    Prints a server and header name, never a header value. Raises Refusal on a shape Hermes would not load.
+    Reads mcp_servers from the root home's config.yaml without env expansion, so a ${VAR} reference stays
+    a reference and no secret enters this process. Prints a server and header name, never a header value.
+    Raises Refusal on a shape Hermes would not load.
     """
-    servers = config_value(root, hermes, "mcp_servers", raw=True)
+    servers = root_mcp_servers(root)
     if servers is None:
         return []
     if not isinstance(servers, dict):
@@ -1309,13 +1339,8 @@ HERMES_TOOL_NAMES = Path(__file__).resolve().parent / "hermes-tool-names"
 BLOCKER_ORDER = "plugins/blocker-order/__init__.py"
 
 
-def hermes_tool_names(root: Path) -> list:
-    """The terminal toolset's registered names, read from the installed Hermes without writing to it.
-
-    Runs the store Python on the checkout and the selected environment's site-packages directly, never
-    through the `hermes` launcher, which leases and can rebuild environments. HERMES_HOME is a scratch
-    directory and bytecode is off. Raises Refusal with the reason when it cannot answer.
-    """
+def hermes_python(root: Path) -> tuple:
+    """The store Python and the selected environment's site-packages directory. Raises Refusal when absent."""
     python_facts = root / "tools" / "facts.json"
     if not python_facts.is_file():
         raise Refusal(f"no Hermes Python in {python_facts}")
@@ -1323,9 +1348,6 @@ def hermes_tool_names(root: Path) -> list:
     python = root / "tools" / str(entry) / "bin" / "python3"
     if not entry or not python.is_file():
         raise Refusal(f"no Hermes Python in {python_facts}")
-    checkout = Path(os.environ.get("HERMES_AGENT_DIR") or root / "hermes-agent")
-    if not (checkout / "tools" / "registry.py").is_file():
-        raise Refusal(f"no Hermes checkout at {checkout}")
     environments = [
         (json_file(facts).get("packages", {}).get("venv") or {}).get("environment")
         for facts in sorted((root / "installs").glob("*/facts.json"))
@@ -1333,10 +1355,24 @@ def hermes_tool_names(root: Path) -> list:
     site = [path for env in environments if env for path in sorted(Path(env).glob("lib/python*/site-packages"))]
     if len(site) != 1:
         raise Refusal(f"no Hermes environment: {len(site)} selected under {root / 'installs'}")
+    return python, site[0]
+
+
+def hermes_tool_names(root: Path) -> list:
+    """The terminal toolset's registered names, read from the installed Hermes without writing to it.
+
+    Runs the store Python on the checkout and the selected environment's site-packages directly, never
+    through the `hermes` launcher, which leases and can rebuild environments. HERMES_HOME is a scratch
+    directory and bytecode is off. Raises Refusal with the reason when it cannot answer.
+    """
+    python, site = hermes_python(root)
+    checkout = Path(os.environ.get("HERMES_AGENT_DIR") or root / "hermes-agent")
+    if not (checkout / "tools" / "registry.py").is_file():
+        raise Refusal(f"no Hermes checkout at {checkout}")
     with tempfile.TemporaryDirectory() as scratch:
         try:
             proc = subprocess.run(
-                [str(python), "-I", "-B", str(HERMES_TOOL_NAMES), str(checkout), str(site[0])],
+                [str(python), "-I", "-B", str(HERMES_TOOL_NAMES), str(checkout), str(site)],
                 env={"PATH": os.environ.get("PATH", ""), "HERMES_HOME": os.path.join(scratch, "home"), "PYTHONDONTWRITEBYTECODE": "1"},
                 cwd=scratch, capture_output=True, text=True, timeout=HERMES_TOOLS_SECONDS,
             )
