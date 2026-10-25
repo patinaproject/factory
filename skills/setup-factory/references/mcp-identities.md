@@ -165,8 +165,10 @@ python3 <repo>/skills/setup-factory/scripts/restart-gateway
 - `check-install` prints no `root mcp` line. For each root-home `mcp_servers`
   entry that is not `enabled: false`, it runs `hermes mcp test <server>` with
   the root home. It reports a server that does not connect, a server whose
-  `sampling.enabled` is not `false`, and a header whose value holds no `${VAR}`
-  reference. It prints no header value.
+  `sampling.enabled` is not `false`, and a header whose value is anything but
+  one `${VAR}` reference, after at most one scheme word. It reports a
+  `config.yaml` it cannot read as one `root mcp` line. It prints no header
+  value.
 
 `claude mcp list` shows a person's interactive view, not a worker's. To read
 every status a worker run sees for one repository:

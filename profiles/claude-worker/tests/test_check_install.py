@@ -1686,7 +1686,11 @@ class YAML:
     def __init__(self, typ="rt", pure=False):
         assert typ == "safe" and pure is True
     def load(self, stream):
-        return json.load(stream)
+        text = stream.read()
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise ValueError("while parsing a flow sequence: " + text) from None
 """
 
 SECRET = "sntryu_0123456789abcdef"
@@ -1741,14 +1745,17 @@ class CheckRootMcpServersTest(unittest.TestCase):
                 ])
 
     def test_a_literal_header_is_reported_without_its_value(self) -> None:
-        server = {**ROOT_SERVER, "headers": {"Authorization": f"Sentry-Bearer {SECRET}"}}
+        for value in (f"Sentry-Bearer {SECRET}", f"Bearer {SECRET} ${{SENTRY_ACCESS_TOKEN}}", f"{SECRET}${{X}}"):
+            with self.subTest(value=value):
+                lines = self.check({"sentry": {**ROOT_SERVER, "headers": {"Authorization": value}}})
 
-        lines = self.check({"sentry": server})
+                self.assertEqual(lines, [
+                    f"root mcp sentry in {self.root}: header Authorization holds a literal value, not a ${{VAR}} reference (part 10)",
+                ])
+                self.assertNotIn(SECRET, "".join(lines))
 
-        self.assertEqual(lines, [
-            f"root mcp sentry in {self.root}: header Authorization holds a literal value, not a ${{VAR}} reference (part 10)",
-        ])
-        self.assertNotIn(SECRET, "".join(lines))
+    def test_a_bare_reference_is_a_reference(self) -> None:
+        self.assertEqual(self.check({"sentry": {**ROOT_SERVER, "headers": {"X-Token": "${SENTRY_ACCESS_TOKEN}"}}}), [])
 
     def test_a_disabled_server_is_skipped(self) -> None:
         self.assertEqual(self.check({"sentry": {**ROOT_SERVER, "sampling": {}, "enabled": False}}, connects=()), [])
@@ -1766,22 +1773,30 @@ class CheckRootMcpServersTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SENTRY_ACCESS_TOKEN": SECRET}):
             self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
 
-    def test_a_config_that_does_not_parse_is_refused(self) -> None:
-        (self.root / "config.yaml").write_text("mcp_servers: [unclosed\n")
-        with self.assertRaises(check_install.Refusal):
-            check_install.check_root_mcp_servers(self.root, str(self.hermes))
+    def test_a_config_that_does_not_parse_is_one_drift_that_quotes_none_of_it(self) -> None:
+        (self.root / "config.yaml").write_text(f"mcp_servers: [unclosed Sentry-Bearer {SECRET}\n")
 
-    def test_a_config_read_that_times_out_is_refused(self) -> None:
+        lines = [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+
+        self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: ValueError (part 10)"])
+
+    def test_a_config_read_that_times_out_is_one_drift(self) -> None:
         (self.root / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
         with mock.patch.object(check_install.subprocess, "run", side_effect=subprocess.TimeoutExpired("python3", 60)):
-            with self.assertRaisesRegex(check_install.Refusal, "timed out"):
-                check_install.check_root_mcp_servers(self.root, str(self.hermes))
+            lines = [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
 
-    def test_a_malformed_config_is_refused(self) -> None:
-        for servers in (["sentry"], {"sentry": "url"}, {"sentry": {**ROOT_SERVER, "headers": {"Authorization": 5}}},
-                        {"sentry": {**ROOT_SERVER, "headers": ["x"]}}, {"sentry": {**ROOT_SERVER, "sampling": True}}):
-            with self.subTest(servers=servers), self.assertRaises(check_install.Refusal):
-                self.check(servers)
+        self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: timed out (part 10)"])
+
+    def test_a_malformed_config_is_one_drift(self) -> None:
+        for servers, problem in (
+            (["sentry"], "mcp_servers is not a mapping"),
+            ({"sentry": "url"}, "mcp_servers.sentry is not a mapping"),
+            ({"sentry": {**ROOT_SERVER, "headers": {"Authorization": 5}}}, "mcp_servers.sentry.headers.Authorization is not a string"),
+            ({"sentry": {**ROOT_SERVER, "headers": ["x"]}}, "mcp_servers.sentry.headers is not a mapping"),
+            ({"sentry": {**ROOT_SERVER, "sampling": True}}, "mcp_servers.sentry.sampling is not a mapping"),
+        ):
+            with self.subTest(servers=servers):
+                self.assertEqual(self.check(servers), [f"root mcp {self.root}: cannot check: {problem} (part 10)"])
 
 
 FAKE_REGISTRY = """import json

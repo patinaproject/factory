@@ -26,8 +26,8 @@ token, and prints no value. For each configured repository, it runs the
 installed claude-session --mcp-status and reports each MCP server that is not
 connected and not in claude_session.disabled_mcp_servers. For each root-home mcp_servers entry that is
 not enabled: false, it runs hermes mcp test with the root home and reports a server that does not connect,
-one whose sampling.enabled is not false, and one whose header value holds no ${VAR} reference. It prints no
-header value. It also checks that the Triage board exists and anchors its worktrees at the
+one whose sampling.enabled is not false, and one whose header value is anything but one ${VAR} reference
+after at most one scheme word. It prints no header value. It also checks that the Triage board exists and anchors its worktrees at the
 default repository, that the source checkout vendors the triage playbook that
 claude-session gives triage cards, and that the triage refs file is as fresh as
 the owned refs. It checks that the default board cannot take the worker slots triage needs
@@ -1252,7 +1252,7 @@ def check_mcp_servers(settings, worker: Path) -> list:
 
 
 ROOT_MCP_SECONDS = 120
-ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+HEADER_REFERENCE = re.compile(r"(?:[A-Za-z][A-Za-z0-9-]* )?\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
 def root_mcp_connects(root: Path, hermes: str, server: str) -> bool:
@@ -1269,9 +1269,13 @@ def root_mcp_connects(root: Path, hermes: str, server: str) -> bool:
 READ_MCP_SERVERS = (
     "import json, sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
-    "from ruamel.yaml import YAML\n"
-    "cfg = YAML(typ='safe', pure=True).load(open(sys.argv[2])) or {}\n"
-    "assert isinstance(cfg, dict), 'config.yaml is not a mapping'\n"
+    "try:\n"
+    "    from ruamel.yaml import YAML\n"
+    "    cfg = YAML(typ='safe', pure=True).load(open(sys.argv[2])) or {}\n"
+    "except Exception as error:\n"
+    "    sys.exit(type(error).__name__)\n"
+    "if not isinstance(cfg, dict):\n"
+    "    sys.exit('config.yaml is not a mapping')\n"
     "print(json.dumps(cfg.get('mcp_servers')))\n"
 )
 
@@ -1281,6 +1285,7 @@ def root_mcp_servers(root: Path):
 
     `hermes config get` expands every ${VAR} to its value, so it cannot show whether a header holds a
     reference or a literal. Parses the file with the Hermes environment's ruamel.yaml, which has no PyYAML.
+    A parse error names only its class, because ruamel quotes the offending line, which can hold a token.
     A missing file is check_config's to report. Raises Refusal on a failure.
     """
     config = root / "config.yaml"
@@ -1293,10 +1298,10 @@ def root_mcp_servers(root: Path):
             env={"PATH": os.environ.get("PATH", "")}, capture_output=True, text=True, timeout=HERMES_TOOLS_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        raise Refusal(f"cannot read mcp_servers from {config}: timed out") from None
+        raise Refusal("cannot read config.yaml: timed out") from None
     if proc.returncode != 0:
         lines = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
-        raise Refusal(f"cannot read mcp_servers from {config}: {lines[-1] if lines else proc.returncode}")
+        raise Refusal(f"cannot read config.yaml: {lines[-1] if lines else proc.returncode}")
     return json.loads(proc.stdout)
 
 
@@ -1305,30 +1310,37 @@ def check_root_mcp_servers(root: Path, hermes: str) -> list:
 
     Reads mcp_servers from the root home's config.yaml without env expansion, so a ${VAR} reference stays
     a reference and no secret enters this process. Prints a server and header name, never a header value.
-    Raises Refusal on a shape Hermes would not load.
+    A config it cannot read or a shape Hermes would not load is one drift, so the other checks still report.
     """
+    try:
+        return root_mcp_drifts(root, hermes)
+    except Refusal as error:
+        return [Drift("root mcp", str(root), f"cannot check: {error} (part 10)")]
+
+
+def root_mcp_drifts(root: Path, hermes: str) -> list:
     servers = root_mcp_servers(root)
     if servers is None:
         return []
     if not isinstance(servers, dict):
-        raise Refusal(f"mcp_servers in {root} is not a mapping")
+        raise Refusal("mcp_servers is not a mapping")
     drifts = []
     for name, server in servers.items():
         where = f"{name} in {root}"
         if not isinstance(server, dict):
-            raise Refusal(f"mcp_servers.{name} in {root} is not a mapping")
+            raise Refusal(f"mcp_servers.{name} is not a mapping")
         if server.get("enabled") is False:
             continue
         sampling = server.get("sampling")
         if sampling is not None and not isinstance(sampling, dict):
-            raise Refusal(f"mcp_servers.{name}.sampling in {root} is not a mapping")
+            raise Refusal(f"mcp_servers.{name}.sampling is not a mapping")
         headers = server.get("headers") or {}
         if not isinstance(headers, dict):
-            raise Refusal(f"mcp_servers.{name}.headers in {root} is not a mapping")
+            raise Refusal(f"mcp_servers.{name}.headers is not a mapping")
         for header, value in headers.items():
             if not isinstance(value, str):
-                raise Refusal(f"mcp_servers.{name}.headers.{header} in {root} is not a string")
-            if not ENV_REFERENCE.search(value):
+                raise Refusal(f"mcp_servers.{name}.headers.{header} is not a string")
+            if not HEADER_REFERENCE.fullmatch(value):
                 drifts.append(Drift(
                     "root mcp", where, f"header {header} holds a literal value, not a ${{VAR}} reference (part 10)"
                 ))
