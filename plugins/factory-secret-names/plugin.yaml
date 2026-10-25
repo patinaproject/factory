@@ -31,3 +31,28 @@ optional_env:
       The read-only Sentry token, the variable that
       claude_session.mcp_servers.sentry.token_env names. Only the gateway
       holds it; the run's sentry server gets it through mcp-headers.
+  - name: POSTHOG_PERSONAL_API_KEY
+    description: >-
+      The factory's PostHog personal API key, the variable that
+      claude_session.mcp_servers.posthog.token_env names. Only the gateway
+      holds it; the run's posthog server gets it through mcp-headers.
+  - name: REVENUECAT_API_KEY
+    description: >-
+      The factory's RevenueCat API v2 secret key, the variable that
+      claude_session.mcp_servers.revenuecat.token_env names. Only the gateway
+      holds it; the run's revenuecat server gets it through mcp-headers.
+  - name: DATAFORSEO_BASIC_TOKEN
+    description: >-
+      The base64 of the factory's DataForSEO API login and password, the variable that
+      claude_session.mcp_servers.dataforseo.token_env names. Only the gateway
+      holds it; the run's dataforseo server gets it through mcp-headers.
+  - name: CLOUDFLARE_API_TOKEN
+    description: >-
+      The factory's Cloudflare account API token, the variable that
+      claude_session.mcp_servers.cloudflare-bindings.token_env names. Only the gateway
+      holds it; the run's cloudflare-bindings server gets it through mcp-headers.
+  - name: FEATUREBASE_API_KEY
+    description: >-
+      The factory's Featurebase API key, the variable that
+      claude_session.mcp_servers.featurebase.token_env names. Only the gateway
+      holds it; the run's featurebase server gets it through mcp-headers.
