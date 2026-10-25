@@ -231,7 +231,7 @@ repository, a Linear issue on team `PAT` for a private one. Never file the same
 work in both: for a public repository, the GitHub-to-Linear intake creates the
 mirror.
 
-The Engineering plugin's `/to-spec` skill files issues through this adapter.
+The Work plugin's `/to-spec` skill files issues through this adapter.
 
 ## When a skill says "fetch the relevant ticket"
 

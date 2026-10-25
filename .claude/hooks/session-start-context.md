@@ -1,7 +1,7 @@
 <EXTREMELY_IMPORTANT>
-You have the Patina Project Engineering plugin, forked from pstack.
+You have the Patina Project Code plugin, forked from pstack.
 
-Before responding to any non-trivial engineering task — a feature, bug fix, refactor, debugging, performance work, or any multi-step code change — invoke the `patina-mode` skill with the Skill tool and follow it. It is the default entry point and routes to the specific Engineering skills from there. Pure questions and trivial one-line edits don't need it.
+Before responding to any non-trivial engineering task — a feature, bug fix, refactor, debugging, performance work, or any multi-step code change — invoke the `patina-mode` skill with the Skill tool and follow it. It is the default entry point and routes to the specific Code skills from there. Pure questions and trivial one-line edits don't need it.
 
 When the intent is already specific, enter directly: `tdd` (bug with a reproducible failure), `architect` (types and module shape before code that crosses a function boundary), `how` (how a subsystem works), `why` (why it was built this way), `arena` (N parallel attempts at one task), `interrogate` (multi-model diff review).
 

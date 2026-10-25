@@ -18,7 +18,7 @@ def discover(skills_dir: Path) -> List[Tuple[str, Path]]:
         if not skill.is_file():
             continue
         if not NAME.match(child.name):
-            logger.warning("team: skipping %s; a skill name may hold only letters, digits, - and _", child)
+            logger.warning("work: skipping %s; a skill name may hold only letters, digits, - and _", child)
             continue
         found.append((child.name, skill))
     return found
@@ -29,12 +29,12 @@ def register(ctx: Any) -> None:
 
     configured = ctx.get_config("skills_dir", "")
     if not configured:
-        logger.warning("team: plugins.entries.team.settings.skills_dir is not set; no team skills are registered")
+        logger.warning("work: plugins.entries.work.settings.skills_dir is not set; no work skills are registered")
         return
     skills_dir = Path(configured)
     if not skills_dir.is_dir():
         logger.error(
-            "team: plugins.entries.team.settings.skills_dir %s is not a directory; no team skills are registered",
+            "work: plugins.entries.work.settings.skills_dir %s is not a directory; no work skills are registered",
             skills_dir,
         )
         return
@@ -42,11 +42,11 @@ def register(ctx: Any) -> None:
     skills = discover(skills_dir)
     allow = ctx.get_config("allow", []) or []
     if not isinstance(allow, list):
-        raise ValueError("team: plugins.entries.team.settings.allow must be a list of skill names")
+        raise ValueError("work: plugins.entries.work.settings.allow must be a list of skill names")
     if allow:
         missing = sorted(set(allow) - {name for name, _ in skills})
         if missing:
-            raise ValueError(f"team: allow names skills that {skills_dir} lacks: {', '.join(missing)}")
+            raise ValueError(f"work: allow names skills that {skills_dir} lacks: {', '.join(missing)}")
         skills = [(name, path) for name, path in skills if name in allow]
 
     for name, path in skills:

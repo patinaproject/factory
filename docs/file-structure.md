@@ -23,8 +23,8 @@
 │   ├── factory-uploads/       # Unix-socket broker that uploads evidence images and issues the worker its Linear and proxy tokens; runs in the gateway or, through service.py, as its own macOS user
 │   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, block and triage-park report hook, activity, issue, and session tools, cli.py
 │   ├── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
-│   ├── team/                  # Registers the skills in a configured directory as team:<name> skills
-│   └── webhook-retry/         # Hooks that queue a delivery whose turn failed on a usage limit, and retry.py, which reruns it
+│   ├── webhook-retry/         # Hooks that queue a delivery whose turn failed on a usage limit, and retry.py, which reruns it
+│   └── work/                  # Registers the skills in a configured directory as work:<name> skills
 ├── profiles/
 │   └── claude-worker/         # Kanban worker profile distribution
 │       ├── SOUL.md            # Worker instructions
