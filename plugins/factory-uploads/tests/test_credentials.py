@@ -9,7 +9,15 @@ from tests.test_service import service  # noqa: F401
 
 from factory_uploads.credentials import GATEWAY_ONLY, servable_names
 
-SERVABLE_TODAY = frozenset({"CLAUDE_PROXY_TOKEN", "SENTRY_ACCESS_TOKEN"})
+SERVABLE_TODAY = frozenset({
+    "CLAUDE_PROXY_TOKEN",
+    "SENTRY_ACCESS_TOKEN",
+    "POSTHOG_PERSONAL_API_KEY",
+    "REVENUECAT_API_KEY",
+    "DATAFORSEO_BASIC_TOKEN",
+    "CLOUDFLARE_API_TOKEN",
+    "FEATUREBASE_API_KEY",
+})
 
 
 class ServableSetTest(unittest.TestCase):
@@ -20,7 +28,7 @@ class ServableSetTest(unittest.TestCase):
         path.write_text(secret_names_manifest(*names))
         return path
 
-    def test_the_real_manifest_serves_exactly_the_proxy_and_sentry_tokens(self):
+    def test_the_real_manifest_serves_exactly_the_proxy_and_mcp_service_tokens(self):
         self.assertEqual(servable_names(REAL_MANIFEST), SERVABLE_TODAY)
 
     def test_a_name_added_to_the_manifest_and_not_to_gateway_only_becomes_servable(self):

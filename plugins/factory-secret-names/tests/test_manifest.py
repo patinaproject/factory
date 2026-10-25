@@ -30,6 +30,20 @@ class ManifestTest(unittest.TestCase):
     def test_the_proxy_token_variable_the_runbook_prescribes_is_declared(self):
         self.assertIn("CLAUDE_PROXY_TOKEN", NAME.findall(MANIFEST))
 
+    def test_each_mcp_token_variable_the_runbook_names_is_declared(self):
+        names = NAME.findall(MANIFEST)
+
+        for name in (
+            "SENTRY_ACCESS_TOKEN",
+            "POSTHOG_PERSONAL_API_KEY",
+            "REVENUECAT_API_KEY",
+            "DATAFORSEO_BASIC_TOKEN",
+            "CLOUDFLARE_API_TOKEN",
+            "FEATUREBASE_API_KEY",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name, names)
+
     def test_register_registers_nothing(self):
         spec = importlib.util.spec_from_file_location("factory_secret_names", PLUGIN / "__init__.py")
         module = importlib.util.module_from_spec(spec)
