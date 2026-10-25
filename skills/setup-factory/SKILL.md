@@ -851,7 +851,11 @@ servers a worker does not load, as [MCP server
 identities](references/mcp-identities.md) describes. Both stay empty until
 the operator creates the first identity. `check-install` reports each
 repository server that a worker run does not see connected and that
-`disabled_mcp_servers` does not list.
+`disabled_mcp_servers` does not list. The root agent gets a static-token
+server through `mcp_servers` in the root home's `config.yaml`, with sampling
+off (see "Root agent" in the same reference). `check-install` reports each
+root server that does not connect, has sampling on, or holds a literal header
+value.
 
 A card that waits in review leaves its Claude session idle past the 5-minute
 prompt cache, and a resumed large session re-writes its whole context at the
