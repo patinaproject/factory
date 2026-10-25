@@ -1,7 +1,7 @@
 manifest_version: 2
-name: team
+name: work
 version: "0.1.0"
-description: "Registers the skills in a directory on the machine as team:<name> skills for Hermes agents. The directory is read in place, so no skill content lives in this repository."
+description: "Registers the skills in a directory on the machine as work:<name> skills for Hermes agents. The directory is read in place, so no skill content lives in this repository."
 config_schema:
   skills_dir:
     type: string

@@ -130,7 +130,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
 | `GITHUB_UPLOAD_TOKEN`, the operator's upload-only token | The factory's Infisical folder only, entered by the operator. The gateway loads it. Neither `.env` holds it, and the broker never hands it out |
 | `platforms.factory_uploads.enabled` and `platforms.factory_uploads.extra.repositories` | `<home>/config.yaml` only |
-| `plugins.entries.team.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
+| `plugins.entries.work.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
 | `kanban.max_in_progress`, `kanban.max_spawn`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
 | The `default` and `triage` boards' `default_workdir` | Kanban board metadata, not `config.yaml` |
@@ -428,7 +428,7 @@ hermes -p claude-worker plugins list
 
 Both list `linear-agent-session`, `pr-ready-gate`, `blocker-order`, and
 `factory-secret-names`,
-enabled. The root home also lists `factory-uploads`, `team`, and
+enabled. The root home also lists `factory-uploads`, `work`, and
 `webhook-retry`, enabled, and the worker home lists none of them. On a fresh
 machine, install both now and skip the content check.
 
@@ -656,8 +656,8 @@ runs `/Library/Developer/CommandLineTools/usr/bin/python3`, not
    broker's log is `/Library/Application Support/factory-broker/home/broker.log`,
    which only root and the broker user read.
 
-**Team skills, root home only.** The `team` plugin registers the skills in a
-directory on the machine as `team:<name>` skills. It reads the directory in
+**Work skills, root home only.** The `work` plugin registers the skills in a
+directory on the machine as `work:<name>` skills. It reads the directory in
 place and copies nothing, so no skill content enters this repository. Install
 it in the root home and never in the worker's home. `check-install` reports an
 install in the worker home.
@@ -665,23 +665,31 @@ install in the worker home.
 1. Install and enable the plugin in the root home:
 
    ```sh
-   hermes plugins install "file://<repo>#plugins/team" --enable --yes-deps </dev/null
+   hermes plugins install "file://<repo>#plugins/work" --enable --yes-deps </dev/null
    ```
 
-2. Point it at the team skills directory. Each subdirectory that holds a
+2. Point it at the work skills directory. Each subdirectory that holds a
    `SKILL.md` is one skill. The real path goes in Hermes config and the
    private record only:
 
    ```sh
-   hermes config set plugins.entries.team.settings.skills_dir <team skills directory>
+   hermes config set plugins.entries.work.settings.skills_dir <work skills directory>
    ```
 
-   To register only some skills, set `plugins.entries.team.settings.allow` to
+   To register only some skills, set `plugins.entries.work.settings.allow` to
    a list of skill names. An empty or unset `allow` registers every skill. A
    name the directory lacks stops the plugin from loading.
 3. **Check.** `check-install` reports a `skills_dir` that is unset, missing,
    or empty, and an `allow` name the directory lacks. It prints no skill
    content.
+
+A root home set up before the `team` plugin became `work` still has the `team`
+plugin and `plugins.entries.team` settings. Move it over: uninstall the
+`team` plugin from the root home with Hermes, install `work` as in step 1,
+set `plugins.entries.work.settings.skills_dir` and any `allow` to the values
+under `plugins.entries.team.settings`, remove the old `plugins.entries.team`
+block, and restart the gateway. Agents then see `work:<name>` where they saw
+`team:<name>`.
 
 Adding, renaming, or removing a skill, or changing its description, takes
 effect at the next gateway restart. An edit to the content of an existing
@@ -975,7 +983,7 @@ it. When no installed version matches, install it as the operator's user, in
 a shell where nvm is loaded: `nvm install <version>`. Install any other tool
 a repository needs, such as `pnpm`, before the first card runs.
 
-A repository that enables the Engineering plugin runs its issue-handoff gate
+A repository that enables the Code plugin runs its issue-handoff gate
 with Bun. `<bin dir>` is the directory that holds `gh` and the other tools
 setup installs, such as `~/.local/bin`. Check with `command -v bun` and with
 `ls <bin dir>/bun`, because a non-login shell can lack `<bin dir>` on `PATH`.
@@ -1886,7 +1894,7 @@ Hermes process starts. The new helper also writes
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.
-   - A `team skills` line: the team skills directory is missing, empty, or
+   - A `work skills` line: the work skills directory is missing, empty, or
      lacks a skill that `allow` names. Fix the directory or the part 5
      setting.
    - A `webhook config <key>` line: run the part 11 install for that key.
@@ -1969,7 +1977,7 @@ Hermes process starts. The new helper also writes
    check against the settings file does. When it prints a line, find which
    home is right with the operator, and set that home's settings in the other
    as in part 10.
-6. If step 3 changed a plugin, a webhook config key, or a team skills setting:
+6. If step 3 changed a plugin, a webhook config key, or a work skills setting:
 
    > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
    > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes.

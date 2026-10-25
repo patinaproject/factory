@@ -10,9 +10,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-_spec = importlib.util.spec_from_file_location("team", Path(__file__).resolve().parent.parent / "__init__.py")
-team = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(team)
+_spec = importlib.util.spec_from_file_location("work", Path(__file__).resolve().parent.parent / "__init__.py")
+work = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(work)
 
 
 def parse_frontmatter(content):
@@ -49,7 +49,7 @@ class FakeCtx:
         self.skills.append((name, path, description, frontmatter))
 
 
-class TeamSkillsTest(unittest.TestCase):
+class WorkSkillsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -66,7 +66,7 @@ class TeamSkillsTest(unittest.TestCase):
 
     def run_register(self, **kwargs):
         ctx = FakeCtx(**kwargs)
-        team.register(ctx)
+        work.register(ctx)
         return ctx
 
     def test_empty_allow_registers_every_skill_in_name_order(self):
@@ -96,7 +96,7 @@ class TeamSkillsTest(unittest.TestCase):
         ctx = FakeCtx(skills_dir=self.dir, allow=["a", "nope", "gone"])
 
         with self.assertRaises(ValueError) as raised:
-            team.register(ctx)
+            work.register(ctx)
 
         self.assertIn("gone, nope", str(raised.exception))
         self.assertEqual(ctx.skills, [])
@@ -106,25 +106,25 @@ class TeamSkillsTest(unittest.TestCase):
         ctx = FakeCtx(skills_dir=self.dir, allow="a")
 
         with self.assertRaises(ValueError) as raised:
-            team.register(ctx)
+            work.register(ctx)
 
         self.assertEqual(
-            str(raised.exception), "team: plugins.entries.team.settings.allow must be a list of skill names"
+            str(raised.exception), "work: plugins.entries.work.settings.allow must be a list of skill names"
         )
         self.assertEqual(ctx.skills, [])
 
     def test_unset_skills_dir_registers_nothing_and_logs_one_line(self):
-        with self.assertLogs("team", logging.WARNING) as logs:
+        with self.assertLogs("work", logging.WARNING) as logs:
             ctx = self.run_register()
 
         self.assertEqual(ctx.skills, [])
         self.assertEqual(len(logs.records), 1)
-        self.assertIn("plugins.entries.team.settings.skills_dir is not set", logs.output[0])
+        self.assertIn("plugins.entries.work.settings.skills_dir is not set", logs.output[0])
 
     def test_missing_skills_dir_registers_nothing_and_logs_its_path(self):
         missing = self.tmp / "absent"
 
-        with self.assertLogs("team", logging.WARNING) as logs:
+        with self.assertLogs("work", logging.WARNING) as logs:
             ctx = self.run_register(skills_dir=missing)
 
         self.assertEqual(ctx.skills, [])
@@ -135,7 +135,7 @@ class TeamSkillsTest(unittest.TestCase):
         self.skill("good")
         self.skill("bad.name")
 
-        with self.assertLogs("team", logging.WARNING) as logs:
+        with self.assertLogs("work", logging.WARNING) as logs:
             ctx = self.run_register(skills_dir=self.dir)
 
         self.assertEqual([skill[0] for skill in ctx.skills], ["good"])
