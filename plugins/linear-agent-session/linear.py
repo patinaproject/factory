@@ -174,6 +174,11 @@ def activity_content(
     raise LinearError(f"unknown activity type {type!r}; expected one of {', '.join(ACTIVITY_TYPES)}")
 
 
+def card_title(identifier: str, title: str) -> str:
+    kept = re.sub(r"[^A-Za-z0-9 .-]", "", title)
+    return f"{identifier}: {' '.join(kept.split())}"
+
+
 class LinearClient:
     def __init__(
         self,
@@ -254,6 +259,7 @@ class LinearClient:
         priority_name, card_priority = PRIORITIES[priority]
         return {
             **_issue_summary(issue),
+            "cardTitle": card_title(issue["identifier"], issue["title"]),
             "priority": priority,
             "priorityName": priority_name,
             "cardPriority": card_priority,

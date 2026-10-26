@@ -7,12 +7,13 @@ description: >-
   at start instead of parking it as a rejected credential, acknowledges
   Linear agent session webhooks within Linear's 10-second deadline, archives
   the triage card of an issue that only left Triage without a triage turn,
+  refuses a card comment that names a pull request URL and a kanban_create call in a triage turn,
   tells the card's agent session when a card blocks or is
   parked in triage, and gives agents the linear_agent_activity,
   linear_agent_activity_read, linear_issue, linear_agent_session_create, linear_delegated_issues,
   linear_issue_undelegate, and linear_issue_to_todo tools, acting as the
   Linear agent app.
-provides_hooks: [pre_gateway_dispatch, kanban_task_blocked, transform_api_error_classification]
+provides_hooks: [pre_gateway_dispatch, pre_tool_call, kanban_task_blocked, transform_api_error_classification]
 provides_tools:
   - linear_agent_activity
   - linear_agent_activity_read

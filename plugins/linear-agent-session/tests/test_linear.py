@@ -526,6 +526,7 @@ class IssueTest(unittest.TestCase):
                 "id": "2f9a6f0e-0000-4000-8000-000000000001",
                 "identifier": "ABC-123",
                 "title": "Fix checkout",
+                "cardTitle": "ABC-123: Fix checkout",
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "gitBranchName": "abc-123-fix-checkout",
                 "priority": 2,
