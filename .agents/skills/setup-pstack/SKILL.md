@@ -92,7 +92,7 @@ Tell the user where the override was written, how its model rows load, and wheth
 
 ### 9. Offer a verification skill (optional)
 
-Check whether the project has a way to drive the real app for proof (a project `verify` or `verify-*` skill, or an existing harness). If not, offer once: "want a project-local verification skill, so agents can drive the app the way a user does and prove changes work? I can generate one with /create-verification-skill." On yes, invoke [`/create-verification-skill`](../create-verification-skill/SKILL.md). On no, move on without pushing.
+Check whether the project has a way to drive the real app for proof: a project driver skill or an existing harness. A project driver skill is a `patinaproject-verify` skill in any project skill directory, at the root or in a monorepo package, such as `.claude/skills/patinaproject-verify/`, or a `verify` skill from an older `/create-verification-skill`. If the project has neither, offer once: "want a project-local verification skill, so agents can drive the app the way a user does and prove changes work? I can generate one with /create-verification-skill." On yes, invoke [`/create-verification-skill`](../create-verification-skill/SKILL.md). On no, move on without pushing.
 
 ## Other runtimes
 
@@ -103,7 +103,7 @@ The role lines are the same everywhere. What differs is the sheet path, how the 
 | Claude Code | `<config>/pstack-models.md` | `@<config>/pstack-models.md` in `<config>/CLAUDE.md` | the `Agent` tool's model parameter | verified live |
 | Codex | `<codex-home>/pstack-models.md` | model rows: paste into `<codex-home>/AGENTS.md`; hook setting: read by the plugin | your configured Codex models, see [codex-tools.md](../patina-mode/references/codex-tools.md#model-names) | hook contract tested; discovery verified |
 | Pi | `pstack-models.md` in the Pi agent directory, `$PI_CODING_AGENT_DIR` or `~/.pi/agent` | read by the pstack Pi extension, model rows and hook setting both; no include line | `pi --list-models`, see [pi-tools.md](../patina-mode/references/pi-tools.md#model-names) and its `setup-pstack` note | extension contract tested offline; live results in the repository's `docs/pi-equivalence.md` |
-| GitHub Copilot (CLI and app) | `${COPILOT_HOME:-~/.copilot}/pstack-models.md` | Engineering ships no Copilot plugin or hook, so read it with `view` | the `task` tool's `model` enum, see [copilot-tools.md](../patina-mode/references/copilot-tools.md#model-names) | skills-only under Engineering |
+| GitHub Copilot (CLI and app) | `${COPILOT_HOME:-~/.copilot}/pstack-models.md` | Code ships no Copilot plugin or hook, so read it with `view` | the `task` tool's `model` enum, see [copilot-tools.md](../patina-mode/references/copilot-tools.md#model-names) | skills-only under Code |
 | opencode | `~/.config/opencode/pstack-models.md` | add the path to the `instructions` array in `opencode.json` | the `models` slash command in the session | from published docs, no live session |
 | Gemini CLI | `~/.gemini/pstack-models.md` | `@~/.gemini/pstack-models.md` in `~/.gemini/GEMINI.md` | the `model` slash command in the session | from published docs, no live session |
 | Prime Agent | no documented sheet path; Prime's configuration chooses models | | | no live session |

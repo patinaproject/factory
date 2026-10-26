@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-machinery.sh — install Engineering's repo-level machinery for
+# install-machinery.sh — install Code's repo-level machinery for
 # skills-only consumers. Managed files are copied on every run so an existing
 # install converges on the bundled version; unrelated files and hook entries
 # are preserved.
@@ -35,7 +35,7 @@ fail() {
 
 require_file() {
   local path="$1"
-  [ -f "$path" ] || fail "missing required file: $path. Install the full Engineering skill catalog, including setup-pstack and patina-mode references, then rerun setup-engineering."
+  [ -f "$path" ] || fail "missing required file: $path. Install the full Code skill catalog, including setup-pstack and patina-mode references, then rerun setup-code-skills."
 }
 
 while [ $# -gt 0 ]; do
@@ -59,6 +59,7 @@ fi
 command -v jq >/dev/null || fail "jq is required to update .claude/settings.json"
 require_file "$SETUP_PSTACK_SKILL"
 require_file "${SKILLS_DIR}/patina-mode/references/codex-tools.md"
+require_file "${SKILLS_DIR}/setup-pstack/scripts/read-sheet.sh"
 require_file "${ASSETS_DIR}/hooks/session-start.sh"
 require_file "${ASSETS_DIR}/hooks/session-start-context.md"
 
@@ -145,6 +146,7 @@ upsert_claude_session_hook() {
     def managed_command:
       (.type? == "command") and
       (((.command? // "") | contains(".claude/hooks/session-start.sh")) or
+       ((.command? // "") | contains("plugins/code/hooks/session-start.sh")) or
        ((.command? // "") | contains("plugins/engineering/hooks/session-start.sh")));
     .hooks = (.hooks // {}) |
     .hooks.SessionStart = [
@@ -160,12 +162,13 @@ upsert_claude_session_hook() {
 
 agents_dir="${repo}/.claude/agents"
 for agent_asset in "${ASSETS_DIR}"/agents/*.md; do
-  [ -f "$agent_asset" ] || fail "missing required file: ${ASSETS_DIR}/agents/*.md. Install the full Engineering skill catalog, including setup-pstack and patina-mode references, then rerun setup-engineering."
+  [ -f "$agent_asset" ] || fail "missing required file: ${ASSETS_DIR}/agents/*.md. Install the full Code skill catalog, including setup-pstack and patina-mode references, then rerun setup-code-skills."
   install_managed_file "$agent_asset" "${agents_dir}/$(basename "$agent_asset")"
 done
 install_managed_file "${ASSETS_DIR}/hooks/session-start.sh" "${repo}/.claude/hooks/session-start.sh"
 chmod +x "${repo}/.claude/hooks/session-start.sh"
-sed 's/engineering://g' "${ASSETS_DIR}/hooks/session-start-context.md" > "${repo}/.claude/hooks/session-start-context.md"
+install_managed_file "${SKILLS_DIR}/setup-pstack/scripts/read-sheet.sh" "${repo}/.claude/hooks/read-sheet.sh"
+install_managed_file "${ASSETS_DIR}/hooks/session-start-context.md" "${repo}/.claude/hooks/session-start-context.md"
 
 # Claude receives the mandate from the project hook and Codex from the plugin
 # hook, so no instructions file carries it. Remove managed blocks that an
