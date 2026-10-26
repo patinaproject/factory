@@ -147,7 +147,12 @@ class OneClientTest(unittest.TestCase):
             and any(call in (REPO / name).read_bytes() for call in (b"AF_UNIX", b"open_unix_connection"))
         )
 
-        self.assertEqual(opening, ["plugins/factory-uploads/broker.py", "plugins/linear-agent-session/broker_client.py"])
+        # probe-sandbox binds a decoy broker socket of its own and never reaches the real broker.
+        self.assertEqual(opening, [
+            "plugins/factory-uploads/broker.py",
+            "plugins/linear-agent-session/broker_client.py",
+            "profiles/claude-worker/scripts/probe-sandbox",
+        ])
 
 
 if __name__ == "__main__":
