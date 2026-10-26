@@ -64,4 +64,3 @@ def read_pull_request(url: str) -> dict:
         detail = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "no error output"
         raise Failed(f"gh pr view failed: {detail}")
     return json.loads(proc.stdout)
-

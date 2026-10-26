@@ -268,7 +268,7 @@ def hold(card: Card, reason: str) -> dict:
         # Hermes types a blocked card's block only while it has no kind and refuses otherwise. Either way the
         # card stays blocked and Hermes posts nothing, and `show --json` does not report the kind.
         try:
-            card.call("block", "--kind", "needs_input")
+            card.call("block", reason, "--kind", "needs_input")
         except Failed:
             pass
         return result("held", "elicitation", reason=reason)

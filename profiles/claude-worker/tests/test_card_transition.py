@@ -408,7 +408,7 @@ class RefusedMergeTest(CardTransitionTest):
              [["comment", "t_1", REAL_MARKER], ["assign", "t_1", "none"]]),
             ("blocked card with no block kind", {"status": "blocked"},
              {"action": "held", "post": "elicitation", "reason": REAL_REASON},
-             [["comment", "t_1", REAL_MARKER], ["assign", "t_1", "none"], ["block", "t_1", "--kind", "needs_input"]]),
+             [["comment", "t_1", REAL_MARKER], ["assign", "t_1", "none"], ["block", "t_1", REAL_REASON, "--kind", "needs_input"]]),
             ("ready card whose block fails", {"fail": {"block": 1}},
              {"action": "held", "post": "elicitation", "reason": REAL_REASON},
              [["comment", "t_1", REAL_MARKER], ["assign", "t_1", "none"], ["block", "t_1", REAL_REASON, "--kind", "needs_input"]]),
