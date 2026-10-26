@@ -303,17 +303,3 @@ For squash-and-merge workflows, PR titles must match the commitlint commit forma
 
 Bot-generated release-please PRs from `release-please--*` branches and bot-generated release
 bump PRs from `bot/bump-*` branches are the only no-issue PR exceptions.
-
-<!-- BEGIN engineering:patina-mode (managed by setup-engineering; re-running overwrites this block) -->
-<EXTREMELY_IMPORTANT>
-You have the Patina Project Code plugin, forked from pstack.
-
-Before responding to any non-trivial engineering task — a feature, bug fix, refactor, debugging, performance work, or any multi-step code change — invoke the `code:patina-mode` skill with the Skill tool and follow it. It is the default entry point and routes to the specific Code skills from there. Pure questions and trivial one-line edits don't need it.
-
-When the intent is already specific, enter directly: `code:tdd` (bug with a reproducible failure), `code:architect` (types and module shape before code that crosses a function boundary), `code:how` (how a subsystem works), `code:why` (why it was built this way), `code:arena` (N parallel attempts at one task), `code:interrogate` (multi-model diff review).
-
-If you were dispatched as a subagent to execute a specific task, ignore this block — patina-mode governs the orchestrating session, and it already shaped your dispatch.
-
-User instructions (CLAUDE.md, AGENTS.md, direct requests) take precedence over this mandate. Other session-start mandates (such as superpowers) compose with it: their skill-check discipline stands, and patina-mode is the implementation entry point they route to for non-trivial code work.
-</EXTREMELY_IMPORTANT>
-<!-- END engineering:patina-mode -->

@@ -13,13 +13,18 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { stripVTControlCharacters } from "node:util";
 
 const UNIT_HEADER = "id\ttrack\tstate\tbranch\tpr\tsha\tbrief";
 const LEDGER_HEADER = "pr\tsha\tverdict\tevidence\tverifier\tts";
 const LOCK_FILE = ".orch.lock";
 const TAKEOVER_DIR = ".orch.lock.takeover";
 const GT_TIMEOUT_MS = 60_000;
+const ESCAPE_SEQUENCE =
+  /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9:;?]*[ -/]*[@-~]/g;
+
+function stripEscapes(text: string): string {
+  return text.replace(ESCAPE_SEQUENCE, "");
+}
 
 export type Verdict =
   | "live-ui-verified"
@@ -1184,7 +1189,7 @@ function graphitePullRequest({
   try {
     // A colour setting such as FORCE_COLOR in the user's environment must not
     // break the gt parsers.
-    raw = stripVTControlCharacters(
+    raw = stripEscapes(
       execFileSync(gt, ["--no-interactive", "info", branch], {
         cwd: repo,
         encoding: "utf8",
@@ -1229,7 +1234,7 @@ function graphiteFrontier({
 }): readonly GtFrontierEntry[] {
   let raw: string;
   try {
-    raw = stripVTControlCharacters(
+    raw = stripEscapes(
       execFileSync(
         gt,
         ["--no-interactive", "log", "short", "--stack", "--reverse"],

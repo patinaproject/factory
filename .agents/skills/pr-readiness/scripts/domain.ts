@@ -21,26 +21,15 @@ export interface CandidateIdentity {
   readonly policyDigest: string;
   readonly reviewContextDigest?: string;
 }
-export interface ExecutionContext {
-  readonly inputDigest?: string;
-  readonly artifactDigest?: string;
-  readonly executableArtifact?: string;
-  readonly target?: string;
-  readonly runtime?: string;
-  readonly environment?: string;
-  readonly fixtures?: string;
-  readonly scope?: string;
-  readonly freshness?: string;
-}
-export interface Receipt {
-  readonly producer: string;
-  readonly observationId: string;
-  readonly candidateHead: string;
-  readonly digest: string;
-  readonly issuedAt: string;
-  readonly signature?: string;
-}
-export interface Observation extends ExecutionContext {
+export interface CheckProvenance { readonly name: string; readonly checkRunId: number; readonly runId?: number; readonly conclusion: string; readonly url: string; }
+export type Provenance =
+  | { readonly kind: "checks"; readonly checks: readonly CheckProvenance[] }
+  | { readonly kind: "approval"; readonly reviewer: string; readonly reviewId: number; readonly url: string };
+export const EVALUATOR_VERSION = "pr-readiness/4";
+export function provenanceUrls(provenance: Provenance): string[] { return provenance.kind === "approval" ? [provenance.url] : provenance.checks.map((check) => check.url); }
+export type ProducerSpec = { readonly producer: "checks"; readonly checks: readonly string[]; readonly allowSkipped?: boolean } | { readonly producer: "approval" };
+export interface ReadinessPolicy { readonly version: 1; readonly obligations: Readonly<Record<Obligation, ProducerSpec>>; readonly digest: string; }
+export interface Observation {
   readonly id: string;
   readonly obligation: Obligation;
   readonly candidate: CandidateIdentity;
@@ -52,11 +41,10 @@ export interface Observation extends ExecutionContext {
   readonly expiresAt?: string;
   readonly verdict: "pass" | "fail";
   readonly reviewContextDigest?: string;
-  readonly receipt?: Receipt;
+  readonly provenance: Provenance;
 }
-export interface BodyClaim { readonly observationId: string; readonly obligation: Obligation; readonly validity: Validity; }
-export interface ValidityDecision { readonly obligation: Obligation; readonly observationId?: string; readonly validity: Validity; readonly reason: string; readonly capturedHead?: string; }
-export interface ObligationRule { readonly obligation: Obligation; readonly applies: (candidate: CandidateIdentity) => boolean; readonly producer: string; readonly requireReceipt?: boolean; }
+export interface ValidityDecision { readonly obligation: Obligation; readonly observationId?: string; readonly validity: Validity; readonly reason: string; readonly capturedHead?: string; readonly produce?: string; }
+export interface ObligationRule { readonly obligation: Obligation; readonly applies: (candidate: CandidateIdentity) => boolean; readonly spec: ProducerSpec; }
 export interface ReadinessPacket {
   readonly version: 1;
   readonly candidate: CandidateIdentity;
@@ -65,7 +53,7 @@ export interface ReadinessPacket {
   readonly requirementsDigest: string;
   readonly policyDigest: string;
   readonly bodyDigest: string;
-  readonly receiptRefs: readonly string[];
+  readonly provenanceRefs: readonly string[];
   readonly artifactRefs: readonly string[];
   readonly expiresAt?: string;
   readonly generatedAt?: string;
@@ -81,10 +69,6 @@ export function canonicalize(value: unknown): string {
 }
 export function sha256(value: unknown): string { return createHash("sha256").update(canonicalize(value)).digest("hex"); }
 export function isObligation(value: unknown): value is Obligation { return typeof value === "string" && (OBLIGATIONS as readonly string[]).includes(value); }
-export function isExecutionContext(value: unknown): value is ExecutionContext {
-  return !!value && typeof value === "object" && Object.entries(value as Record<string, unknown>).every(([key, item]) =>
-    ["inputDigest", "artifactDigest", "executableArtifact", "target", "runtime", "environment", "fixtures", "scope", "freshness"].includes(key) && (item === undefined || typeof item === "string"));
-}
 export function freezePacket(packet: Omit<ReadinessPacket, "digest">): ReadinessPacket { return deepFreeze({ ...packet, digest: sha256(packet) } as ReadinessPacket); }
 export function verifyPacket(packet: unknown): packet is ReadinessPacket {
   if (!packet || typeof packet !== "object") return false;

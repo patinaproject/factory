@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "bun test issue-handoff orch watch-pr mark-ready ../../pr-readiness/scripts",
+    "test": "bun test issue-handoff orch watch-pr ../../pr-readiness/scripts",
     "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project issue-handoff.tsconfig.json --noEmit --strict"
   },
   "dependencies": {

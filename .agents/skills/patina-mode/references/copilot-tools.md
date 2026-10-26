@@ -1,6 +1,6 @@
 # GitHub Copilot tool mapping for pstack
 
-The Engineering plugin does not ship the GitHub Copilot runtime: no Copilot manifest, `SessionStart` hook, or `PreToolUse` hook. Sections below that describe those hooks apply to upstream pstack's Copilot plugin, not to Engineering.
+The Code plugin does not ship the GitHub Copilot runtime: no Copilot manifest, `SessionStart` hook, or `PreToolUse` hook. Sections below that describe those hooks apply to upstream pstack's Copilot plugin, not to Code.
 
 pstack skills are written in Claude Code tool language (the `Skill` tool, the `Agent` tool, `AskUserQuestion`, Claude model names, `~/.claude/` paths). On GitHub Copilot the skills are the same files; only the tool names, model IDs, and paths resolve differently. Read this when a pstack skill names a Claude tool, a driver or bundled skill, a Claude model, or a Claude Code path. It covers both the Copilot CLI and the Copilot app, which load the same plugin. This file is Copilot-specific; other runtimes use their own equivalents.
 
@@ -15,7 +15,7 @@ pstack skills are written in Claude Code tool language (the `Skill` tool, the `A
 | Search file contents / find files | `grep` / `glob` |
 | Fetch a URL | `web_fetch` |
 | Search the web | `web_search` |
-| Invoke a skill (the `Skill` tool, `/command`, `engineering:<skill>`) | The `skill` tool with the bare skill name (`patina-mode`, not `engineering:patina-mode`). A user types `/engineering:<skill>` in the CLI prompt; on CLI 1.0.89 a bare `/<skill>` reports an unknown command for a plugin skill. Copilot's prompt lists only part of a large plugin's skills (a character budget cuts the alphabetical tail); a skill missing from that list still loads by name. |
+| Invoke a skill (the `Skill` tool, `/command`) | The `skill` tool with the bare skill name, such as `patina-mode`. In a plugin install, a user types `/code:<skill>` in the CLI prompt; on CLI 1.0.89 a bare `/<skill>` reports an unknown command for a plugin skill. Copilot's prompt lists only part of a large plugin's skills (a character budget cuts the alphabetical tail); a skill missing from that list still loads by name. |
 | Dispatch a subagent (the `Agent`/`Task` tool) | The `task` tool: `agent_type`, `model`, `mode`, `name`, `prompt`. |
 | Dispatch N parallel subagents in one turn | N `task` calls in one response. |
 | Background subagent (`run_in_background: true`) | `task` with `mode: "background"`; you are notified when it finishes. |
@@ -26,13 +26,13 @@ pstack skills are written in Claude Code tool language (the `Skill` tool, the `A
 
 ## Subagent policy
 
-patina-mode's Subagents section sets Claude-specific defaults (`subagent_type: "engineering:patina-agent"`, `run_in_background: true`). On GitHub Copilot:
+patina-mode's Subagents section sets Claude-specific defaults (`subagent_type: "patina-agent"`, `run_in_background: true`). On GitHub Copilot:
 
-- The plugin's agents load as `task` agent types under their namespaced names, `engineering:patina-agent` and `engineering:comment-sicko`. Pass the skill's `subagent_type` as `agent_type` unchanged.
-- `subagent_type: "general-purpose"` maps to `agent_type: "general-purpose"`. Where a skill leaves the type unset, use `engineering:patina-agent`.
+- Pass the skill's `subagent_type`, such as `patina-agent` or `comment-sicko`, as `agent_type` unchanged.
+- `subagent_type: "general-purpose"` maps to `agent_type: "general-purpose"`. Where a skill leaves the type unset, use `patina-agent`.
 - `readonly: true` (reviewers, explorers, critics) maps to a read-only agent type: `explore` for code reading, `code-review` for diff review. When a read-only role must run commands or reach MCP tools, use `general-purpose` and tell it in the prompt not to write files; review its diff anyway.
-- `readonly: false`, or a role that needs MCP tools, maps to `general-purpose` or `engineering:patina-agent`.
-- Reasoning effort maps to `task`'s `reasoning_effort`. Pass a role value's `@<level>` suffix, or else the sheet's `default effort` level, as `reasoning_effort`; `session` omits it. Do not dispatch the `engineering:effort-<level>` or `engineering:patina-agent-<level>` agent types that Claude Code uses for effort. Use `general-purpose` or `engineering:patina-agent` with `reasoning_effort` instead.
+- `readonly: false`, or a role that needs MCP tools, maps to `general-purpose` or `patina-agent`.
+- Reasoning effort maps to `task`'s `reasoning_effort`. Pass a role value's `@<level>` suffix, or else the sheet's `default effort` level, as `reasoning_effort`; `session` omits it. Do not dispatch the `effort-<level>` or `patina-agent-<level>` agent types that Claude Code uses for effort. Use `general-purpose` or `patina-agent` with `reasoning_effort` instead.
 - `run_in_background: true` maps to `mode: "background"`. `mode: "sync"` blocks your turn; use it only when the next step needs the result.
 - A model a skill states for a role (its Models section, an `Agent` call's `model`, or the user's sheet line) is an explicit model instruction, so pass it as `task`'s `model`. A role with no configured model omits `model`. See Model names below for how a Claude default resolves.
 - Workers that write share this machine on the CLI, so the **swarm** skill's workers and the fan-out playbooks (`orchestrate`, `autopilot-full`, `autopilot-stack`) isolate writers with worktrees, as on Claude Code. In the Copilot app, `create_session` gives each writer its own worktree session instead; see App and CLI below.
@@ -46,7 +46,7 @@ Skills name Claude Code model aliases in their Models sections. Those aliases ar
 - Read the sheet only when that block and the hook's `sheet invalid` or no-sheet note are all missing, as in a skills-only install with no hook. `view`, `create`, and `edit` take literal paths and expand neither `~` nor `$COPILOT_HOME`, so print the sheet's absolute path with `bash` first (`echo "${COPILOT_HOME:-$HOME/.copilot}/pstack-models.md"`) and read and write exactly that path; do not append `.copilot` or any other segment to it. A session with its own `COPILOT_HOME` then never touches `~/.copilot`.
 - No sheet, or the hook reports `sheet invalid`: before a skill that needs a role model (`architect`, `arena`, `how`, `interrogate`, `patina-mode`, `reflect`, `swarm`, `why`), stop, load `setup-pstack` with the `skill` tool, and finish it first. In that same session, use the values it just wrote; later sessions get them from the hook. Do not ask again on later runs.
 - A role line in the sheet is the user's explicit model instruction, so pass it as the `task` tool's `model` parameter. `inherit-parent` or `auto` omits `model`.
-- The plugin's `PreToolUse` hook enforces this for pstack agents. While the sheet is valid, it denies a `task` call whose `agent_type` starts with `engineering:` and whose `model` is not one of the sheet's values, and its reason lists the saved IDs. Retry with the role's saved model; never retry on another unsaved model. It leaves calls with no `model` and other agent types alone.
+- The plugin's `PreToolUse` hook enforces this for pstack agents. While the sheet is valid, it denies a `task` call whose `agent_type` names a pstack agent and whose `model` is not one of the sheet's values, and its reason lists the saved IDs. Retry with the role's saved model; never retry on another unsaved model. It leaves calls with no `model` and other agent types alone.
 - Roles that default to the strongest model (`bug-fix`, `perf-issue`, `hillclimb`, `strongest judgment`): the strongest model the user chose.
 - Diverse-model panels (`arena`, `architect`, `interrogate`, `how` critics, `reflect`): the adversarial signal comes from model diversity, so fill a panel from distinct vendors in the `task` tool's `model` list (Claude, GPT, Gemini, Grok, and so on). pstack ships no default Copilot panel. If only one vendor is reachable, vary reasoning effort and note in the verdict that diversity was reduced.
 
@@ -56,7 +56,7 @@ Run `setup-pstack`, and the parent session that orchestrates a panel, on a model
 
 ## Session routing hook
 
-The plugin's `SessionStart` hook runs on the Copilot CLI and in the Copilot app. Copilot loads the plugin through its own Copilot manifest and hook file, not the Claude Code ones. The hook prints the routing mandate as the `additionalContext` JSON Copilot injects. It reads `${COPILOT_HOME:-~/.copilot}/pstack-models.md`, which the session itself cannot read without a path-access prompt. `session hook: off` disables injection. When the sheet passes the checks `check-sheet.sh` applies, the injected context ends with one line per role, rebuilt from the checked values; no other sheet text reaches the context. When it fails them, the context says `sheet invalid` and names each problem. With no sheet, it says so. Either way it tells the session to run `setup-pstack` before the first skill that dispatches on role models. The mandate names skills as `engineering:<skill>`; on Copilot load them by bare name.
+The plugin's `SessionStart` hook runs on the Copilot CLI and in the Copilot app. Copilot loads the plugin through its own Copilot manifest and hook file, not the Claude Code ones. The hook prints the routing mandate as the `additionalContext` JSON Copilot injects. It reads `${COPILOT_HOME:-~/.copilot}/pstack-models.md`, which the session itself cannot read without a path-access prompt. `session hook: off` disables injection. When the sheet passes the checks `check-sheet.sh` applies, the injected context ends with one line per role, rebuilt from the checked values; no other sheet text reaches the context. When it fails them, the context says `sheet invalid` and names each problem. With no sheet, it says so. Either way it tells the session to run `setup-pstack` before the first skill that dispatches on role models. The mandate names skills by their bare names; load them that way.
 
 If the mandate is missing from a session (a skills-only install, a Copilot version that drops plugin hook context, or another plugin's hook replacing it), add the standing instruction `setup-pstack` describes to `~/.copilot/copilot-instructions.md`, or request `patina-mode` explicitly.
 
@@ -112,11 +112,11 @@ Affected skill entry points point here. Most skills need only the tables above. 
 | Skill | On GitHub Copilot |
 |-------|-------------------|
 | `interrogate` | Each reviewer is a `task` call: `subagent_type` becomes `agent_type`, `readonly: true` becomes a read-only agent type (see Subagent policy), and `model` comes from the sheet. Keep the panel's vendors distinct. |
-| `setup-pstack` | The skill's Other runtimes table names the Copilot sheet path and how it loads. Its [Copilot setup questions](../../setup-pstack/copilot.md) list models from the `task` tool's `model` enum and ask one `ask_user` question per tier and panel slot, grouped by vendor, with no recommended model; a first question lets a plan with one model, or anyone who wants no per-role choices, run every role on the session's model. The role rows are identical; Engineering ships no Copilot hook, so the `session hook` line has no effect on Copilot. |
+| `setup-pstack` | The skill's Other runtimes table names the Copilot sheet path and how it loads. Its [Copilot setup questions](../../setup-pstack/copilot.md) list models from the `task` tool's `model` enum and ask one `ask_user` question per tier and panel slot, grouped by vendor, with no recommended model; a first question lets a plan with one model, or anyone who wants no per-role choices, run every role on the session's model. The role rows are identical; Code ships no Copilot hook, so the `session hook` line has no effect on Copilot. |
 | `architect` | The runner panel goes through the **arena** skill: one `task` per runner, each with a model from the sheet's `architect runners` line. |
 | `how` | The explorers and the explainer are `task` calls with the sheet's `how` role models; critics use a read-only agent type (see Subagent policy). |
 | `arena` | Runners and the cross-judge pool come from the sheet's panel lines; pick the cross-judge from a different vendor than the candidate it grades. |
-| `no-comments` | Dispatch `task` with `agent_type: "engineering:comment-sicko"`. |
+| `no-comments` | Dispatch `task` with `agent_type: "comment-sicko"`. |
 | `swarm` | Workers are `task` calls with `mode: "background"`, each on its own worktree; in the app, `create_session` per worker. |
 | `teach` | Running `how` and `why` in parallel maps to `task` fan-out; image generation uses whatever image tool you have, or skip it and say so. |
 | `why` | Available MCP servers appear in your tool list; there is no `mcp__` prefix convention to scan for. |
@@ -124,7 +124,7 @@ Affected skill entry points point here. Most skills need only the tables above. 
 | `recall` | Search Copilot session state scoped to the current workspace (Transcripts above), not `~/.claude/projects/`. |
 | `show-me-your-work` | The end-of-run check reads this session's `events.jsonl` (Transcripts above). |
 | `automate-me` | Mode skills live in the Copilot skill locations below; transcripts come from Transcripts above; `plugin-dev:skill-development` resolves through the skills table. |
-| `create-verification-skill` | The generated skill lands under `.claude/skills/verify/` on Claude Code; on Copilot write it to `.github/skills/verify/`. The app-driving harness is platform-neutral. |
+| `create-verification-skill` | The generated skill lands under `.claude/skills/patinaproject-verify/` on Claude Code; on Copilot write it to `.github/skills/patinaproject-verify/`. The app-driving harness is platform-neutral. |
 | `maintain-verification-skill` | The parallel per-feature source readers map to `task` fan-out; the project-local skill lives under `.github/skills/`, not `.claude/skills/`. |
 | `babysit` | `loop` and `AskUserQuestion` resolve through the tables above; in the app, `save_session_automation` is the cadence. |
 
@@ -134,7 +134,7 @@ Affected skill entry points point here. Most skills need only the tables above. 
 
 ## Instructions file
 
-Where a pstack skill says "your instructions file" or `CLAUDE.md`, on Copilot that is `AGENTS.md` or `.github/copilot-instructions.md` in the repository, and `~/.copilot/copilot-instructions.md` for every repository. Copilot also reads a repository's `CLAUDE.md`. Copilot does not expand `@~/` includes in user-level instructions, and Engineering ships no Copilot hook, so read the model sheet with `view`, as Model names above describes for a skills-only install.
+Where a pstack skill says "your instructions file" or `CLAUDE.md`, on Copilot that is `AGENTS.md` or `.github/copilot-instructions.md` in the repository, and `~/.copilot/copilot-instructions.md` for every repository. Copilot also reads a repository's `CLAUDE.md`. Copilot does not expand `@~/` includes in user-level instructions, and Code ships no Copilot hook, so read the model sheet with `view`, as Model names above describes for a skills-only install.
 
 ## Skill locations
 

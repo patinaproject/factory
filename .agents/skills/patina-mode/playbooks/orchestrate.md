@@ -50,7 +50,8 @@ FORBIDDEN    no gt, no rebase, no force-push, no fixes outside scope, plus unit-
 REPORT       status, branch, head SHA, PRs, verdict, what you actually ran, deviations,
              suggested follow-ups, and applicable verification context
 PUBLICATION  opening-a-pr gate: draft PR, `/deslop`, `/no-comments`, `code-review`,
-             resolve every finding on the current head, then run `pr-readiness publish`
+             resolve every finding on the current head, post the result as a
+             COMMENT review, and leave the PR waiting for a maintainer's approval
 STANDING     <preferences.md pasted verbatim>
 ```
 
@@ -106,7 +107,8 @@ A unit is not done until its output is externalized the moment it lands, never b
 Every unit that publishes a PR follows [`opening-a-pr`](opening-a-pr.md) before it
 can report a ready PR. The worker creates a draft, runs `/deslop`, `/no-comments`,
 and `code-review` in that order, resolves every finding against the current head,
-and invokes `pr-readiness publish` as the only ready transition.
+and posts the result as a `COMMENT` review. The PR waits for a maintainer's
+approval, and `pr-readiness publish`, the only ready transition, runs after it.
 The completion report includes the current head SHA and the resolved code-review
 record. A worker cannot report a ready PR while that record is missing or belongs
 to an older head; return the unit to repair when the head changes.
