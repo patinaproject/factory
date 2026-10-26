@@ -258,9 +258,8 @@ A teammate replied on the agent session of an issue whose triage card is not
    an error, comment on the triage card that a Linear reply arrived without
    text, post a `thought` on this agent session asking the human to send the
    reply again, and stop.
-2. Comment on the triage card once with the reply, attributed to Linear, with
-   each pull request URL replaced as "Prompt" step 2 says, and never correct
-   it afterward.
+2. Comment on the triage card once with the reply, attributed to Linear, and
+   never correct it afterward.
 3. If the triage card is `blocked`, run
    `hermes kanban --board triage assign <task id> none`, then
    `hermes kanban --board triage unblock <task id>`. `dispatch-triage`

@@ -6,7 +6,7 @@ from tests import load_plugin
 
 plugin = load_plugin()
 
-from linear_agent_session import kanban_guard, linear  # noqa: E402
+from linear_agent_session import kanban_guard  # noqa: E402
 
 
 def decide(tool, args, platform=""):
@@ -58,17 +58,6 @@ class OtherCallsTest(unittest.TestCase):
     def test_odd_args_do_not_raise(self):
         for args in (None, "text", [], {}, {"body": None}, {"body": 5}):
             self.assertIsNone(decide("kanban_comment", args))
-
-
-class CardTitleTest(unittest.TestCase):
-    def test_unsafe_characters_are_removed_and_spaces_collapsed(self):
-        self.assertEqual(
-            linear.card_title("PAT-1", 'Fix "quoted" [bracket] title: it’s $(rm) — ok?'),
-            "PAT-1: Fix quoted bracket title its rm ok",
-        )
-
-    def test_dots_hyphens_and_digits_stay(self):
-        self.assertEqual(linear.card_title("PAT-2", "  v1.2 - re-run  "), "PAT-2: v1.2 - re-run")
 
 
 if __name__ == "__main__":

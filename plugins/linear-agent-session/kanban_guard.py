@@ -10,7 +10,7 @@ PULL_URL = re.compile(r"https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)", re
 WEBHOOK_PLATFORM = "webhook"
 
 
-def refusal(tool_name: str, args: Any, platform: str) -> Optional[str]:
+def refusal(tool_name: str, args: Any, platform: Callable[[], str]) -> Optional[str]:
     """The reason to refuse this tool call, or None to allow it."""
     if tool_name == "kanban_comment":
         body = args.get("body") if isinstance(args, dict) else None
@@ -25,7 +25,7 @@ def refusal(tool_name: str, args: Any, platform: str) -> Optional[str]:
             "would not start. Write each pull request as <owner>/<name>#<number> and call kanban_comment again:\n"
             f"{listed}"
         )
-    if tool_name == "kanban_create" and platform == WEBHOOK_PLATFORM:
+    if tool_name == "kanban_create" and platform() == WEBHOOK_PLATFORM:
         return (
             "A triage turn creates a card only with the shell command `hermes kanban create` (or "
             "`hermes kanban --board triage create` for a triage card), because the kanban_create tool cannot set "
@@ -36,9 +36,7 @@ def refusal(tool_name: str, args: Any, platform: str) -> Optional[str]:
 
 def make_hook(platform: Callable[[], str]):
     def on_pre_tool_call(tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict]:
-        if tool_name not in ("kanban_comment", "kanban_create"):
-            return None
-        message = refusal(tool_name, args, platform())
+        message = refusal(tool_name, args, platform)
         return None if message is None else {"action": "block", "message": message}
 
     return on_pre_tool_call

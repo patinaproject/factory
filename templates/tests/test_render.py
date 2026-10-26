@@ -602,11 +602,10 @@ class MergedCardTest(unittest.TestCase):
     def test_a_refused_promote_or_completion_leaves_the_card_unassigned(self):
         rule = self.bullet("triage")
         promote = rule[rule.index("  5. ") : rule.index("  6. ")]
-        self.assertIn("comment the refusal with the pull request URL and stop. Leave the card\n     unassigned", promote)
+        self.assertIn("and stop. Leave the card\n     unassigned", promote)
         self.assertNotIn("claude-worker", promote)
         call = self.completion_call()
-        self.assertIn("Otherwise comment\nthe refusal with the pull request URL and stop.", call)
-        self.assertIn("Never assign the card after\n`specify` succeeded.", call)
+        self.assertIn("Otherwise comment\nthe refusal, naming the pull request as `<owner>/<name>#<number>`, and stop.\nNever assign the card after `specify` succeeded.", call)
 
     def test_only_a_failed_acceptance_routes_to_the_failing_checks_rule(self):
         call = self.completion_call()

@@ -29,7 +29,8 @@ just before you act and read `status` from it:
      Never complete the card while its title and body are the rewritten ones.
   5. `hermes kanban show <task id> --json`. If `status` is `todo`, run
      `hermes kanban promote <task id> pull request merged`. If it refuses,
-     comment the refusal with the pull request URL and stop. Leave the card
+     comment the refusal, naming the pull request as
+     `<owner>/<name>#<number>`, and stop. Leave the card
      unassigned: an `assigned` event lifts the `active_pr` hold, and a worker
      would start on a merged pull request.
   6. Make the completion call.
@@ -51,8 +52,8 @@ is `pr_acceptance`. If its payload's `pr_url` is the pull request URL, its
 `classification` other than `success` or `pending`, or its own
 `classification` is `missing` and its `checks` is empty, finish the card as
 "A refused merge" says. Otherwise comment
-the refusal with the pull request URL and stop. Never assign the card after
-`specify` succeeded.
+the refusal, naming the pull request as `<owner>/<name>#<number>`, and stop.
+Never assign the card after `specify` succeeded.
 
 ### A refused merge
 
@@ -71,7 +72,8 @@ Otherwise the refused checks are the `name` of each entry in that event's `check
 name, quoted. It reads the pull request's newest run of each check and prints
 JSON with `head_sha`, `real`, and `superseded`. If it prints an error, run it once more.
 If that fails too, comment the error on the card and stop. If `head_sha` is not
-the event's `head_sha`, comment the refusal with the pull request URL and stop.
+the event's `head_sha`, comment the refusal, naming the pull request as `<owner>/<name>#<number>`,
+and stop.
 
 - When `real` is not empty, a check's newest run failed. The names are `real`.
 - When `real` is empty, every refused check passed on its newest run. Hermes counted
