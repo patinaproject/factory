@@ -312,6 +312,7 @@ class RegisterTest(unittest.TestCase):
         self.assertEqual(
             sorted(ctx.tools),
             [
+                "github_issue_edit",
                 "linear_agent_activity",
                 "linear_agent_activity_read",
                 "linear_agent_session_create",

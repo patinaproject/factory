@@ -113,6 +113,13 @@ def register(ctx: Any) -> None:
         handler=lambda args, **_: tools.run_search(get_client, args),
         description=tools.SEARCH_SCHEMA["description"],
     )
+    ctx.register_tool(
+        name="github_issue_edit",
+        toolset=TOOLSET,
+        schema=tools.GITHUB_EDIT_SCHEMA,
+        handler=lambda args, **_: tools.run_github_edit(args),
+        description=tools.GITHUB_EDIT_SCHEMA["description"],
+    )
     ctx.register_hook(
         "pre_gateway_dispatch",
         make_dispatch_hook(

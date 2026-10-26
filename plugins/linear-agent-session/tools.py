@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Callable, Optional
 
+from . import github_issue
 from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, LinearClient, LinearError, activity_content
 
 ClientFactory = Callable[[], LinearClient]
@@ -155,6 +156,27 @@ EDIT_SCHEMA = {
     },
 }
 
+GITHUB_EDIT_SCHEMA = {
+    "name": "github_issue_edit",
+    "description": (
+        "Edit the GitHub issue at `url` as the factory's GitHub App, with one PATCH: title, body (the full new "
+        "text), add_labels and remove_labels by name, matched whatever their case and punctuation, and state "
+        "(Done, Canceled, or Todo, Backlog, or Triage to reopen). Adds only labels the repository has. Never "
+        "changes assignees. Returns url, changed, title, labels, state, and state_reason."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Required. https://github.com/<owner>/<repo>/issues/<number>."},
+            "title": {"type": "string", "description": "The issue's new title."},
+            "body": {"type": "string", "description": "The issue's full new body, in Markdown."},
+            "add_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to add."},
+            "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to remove."},
+            "state": {"type": "string", "description": "Done, Canceled, or a status that reopens, such as Todo."},
+        },
+    },
+}
+
 SEARCH_ARGUMENT_NAMES = ("query", "term", "text")
 
 SEARCH_SCHEMA = {
@@ -238,12 +260,10 @@ def run_to_todo(client_factory: ClientFactory, args: dict) -> str:
 
 def run_edit(client_factory: ClientFactory, args: dict) -> str:
     def run() -> dict:
-        refused = sorted(k for k in args if "assignee" in k.casefold() or "delegate" in k.casefold())
-        if refused:
-            raise LinearError(f"linear_issue_edit never changes assignee or delegate; drop {', '.join(refused)}")
+        _refuse_people(args)
         issue = _issue_argument(args)
         add, remove, state = _names(args.get("add_labels")), _names(args.get("remove_labels")), args.get("state")
-        title, description = args.get("title"), args.get("description")
+        title, description = _title(args), args.get("description")
         if not (add or remove or state or title or description is not None):
             raise LinearError("pass title, description, add_labels, remove_labels, or state")
         return client_factory().edit_issue(
@@ -251,6 +271,40 @@ def run_edit(client_factory: ClientFactory, args: dict) -> str:
         )
 
     return _tool_result_or_error(run)
+
+
+def run_github_edit(args: dict, gh: github_issue.Gh = github_issue.run_gh) -> str:
+    def run() -> dict:
+        _refuse_people(args)
+        url = _first_argument(args, ("url", "issue", "issue_url"))
+        if not url:
+            raise LinearError("pass url, the GitHub issue's URL")
+        add, remove, state = _names(args.get("add_labels")), _names(args.get("remove_labels")), args.get("state")
+        title, body = _title(args), _first_present(args, ("body", "description"))
+        if not (add or remove or state or title or body is not None):
+            raise LinearError("pass title, body, add_labels, remove_labels, or state")
+        return github_issue.edit_issue(
+            url, title=title, body=body, add_labels=add, remove_labels=remove, state=state, gh=gh
+        )
+
+    return _tool_result_or_error(run)
+
+
+def _refuse_people(args: dict) -> None:
+    refused = sorted(k for k in args if "assignee" in k.casefold() or "delegate" in k.casefold())
+    if refused:
+        raise LinearError(f"this tool never changes assignee or delegate; drop {', '.join(refused)}")
+
+
+def _title(args: dict) -> Optional[str]:
+    title = args.get("title")
+    if title is not None and not title.strip():
+        raise LinearError("a title cannot be blank")
+    return title
+
+
+def _first_present(args: dict, names: tuple) -> Optional[str]:
+    return next((args[name] for name in names if args.get(name) is not None), None)
 
 
 def run_search(client_factory: ClientFactory, args: dict) -> str:

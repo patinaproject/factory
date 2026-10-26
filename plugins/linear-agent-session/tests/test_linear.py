@@ -834,13 +834,19 @@ class EditTest(unittest.TestCase):
             with self.subTest(key=key):
                 fake, output = self.edit([], title="New title", **{key: "user-1"})
                 self.assertEqual(
-                    output, {"error": f"linear_issue_edit never changes assignee or delegate; drop {key}"}
+                    output, {"error": f"this tool never changes assignee or delegate; drop {key}"}
                 )
                 self.assertEqual(fake.graphql_requests, [])
+
+    def test_a_blank_title_is_refused(self):
+        fake, output = self.edit([], title=" ", description="New text.")
+        self.assertEqual(output, {"error": "a title cannot be blank"})
+        self.assertEqual(fake.graphql_requests, [])
 
     def test_the_schema_requires_no_argument(self):
         self.assertNotIn("required", tools.EDIT_SCHEMA["parameters"])
         self.assertNotIn("required", tools.SEARCH_SCHEMA["parameters"])
+        self.assertNotIn("required", tools.GITHUB_EDIT_SCHEMA["parameters"])
 
 
 class SearchTest(unittest.TestCase):

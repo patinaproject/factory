@@ -496,6 +496,7 @@ class PromptSubstitutionTest(unittest.TestCase):
         change = prompt[prompt.index("## Requested issue change") : prompt.index("## Triage card reply")]
         self.assertIn("`linear_issue_edit`", change)
         self.assertIn("`linear_issue_search`", change)
+        self.assertIn("`github_issue_edit`", change)
         self.assertNotIn("hermes kanban", change)
 
     def test_the_gate_answers_ready_for_human_and_unready_issues_without_a_card(self):
