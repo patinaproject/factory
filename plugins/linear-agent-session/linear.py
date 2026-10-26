@@ -63,7 +63,7 @@ PRIORITIES = {0: ("No priority", 0), 1: ("Urgent", 4), 2: ("High", 3), 3: ("Medi
 
 ISSUE_QUERY = """query Issue($id: String!) {
   issue(id: $id) {
-    id identifier title url branchName priority
+    id identifier title description url branchName priority
     state { name type }
     delegate { id }
     labels { nodes { name } }
@@ -135,13 +135,19 @@ ISSUE_STATES_QUERY = """query IssueStates($id: String!) {
 
 ISSUE_EDIT_QUERY = """query IssueEdit($id: String!) {
   issue(id: $id) {
-    id identifier
+    id identifier title description
     state { name }
     labels { nodes { id name parent { id } } }
     team { states { nodes { id name } } labels(first: 250) { nodes { id name isGroup parent { id } } } }
   }
   issueLabels(first: 250, filter: { team: { null: true } }) { nodes { id name isGroup parent { id } } }
 }"""
+
+ISSUE_SEARCH_QUERY = """query IssueSearch($term: String!, $first: Int!) {
+  searchIssues(term: $term, first: $first) { nodes { identifier title url team { name } state { name } } }
+}"""
+
+GITHUB_ISSUE_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+")
 
 ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
@@ -267,6 +273,8 @@ class LinearClient:
             "priority": priority,
             "priorityName": priority_name,
             "cardPriority": card_priority,
+            "description": issue["description"] or "",
+            "githubIssues": [a["url"] for a in issue["attachments"]["nodes"] if GITHUB_ISSUE_URL.fullmatch(a["url"])],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
             "labels": _label_names(issue),
             "blockedBy": _blocking_issues(issue["inverseRelations"]),
@@ -370,11 +378,16 @@ class LinearClient:
         return {**result, "moved": True, "state": target["name"]}
 
     def edit_issue(
-        self, id_or_identifier: str, *, add_labels: list = (), remove_labels: list = (), state: Optional[str] = None
+        self,
+        id_or_identifier: str,
+        *,
+        add_labels: list = (),
+        remove_labels: list = (),
+        state: Optional[str] = None,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
     ) -> dict:
-        """Add and remove labels and set the status by name, matched whatever their case and punctuation.
-
-        An added label replaces the issue's other labels in its group, because Linear allows one per group."""
+        """An added label replaces the issue's other labels in its group, because Linear allows one per group."""
         data = self._graphql(ISSUE_EDIT_QUERY, {"id": id_or_identifier})
         issue = data["issue"]
         if issue is None:
@@ -394,6 +407,10 @@ class LinearClient:
                 labels = {i: n for i, n in labels.items() if (n["parent"] or {}).get("id") != group}
             labels[label["id"]] = label
         update: dict = {}
+        if title is not None and title != issue["title"]:
+            update["title"] = title
+        if description is not None and description != (issue["description"] or ""):
+            update["description"] = description
         if labels.keys() != current.keys():
             update["labelIds"] = sorted(labels)
         target = _by_name(issue["team"]["states"]["nodes"], state, "status") if state else None
@@ -406,9 +423,17 @@ class LinearClient:
         return {
             "identifier": issue["identifier"],
             "changed": bool(update),
+            "title": update.get("title", issue["title"]),
             "labels": sorted(n["name"] for n in labels.values()),
             "state": target["name"] if target else issue["state"]["name"],
         }
+
+    def search_issues(self, term: str) -> list:
+        nodes = self._graphql(ISSUE_SEARCH_QUERY, {"term": term, "first": 10})["searchIssues"]["nodes"]
+        return [
+            {"identifier": n["identifier"], "title": n["title"], "url": n["url"], "team": n["team"]["name"], "state": n["state"]["name"]}
+            for n in nodes
+        ]
 
     def list_delegated_issues(self, *, include_closed: bool = False) -> list:
         issue_filter: dict = {"delegate": {"isMe": {"eq": True}}}

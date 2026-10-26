@@ -487,6 +487,7 @@ class IssueTest(unittest.TestCase):
                 "id": "2f9a6f0e-0000-4000-8000-000000000001",
                 "identifier": "ABC-123",
                 "title": "Fix checkout",
+                "description": "Checkout fails.",
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "branchName": "abc-123-fix-checkout",
                 "priority": 2.0,
@@ -495,7 +496,8 @@ class IssueTest(unittest.TestCase):
                 "labels": {"nodes": [{"name": "ready-for-agent"}, {"name": "bug"}]},
                 "attachments": {
                     "nodes": [
-                        {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
+                        {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"},
+                        {"url": "https://github.com/example-org/example-repo/pull/10", "sourceType": "github"},
                     ]
                 },
                 "inverseRelations": {
@@ -534,11 +536,14 @@ class IssueTest(unittest.TestCase):
                 "cardPriority": 3,
                 "state": "Todo",
                 "stateType": "unstarted",
+                "description": "Checkout fails.",
+                "githubIssues": ["https://github.com/example-org/example-repo/issues/9"],
                 "delegate": "app-user-1",
                 "labels": ["bug", "ready-for-agent"],
                 "role_labels": {"ready-for-agent": "Ready for agent"},
                 "attachments": [
-                    {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
+                    {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"},
+                    {"url": "https://github.com/example-org/example-repo/pull/10", "sourceType": "github"},
                 ],
                 "blockedBy": [
                     {"id": "uuid-b1", "identifier": "ABC-122", "gitBranchName": "abc-122-first", "stateType": "started",
@@ -728,6 +733,8 @@ def issue_for_edit(labels, state="Triage"):
     issue = {
         "id": "issue-uuid",
         "identifier": "ABC-1",
+        "title": "Old title",
+        "description": "Old text.",
         "state": {"name": state},
         "labels": {"nodes": [{k: n[k] for k in ("id", "name", "parent")} for n in labels]},
         "team": {
@@ -749,7 +756,13 @@ class EditTest(unittest.TestCase):
         )
         self.assertEqual(
             output,
-            {"identifier": "ABC-1", "changed": True, "labels": ["Factory", "Ready for agent", "bug"], "state": "Canceled"},
+            {
+                "identifier": "ABC-1",
+                "changed": True,
+                "title": "Old title",
+                "labels": ["Factory", "Ready for agent", "bug"],
+                "state": "Canceled",
+            },
         )
         self.assertEqual(
             fake.graphql_requests[1]["variables"],
@@ -773,7 +786,9 @@ class EditTest(unittest.TestCase):
 
     def test_an_issue_that_already_matches_is_not_updated(self):
         fake, output = self.edit([issue_for_edit([TEAM_LABELS[3]], state="Todo")], add_labels=["factory"], state="todo")
-        self.assertEqual(output, {"identifier": "ABC-1", "changed": False, "labels": ["Factory"], "state": "Todo"})
+        self.assertEqual(
+            output, {"identifier": "ABC-1", "changed": False, "title": "Old title", "labels": ["Factory"], "state": "Todo"}
+        )
         self.assertEqual(len(fake.graphql_requests), 1)
 
     def test_an_unknown_name_changes_nothing_and_lists_the_names(self):
@@ -792,7 +807,79 @@ class EditTest(unittest.TestCase):
 
     def test_without_a_change_it_asks_for_one(self):
         fake, output = self.edit([])
-        self.assertEqual(output, {"error": "pass add_labels, remove_labels, or state"})
+        self.assertEqual(output, {"error": "pass title, description, add_labels, remove_labels, or state"})
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_edits_the_title_and_description_of_any_named_issue(self):
+        fake = FakeLinear([issue_for_edit([]), UPDATE_OK])
+        output = json.loads(
+            tools.run_edit(lambda: make_client(fake), {"issue": "XYZ-9", "title": "New title", "description": "New text."})
+        )
+        self.assertEqual(
+            output, {"identifier": "ABC-1", "changed": True, "title": "New title", "labels": [], "state": "Triage"}
+        )
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "XYZ-9"})
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"],
+            {"id": "issue-uuid", "input": {"title": "New title", "description": "New text."}},
+        )
+
+    def test_an_unchanged_title_and_description_are_not_written(self):
+        fake, output = self.edit([issue_for_edit([])], title="Old title", description="Old text.")
+        self.assertFalse(output["changed"])
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_an_assignee_or_delegate_argument_is_refused_before_linear_is_asked(self):
+        for key in ("assignee", "assigneeId", "delegate", "delegate_id"):
+            with self.subTest(key=key):
+                fake, output = self.edit([], title="New title", **{key: "user-1"})
+                self.assertEqual(
+                    output, {"error": f"linear_issue_edit never changes assignee or delegate; drop {key}"}
+                )
+                self.assertEqual(fake.graphql_requests, [])
+
+    def test_the_schema_requires_no_argument(self):
+        self.assertNotIn("required", tools.EDIT_SCHEMA["parameters"])
+        self.assertNotIn("required", tools.SEARCH_SCHEMA["parameters"])
+
+
+class SearchTest(unittest.TestCase):
+    def search(self, responses, args):
+        fake = FakeLinear(responses)
+        return fake, json.loads(tools.run_search(lambda: make_client(fake), args))
+
+    def test_returns_up_to_ten_matching_issues(self):
+        node = {
+            "identifier": "ABC-57",
+            "title": "Upgrade to SDK 57",
+            "url": "https://linear.app/example/issue/ABC-57",
+            "team": {"name": "Apps"},
+            "state": {"name": "Todo"},
+        }
+        fake, output = self.search([(200, {"data": {"searchIssues": {"nodes": [node]}}})], {"query": "SDK 57"})
+        self.assertEqual(
+            output,
+            {
+                "issues": [
+                    {
+                        "identifier": "ABC-57",
+                        "title": "Upgrade to SDK 57",
+                        "url": "https://linear.app/example/issue/ABC-57",
+                        "team": "Apps",
+                        "state": "Todo",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"term": "SDK 57", "first": 10})
+
+    def test_takes_the_names_models_guess(self):
+        fake, output = self.search([(200, {"data": {"searchIssues": {"nodes": []}}})], {"term": "SDK"})
+        self.assertEqual(output, {"issues": []})
+
+    def test_without_a_query_it_asks_for_one(self):
+        fake, output = self.search([], {})
+        self.assertEqual(output, {"error": "pass query, the words to search issues for"})
         self.assertEqual(fake.graphql_requests, [])
 
 

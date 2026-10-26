@@ -106,6 +106,13 @@ def register(ctx: Any) -> None:
         handler=lambda args, **_: tools.run_edit(get_client, args),
         description=tools.EDIT_SCHEMA["description"],
     )
+    ctx.register_tool(
+        name="linear_issue_search",
+        toolset=TOOLSET,
+        schema=tools.SEARCH_SCHEMA,
+        handler=lambda args, **_: tools.run_search(get_client, args),
+        description=tools.SEARCH_SCHEMA["description"],
+    )
     ctx.register_hook(
         "pre_gateway_dispatch",
         make_dispatch_hook(

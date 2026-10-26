@@ -56,6 +56,7 @@ ISSUE_SCHEMA = {
         "Read the Linear issue named by `issue` (UUID or ABC-123). Reads as the agent app and returns "
         "id, identifier, title, url, gitBranchName, priority, priorityName, "
         "cardPriority (the Kanban card priority for this issue), "
+        "description, githubIssues (the URLs of the GitHub issues attached to it), "
         "state, stateType, delegate (the delegate's user ID, or null), labels (names), role_labels (the live label name of each triage role the issue's team and workspace "
         "have, keyed needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix; name a label to people "
         "by it, never by the role), attachments, "
@@ -136,18 +137,35 @@ TO_TODO_SCHEMA = {
 EDIT_SCHEMA = {
     "name": "linear_issue_edit",
     "description": (
-        "Edit `issue` (UUID or ABC-123): add_labels, remove_labels, and state, each by name, matched "
-        "whatever their case and punctuation. An added label replaces the issue's other label in its group. "
-        "Creates no label or status. Returns identifier, changed, labels (names), and state."
+        "Edit `issue` (UUID or ABC-123), any issue the agent app can read: title, description (the full new "
+        "text), add_labels, remove_labels, and state, labels and status by name, matched whatever their case and "
+        "punctuation. An added label replaces the issue's other label in its group. Creates no label or status, "
+        "and never changes assignee or delegate. Returns identifier, changed, title, labels (names), and state."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             **ISSUE_PARAMETERS["properties"],
+            "title": {"type": "string", "description": "The issue's new title."},
+            "description": {"type": "string", "description": "The issue's full new description, in Markdown."},
             "add_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to add."},
             "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to remove."},
             "state": {"type": "string", "description": "Status name to move the issue to, such as Canceled."},
         },
+    },
+}
+
+SEARCH_ARGUMENT_NAMES = ("query", "term", "text")
+
+SEARCH_SCHEMA = {
+    "name": "linear_issue_search",
+    "description": (
+        "Search `query` (text) across the Linear issues the agent app can read. Returns issues, up to 10, "
+        "each with identifier, title, url, team, and state."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "Required. Words to search issues for."}},
     },
 }
 
@@ -220,11 +238,27 @@ def run_to_todo(client_factory: ClientFactory, args: dict) -> str:
 
 def run_edit(client_factory: ClientFactory, args: dict) -> str:
     def run() -> dict:
+        refused = sorted(k for k in args if "assignee" in k.casefold() or "delegate" in k.casefold())
+        if refused:
+            raise LinearError(f"linear_issue_edit never changes assignee or delegate; drop {', '.join(refused)}")
         issue = _issue_argument(args)
         add, remove, state = _names(args.get("add_labels")), _names(args.get("remove_labels")), args.get("state")
-        if not (add or remove or state):
-            raise LinearError("pass add_labels, remove_labels, or state")
-        return client_factory().edit_issue(issue, add_labels=add, remove_labels=remove, state=state)
+        title, description = args.get("title"), args.get("description")
+        if not (add or remove or state or title or description is not None):
+            raise LinearError("pass title, description, add_labels, remove_labels, or state")
+        return client_factory().edit_issue(
+            issue, add_labels=add, remove_labels=remove, state=state, title=title, description=description
+        )
+
+    return _tool_result_or_error(run)
+
+
+def run_search(client_factory: ClientFactory, args: dict) -> str:
+    def run() -> dict:
+        term = _first_argument(args, SEARCH_ARGUMENT_NAMES)
+        if not term:
+            raise LinearError("pass query, the words to search issues for")
+        return {"issues": client_factory().search_issues(term)}
 
     return _tool_result_or_error(run)
 
