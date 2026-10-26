@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import unittest
+from unittest import mock
 
 from tests import load_plugin
 
@@ -23,13 +26,16 @@ def issue(labels=("Needs triage",), state="open", state_reason=None, title="Old 
 
 
 class FakeGh:
-    def __init__(self, current, labels=("Needs triage", "Ready for agent", "bug")):
+    def __init__(self, current, labels=("Needs triage", "Ready for agent", "bug"), visibility="public"):
         self.current = current
         self.labels = labels
+        self.visibility = visibility
         self.calls = []
 
     def __call__(self, args, stdin):
         self.calls.append((list(args), json.loads(stdin) if stdin else None))
+        if args[:2] == ["api", "repos/example-org/example-repo"]:
+            return json.dumps({"visibility": self.visibility})
         if args[:2] == ["api", PATH]:
             return json.dumps(self.current)
         if args[:3] == ["api", "--paginate", "--slurp"]:
@@ -94,6 +100,38 @@ class GitHubEditTest(unittest.TestCase):
             {"error": "a GitHub issue has no status 'In Review'; name Done, Canceled, or Todo"},
         )
         self.assertEqual(gh.patches(), [])
+
+    def test_a_label_name_two_labels_match_changes_nothing(self):
+        gh = FakeGh(issue(), labels=("Bug", "bug"))
+        self.assertEqual(
+            self.edit(gh, add_labels=["BUG"]),
+            {"error": "more than one label of example-org/example-repo matches 'BUG': Bug, bug"},
+        )
+        self.assertEqual(gh.patches(), [])
+
+    def test_an_issue_of_a_private_repository_is_refused(self):
+        for visibility in ("private", "internal"):
+            with self.subTest(visibility=visibility):
+                gh = FakeGh(issue(), visibility=visibility)
+                self.assertEqual(
+                    self.edit(gh, title="New title"),
+                    {"error": f"example-org/example-repo is {visibility}; edit its issues in Linear"},
+                )
+                self.assertEqual([args for args, _ in gh.calls], [["api", "repos/example-org/example-repo"]])
+
+    def test_gh_sees_only_its_own_environment(self):
+        recorded = {}
+
+        def fake_run(cmd, **kwargs):
+            recorded.update(cmd=cmd, env=kwargs["env"])
+            return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+        environ = {"PATH": "/bin", "HOME": "/home/f", "GH_CONFIG_DIR": "/gh", "LINEAR_CLIENT_SECRET": "s", "SENTRY_TOKEN": "t"}
+        with mock.patch.dict(os.environ, environ, clear=True), mock.patch.object(subprocess, "run", fake_run):
+            tools.github_issue.run_gh(["api", "repos/o/r"])
+        self.assertEqual(recorded["env"], {"PATH": "/bin", "HOME": "/home/f", "GH_CONFIG_DIR": "/gh"})
+        self.assertEqual(recorded["cmd"][1:], ["api", "repos/o/r"])
+        self.assertTrue(recorded["cmd"][0].endswith("/.local/bin/gh"))
 
     def test_refuses_people_a_pull_request_and_an_empty_request_before_gh_runs(self):
         gh = FakeGh(issue())
