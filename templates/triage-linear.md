@@ -36,8 +36,7 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 
   The branch survives when Hermes rewrites a card's title and body. A card on
   the factory's own pull request branch has no branch key, so keys 3 and 4
-  find it. Create a card only with the `hermes kanban create` command below,
-  never with the `kanban_create` tool, which cannot set the branch.
+  find it. Create a card with the `hermes kanban create` command below.
 - Archive a card only with `<<archive_card>> <task id>`, never with
   `hermes kanban archive`. Hermes keeps a dirty or unpushed worktree after an
   archive, and that worktree would hold the card's branch against the next card
@@ -147,12 +146,8 @@ Type `AgentSessionEvent`, action `created`. The issue is the agent session issue
    `thought` on this agent session, create no card, and stop. When it prints
    `error` (exit code 1), post that error as one `thought` and stop.
 
-   Never write a pull request URL in a card comment. Hermes treats a card
-   whose comments name a pull request as already having one.
-
    Create the card with the chosen repository's card flags, the branch you
-   chose, and a title made of the identifier, a colon, and the issue title
-   with every character except letters, digits, spaces, `.` and `-` removed:
+   chose, and the issue's `cardTitle` exactly as `linear_issue` returns it as the title:
 
    ````sh
    hermes kanban create '<title>' \
@@ -228,9 +223,7 @@ Type `AgentSessionEvent`, action `prompted`, and the activity signal is not
    asking the human to send the reply again, and stop. Do not unblock the
    card, because the worker would block again on the same question.
    Comment on the card once with the reply, attributed to Linear, and never
-   correct it afterward. Replace each
-   `https://github.com/<owner>/<name>/pull/<number>` URL in it with
-   `<owner>/<name>#<number>`, so the comment names no pull request URL.
+   correct it afterward.
 3. If the card's body names a different `linear_agent_session_id`, update it as
    in "Session created" step 6.
 4. If a `body` in the `comments` of `hermes kanban show <task id> --json`
