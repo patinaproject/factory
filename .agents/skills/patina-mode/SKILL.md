@@ -17,6 +17,41 @@ a sequential substitute.
 
 Use the session's task-tracking tools for the todolist. On Claude Code these are `TaskCreate` and `TaskUpdate`, or `TodoWrite` when configured. Availability depends on the model; `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` enables them through the environment or a project's `.claude/settings.local.json` `env` block. See the [task-tool documentation](https://code.claude.com/docs/en/tools-reference#task-tool-availability). If no task-tracking tool is available, keep an uncommitted `todo.md` Markdown checklist in the work dir, next to the decision trail, with the playbook steps verbatim and each `skip: <reason>` line. When several sessions share the checkout, name it `.audit/<task-slug>.todo.md`, beside that session's `.audit/<task-slug>.tsv` trail, so they never write one file.
 
+## Playbooks
+
+Route before you act. Match the task to a playbook below and open its file. Open a todolist whose first items are its steps, copied in verbatim, before any task-specific todos. Do this before the first file edit or commit. A step you choose not to do stays in the list with a one-line `skip: <reason>`.
+
+**A code change routes to its build playbook:** Bug fix, Feature, Refactoring, Perf issue, Hillclimb, or Visual parity. A request to implement an issue and open a pull request is that build task. **Opening a PR** is the build playbook's last step, never the route for the code. Prototype sketches and Babysit repairs keep their own playbooks. Who writes the code follows **A subagent writes the code** in **Subagents**.
+
+A large or cross-cutting effort (a migration across many call sites, an ambitious multi-part change), or work the user steps away from to trust later, routes to the **figure-it-out** skill even when a narrower playbook like Feature fits. Use **figure-it-out** whenever no bundled playbook fits. It designs a bespoke, rigorous playbook for the task. A standing project-scale program (multi-day, many stacked PRs, a fleet of subagents under one coordinator) routes to **Orchestrate** instead. figure-it-out designs one bespoke run, orchestrate runs the program.
+
+- **Investigation.** Read-only question: how does X work, why was Y built this way, are we sure about Z, should we do X or Y. `playbooks/investigation.md`.
+- **Triage.** Unattended triage of one existing tracker issue to a ready label or one round of questions, without implementing it ("triage this issue", "Triage Linear issue … Do not implement it."). People triaging by hand use the Work plugin's triage skill instead. `playbooks/triage.md`.
+- **Bug fix.** A reported defect to reproduce, root-cause, and fix with runtime evidence. `playbooks/bug-fix.md`.
+- **Perf issue.** A measured slowness to trace and improve against a baseline. `playbooks/perf-issue.md`.
+- **Hillclimb.** Sustained, scientific improvement of one metric against a target: loop hypotheses with before/after measurement, a decision log, and one commit per accepted win. Distinct from Perf issue, which is a one-off fix. `playbooks/hillclimb.md`.
+- **Runtime forensics.** Diagnose a runtime symptom (leak, idle-CPU spin, glitch) from live instrumentation. The deliverable is a diagnosis, not a fix. `playbooks/runtime-forensics.md`.
+- **Trace forensics.** Diagnose a captured profiling artifact (cpuprofile, trace, spindump, heap snapshot) handed to you after the fact. The deliverable is a diagnosis, not a fix. `playbooks/trace-forensics.md`.
+- **Feature.** New or changed behavior, built from a named data shape. `playbooks/feature.md`.
+- **Refactoring.** A behavior-preserving change to structure or shape (rename, extract, inline, dedupe, move). `playbooks/refactoring.md`.
+- **Prototype.** A throwaway sketch to make a design or behavioral decision cheaply, or to settle an empirical fork by observing it instead of asking the human ("prototype", "mock it up", "try this layout", "sketch it to decide"). `playbooks/prototype.md`.
+- **Visual parity.** Pixel-exact UI equivalence: matching two implementations or migrating a styling system. `playbooks/visual-parity.md`.
+- **Authoring or modifying a skill.** Writing or editing a SKILL.md. `playbooks/authoring-a-skill.md`.
+- **Eval.** Testing how a skill, structure, or prompt change affects agent behavior before promoting it. `playbooks/eval.md`.
+- **Babysit.** Driving a PR or a stack to merge-ready: conflicts, review threads, CI. `playbooks/babysit.md`.
+- **Shipping.** The half after Babysit. Independently verifying a green stack, then landing the contiguous verified run bottom-up through `gh` by default or Origin when its CLI is available. `playbooks/shipping.md`.
+- **Autonomous run.** A long task to drive to completion without stopping ("run until done", "/loop until X"). `playbooks/autonomous-run.md`.
+- **Orchestrate.** A standing project handed to one coordinator chat: multi-day, many stacked PRs, dozens to hundreds of subagents, minimal human turns ("run this whole project", "own this migration until it lands"). Distinct from Autonomous run, which drives one task to a predicate. Work one agent could finish inside the session's budget routes there, not here, however program-shaped the phrasing sounds. `playbooks/orchestrate.md`.
+- **Autopilot-full.** A queue of independent PRs driven to merge-ready with full autonomy. One owner per PR carries build to merge-ready, the root swarm-verifies each PR, and the operator clicks every merge ("autopilot this queue", "full autopilot", one-owner-per-PR programs). `playbooks/autopilot-full.md`.
+- **Autopilot-stack.** A queue of changes built and verified with full autonomy, delivered as one linear reviewed base-branch stack the operator lands ("autopilot-stack", "stack them, don't ship", "build the stack, I'll land it"). `playbooks/autopilot-stack.md`.
+- **Session pickup.** Resuming or taking over a prior agent's in-flight work from a transcript, cloud-agent URL, or pushed branch. `playbooks/session-pickup.md`.
+- **Pause safely.** Suspending in-flight work cleanly so it can be resumed, on an explicit pause, going offline, a session restart, or imminent context compaction. The complement to Session pickup. Full steps: `playbooks/pause-safely.md`.
+- **Multi-phase or multi-PR plan.** Work that spans phases or stacked PRs. `playbooks/multi-phase-plan.md`.
+- **Worktree and simulator cleanup.** Reclaiming local disk by pruning merged or abandoned git worktrees and stale iOS simulators ("what's using my disk", "clean up worktrees", "prune safe-to-prune worktrees", "free up space", "delete old simulators"). `playbooks/worktree-cleanup.md`.
+- **Opening a PR.** Invoked at the end of every other playbook. It routes alone only for work already built. `playbooks/opening-a-pr.md`.
+
+**Project playbooks.** A repository can add playbooks of its own under `.agents/playbooks/`, one Markdown file each. Its frontmatter names `extends`, the bundled playbook stems it builds on (comma-separated, or empty for a standalone playbook), and `when`, one sentence naming the requests it serves. When the playbook you match is one a project playbook extends, or the task fits a project playbook's `when`, open that file as well. Copy the bundled steps into the todolist verbatim, then apply each change at the step its quoted text names, and stop where the project playbook says to stop. A change is a list item that starts with `**After**`, `**Before**`, `**Replace**` or `**In**` followed by a quoted run of the bundled step's own words. Before you apply a project playbook, run `node <patina-mode-base>/scripts/check-playbooks.mjs` from the repository root. It fails when a project playbook extends a playbook this version lacks, or quotes step text this version no longer has, which happens when a pstack upgrade rewrites a step. Report each line it prints to the user and do not guess where an unanchored change belongs.
+
 ## Non-negotiables
 
 The Principles section below grounds every trigger. Keep principle choices, routing decisions, skip reasons, and throughput notes in the private task record. Explain them to the user only when asked or when the reasoning affects a decision the user must make. Cite only principles whose leaf SKILL.md you read this session.
@@ -25,13 +60,12 @@ While patina-mode is active, this skill owns workflow routing. Use only the
 skills and playbooks named here. Do not substitute another development, repair,
 review, or pull request controller because it is installed.
 
-Every skill named in this document and its playbooks is the Engineering
-plugin's. On Claude Code, invoke it as `engineering:<name>` rather than the bare
-name. Another installed plugin may ship a skill of the same name and an
-identical description, so a bare name can silently reach the wrong one. The
-exceptions are the references already carrying their own namespace, such as
-`plugin-dev:skill-development`, and the Claude Code built-in driver skills
-`run` and `verify`. On Codex, see
+Every skill named in this document and its playbooks is the Code
+plugin's. Invoke it by its bare name, such as `patina-mode`. An Agent Skills
+install registers bare names only, so a `plugin:skill` name for a Code
+skill does not resolve there. The exceptions are the references already
+carrying their own namespace, such as `plugin-dev:skill-development`, and the
+Claude Code built-in driver skills `run` and `verify`. On Codex, see
 [`references/codex-tools.md`](references/codex-tools.md).
 
 Every `scripts/...` and `playbooks/...` path in this document, its playbooks,
@@ -63,7 +97,7 @@ Remaining triggers:
   handoff gate.
 - Unresolved facts that require subsystem investigation, or nontrivial uncertainty about how the current system works → the **how** skill. Do not repeat How when a valid grounding record already answers the same questions.
 - About to `AskUserQuestion` on a "which approach", "how should I", or "what should this do" fork → classify it before you ask. If the answer is a fact you could observe by running something (behavior, timing, layout, output, perf, even whether an eval separates), it is not the human's to answer. Sketch it via the Prototype playbook (`playbooks/prototype.md`) and let the result decide. If the task is a read-only Investigation whose deliverable is a cited answer, stay in it and answer from the evidence rather than building a sketch. Reserve the question for a genuine product or preference call no experiment can settle. Under a full-autonomy grant, decide a call that the grant covers, act on it, and report it, with no reply word and no offer. Under the grant, apply a default for a call that only the operator can make. Report the default with a full explanation, and say in plain words what the operator could tell you to do instead. The operator answers in their own words. Never give a shorthand token to type back. Gates that the operator named and the Always-pause list in Autonomy still need the operator.
-- Any code → name the data shape first, and choose its organizing structure per **principle-model-the-domain**.
+- Any code change → open its build playbook per **Playbooks** before the first source edit. Name the data shape first, and choose its organizing structure per **principle-model-the-domain**.
 - A consequential choice about ownership or interfaces, or competing viable designs → the **architect** skill before implementing. A function boundary alone does not trigger Architect. When requirements and the implementation pattern are established, follow the matched playbook. Escalate if later evidence reveals unresolved risk, material uncertainty, or competing approaches.
 - Parallel fan-out → the **swarm** skill for coverage matrices, races, gauntlets, and exploration partitions. Use **arena** for design or code bakeoffs with base selection and grafting.
 - Stacked PRs, a GitHub stack suggestion, or a stack topology change → read
@@ -83,7 +117,7 @@ Remaining triggers:
   **running-mobile-simulators** skill before the first device state change. The
   agent that controls the device owns one exact device lease through app
   execution, automation, evidence capture, recovery, and cleanup.
-- Opening or preparing any PR → follow [`playbooks/opening-a-pr.md`](playbooks/opening-a-pr.md): create the caller-selected mode, run `/deslop`, `/no-comments`, then `code-review`, record observations, and use `pr-readiness publish` for the only ready transition.
+- Opening or preparing a PR for work already built → follow [`playbooks/opening-a-pr.md`](playbooks/opening-a-pr.md). Create the caller-selected mode, run `/deslop`, `/no-comments`, then `code-review`, post its result as a `COMMENT` review, wait for a maintainer's approval, and use `pr-readiness publish` for the only ready transition.
 - Any PR-status request → the **Babysit** playbook (`playbooks/babysit.md`), not the bundled **babysit** skill, whose description matches the same words. That includes "babysit this", "get it green", "address the review-bot comments", and the commonest phrasing, "check on PR X" / "anything outstanding on X". Never triggered by merely opening a PR. Declare its mode before polling. The playbook's step 1 owns the request-to-mode mapping. Reaching for `drive` inside a phase agent stops that agent finishing its turn.
 - A failed or reported CI check → identify its owner, reproduce it with the failure command, and route the repair to the **fix-ci** skill (`../fix-ci/SKILL.md`). Carry the owner, reproduction scope, command, and evidence into the routed brief, then return fix-ci's verification evidence to the active workflow. Each attempt follows **Repair from evidence**. Defect, review, and Babysit routing remain unchanged.
 - Asked to land or ship a green stack → the **Shipping** playbook (`playbooks/shipping.md`). Green is not safe. Nothing gets armed before an independent per-PR verdict, and only the contiguous verified run from the root lands.
@@ -117,7 +151,7 @@ Pass the relevant grounding and each other scoped routing exception in every exe
 - Skip the **Feature** or **Refactoring** Architect step only when no consequential ownership, interface, or competing-design decision remains. A straightforward change still follows every other matched playbook step, including a required configured implementation delegate, isolated worktree, and parent review.
 - **Autopilot-full** owners and supervisors inspect a slow worker before acting. Inspect process state, output, and task-relevant progress. Elapsed time or the lack of a side effect alone does not prove failure. Replace the worker only after recording failure evidence or when an explicit deadline contract requires replacement. Do not invent a deadline.
 - Reporting executors keep the outcome, relevant verification, and unresolved decisions. They omit required principle, routing, and throughput narration unless the user requests it or the reasoning affects the user's decision. Preserve any child reply item that communicates a result, evidence, risk, or decision.
-- Publication executors follow the repository's instructions for titles, bodies, references, links, and readiness. Under patina-mode, the caller selects the creation mode; `/deslop`, `/no-comments`, and `code-review` run in order; each producer emits a typed observation; and `pr-readiness publish` is the sole ready transition.
+- Publication executors follow the repository's instructions for titles, bodies, references, links, and readiness. Under patina-mode, the caller selects the creation mode; `/deslop`, `/no-comments`, and `code-review` run in order; readiness counts only GitHub Actions checks and a maintainer's approval read from the forge, which no agent can give; and `pr-readiness publish` is the sole ready transition.
 
 These exceptions apply only to work routed through patina-mode and only to the named child requirements. They do not override higher-priority user or repository instructions, and they do not change standalone child invocations. They never waive reproduction, evidence, issue ownership, authorization, configured model routing, writer isolation, a required independent review, or a current-head verification gate.
 
@@ -190,7 +224,9 @@ Read the leaf skill in full for any principle you apply. Each entry names when i
 
 ## Subagents
 
-**Use `subagent_type: "engineering:patina-agent"` for any subagent you spawn inside a playbook step** (code-writing delegates, ad-hoc helpers). Plugin agents register under the plugin namespace. The bare name `patina-agent` errors. `/patina-mode` and `patina-agent` route through the same wrapper. Routed workflow skills (`how`, `why`, `interrogate`, `reflect`, `swarm`) set their own `subagent_type` for diverse-model review. Respect what the skill prescribes, don't override to `patina-agent`.
+**Use `subagent_type: "patina-agent"` for any subagent you spawn inside a playbook step** (code-writing delegates, ad-hoc helpers). `setup-code-skills` installs the Code agents under their bare names, so the name resolves in a plugin install and in an Agent Skills install. `/patina-mode` and `patina-agent` route through the same wrapper. Routed workflow skills (`how`, `why`, `interrogate`, `reflect`, `swarm`) set their own `subagent_type` for diverse-model review. Respect what the skill prescribes, don't override to `patina-agent`.
+
+**A subagent writes the code.** In a build playbook, the main thread plans, briefs, reviews, and verifies. A subagent writes every source edit, in its own worktree, on the model the playbook names. Feature step 4's worktree and no-spawn rules apply to every build playbook. Fix rounds follow **Fresh subagents by default**. Babysit's repairs are the exception. Its PR owner commits them directly on the owning branch, per `playbooks/babysit.md`. A human change request that Babysit routes to a build playbook follows this rule.
 
 **Defaults for every `Agent` call.** `run_in_background: true`, full tool access (do not pick a subagent_type that strips MCP), file pointers not inlined context, explicit model per role (configurable via `/setup-pstack`. Role defaults in [Models](#models), with "judgment and prose" covering prose and judgment). Code delegates tier by difficulty. The hardest changes (cross-cutting design, gnarly concurrency, subtle algorithms) go to your strongest-judgment model (default in [Models](#models)), whether the task needs judgment on vague intent or is a precisely specified sequence of steps to execute to the letter. Trivial mechanical edits go to your fast code model. Everything else uses the single-role default. Multi-model panels run the configured panel for diversity, with defaults enumerated in each panel skill's Models section (`arena`, `architect`, `interrogate`). Per-role `/setup-pstack` lines override these defaults and the model choices in the routed skills (`how`, `why`, `arena`, `swarm`, `architect`, `interrogate`, `reflect`). A role with no line keeps its default, and a role line of `inherit-parent` or `auto` runs that role on the parent session's model (omit `model` on the `Agent` call).
 
@@ -218,39 +254,6 @@ Every playbook ends with a reply written this way. Report the outcome, relevant 
 
 Comments follow the same rule as the reply. Write them clean as you go. Keep a comment only for a non-obvious *why* the code can't show. A verify or test script gets no phase-narrating comments such as `// Phase 1: add cards`. The assertion or log string documents the step, as in `assert(ok, 'persisted across restart')`. This applies to every file you produce, including the delegate's diff.
 
-## Playbooks
-
-Open a todolist whose first items are the matched playbook's steps, copied in verbatim, before any task-specific todos. A step you choose not to do stays in the list with a one-line `skip: <reason>`. Match the task to a playbook below, open its file, and copy its steps in verbatim.
-
-A large or cross-cutting effort (a migration across many call sites, an ambitious multi-part change), or work the user steps away from to trust later, routes to the **figure-it-out** skill even when a narrower playbook like Feature fits. Use **figure-it-out** whenever no bundled playbook fits. It designs a bespoke, rigorous playbook for the task. A standing project-scale program (multi-day, many stacked PRs, a fleet of subagents under one coordinator) routes to **Orchestrate** instead. figure-it-out designs one bespoke run, orchestrate runs the program.
-
-- **Investigation.** Read-only question: how does X work, why was Y built this way, are we sure about Z, should we do X or Y. `playbooks/investigation.md`.
-- **Triage.** Unattended triage of one existing tracker issue to a ready role or one round of questions, without implementing it ("triage this issue", "Triage Linear issue … Do not implement it."). People triaging by hand use the Team plugin's triage skill instead. `playbooks/triage.md`.
-- **Bug fix.** A reported defect to reproduce, root-cause, and fix with runtime evidence. `playbooks/bug-fix.md`.
-- **Perf issue.** A measured slowness to trace and improve against a baseline. `playbooks/perf-issue.md`.
-- **Hillclimb.** Sustained, scientific improvement of one metric against a target: loop hypotheses with before/after measurement, a decision log, and one commit per accepted win. Distinct from Perf issue, which is a one-off fix. `playbooks/hillclimb.md`.
-- **Runtime forensics.** Diagnose a runtime symptom (leak, idle-CPU spin, glitch) from live instrumentation. The deliverable is a diagnosis, not a fix. `playbooks/runtime-forensics.md`.
-- **Trace forensics.** Diagnose a captured profiling artifact (cpuprofile, trace, spindump, heap snapshot) handed to you after the fact. The deliverable is a diagnosis, not a fix. `playbooks/trace-forensics.md`.
-- **Feature.** New or changed behavior, built from a named data shape. `playbooks/feature.md`.
-- **Refactoring.** A behavior-preserving change to structure or shape (rename, extract, inline, dedupe, move). `playbooks/refactoring.md`.
-- **Prototype.** A throwaway sketch to make a design or behavioral decision cheaply, or to settle an empirical fork by observing it instead of asking the human ("prototype", "mock it up", "try this layout", "sketch it to decide"). `playbooks/prototype.md`.
-- **Visual parity.** Pixel-exact UI equivalence: matching two implementations or migrating a styling system. `playbooks/visual-parity.md`.
-- **Authoring or modifying a skill.** Writing or editing a SKILL.md. `playbooks/authoring-a-skill.md`.
-- **Eval.** Testing how a skill, structure, or prompt change affects agent behavior before promoting it. `playbooks/eval.md`.
-- **Babysit.** Driving a PR or a stack to merge-ready: conflicts, review threads, CI. `playbooks/babysit.md`.
-- **Shipping.** The half after Babysit. Independently verifying a green stack, then landing the contiguous verified run bottom-up through `gh` by default or Origin when its CLI is available. `playbooks/shipping.md`.
-- **Autonomous run.** A long task to drive to completion without stopping ("run until done", "/loop until X"). `playbooks/autonomous-run.md`.
-- **Orchestrate.** A standing project handed to one coordinator chat: multi-day, many stacked PRs, dozens to hundreds of subagents, minimal human turns ("run this whole project", "own this migration until it lands"). Distinct from Autonomous run, which drives one task to a predicate. Work one agent could finish inside the session's budget routes there, not here, however program-shaped the phrasing sounds. `playbooks/orchestrate.md`.
-- **Autopilot-full.** A queue of independent PRs driven to merge-ready with full autonomy. One owner per PR carries build to merge-ready, the root swarm-verifies each PR, and the operator clicks every merge ("autopilot this queue", "full autopilot", one-owner-per-PR programs). `playbooks/autopilot-full.md`.
-- **Autopilot-stack.** A queue of changes built and verified with full autonomy, delivered as one linear reviewed base-branch stack the operator lands ("autopilot-stack", "stack them, don't ship", "build the stack, I'll land it"). `playbooks/autopilot-stack.md`.
-- **Session pickup.** Resuming or taking over a prior agent's in-flight work from a transcript, cloud-agent URL, or pushed branch. `playbooks/session-pickup.md`.
-- **Pause safely.** Suspending in-flight work cleanly so it can be resumed, on an explicit pause, going offline, a session restart, or imminent context compaction. The complement to Session pickup. Full steps: `playbooks/pause-safely.md`.
-- **Multi-phase or multi-PR plan.** Work that spans phases or stacked PRs. `playbooks/multi-phase-plan.md`.
-- **Worktree and simulator cleanup.** Reclaiming local disk by pruning merged or abandoned git worktrees and stale iOS simulators ("what's using my disk", "clean up worktrees", "prune safe-to-prune worktrees", "free up space", "delete old simulators"). `playbooks/worktree-cleanup.md`.
-- **Opening a PR.** Invoked at the end of every other playbook. `playbooks/opening-a-pr.md`.
-
-**Project playbooks.** A repository can add playbooks of its own under `.agents/playbooks/`, one Markdown file each. Its frontmatter names `extends`, the bundled playbook stems it builds on (comma-separated, or empty for a standalone playbook), and `when`, one sentence naming the requests it serves. When the playbook you match is one a project playbook extends, or the task fits a project playbook's `when`, open that file as well. Copy the bundled steps into the todolist verbatim, then apply each change at the step its quoted text names, and stop where the project playbook says to stop. A change is a list item that starts with `**After**`, `**Before**`, `**Replace**` or `**In**` followed by a quoted run of the bundled step's own words. Before you apply a project playbook, run `node <patina-mode-base>/scripts/check-playbooks.mjs` from the repository root. It fails when a project playbook extends a playbook this version lacks, or quotes step text this version no longer has, which happens when a pstack upgrade rewrites a step. Report each line it prints to the user and do not guess where an unanchored change belongs.
-
 ## Models
 
 Role defaults, stamped from `plugins/pstack/models.json` (edit there, rerun `tools/generate.mjs`). A matching role line in the `pstack-models.md` override sheet overrides each at runtime; `/setup-pstack` writes it and lists its path per runtime.
@@ -264,4 +267,4 @@ Role defaults, stamped from `plugins/pstack/models.json` (edit there, rerun `too
 
 ## Reasoning effort
 
-A role value in the override sheet may name a reasoning effort after its model, as in `opus @xhigh`. Levels on Claude Code: `low`, `medium`, `high`, `xhigh`, `max`. Which ones apply depends on the model. A value without `@` takes the sheet's `default effort` line, a level or `session`, and `session` when the sheet has no such line. `session` sets no effort, so the dispatch is the usual one. Strip the suffix before reading the model: `inherit-parent` or `auto` still omits `model` at every level, and a model name is passed as `model`. On Claude Code, a level picks the effort agent from the `subagent_type` you would otherwise use. `engineering:patina-agent` becomes `subagent_type: "engineering:patina-agent-<level>"`. `general-purpose`, or no `subagent_type`, becomes `subagent_type: "engineering:effort-<level>"`. The effort agents set only `effort`, so the model you pass still decides the model. On Codex, pass the level as `spawn_agent`'s `reasoning_effort` and keep the usual instructions.
+A role value in the override sheet may name a reasoning effort after its model, as in `opus @xhigh`. Levels on Claude Code: `low`, `medium`, `high`, `xhigh`, `max`. Which ones apply depends on the model. A value without `@` takes the sheet's `default effort` line, a level or `session`, and `session` when the sheet has no such line. `session` sets no effort, so the dispatch is the usual one. Strip the suffix before reading the model: `inherit-parent` or `auto` still omits `model` at every level, and a model name is passed as `model`. On Claude Code, a level picks the effort agent from the `subagent_type` you would otherwise use. `patina-agent` becomes `subagent_type: "patina-agent-<level>"`. `general-purpose`, or no `subagent_type`, becomes `subagent_type: "effort-<level>"`. The effort agents set only `effort`, so the model you pass still decides the model. On Codex, pass the level as `spawn_agent`'s `reasoning_effort` and keep the usual instructions.

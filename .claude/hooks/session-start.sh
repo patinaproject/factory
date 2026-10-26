@@ -19,14 +19,23 @@ if [ -z "$hook_root" ]; then
   hook_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 fi
 
-bom=$(printf '\357\273\277')
-if [ -f "$sheet" ] && [ -r "$sheet" ] && sed "1s/^$bom//" "$sheet" | tr -d '\r' | grep -qx 'session hook: off'; then
+read_sheet="$hook_root/read-sheet.sh"
+[ -f "$read_sheet" ] || read_sheet="$hook_root/../skills/setup-pstack/scripts/read-sheet.sh"
+
+if [ ! -f "$read_sheet" ]; then
+  echo "session-start.sh: missing $read_sheet; the session hook setting is ignored. Rerun the setup-code-skills install machinery to restore it." >&2
+  normalized=
+else
+  normalized=$(sh "$read_sheet" "$sheet") || normalized=
+fi
+if printf '%s\n' "$normalized" | grep -qx 'session hook: off'; then
   exit 0
 fi
 
-# A CLAUDE.md symlink to AGENTS.md is shared by Claude and Codex. When Codex
-# setup owns the mandate in that shared file, Claude already receives it from
-# the instructions file; avoid injecting a second copy through the hook.
+# A repository that carries the managed mandate block in CLAUDE.md already
+# delivers it to Claude; avoid injecting a second copy through the hook.
+# setup-code-skills removes the block it once wrote, so this guards a block that
+# someone restored or copied by hand.
 if [ "$1" = claude ]; then
   project_dir="${CLAUDE_PROJECT_DIR:-}"
   case "$hook_root" in
