@@ -80,7 +80,10 @@ def missing(body: str | None, repo: str, wanted: Iterable[str]) -> list[str]:
     return [ref for ref in wanted if ref not in found]
 
 
-def with_url(body: str, identifier: str, url: str) -> str:
+def with_link(body: str, identifier: str, url: str) -> str:
+    """Write each rendered bare `identifier` after a closing keyword as `[IDENTIFIER](url)`, the form that the
+    monorepo's pull request check accepts."""
+    link = f"[{identifier.upper()}]({url})"
     hidden = [match.span() for match in HIDDEN.finditer(body)]
     parts, last = [], 0
     for match in CLOSING.finditer(body):
@@ -89,7 +92,7 @@ def with_url(body: str, identifier: str, url: str) -> str:
             continue
         if any(left <= start < right for left, right in hidden):
             continue
-        parts += [body[last:start], url]
+        parts += [body[last:start], link]
         last = end
     return "".join(parts) + body[last:]
 

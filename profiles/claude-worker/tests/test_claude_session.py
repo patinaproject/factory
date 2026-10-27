@@ -101,7 +101,7 @@ TRIAGE_ENTRY = (
 TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
 LINEAR_URL = "https://linear.app/example/issue/ABC-123"
 CARD_BODY = f"```text\nlinear_issue_identifier: ABC-123\n```\ngithub_issue_url: https://github.com/{REPO}/issues/12"
-CLOSING_LINE = f"Closes #12, closes {LINEAR_URL}"
+CLOSING_LINE = f"Closes #12, closes [ABC-123]({LINEAR_URL})"
 TAKEOVER_BODY = f"Adds the thing.\n\n{CLOSING_LINE}"
 # What Hermes leaves in a dispatcher worker's subprocess: it scrubs HERMES_KANBAN_TASK, RUN_ID and CLAIM_LOCK.
 HERMES_CHILD_ENV = {"HERMES_DELEGATED_CHILD_CONTEXT": "1", "HERMES_KANBAN_DB": "/nonexistent/kanban.db"}
@@ -2322,16 +2322,17 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(links, {"pr": f"https://github.com/{REPO}/pull/9", "action": "linked"})
         self.assertEqual(body, f"Adds the thing.\n\n{CLOSING_LINE}")
 
-    def test_a_bare_linear_identifier_becomes_its_url_without_a_second_closing_line(self) -> None:
+    def test_a_bare_linear_identifier_becomes_a_markdown_link_without_a_second_closing_line(self) -> None:
         _, body = self.linked_body("Adds the thing.\n\nCloses #12\nCloses ABC-123")
 
-        self.assertEqual(body, f"Adds the thing.\n\nCloses #12\nCloses {LINEAR_URL}")
+        self.assertEqual(body, f"Adds the thing.\n\nCloses #12\nCloses [ABC-123]({LINEAR_URL})")
 
     def test_a_pull_request_that_already_links_both_issues_is_unchanged(self) -> None:
         for body in (
             f"Adds the thing.\n\n{CLOSING_LINE}",
             f"Fixes {REPO}#12 and resolves [ABC-123]({LINEAR_URL}/the-title-slug).",
             f"Closes [#12](https://github.com/{REPO}/issues/12), closes {LINEAR_URL}",
+            f"Closes #12, closes [ABC-123]({LINEAR_URL})",
         ):
             with self.subTest(body=body):
                 links, after = self.linked_body(body)
@@ -2341,7 +2342,7 @@ class ClaudeSessionTest(GitFixture):
     def test_a_card_without_a_github_issue_gets_only_the_linear_closing_line(self) -> None:
         _, body = self.linked_body("", card_body="linear_issue_identifier: ABC-123")
 
-        self.assertEqual(body, f"Closes {LINEAR_URL}")
+        self.assertEqual(body, f"Closes [ABC-123]({LINEAR_URL})")
 
     def test_another_issue_number_or_identifier_does_not_count_as_linked(self) -> None:
         _, body = self.linked_body(f"Closes #123, closes ABC-1234 and {LINEAR_URL}4")

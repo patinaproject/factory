@@ -402,7 +402,7 @@ def link_issues(
     """Give the factory's open pull request for the branch a closing reference to each of the card's issues.
 
     Runs after each Claude turn, like supersede_takeover. A bare Linear identifier after a closing keyword
-    becomes the issue's URL, and one closing line names whatever is still missing, so no issue gets a second
+    becomes a Markdown link to the issue's URL, and one closing line names whatever is still missing, so no issue gets a second
     closing reference. The result goes in the run's report and never changes its status.
     """
     try:
@@ -414,13 +414,13 @@ def link_issues(
             return {"action": "waiting", "reason": f"no open pull request by {login} on {branch}"}
         result = {"pr": pull["html_url"]}
         body = pull.get("body") or ""
-        edited = closing.with_url(body, identifier, linear_url)
+        edited = closing.with_link(body, identifier, linear_url)
         written = {}
         issue = closing.ISSUE_URL.match(github_issue or "")
         if issue:
             ref = closing.github_reference(*issue.groups(), repo)
             written[ref] = ref
-        written[identifier.upper()] = linear_url
+        written[identifier.upper()] = f"[{identifier.upper()}]({linear_url})"
         missing = [written[ref] for ref in closing.missing(edited, repo, written)]
         if missing:
             edited = f"{edited.rstrip()}\n\nCloses {', closes '.join(missing)}".strip()
