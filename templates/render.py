@@ -285,8 +285,8 @@ def triage_card_flags(repositories: list) -> str:
     return "\n".join(f"- `{repo['full_name']}`: `{_workspace_flag(repo)}`" for repo in repositories)
 
 
-def merged_checks_command(home: Path) -> str:
-    return f"python3 {shlex.quote(str(home / 'profiles' / 'claude-worker' / 'scripts' / 'merged_checks.py'))}"
+def card_transition_command(home: Path) -> str:
+    return f"python3 {shlex.quote(str(home / 'profiles' / 'claude-worker' / 'scripts' / 'card_transition.py'))}"
 
 
 def _or_list(items: list) -> str:
@@ -325,18 +325,21 @@ def _read_template(name: str) -> str:
     return (TEMPLATE_DIR / name).read_text(encoding="utf-8")
 
 
+def _transition_section(name: str) -> str:
+    values = {"card_transition": card_transition_command(hermes_home())}
+    return render_prompt(_read_template(name), values).rstrip("\n")
+
+
 def triage_resume_section() -> str:
-    return _read_template("triage-resume.md").rstrip("\n")
+    return _transition_section("triage-resume.md")
 
 
 def triage_merged_section() -> str:
-    home = hermes_home()
-    values = {"archive_card": archive_card_command(home), "merged_checks": merged_checks_command(home)}
-    return render_prompt(_read_template("triage-merged.md"), values).rstrip("\n")
+    return _transition_section("triage-merged.md")
 
 
 def triage_unblock_section() -> str:
-    return _read_template("triage-unblock.md").rstrip("\n")
+    return _transition_section("triage-unblock.md")
 
 
 def triage_inbox_section(config: dict) -> str:
@@ -407,6 +410,7 @@ def build_routes(settings: Any) -> dict:
                     "card_branch": card_branch_command(hermes_home(), config["github_login"]),
                     "triage_unblock": triage_unblock_section(),
                     "archive_card": archive_card_command(hermes_home()),
+                    "card_transition": card_transition_command(hermes_home()),
                     "triage_resume": triage_resume_section(),
                     "triage_inbox": triage_inbox_section(config),
                     "delegation_gate": delegation_gate_section(),
@@ -423,6 +427,7 @@ def build_routes(settings: Any) -> dict:
                 {
                     "repositories": repos,
                     "events_that_matter": events_that_matter(GITHUB_EVENT_TABLE),
+                    "card_transition": card_transition_command(hermes_home()),
                     "triage_unblock": triage_unblock_section(),
                     "triage_resume": triage_resume_section(),
                     "triage_merged": triage_merged_section(),
