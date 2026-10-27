@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -36,6 +37,11 @@ REASK_PREAMBLE = (
     "an answer, say so briefly in the `response`. Change cards only as the rules below allow.\n\n"
 )
 REASK_SOURCE = "linear-reply-reask"
+# The re-ask's turn-end hook touches this file in the query directory, so the exit check knows the hook owns the outcome.
+MARKER = "handled"
+MARKER_ENV = "LINEAR_REASK_MARKER"
+CLI = str(Path(__file__).with_name("cli.py"))
+EXIT_LOG = "linear-reask.log"
 
 
 def _event_line(name: str) -> "re.Pattern[str]":
@@ -123,12 +129,20 @@ def hermes_home() -> str:
 
 
 # The outer shell exits at once and the inner one is reparented, so the re-ask outlives a parent that exits first,
-# such as a one-shot replay, leaves no zombie behind, and still removes its query once Hermes exits.
-DETACH = '("$@"; rm -rf "$0") </dev/null >/dev/null 2>&1 &'
+# such as a one-shot replay, leaves no zombie behind, and still removes its query once Hermes exits. When Hermes exits
+# before its turn-end hook touched the marker, the exit check asks the person again; `;` keeps the cleanup after it.
+DETACH = (
+    '(session=$1 python=$2 cli=$3; shift 3; "$@"; '
+    '[ -e "$0/{MARKER}" ] || "$python" "$cli" reask-exit --agent-session-id "$session"; '
+    'rm -rf "$0") </dev/null >/dev/null 2>&1 &'
+).format(MARKER=MARKER)
 
 
-def spawn_reask(query: str, toolsets: str, redact: Callable[[str], str] = blocks.hermes_redact) -> None:
-    """Start a fresh agent turn on the query in its own detached Hermes process."""
+def spawn_reask(query: str, toolsets: str, agent_session: str, follow_up: tuple[str, str] = (sys.executable, CLI)) -> None:
+    """Start a fresh agent turn on the query in its own detached Hermes process, in a session apart from the gateway's.
+
+    `follow_up` is the interpreter and script that run the exit check's `reask-exit` command.
+    """
     directory: Optional[str] = None
     try:
         command = [find_hermes(), "chat", "-Q", "--oneshot", "--query-file"]
@@ -142,29 +156,68 @@ def spawn_reask(query: str, toolsets: str, redact: Callable[[str], str] = blocks
             command += ["-t", toolsets]
         command += ["--source", REASK_SOURCE]
         subprocess.run(
-            ["/bin/sh", "-c", DETACH, directory, *command],
-            env={**os.environ, "HERMES_HOME": hermes_home()},
+            ["/bin/sh", "-c", DETACH, directory, agent_session, *follow_up, *command],
+            env={**os.environ, "HERMES_HOME": hermes_home(), MARKER_ENV: os.path.join(directory, MARKER)},
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=True,
+            start_new_session=True,
         )
-    except Exception as failure:
-        logger.error("linear-agent-session: the reply re-ask failed: %s", redact(f"{type(failure).__name__}: {failure}"))
+    except Exception:
         if directory:
             shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+
+def post_ask_again(get_client: Callable[[], linear.LinearClient], agent_session: str) -> None:
+    get_client().create_activity(agent_session, linear.activity_content("elicitation", ASK_AGAIN))
+
+
+def reask_exit(get_client: Callable[[], linear.LinearClient], agent_session: str, log: Path) -> None:
+    """Ask the person again for a re-ask whose Hermes exited before its turn-end hook ran, and log the outcome.
+
+    It runs in its own process after Hermes exits, without Hermes' redaction, so a failure is logged by type only.
+    """
+    outcome: list[str] = []
+
+    def post() -> None:
+        try:
+            post_ask_again(get_client, agent_session)
+            outcome.append("asked again")
+        except Exception as failure:
+            outcome.append(f"asking again failed: {type(failure).__name__}")
+
+    worker = threading.Thread(target=post, daemon=True)
+    worker.start()
+    worker.join(POST_TIMEOUT_SECONDS)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as handle:
+        handle.write(f"{utc_now()} session {agent_session}: the re-ask exited before its turn-end hook; "
+                     f"{outcome[0] if outcome else 'asking again timed out'}\n")
+
+
+def mark_handled(redact: Callable[[str], str]) -> None:
+    path = os.environ.get(MARKER_ENV)
+    if not path:
+        return
+    try:
+        Path(path).touch()
+    except OSError as failure:
+        logger.error("linear-agent-session: marking the re-ask handled failed: %s", redact(f"{type(failure).__name__}: {failure}"))
 
 
 def make_turn_hook(
     record: PostRecord,
     get_client: Callable[[], linear.LinearClient],
-    reask: Callable[[str, str], Any],
+    reask: Callable[[str, str, str], Any],
     toolsets: Callable[[], str],
     redact: Callable[[str], str] = blocks.hermes_redact,
 ) -> Callable[..., None]:
     def ask_again(agent_session: str) -> None:
         try:
-            get_client().create_activity(agent_session, linear.activity_content("elicitation", ASK_AGAIN))
+            post_ask_again(get_client, agent_session)
         except Exception as failure:
             logger.error(
                 "linear-agent-session: asking for a reply again in session %s failed: %s",
@@ -180,11 +233,22 @@ def make_turn_hook(
         try:
             posted = record.take(session_id) if session_id else set()
             agent_session = reply_session(user_message)
-            if agent_session is None or agent_session in posted:
+            if agent_session is None:
                 return
-            if not user_message.startswith(REASK_FIRST_SENTENCE):
-                reask(REASK_PREAMBLE.format(sent=utc_now()) + user_message, toolsets())
+            replayed = user_message.startswith(REASK_FIRST_SENTENCE)
+            if replayed:
+                mark_handled(redact)
+            if agent_session in posted:
                 return
+            if not replayed:
+                try:
+                    reask(REASK_PREAMBLE.format(sent=utc_now()) + user_message, toolsets(), agent_session)
+                    return
+                except Exception as failure:
+                    logger.error(
+                        "linear-agent-session: the reply re-ask could not start: %s",
+                        redact(f"{type(failure).__name__}: {failure}"),
+                    )
             worker = threading.Thread(target=ask_again, args=(agent_session,), daemon=False)
             worker.start()
             worker.join(POST_TIMEOUT_SECONDS)

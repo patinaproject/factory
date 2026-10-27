@@ -59,6 +59,11 @@ def main(argv: Optional[list] = None) -> int:
     )
     exit_check.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
 
+    reask_exit = commands.add_parser(
+        "reask-exit", help="ask the person again for a reply re-ask whose Hermes exited before its turn-end hook"
+    )
+    reask_exit.add_argument("--agent-session-id", required=True)
+
     intent = commands.add_parser("triage-intent", help="print the computed triage intent block for a Linear webhook payload")
     intent.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
     intent.add_argument("--now", help="the delivery time as ISO 8601, for a replay; default is the payload's timestamp")
@@ -66,6 +71,11 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "triage-exit":
         return _triage_exit(plugin, args.payload_file)
+    if args.command == "reask-exit":
+        replies = plugin.replies
+        log = Path(replies.hermes_home()) / "logs" / replies.EXIT_LOG
+        replies.reask_exit(plugin.linear.client_from_env, args.agent_session_id, log)
+        return 0
     if args.command == "triage-intent":
         return _triage_intent(plugin, args.payload_file, args.now)
     if args.command == "activity":
