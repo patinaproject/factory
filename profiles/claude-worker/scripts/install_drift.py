@@ -13,8 +13,7 @@ from typing import NamedTuple
 
 PROFILE = "profiles/claude-worker"
 SCRIPTS = f"{PROFILE}/scripts"
-# The plugins whose modules claude-session imports.
-SKEW_PLUGINS = ("blocker-order", "linear-agent-session")
+IMPORTED_PLUGINS = ("blocker-order", "linear-agent-session")
 
 
 class GitError(Exception):
@@ -53,13 +52,11 @@ class Commit(NamedTuple):
 
 
 def blob_id(data: bytes, like: str) -> str:
-    """The id git gives a blob with these bytes, in the hash that the object id `like` uses."""
     algorithm = hashlib.sha256 if len(like) == 64 else hashlib.sha1
     return algorithm(b"blob %d\0" % len(data) + data).hexdigest()
 
 
 def compare_files(commit: Commit, files: dict, strip: str, home: Path) -> list:
-    """Return a detail for each file at the commit that is missing or different under `home`."""
     details = []
     for path, wanted in sorted(files.items()):
         relative = path[len(strip):]
@@ -72,14 +69,11 @@ def compare_files(commit: Commit, files: dict, strip: str, home: Path) -> list:
 
 
 def skew(home: Path, repo: Path) -> list:
-    """Which of "profile", "blocker-order", and "linear-agent-session" differ from the checkout's local HEAD.
-
-    Raises GitError, or OSError when an installed file cannot be read."""
     commit = Commit(repo, git(repo, "rev-parse", "--verify", "HEAD^{commit}").strip(), "HEAD")
     differing = []
     if compare_files(commit, commit.files(SCRIPTS), f"{PROFILE}/", home):
         differing.append("profile")
-    for name in SKEW_PLUGINS:
+    for name in IMPORTED_PLUGINS:
         prefix = f"plugins/{name}/"
         files = {path: blob for path, blob in commit.files(f"plugins/{name}").items() if not path.startswith(f"{prefix}tests/")}
         if compare_files(commit, files, prefix, home / "plugins" / name):

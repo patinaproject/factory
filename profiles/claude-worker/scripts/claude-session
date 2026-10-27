@@ -676,10 +676,6 @@ def plugin_module(plugin: str, name: str):
 
 
 def install_skew() -> str | None:
-    """The refusal message when the worker home's scripts or plugins differ from the factory checkout's HEAD.
-
-    A deploy installs the scripts before the plugins, so a run that starts between would load a plugin module
-    older than the script that imports it. A comparison that cannot run proceeds."""
     try:
         home = Path(os.environ["HERMES_HOME"])
         repo = factory_source.checkout(home)

@@ -174,7 +174,6 @@ class ClaudeSessionTest(GitFixture):
         return broker
 
     def plain_checkout(self, name: str, playbook: bool = True) -> Path:
-        """A directory that is no git checkout, so the install comparison cannot run and the run goes on."""
         checkout = self.tmp / name
         if playbook:
             source = FACTORY / ".agents/skills/patina-mode/playbooks/triage.md"
@@ -1551,9 +1550,6 @@ class ClaudeSessionTest(GitFixture):
                 self.assertFalse(self.log.exists())
 
     def deploy(self, **ahead: str) -> Path:
-        """Make the fake home and a git checkout hold the same scripts and plugins.
-
-        `ahead` maps a path in the checkout to text that one more commit writes there, which the home lacks."""
         files = {
             "profiles/claude-worker/scripts/helper.py": "VALUE = 1\n",
             "plugins/blocker-order/tests/test_result_line.py": "# tests are never installed\n",
