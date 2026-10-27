@@ -24,8 +24,10 @@ proxy token, and the token of each server in claude_session.mcp_servers
 present. That check sends only {"op": "status"}, never uploads or asks for a
 token, and prints no value. For each configured repository, it runs the
 installed claude-session --mcp-status and reports each MCP server that is not
-connected and not in claude_session.disabled_mcp_servers. It
-also checks that the Triage board exists and anchors its worktrees at the
+connected and not in claude_session.disabled_mcp_servers. For each root-home mcp_servers entry that is
+not enabled: false, it runs hermes mcp test with the root home and reports a server that does not connect,
+one whose sampling.enabled is not false, and one whose header value is anything but one ${VAR} reference
+after at most one scheme word. It prints no header value. It also checks that the Triage board exists and anchors its worktrees at the
 default repository, that the source checkout vendors the triage playbook that
 claude-session gives triage cards, and that the triage refs file is as fresh as
 the owned refs. It checks that the default board cannot take the worker slots triage needs
@@ -1241,9 +1243,128 @@ def check_mcp_servers(settings, worker: Path) -> list:
     return drifts
 
 
+ROOT_MCP_SECONDS = 120
+HEADER_REFERENCE = re.compile(r"(?:[A-Za-z][A-Za-z0-9-]* )?\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def root_mcp_connects(root: Path, hermes: str, server: str) -> bool:
+    try:
+        proc = subprocess.run(
+            [hermes, "mcp", "test", server], env={**os.environ, "HERMES_HOME": str(root)},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=ROOT_MCP_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return proc.returncode == 0
+
+
+READ_MCP_SERVERS = (
+    "import json, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "try:\n"
+    "    from ruamel.yaml import YAML\n"
+    "    cfg = YAML(typ='safe', pure=True).load(open(sys.argv[2])) or {}\n"
+    "except Exception as error:\n"
+    "    sys.exit(type(error).__name__)\n"
+    "if not isinstance(cfg, dict):\n"
+    "    sys.exit('config.yaml is not a mapping')\n"
+    "print(json.dumps(cfg.get('mcp_servers')))\n"
+)
+
+
+def root_mcp_servers(root: Path):
+    """The root home's mcp_servers as config.yaml writes it, with no ${VAR} expansion.
+
+    `hermes config get` expands every ${VAR} to its value, so it cannot show whether a header holds a
+    reference or a literal. Parses the file with the Hermes environment's ruamel.yaml, which has no PyYAML.
+    A parse error names only its class, because ruamel quotes the offending line, which can hold a token.
+    A missing file is check_config's to report. Raises Refusal on a failure.
+    """
+    config = root / "config.yaml"
+    if not config.is_file():
+        return None
+    python, site = hermes_python(root)
+    try:
+        proc = subprocess.run(
+            [str(python), "-I", "-B", "-c", READ_MCP_SERVERS, str(site), str(config)],
+            env={"PATH": os.environ.get("PATH", "")}, capture_output=True, text=True, timeout=HERMES_TOOLS_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise Refusal("cannot read config.yaml: timed out") from None
+    if proc.returncode != 0:
+        lines = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
+        raise Refusal(f"cannot read config.yaml: {lines[-1] if lines else proc.returncode}")
+    return json.loads(proc.stdout)
+
+
+def check_root_mcp_servers(root: Path, hermes: str) -> list:
+    """Report each enabled root-home MCP server that does not connect, samples, or holds a literal header.
+
+    Reads mcp_servers from the root home's config.yaml without env expansion, so a ${VAR} reference stays
+    a reference and no secret enters this process. Prints a server and header name, never a header value.
+    A config it cannot read or a shape Hermes would not load is one drift, so the other checks still report.
+    """
+    try:
+        return root_mcp_drifts(root, hermes)
+    except Refusal as error:
+        return [Drift("root mcp", str(root), f"cannot check: {error} (part 10)")]
+
+
+def root_mcp_drifts(root: Path, hermes: str) -> list:
+    servers = root_mcp_servers(root)
+    if servers is None:
+        return []
+    if not isinstance(servers, dict):
+        raise Refusal("mcp_servers is not a mapping")
+    drifts = []
+    for name, server in servers.items():
+        where = f"{name} in {root}"
+        if not isinstance(server, dict):
+            raise Refusal(f"mcp_servers.{name} is not a mapping")
+        if server.get("enabled") is False:
+            continue
+        sampling = server.get("sampling")
+        if sampling is not None and not isinstance(sampling, dict):
+            raise Refusal(f"mcp_servers.{name}.sampling is not a mapping")
+        headers = server.get("headers") or {}
+        if not isinstance(headers, dict):
+            raise Refusal(f"mcp_servers.{name}.headers is not a mapping")
+        for header, value in headers.items():
+            if not isinstance(value, str):
+                raise Refusal(f"mcp_servers.{name}.headers.{header} is not a string")
+            if not HEADER_REFERENCE.fullmatch(value):
+                drifts.append(Drift(
+                    "root mcp", where, f"header {header} holds a literal value, not a ${{VAR}} reference (part 10)"
+                ))
+        if (sampling or {}).get("enabled") is not False:
+            drifts.append(Drift("root mcp", where, "does not set sampling.enabled to false (part 10)"))
+        if not root_mcp_connects(root, hermes, name):
+            drifts.append(Drift("root mcp", where, f"does not connect: run hermes mcp test {name} (part 10)"))
+    return drifts
+
+
 HERMES_TOOLS_SECONDS = 60
 HERMES_TOOL_NAMES = Path(__file__).resolve().parent / "hermes-tool-names"
 BLOCKER_ORDER = "plugins/blocker-order/__init__.py"
+
+
+def hermes_python(root: Path) -> tuple:
+    """The store Python and the selected environment's site-packages directory. Raises Refusal when absent."""
+    python_facts = root / "tools" / "facts.json"
+    if not python_facts.is_file():
+        raise Refusal(f"no Hermes Python in {python_facts}")
+    entry = (json_file(python_facts).get("packages", {}).get("python") or {}).get("entry")
+    python = root / "tools" / str(entry) / "bin" / "python3"
+    if not entry or not python.is_file():
+        raise Refusal(f"no Hermes Python in {python_facts}")
+    environments = [
+        (json_file(facts).get("packages", {}).get("venv") or {}).get("environment")
+        for facts in sorted((root / "installs").glob("*/facts.json"))
+    ]
+    site = [path for env in environments if env for path in sorted(Path(env).glob("lib/python*/site-packages"))]
+    if len(site) != 1:
+        raise Refusal(f"no Hermes environment: {len(site)} selected under {root / 'installs'}")
+    return python, site[0]
 
 
 def hermes_tool_names(root: Path) -> list:
@@ -1253,27 +1374,14 @@ def hermes_tool_names(root: Path) -> list:
     through the `hermes` launcher, which leases and can rebuild environments. HERMES_HOME is a scratch
     directory and bytecode is off. Raises Refusal with the reason when it cannot answer.
     """
-    python_facts = root / "tools" / "facts.json"
-    if not python_facts.is_file():
-        raise Refusal(f"no Hermes Python in {python_facts}")
-    entry = (json_file(python_facts).get("packages", {}).get("python") or {}).get("entry")
-    python = root / "tools" / str(entry) / "bin" / "python3"
-    if not entry or not python.is_file():
-        raise Refusal(f"no Hermes Python in {python_facts}")
+    python, site = hermes_python(root)
     checkout = Path(os.environ.get("HERMES_AGENT_DIR") or root / "hermes-agent")
     if not (checkout / "tools" / "registry.py").is_file():
         raise Refusal(f"no Hermes checkout at {checkout}")
-    environments = [
-        (json_file(facts).get("packages", {}).get("venv") or {}).get("environment")
-        for facts in sorted((root / "installs").glob("*/facts.json"))
-    ]
-    site = [path for env in environments if env for path in sorted(Path(env).glob("lib/python*/site-packages"))]
-    if len(site) != 1:
-        raise Refusal(f"no Hermes environment: {len(site)} selected under {root / 'installs'}")
     with tempfile.TemporaryDirectory() as scratch:
         try:
             proc = subprocess.run(
-                [str(python), "-I", "-B", str(HERMES_TOOL_NAMES), str(checkout), str(site[0])],
+                [str(python), "-I", "-B", str(HERMES_TOOL_NAMES), str(checkout), str(site)],
                 env={"PATH": os.environ.get("PATH", ""), "HERMES_HOME": os.path.join(scratch, "home"), "PYTHONDONTWRITEBYTECODE": "1"},
                 cwd=scratch, capture_output=True, text=True, timeout=HERMES_TOOLS_SECONDS,
             )
@@ -1414,6 +1522,7 @@ def main() -> int:
             *check_settings(settings, worker),
             *check_model_tiers(settings, worker),
             *check_mcp_servers(settings, worker),
+            *check_root_mcp_servers(root, hermes),
             *check_hermes_tools(root, worker / "plugins" / "blocker-order" / "__init__.py"),
         ]
         if sys.platform == "darwin":
