@@ -28,6 +28,15 @@ def passed(check: dict) -> bool:
     return check.get("status") == "COMPLETED" and check.get("conclusion") in PASSING_CONCLUSIONS
 
 
+def failed(check: dict) -> bool:
+    """A finished run that did not pass, as opposed to one still pending."""
+    if passed(check):
+        return False
+    if "state" in check:
+        return check["state"] not in ("PENDING", "EXPECTED")
+    return check.get("status") == "COMPLETED"
+
+
 def run_order(check: dict) -> tuple[str, bool]:
     started = check.get("startedAt") or UNSTARTED
     return ("~" if started == UNSTARTED else started, not passed(check))
