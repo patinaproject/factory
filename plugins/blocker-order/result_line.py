@@ -88,8 +88,16 @@ class Refused:
     transient: bool = False
 
 
-Report = Union[Waiting, Done, Failed, Refused]
-VARIANTS = (Waiting, Done, Failed, Refused)
+@dataclass(frozen=True)
+class Crashed:
+    """Claude ran in this session, then `claude-session` failed before it could report the run."""
+
+    error: str
+    session_id: str
+
+
+Report = Union[Waiting, Done, Failed, Refused, Crashed]
+VARIANTS = (Waiting, Done, Failed, Refused, Crashed)
 
 
 def waiting_on(report: Optional[Report]) -> Optional[list[str]]:

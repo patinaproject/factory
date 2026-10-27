@@ -307,10 +307,18 @@ class ResultLineTest(unittest.TestCase):
             "failed": result_line.Failed("claude run ended with error_during_execution (exit 0)", SESSION, outcome(None)),
             "refused": result_line.Refused("another claude-session holds /w"),
             "refused, transient": result_line.Refused("Linear token: the broker is busy", transient=True),
+            "crashed": result_line.Crashed("TypeError: unexpected keyword argument 'progress'", "s-1"),
         }
         for name, written in reports.items():
             with self.subTest(name):
                 self.assertEqual(result_line.last(f"log line\n{result_line.line(written)}\n"), written)
+
+    def test_a_crashed_line_is_neither_refused_nor_failed(self):
+        written = result_line.Crashed("OSError: boom", "s-1")
+        self.assertEqual(json.loads(result_line.line(written)), {"error": "OSError: boom", "session_id": "s-1"})
+        self.assertEqual(result_line.decode({"error": "OSError: boom"}), result_line.Refused("OSError: boom"))
+        self.assertIsNone(result_line.needs_input(written))
+        self.assertIsNone(result_line.waiting_on(written))
 
     def test_only_a_run_whose_result_asks_for_input_needs_input(self):
         self.assertEqual(result_line.needs_input(result_line.Done(SESSION, outcome("Needs input: a?"))), "Needs input: a?")

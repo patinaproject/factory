@@ -160,7 +160,8 @@ class ClaudeSessionTest(GitFixture):
         self.hermes_home = self.tmp / "hermes" / "profiles" / "claude-worker"
         self.install_linear_plugin(self.hermes_home)
         self.broker = self.start_broker(linear_token=[granted("cached-token")], proxy_token=[granted("token-value", None)])
-        self.install_from(FACTORY)
+        self.checkout = self.plain_checkout("factory")
+        self.install_from(self.checkout)
         self.github = FakeGithub(self.tmp, REPO)
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
@@ -171,6 +172,17 @@ class ClaudeSessionTest(GitFixture):
         broker = FakeBroker(self.tmp / "hermes" / "factory-uploads.sock", **answers)
         self.addCleanup(broker.close)
         return broker
+
+    def plain_checkout(self, name: str, playbook: bool = True) -> Path:
+        """A directory that is no git checkout, so the install comparison cannot run and the run goes on."""
+        checkout = self.tmp / name
+        if playbook:
+            source = FACTORY / ".agents/skills/patina-mode/playbooks/triage.md"
+            (checkout / source.relative_to(FACTORY)).parent.mkdir(parents=True)
+            shutil.copy(source, checkout / source.relative_to(FACTORY))
+        else:
+            checkout.mkdir()
+        return checkout
 
     def install_from(self, checkout: Path) -> None:
         (self.hermes_home / "distribution.yaml").write_text(
@@ -363,7 +375,7 @@ class ClaudeSessionTest(GitFixture):
         for implementation_rule in ("Publish commits only", "A finished check never runs again",
                                     "Every pull request description shows its proof", "To wait for CI"):
             self.assertNotIn(implementation_rule, system)
-        playbook = FACTORY / ".agents/skills/patina-mode/playbooks/triage.md"
+        playbook = self.checkout / ".agents/skills/patina-mode/playbooks/triage.md"
         for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token",
                                 f"patina-mode's triage playbook at `{playbook}`"):
             self.assertIn(triage_contract, system)
@@ -461,11 +473,12 @@ class ClaudeSessionTest(GitFixture):
         self.assertNotIn("activity", report)
 
     def test_a_triage_card_refuses_when_the_factory_checkout_has_no_playbook(self) -> None:
-        self.install_from(self.main)
+        bare = self.plain_checkout("no-playbook", playbook=False)
+        self.install_from(bare)
 
         status, report = self.run_session(env=TRIAGE_ENV)
 
-        playbook = self.main / ".agents/skills/patina-mode/playbooks/triage.md"
+        playbook = bare / ".agents/skills/patina-mode/playbooks/triage.md"
         self.assertEqual((status, report), (2, {
             "error": f"{playbook} does not exist, so a triage card cannot follow the triage playbook"
         }))
@@ -1536,6 +1549,115 @@ class ClaudeSessionTest(GitFixture):
                     f"claude_session.disabled_mcp_servers {value!r} must be a list of MCP server names"
                 )})
                 self.assertFalse(self.log.exists())
+
+    def deploy(self, **ahead: str) -> Path:
+        """Make the fake home and a git checkout hold the same scripts and plugins.
+
+        `ahead` maps a path in the checkout to text that one more commit writes there, which the home lacks."""
+        files = {
+            "profiles/claude-worker/scripts/helper.py": "VALUE = 1\n",
+            "plugins/blocker-order/tests/test_result_line.py": "# tests are never installed\n",
+        }
+        scripts = self.hermes_home / "scripts"
+        scripts.mkdir()
+        (scripts / "helper.py").write_text(files["profiles/claude-worker/scripts/helper.py"])
+        for plugin in ("blocker-order", "linear-agent-session"):
+            for installed in (self.hermes_home / "plugins" / plugin).iterdir():
+                files[f"plugins/{plugin}/{installed.name}"] = installed.read_text()
+        checkout = self.tmp / "deployed"
+        checkout.mkdir()
+        git(checkout, "init", "-q", "-b", "main")
+        self.commit_files(checkout, files)
+        if ahead:
+            self.commit_files(checkout, ahead)
+        self.install_from(checkout)
+        return checkout
+
+    @staticmethod
+    def commit_files(checkout: Path, files: dict) -> None:
+        for name, text in files.items():
+            (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+            (checkout / name).write_text(text)
+        git(checkout, "add", "-A")
+        git(checkout, "commit", "-q", "-m", "deploy")
+
+    def test_a_home_that_matches_the_checkout_runs(self) -> None:
+        self.deploy()
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["session_id"]), (0, SESSION_ID))
+        self.assertTrue(self.log.exists())
+
+    def test_a_plugin_that_differs_from_the_checkout_refuses_as_transient_before_claude_starts(self) -> None:
+        self.deploy(**{"plugins/blocker-order/result_line.py": "# the next commit\n"})
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(set(report), {"error", "transient"})
+        self.assertTrue(report["transient"])
+        self.assertIn("the blocker-order plugin", report["error"])
+        self.assertNotIn("linear-agent-session", report["error"])
+        self.assertIn("a factory deploy is in progress or was left unfinished", report["error"])
+        self.assertEqual(RESULT_LINE.last(json.dumps(report)), RESULT_LINE.Refused(report["error"], transient=True))
+        self.assertFalse(self.log.exists())
+
+    def test_scripts_that_differ_from_the_checkout_refuse_and_name_the_profile(self) -> None:
+        self.deploy(**{"profiles/claude-worker/scripts/helper.py": "VALUE = 2\n"})
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertIn("the profile scripts", report["error"])
+        self.assertFalse(self.log.exists())
+
+    def test_a_ref_ahead_of_head_does_not_refuse(self) -> None:
+        checkout = self.deploy()
+        git(checkout, "checkout", "-q", "-b", "next")
+        self.commit_files(checkout, {"plugins/blocker-order/result_line.py": "# the next commit\n"})
+        git(checkout, "update-ref", "refs/remotes/origin/main", "next")
+        git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        git(checkout, "checkout", "-q", "main")
+
+        status, _ = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertTrue(self.log.exists())
+
+    def test_a_missing_distribution_goes_on_and_says_why_on_one_stderr_line(self) -> None:
+        (self.hermes_home / "distribution.yaml").unlink()
+        command, env = self.session_command()
+
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        notes = [line for line in proc.stderr.splitlines() if "could not compare the install" in line]
+        self.assertEqual(len(notes), 1, proc.stderr)
+        self.assertIn("distribution.yaml does not exist", notes[0])
+
+    def test_mcp_status_does_not_compare_the_install(self) -> None:
+        self.deploy(**{"plugins/blocker-order/result_line.py": "# the next commit\n"})
+        self.configure_fake_claude(init=[{"name": "linear", "status": "connected"}])
+
+        code, report = self.run_probe()
+
+        self.assertEqual((code, report["servers"]), (0, [{"name": "linear", "status": "connected"}]))
+
+    def test_a_failure_after_claude_ran_reports_its_session_as_crashed(self) -> None:
+        module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
+        text = module.read_text()
+        module.unlink()
+        module.write_text(
+            text + "\n\ndef Session(*args, **kwargs):\n    raise TypeError(\"unexpected keyword argument 'progress'\")\n"
+        )
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(report, {"error": "TypeError: unexpected keyword argument 'progress'", "session_id": SESSION_ID})
+        self.assertEqual(RESULT_LINE.last(json.dumps(report)), RESULT_LINE.Crashed(report["error"], SESSION_ID))
+        self.assertTrue(self.log.exists())
 
     def run_probe(self, timeout: float = 20) -> tuple:
         command, env = self.session_command()

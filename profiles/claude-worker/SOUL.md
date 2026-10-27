@@ -138,6 +138,11 @@ message, because the `blocker-order` hook sees tool results and not that message
 - A run whose process has exited without a JSON line crashed. Treat it as a
   failure with the exit code and the output's last lines as the message. A
   timeout is never a crash.
+- A line of only `error` and `session_id` means Claude ran in that session,
+  then `claude-session` failed before it could report the run. Post an `error`
+  activity that says Claude ran and `claude-session` failed after it, with the
+  message, and never that Claude did not start. Call `kanban_block` with kind
+  `capability` and stop.
 - On failure the line holds `error`. A refusal that another process holds the
   worktree means a second worker is running this card: post an `error`
   activity saying so, call `kanban_block` with kind `transient`, and stop.
