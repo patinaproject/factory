@@ -4,20 +4,29 @@
 Asks the gateway's broker for an installation token and stores it with
 `gh auth login` in the directory that GH_CONFIG_DIR names. The broker holds the
 App's private key, so no process that runs as the factory user reads it.
-Installation tokens expire after one hour, so a Hermes script-only cron job
-runs this more often than that.
+Installation tokens expire after one hour, so a launchd job outside Hermes runs
+this every `REFRESH_INTERVAL_SECONDS`. `hermes pause` stops Hermes' cron, which
+would let the login lapse. After a login it saves the broker's expiry beside
+hosts.yml for `claude-session`, which refuses a run when too little is left.
 
 Silent on success. On failure, prints one line that names the failed step and
 exits 1, and leaves the existing login as it was. It never prints the token.
+`--print-plist` prints the launchd job that runs this script.
 """
 from __future__ import annotations
 
+import argparse
+import fcntl
 import os
+import plistlib
 import subprocess
 import sys
 from pathlib import Path
 
+import gh_login
+
 HOME = Path(__file__).resolve().parents[1]
+LABEL = "ai.patinaproject.factory.gh-login"
 # gh refuses to store a login while either variable is set, because it would
 # use the variable instead of hosts.yml.
 GH_TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN")
@@ -28,7 +37,7 @@ class StepFailed(Exception):
         super().__init__(f"{step}: {reason}")
 
 
-def installation_token() -> str:
+def installation_token() -> tuple[str, float]:
     sys.path.insert(0, str(HOME / "plugins" / "linear-agent-session"))
     import broker_client
 
@@ -36,10 +45,12 @@ def installation_token() -> str:
         reply = broker_client.request(broker_client.socket_path({"HERMES_HOME": str(HOME)}), "github_token")
     except broker_client.BrokerError as error:
         raise StepFailed("ask the broker", str(error))
-    return reply["token"]
+    if not isinstance(reply.get("expires_at"), (int, float)):
+        raise StepFailed("ask the broker", "the reply holds no expires_at")
+    return reply["token"], float(reply["expires_at"])
 
 
-def gh_login(token: str) -> None:
+def login(token: str) -> None:
     env = {key: value for key, value in os.environ.items() if key not in GH_TOKEN_VARIABLES}
     gh = os.environ.get("GH_BIN", "gh")
     try:
@@ -56,11 +67,39 @@ def gh_login(token: str) -> None:
         raise StepFailed("gh auth login", proc.stderr.strip() or f"exited {proc.returncode}")
 
 
+def plist() -> bytes:
+    log = str(HOME / "logs" / "gh-login.log")
+    return plistlib.dumps({
+        "Label": LABEL,
+        "ProgramArguments": ["/usr/bin/python3", str(HOME / "scripts" / "refresh-gh-app-login")],
+        "StartInterval": gh_login.REFRESH_INTERVAL_SECONDS,
+        "RunAtLoad": True,
+        "EnvironmentVariables": {
+            "GH_CONFIG_DIR": str(HOME / "gh"),
+            "HERMES_HOME": str(HOME),
+            "PATH": f"{Path.home() / '.local' / 'bin'}:/usr/local/bin:/usr/bin:/bin",
+        },
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+    })
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--print-plist", action="store_true", help="print the launchd job that runs this script")
+    if parser.parse_args().print_plist:
+        sys.stdout.buffer.write(plist())
+        return 0
     try:
         if not os.environ.get("GH_CONFIG_DIR"):
             raise StepFailed("check environment", "GH_CONFIG_DIR is not set; set it in the worker profile's .env")
-        gh_login(installation_token())
+        config_dir = Path(os.environ["GH_CONFIG_DIR"])
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with open(config_dir / gh_login.LOCK_FILE, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            token, expires_at = installation_token()
+            login(token)
+            gh_login.write_expiry(config_dir, expires_at)
     except StepFailed as failure:
         print(f"refresh-gh-app-login: {failure}")
         return 1

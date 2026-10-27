@@ -52,6 +52,7 @@ import card_branch
 import closing
 import factory_settings
 import factory_source
+import gh_login
 import kanban_board
 
 DEFAULT_WORKER_ENTRY = (
@@ -1067,12 +1068,30 @@ def end_run(proc: subprocess.Popen) -> set[int]:
     return leftovers
 
 
+def require_fresh_login() -> None:
+    """Refuse before Claude starts when the saved gh login expiry is missing or too near."""
+    config_dir = os.environ.get("GH_CONFIG_DIR")
+    if not config_dir:
+        raise Refusal("GH_CONFIG_DIR is not set, so the worker's gh login cannot be checked", transient=True)
+    try:
+        left = gh_login.seconds_left(Path(config_dir), time.time())
+    except ValueError as error:
+        raise Refusal(f"the worker's gh login: {error}; refresh-gh-app-login has not saved an expiry", transient=True) from None
+    if left < gh_login.MIN_REMAINING_SECONDS:
+        raise Refusal(
+            f"the worker's gh login in {config_dir} has {max(left, 0) // 60:.0f} minutes left, "
+            f"under the {gh_login.MIN_REMAINING_SECONDS // 60} needed; refresh-gh-app-login renews it",
+            transient=True,
+        )
+
+
 def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     import result_line
 
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
         raise Refusal("HERMES_KANBAN_WORKSPACE is not set; claude-session runs only inside a Kanban worker")
+    require_fresh_login()
     triage = os.environ.get("HERMES_KANBAN_BOARD") == TRIAGE_BOARD
     settings = load_settings(args.settings_json)
     repo = find_repository(settings, args.repo)

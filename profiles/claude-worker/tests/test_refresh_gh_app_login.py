@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -39,6 +42,7 @@ class RefreshGhAppLoginTest(unittest.TestCase):
         self.script = self.worker / "scripts" / "refresh-gh-app-login"
         self.script.parent.mkdir(parents=True)
         shutil.copy(SCRIPTS / "refresh-gh-app-login", self.script)
+        shutil.copy(SCRIPTS / "gh_login.py", self.script.parent)
         self.fake_gh = self.tmp / "fake-gh"
         self.fake_gh.write_text(with_interpreter(FAKE_GH))
         os.chmod(self.fake_gh, 0o755)
@@ -80,6 +84,55 @@ class RefreshGhAppLoginTest(unittest.TestCase):
             "gh_token": None,
             "stdin": TOKEN,
         })
+        expiry = self.gh_config_dir / "token-expiry.json"
+        self.assertEqual(json.loads(expiry.read_text()), {"expires_at": 1893456000.0})
+        self.assertEqual(expiry.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(sorted(p.name for p in self.gh_config_dir.iterdir()), ["login.lock", "token-expiry.json"])
+
+    def test_the_plist_runs_the_installed_script_every_15_minutes_with_its_directories(self) -> None:
+        proc = subprocess.run([sys.executable, str(self.script), "--print-plist"], capture_output=True)
+
+        job = plistlib.loads(proc.stdout)
+        self.assertEqual(job["Label"], "ai.patinaproject.factory.gh-login")
+        self.assertEqual(job["ProgramArguments"], ["/usr/bin/python3", str(self.script)])
+        self.assertEqual((job["StartInterval"], job["RunAtLoad"]), (900, True))
+        env = job["EnvironmentVariables"]
+        self.assertEqual((env["GH_CONFIG_DIR"], env["HERMES_HOME"]), (str(self.worker / "gh"), str(self.worker)))
+        self.assertEqual(job["StandardErrorPath"], str(self.worker / "logs" / "gh-login.log"))
+
+    def test_a_failed_login_keeps_the_saved_expiry(self) -> None:
+        self.broker(granted(TOKEN, 1893456000.0), granted(TOKEN, 1893459600.0))
+        self.run_script()
+
+        proc = self.run_script(FAKE_GH_EXIT="1")
+
+        self.assertEqual(proc.returncode, 1)
+        expiry = json.loads((self.gh_config_dir / "token-expiry.json").read_text())
+        self.assertEqual(expiry, {"expires_at": 1893456000.0})
+
+    def test_a_reply_without_an_expiry_fails_without_touching_the_login(self) -> None:
+        self.broker(granted(TOKEN, None))
+
+        proc = self.run_script()
+
+        self.assert_failed(proc, "ask the broker: the reply holds no expires_at")
+
+    def test_the_login_waits_for_the_lock_another_refresh_holds(self) -> None:
+        broker = self.broker(granted(TOKEN, 1893456000.0))
+        self.gh_config_dir.mkdir()
+        with open(self.gh_config_dir / "login.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            env = {
+                "PATH": os.environ["PATH"], "GH_BIN": str(self.fake_gh), "FAKE_GH_LOG": str(self.gh_log),
+                "GH_CONFIG_DIR": str(self.gh_config_dir), "HERMES_HOME": str(self.worker),
+            }
+            proc = subprocess.Popen([sys.executable, str(self.script)], env=env, stdout=subprocess.PIPE, text=True)
+            self.addCleanup(proc.stdout.close)
+            time.sleep(1)
+            self.assertIsNone(proc.poll())
+            self.assertEqual(broker.requests, [])
+        self.assertEqual((proc.wait(timeout=30), proc.stdout.read()), (0, ""))
+        self.assertEqual(broker.requests, ["github_token"])
 
     def test_a_broker_refusal_fails_without_touching_the_login(self) -> None:
         self.broker(REFUSAL)
@@ -113,6 +166,7 @@ class RefreshGhAppLoginTest(unittest.TestCase):
 
         self.assertEqual((proc.returncode, proc.stdout), (1, "refresh-gh-app-login: gh auth login: exited 1\n"))
         self.assertNotIn(TOKEN, proc.stdout + proc.stderr)
+        self.assertFalse((self.gh_config_dir / "token-expiry.json").exists())
 
 
 if __name__ == "__main__":
