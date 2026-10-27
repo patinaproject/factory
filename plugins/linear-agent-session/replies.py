@@ -75,7 +75,7 @@ class PostRecord:
 
 
 def make_activity_handler(
-    record: PostRecord, post: Callable[[dict], str]
+    record: PostRecord, post: Callable[[dict], str], redact: Callable[[str], str] = blocks.hermes_redact
 ) -> Callable[..., str]:
     def handler(args: dict, session_id: Optional[str] = None, **_: Any) -> str:
         result = post(args)
@@ -83,8 +83,11 @@ def make_activity_handler(
             ok = json.loads(result).get("ok") is True
         except ValueError:
             ok = False
-        if ok and session_id and not args.get("ephemeral") and args.get("agent_session_id"):
-            record.add(session_id, args["agent_session_id"])
+        if ok and not args.get("ephemeral") and args.get("agent_session_id"):
+            # A re-ask that answered and then died before its turn-end hook must not also ask the person again.
+            mark_handled(redact)
+            if session_id:
+                record.add(session_id, args["agent_session_id"])
         return result
 
     return handler

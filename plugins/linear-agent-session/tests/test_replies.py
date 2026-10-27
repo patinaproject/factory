@@ -276,6 +276,18 @@ class MarkerTest(ReplyGuaranteeTest.__base__):
         self.assertTrue(self.marker.exists())
         self.assertEqual(self.marker_at_post, [])
 
+    def test_a_post_in_the_reask_marks_before_the_turn_ends(self):
+        handler = plugin.replies.make_activity_handler(self.posts, lambda args: '{"ok": true}', fake_redact)
+        handler({"agent_session_id": "agent-session-1", "type": "thought", "body": "hm", "ephemeral": True}, session_id=HERMES)
+        self.assertFalse(self.marker.exists())
+        handler({"agent_session_id": "agent-session-1", "type": "response", "body": "hello"}, session_id=HERMES)
+        self.assertTrue(self.marker.exists())
+
+    def test_a_failed_post_does_not_mark(self):
+        handler = plugin.replies.make_activity_handler(self.posts, lambda args: '{"error": "down"}', fake_redact)
+        handler({"agent_session_id": "agent-session-1", "type": "response", "body": "hello"}, session_id=HERMES)
+        self.assertFalse(self.marker.exists())
+
     def test_a_first_turn_does_not_mark(self):
         self.turn_end(session_id=HERMES, user_message=prompt())
         self.assertFalse(self.marker.exists())
