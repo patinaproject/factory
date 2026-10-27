@@ -6,7 +6,9 @@ Usage: card_transition.py [--board <board>] <command> <task id> [options]
   `triage`, and it rewrites the card's title and body and makes the card dispatchable. The card is
   unassigned first, because the dispatcher skips a card with no assignee, its kept title and body are
   restored, and only then is it assigned to `claude-worker`. That assignment is the handoff that lifts
-  Hermes' hold on a card whose comments name a pull request.
+  Hermes' hold on a card whose comments name a pull request. `specify` asks the model through the
+  proxy, and Hermes strips the proxy token from the triage agent's commands, so `specify` alone gets
+  the token, from the gateway's broker, in the variable `claude_session.auth_token_env` names.
 - `triage-reply`: resume a card on the `triage` board after a person replied: a `blocked` card is
   unassigned and unblocked, a `triage` card is resumed without the assignment. `dispatch-triage`
   assigns it when a triage slot is free.
@@ -49,11 +51,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import os
 import subprocess
 import sys
 from enum import Enum
+from pathlib import Path
 from typing import Callable, NamedTuple
 
+import factory_settings
 import merged_checks
 from archive_card import Failed, archive, kanban_command, last_line, run_kanban
 
@@ -88,9 +93,9 @@ class Card:
     def status(self) -> str:
         return self.show()["task"]["status"]
 
-    def call(self, *args: str) -> str:
+    def call(self, *args: str, env: dict | None = None) -> str:
         try:
-            return run_kanban(*self.kanban, args[0], self.id, *args[1:])
+            return run_kanban(*self.kanban, args[0], self.id, *args[1:], env=env)
         except Failed as failure:
             raise Failed(f"hermes kanban {args[0]} failed: {last_line(failure.stderr)}", failure.stderr) from failure
 
@@ -103,14 +108,34 @@ class Card:
         archive(self.kanban, self.id)
 
 
+def specify_environment() -> dict:
+    """This environment with the proxy token, which Hermes strips from the triage agent's commands."""
+    home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+    sys.path.insert(0, str(Path(home) / "plugins" / "linear-agent-session"))
+    import broker_client
+
+    try:
+        variable = factory_settings.token_variables(factory_settings.read(raw=False))[0]
+    except factory_settings.SettingsError as error:
+        raise SpecifyFailed(f"specify needs the proxy token: {error}") from None
+    if not variable:
+        raise SpecifyFailed("specify needs the proxy token, and claude_session.auth_token_env is not set")
+    try:
+        token = broker_client.request(broker_client.socket_path(os.environ), "proxy_token")["token"]
+    except broker_client.BrokerError as error:
+        raise SpecifyFailed(f"specify needs the proxy token: {error}") from None
+    return {**os.environ, variable: token}
+
+
 def leave_triage(card: Card) -> None:
     """Run `specify` with the card unassigned and restore its title and body; the card stays unassigned."""
     task = card.show()["task"]
     if task["status"] != "triage":
         raise Failed(f"card {card.id} is {task['status']}, not triage")
+    env = specify_environment()
     card.call("assign", "none")
     try:
-        card.call("specify")
+        card.call("specify", env=env)
     except Failed as failure:
         card.call("assign", WORKER)
         raise SpecifyFailed(f"{failure}; the card stays in triage") from failure
