@@ -31,9 +31,9 @@ class Failed(Exception):
         self.stderr = stderr
 
 
-def run(*command: str) -> str:
+def run(*command: str, env: dict | None = None) -> str:
     try:
-        proc = subprocess.run(command, capture_output=True, text=True)
+        proc = subprocess.run(command, capture_output=True, text=True, env=env)
     except OSError as failure:
         raise Failed(f"{command[0]} could not run: {failure.strerror or failure}") from failure
     if proc.returncode != 0:
@@ -45,18 +45,18 @@ def last_line(stderr: str) -> str:
     return stderr.strip().splitlines()[-1] if stderr.strip() else "no error output"
 
 
-def run_kanban(*command: str) -> str:
+def run_kanban(*command: str, env: dict | None = None) -> str:
     """Retry once when Hermes' preflight loses a race with another `hermes kanban` process.
 
     That process removes the `-wal` file between the preflight's existence check and its
     permission check, so the call fails with a message about a file that is gone.
     """
     try:
-        return run(*command)
+        return run(*command, env=env)
     except Failed as failure:
         if PREFLIGHT_RACE not in failure.stderr:
             raise
-        return run(*command)
+        return run(*command, env=env)
 
 
 def read_task(kanban: list[str], task_id: str) -> dict:

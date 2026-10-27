@@ -9,13 +9,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import SCRIPTS, with_interpreter
+from tests.support import REPO, SCRIPTS, FakeBroker, granted, with_interpreter
 
 FAKE_HERMES = """#!/usr/bin/env python3
 import json, os, sys
 path = os.environ["FAKE_STATE"]
 state = json.load(open(path))
 argv = sys.argv[1:]
+if argv[:2] == ["config", "get"]:
+    print(json.dumps({"claude_session": {"auth_token_env": "PROXY_VARIABLE"}}))
+    sys.exit()
 assert argv[0] == "kanban", argv
 argv = argv[1:]
 board = None
@@ -37,6 +40,7 @@ if verb == "show":
 elif verb == "assign":
     task["assignee"] = None if argv[2] == "none" else argv[2]
 elif verb == "specify":
+    state["specify_token"] = os.environ.get("PROXY_VARIABLE")
     task.update(status=state["specify_to"], title="Rewritten title", body="Rewritten body")
 elif verb == "edit":
     task.update(title=argv[argv.index("--title") + 1], body=argv[argv.index("--body") + 1])
@@ -145,6 +149,17 @@ class CardTransitionTest(unittest.TestCase):
             "specify_to": "todo", "refuse_completion": False, "receipt": FAILED_RECEIPT,
             "pr": {"url": URL, "head": HEAD, "rollup": FAILED_NEWEST}, "branch_has_pr": True,
         }
+        self.home = self.dir / "hermes"
+        (self.home / "plugins").mkdir(parents=True)
+        (self.home / "plugins" / "linear-agent-session").symlink_to(REPO / "plugins" / "linear-agent-session")
+        self.start_broker(proxy_token=[granted("proxy-value", None)])
+
+    def start_broker(self, **answers: list) -> FakeBroker:
+        socket = self.home / "factory-uploads.sock"
+        socket.unlink(missing_ok=True)
+        self.broker = FakeBroker(socket, **answers)
+        self.addCleanup(self.broker.close)
+        return self.broker
 
     def given(self, status: str, **changes) -> None:
         self.state["task"]["status"] = status
@@ -153,6 +168,7 @@ class CardTransitionTest(unittest.TestCase):
     def transition(self, *argv: str) -> tuple[int, dict]:
         self.state_path.write_text(json.dumps(self.state))
         env = {**os.environ, "HERMES_BIN": str(self.dir / "bin" / "hermes"), "FAKE_STATE": str(self.state_path),
+               "HERMES_HOME": str(self.home),
                "PATH": f"{self.dir / 'bin'}:{os.environ['PATH']}"}
         proc = subprocess.run([sys.executable, str(SCRIPTS / "card_transition.py"), *argv],
                               capture_output=True, text=True, env=env)
@@ -179,6 +195,19 @@ class ResumeTest(CardTransitionTest):
             ["assign", "t_1", "claude-worker"],
         ])
         self.assertEqual((self.state["task"]["title"], self.state["task"]["body"]), (TITLE, BODY))
+
+    def test_specify_alone_gets_the_proxy_token_from_the_broker(self):
+        code, _ = self.transition("resume", "t_1")
+        self.assertEqual((code, self.state["specify_token"], self.broker.requests), (0, "proxy-value", ["proxy_token"]))
+
+    def test_a_broker_that_refuses_the_token_changes_nothing(self):
+        self.broker.close()
+        self.start_broker(proxy_token=[{"ok": False, "state": "refused", "message": "The gateway holds no proxy token."}])
+        code, out = self.transition("resume", "t_1")
+        self.assertEqual(code, 1)
+        self.assertIn("specify needs the proxy token", out["error"])
+        self.assertEqual(self.state_changes(), [])
+        self.assertEqual(self.state["task"]["assignee"], "claude-worker")
 
     def test_a_failed_specify_reassigns_the_card_and_restores_nothing(self):
         self.state["fail"]["specify"] = 1
