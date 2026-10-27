@@ -286,18 +286,30 @@ class SafetyTest(unittest.TestCase):
         self.assertIn("token [redacted] for the repo", content["body"])
 
     def test_secret_at_the_truncation_point_is_redacted_whole(self):
-        reason = "x" * (blocks.REASON_LIMIT - 6) + f" {SECRET}"
+        reason = "x" * (blocks.TEXT_LIMIT - 6) + f" {SECRET}"
         client, _ = fire("blocked", "capability", reason=reason)
         ((_, content),) = client.calls
         self.assertNotIn("sk-", content["body"])
 
     def test_long_reason_is_truncated(self):
-        client, _ = fire("blocked", "needs_input", reason="word " * 400)
+        client, _ = fire("blocked", "needs_input", reason="word " * 1000)
         ((_, content),) = client.calls
         reason = content["body"].split("Reason: ")[1].split("\n\n")[0]
-        self.assertLessEqual(len(reason), blocks.REASON_LIMIT + 3)
-        self.assertGreater(len(reason), blocks.REASON_LIMIT - 2)
+        self.assertLessEqual(len(reason), blocks.TEXT_LIMIT + 3)
+        self.assertGreater(len(reason), blocks.TEXT_LIMIT - 2)
         self.assertTrue(reason.endswith("..."))
+
+    def test_long_multiline_reason_is_posted_whole_with_its_line_breaks(self):
+        reason = "Needs a decision on three points:\n- first: which branch\n- second: which name\n- third: " + "y" * 1500
+        client, _ = fire("blocked", "needs_input", reason=reason)
+        ((_, content),) = client.calls
+        self.assertIn(
+            "Reason: Needs a decision on three points:\n- first: which branch\n- second: which name\n- third: "
+            + "y" * 1500
+            + "\n\n",
+            content["body"],
+        )
+        self.assertNotIn("...", content["body"])
 
     def test_missing_reason_is_said_plainly(self):
         client, _ = fire("triage", "needs_input", reason=None)
