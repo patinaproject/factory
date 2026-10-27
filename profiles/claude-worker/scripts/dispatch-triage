@@ -16,12 +16,11 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
-from pathlib import Path
 
-SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
+import factory_settings
+
 TRIAGE_BOARD = "triage"
 WORKER = "claude-worker"
 
@@ -32,15 +31,6 @@ class Refusal(Exception):
         self.code = code
 
 
-def find_hermes() -> str:
-    # A cron job's PATH can lack the installer's bin directory, so fall back to where it puts hermes.
-    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
-    for candidate in filter(None, candidates):
-        if os.access(candidate, os.X_OK):
-            return candidate
-    raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
-
-
 def hermes(binary: str, *args: str) -> str:
     proc = subprocess.run([binary, *args], capture_output=True, text=True)
     if proc.returncode != 0:
@@ -48,11 +38,10 @@ def hermes(binary: str, *args: str) -> str:
     return proc.stdout
 
 
-def max_running(binary: str) -> int:
-    settings = json.loads(hermes(binary, "config", "get", SETTINGS_KEY, "--json"))
+def max_running(settings) -> int:
     value = (settings.get("triage") or {}).get("max_running") if isinstance(settings, dict) else None
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise Refusal(f"triage.max_running {value!r} in {SETTINGS_KEY} must be a positive integer")
+        raise Refusal(f"triage.max_running {value!r} in {factory_settings.SETTINGS_KEY} must be a positive integer")
     return value
 
 
@@ -70,8 +59,8 @@ def main() -> int:
         print("dispatch-triage: HERMES_HOME is not set; point it at the claude-worker profile home", file=sys.stderr)
         return 2
     try:
-        binary = find_hermes()
-        cap = max_running(binary)
+        binary = factory_settings.find_hermes()
+        cap = max_running(factory_settings.read(raw=False))
         tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
         for task_id in to_assign(tasks, cap):
             hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)
@@ -79,6 +68,9 @@ def main() -> int:
     except Refusal as exc:
         print(f"dispatch-triage: {exc}", file=sys.stderr)
         return exc.code
+    except factory_settings.SettingsError as exc:
+        print(f"dispatch-triage: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

@@ -1219,6 +1219,30 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (0, ""))
 
+    def test_a_setting_that_refuses_a_worker_run_is_reported_with_the_refusal_text(self) -> None:
+        self.claude_session(fresh_after_tokens=-1)
+
+        self.assertEqual(self.check(), (
+            1, f"config claude_session in {self.worker}: claude_session.fresh_after_tokens -1 must be a positive integer\n",
+        ))
+
+    def test_a_leftover_sentry_token_env_is_reported(self) -> None:
+        self.claude_session(sentry_token_env="SENTRY_ACCESS_TOKEN")
+
+        self.assertEqual(self.check(), (1, (
+            f"config claude_session in {self.worker}: "
+            "claude_session.sentry_token_env is replaced by claude_session.mcp_servers.sentry\n"
+        )))
+
+    def test_a_repository_setting_that_refuses_its_run_is_reported_though_its_checkout_is_missing(self) -> None:
+        settings = {**SETTINGS, "repositories": [{"full_name": "org/gone", "path": str(self.tmp / "gone"), "worker_entry": "{x}"}]}
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+
+        status, output = self.check()
+
+        self.assertEqual(status, 1)
+        self.assertIn(f"config org/gone in {self.worker}: worker_entry '{{x}}' must be a plain prefix", output)
+
     def checkout(self) -> Path:
         path = self.tmp / "checkout"
         git(self.tmp, "clone", "-q", str(self.tmp / "seed"), str(path))
@@ -1650,13 +1674,11 @@ class CheckMcpServersTest(unittest.TestCase):
             "mcp example-org/site: cannot read the MCP server status: exited 0 without a report (part 10)",
         ])
 
-    def test_a_leftover_sentry_token_env_is_reported(self) -> None:
+    def test_a_setting_that_refuses_every_run_skips_the_probes(self) -> None:
         self.settings["claude_session"] = {"sentry_token_env": "SENTRY_ACCESS_TOKEN"}
-        report = {"servers": [], "disabled": []}
+        report = {"servers": [{"name": "sentry", "status": "failed"}], "disabled": []}
 
-        self.assertEqual(self.check({"example-org/app": [0, report], "example-org/site": [0, report]}), [
-            "config claude_session.sentry_token_env: is replaced by mcp_servers.sentry, so every worker run is refused (part 10)",
-        ])
+        self.assertEqual(self.check({"example-org/app": [0, report], "example-org/site": [0, report]}), [])
 
     def test_a_report_that_is_not_an_object_is_named(self) -> None:
         self.assertEqual(self.check({"example-org/app": [2, ["no"]], "example-org/site": [0, "no"]}), [
