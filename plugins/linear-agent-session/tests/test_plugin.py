@@ -329,7 +329,7 @@ class RegisterTest(unittest.TestCase):
             self.assertEqual(tool["schema"]["name"], name)
         self.assertEqual(
             [name for name, _ in ctx.hooks],
-            ["pre_gateway_dispatch", "kanban_task_blocked", "transform_api_error_classification"],
+            ["pre_gateway_dispatch", "kanban_task_blocked", "post_llm_call", "transform_api_error_classification"],
         )
 
     def test_the_manifest_lists_every_registered_tool(self):
