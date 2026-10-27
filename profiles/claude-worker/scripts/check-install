@@ -53,14 +53,14 @@ and the factory user cannot read it, judged by ownership and mode only, and
 that the gateway runs no broker of its own.
 
 It also checks that Hermes still registers the tools the installed blocker-order plugin watches, so a
-Hermes upgrade that renames one trips the alert. It runs hermes-tool-names with the store Python on the
+Hermes upgrade that renames one is reported. It runs hermes-tool-names with the store Python on the
 checkout and the selected environment's site-packages, with a scratch HERMES_HOME and no bytecode, and
 never through the `hermes` launcher, which can rebuild environments. It prints a row when Hermes cannot be
 imported. HERMES_AGENT_DIR overrides the checkout, which defaults to <root home>/hermes-agent.
 
 It checks that each repository plugin installed in a home is enabled there, from `hermes plugins list
 --user --json`, and imports each installed plugin the way Hermes does with import-plugins, in the same
-store Python, so a plugin Hermes would skip or fail to load trips the alert. Hermes only logs both.
+store Python, so a plugin Hermes would skip or fail to load is reported. Hermes only logs both.
 
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd and broker user checks at
 another file system root and launchctl, for tests.
@@ -110,9 +110,8 @@ HEALTHY_RUNS = (None, "ok", "delivery_queued")
 RUN_ERROR_LIMIT = 200
 SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE)
 TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
-ROOT_ALERT_SCRIPT = "check-install-alert"
-# watch-gateway runs from launchd and restart-gateway is the one it runs, so both live beside the cron wrappers.
-ROOT_WRAPPERS = (ROOT_ALERT_SCRIPT, "retry-failed-webhooks", "watch-gateway", "restart-gateway")
+# watch-gateway runs from launchd and restart-gateway is the one it runs, so both live beside the cron wrapper.
+ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway")
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -261,10 +260,6 @@ CRON = (
     CronJob(12, "refresh-owned-refs", 1, equal("local")),
     CronJob(12, "reopen-conflicts", 5, equal("local")),
     CronJob(12, "dispatch-triage", 1, equal("local")),
-    CronJob(
-        12, "check-install", 60, declared("the operator's chat platform", besides=("local",)),
-        home=ROOT, script=ROOT_ALERT_SCRIPT,
-    ),
     CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
 )
 OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
@@ -654,10 +649,6 @@ def last_run_failure(job: CronJob, live: dict, secrets: list) -> list:
         return []
     if status == "delivery_failed":
         what, error = "last run's output was not delivered", live.get("last_delivery_error")
-    elif job.runs == ROOT_ALERT_SCRIPT:
-        # The alert job runs this check, so its failure is the previous run's report. Reporting it would fail this
-        # run as well, and one failure would repeat after the machine is clean.
-        return []
     else:
         what, error = "last run failed", live.get("last_error")
     # Redacted before it is clipped, so a clip never leaves part of a secret unmasked.

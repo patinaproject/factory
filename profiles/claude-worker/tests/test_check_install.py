@@ -121,10 +121,8 @@ WORKER_JOBS = [
     cron_job("reopen-conflicts", 5),
     cron_job("dispatch-triage", 1),
 ]
-ALERT_SCRIPT = "check-install-alert"
 RETRY_SCRIPT = "retry-failed-webhooks"
-ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}, cron_job(RETRY_SCRIPT, 10, "slack")]
-ALERT_SOURCE = f"skills/setup-factory/scripts/{ALERT_SCRIPT}"
+ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack")]
 RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
@@ -149,7 +147,6 @@ REPO_FILES = {
     "plugins/work/__init__.py": "# work\n",
     "plugins/webhook-retry/__init__.py": "# retry\n",
     "templates/render.py": RENDER,
-    ALERT_SOURCE: "#!/usr/bin/env python3\nalert\n",
     RETRY_SOURCE: "#!/usr/bin/env python3\nretry\n",
 }
 
@@ -201,7 +198,6 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps({**ROUTE, "secret": "abc...1234"}))
         self.install(self.root, f"installed-config/{RATE_LIMIT_KEY}.json", "600")
         self.install(self.root, "logs/agent.log", "")
-        self.install(self.root, f"scripts/{ALERT_SCRIPT}", REPO_FILES[ALERT_SOURCE])
         self.install(self.root, f"scripts/{RETRY_SCRIPT}", REPO_FILES[RETRY_SOURCE])
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C0123\n")
         self.owned_refs = self.root / "owned-refs.json"
@@ -909,7 +905,6 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job refresh-checkouts in {self.worker}: is missing (part 12)\n"
-                f"cron job check-install in {self.root}: exists 2 times (part 12)\n"
                 f"cron job {RETRY_SCRIPT} in {self.root}: exists 2 times (part 12)\n"),
         )
 
@@ -921,7 +916,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("reopen-conflicts", 5),
             cron_job("dispatch-triage", 1),
         ])
-        self.cron(self.root, [{**cron_job("check-install", 60, "local"), "script": ALERT_SCRIPT}, ROOT_JOBS[1]])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local")])
 
         self.assertEqual(
             self.check(),
@@ -929,7 +924,7 @@ class CheckInstallTest(unittest.TestCase):
                 f"cron job refresh-checkouts in {self.worker}: runs every 15m, not every 60m (part 12)\n"
                 f"cron job refresh-checkouts in {self.worker}: is not a script-only job that runs refresh-checkouts "
                 "(part 12)\n"
-                f'cron job check-install in {self.root}: delivers to "local", not the operator\'s chat platform '
+                f'cron job {RETRY_SCRIPT} in {self.root}: delivers to "local", not the operator\'s chat platform '
                 "(part 12)\n"),
         )
 
@@ -978,24 +973,6 @@ class CheckInstallTest(unittest.TestCase):
                 "rejected [redacted] and [redacted] (part 12)\n"),
         )
 
-    def test_failed_check_install_run_does_not_fail_a_clean_machine(self) -> None:
-        error = (
-            "Script exited with code 1\nstderr:\nprofile claude-worker: scripts/claude-session differs from main "
-            "at c02dda9 (part 12)"
-        )
-        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}, *ROOT_JOBS[1:]])
-
-        self.assertEqual(self.check(), (0, ""))
-
-        failed = cron_job("refresh-checkouts", 60, last_status="error", last_error="Script exited with code 1")
-        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
-
-        self.assertEqual(
-            self.check(),
-            (1, f"cron job refresh-checkouts in {self.worker}: last run failed: Script exited with code 1 "
-                "(part 12)\n"),
-        )
-
     def test_undelivered_last_run_names_its_delivery_error(self) -> None:
         undelivered = {**ROOT_JOBS[0], "last_status": "delivery_failed", "last_error": None,
                        "last_delivery_error": "slack: channel_not_found\nmore"}
@@ -1003,16 +980,18 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(
             self.check(),
-            (1, f"cron job check-install in {self.root}: last run's output was not delivered: "
+            (1, f"cron job {RETRY_SCRIPT} in {self.root}: last run's output was not delivered: "
                 "slack: channel_not_found (part 12)\n"),
         )
 
-    def test_check_install_job_left_in_the_worker_profile(self) -> None:
+    def test_check_install_job_left_from_an_earlier_setup(self) -> None:
+        self.cron(self.root, [*ROOT_JOBS, {**cron_job("check-install", 60, "slack"), "script": "check-install-alert"}])
         self.cron(self.worker, [*WORKER_JOBS, cron_job("check-install", 60, "slack")])
 
         self.assertEqual(
             self.check(),
-            (1, f"cron job check-install in {self.worker}: belongs to the root profile (part 12)\n"),
+            (1, f"cron job check-install in {self.root}: is not a job the setup runbook creates\n"
+                f"cron job check-install in {self.worker}: is not a job the setup runbook creates\n"),
         )
 
     def test_delivery_without_a_home_channel_is_reported(self) -> None:
@@ -1020,9 +999,7 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(
             self.check(),
-            (1, f"cron job check-install in {self.root}: delivers to slack, which has no home channel in "
-                f"{self.root}, so Hermes drops its output (part 12)\n"
-                f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
+            (1, f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -1031,9 +1008,7 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(
             self.check(),
-            (1, f"cron job check-install in {self.root}: delivers to slack, which has no home channel in "
-                f"{self.root}, so Hermes drops its output (part 12)\n"
-                f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
+            (1, f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -1045,27 +1020,14 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_explicit_and_local_delivery_targets_need_no_home_channel(self) -> None:
         (self.root / ".env").unlink()
-        self.cron(self.root, [{**cron_job("check-install", 60, "slack:C0123"), "script": ALERT_SCRIPT}, cron_job(RETRY_SCRIPT, 10, "slack:C0123")])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "slack:C0123")])
 
         self.assertEqual(self.check(), (0, ""))
 
-    def test_root_alert_script_missing_or_changed(self) -> None:
-        script = self.root / "scripts" / ALERT_SCRIPT
-        script.write_text("old\n")
-        changed = self.check()
-        script.unlink()
-        missing = self.check()
-
-        self.assertEqual(
-            (changed, missing),
-            ((1, f"script {script}: differs from main at {self.sha} (part 12)\n"),
-             (1, f"script {script}: is missing; install it from {ALERT_SOURCE} (part 12)\n")),
-        )
-
     def test_retry_cron_job_missing_or_changed(self) -> None:
-        self.cron(self.root, ROOT_JOBS[:1])
+        self.cron(self.root, [])
         missing = self.check()
-        self.cron(self.root, [ROOT_JOBS[0], cron_job(RETRY_SCRIPT, 30, "slack", enabled=False)])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 30, "slack", enabled=False)])
         changed = self.check()
 
         self.assertEqual(
