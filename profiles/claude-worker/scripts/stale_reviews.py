@@ -61,7 +61,10 @@ def decide(pull: dict, reviews: list, requested: list[str], thread_authors: list
         return Handback(f"required checks failed: {', '.join(failing)}")
     if any(not runs.get(name) or not all(passed(run) for run in runs[name]) for name in required_contexts):
         return Nothing()
-    waiting = [login for login in requesters if login not in requested and login not in thread_authors]
+    waiting = [login for login in requesters if login not in requested]
+    open_threads = [login for login in waiting if login in thread_authors]
+    if open_threads:
+        return Handback(f"unresolved review threads from {', '.join(open_threads)}")
     return Request(tuple(waiting)) if waiting else Nothing()
 
 

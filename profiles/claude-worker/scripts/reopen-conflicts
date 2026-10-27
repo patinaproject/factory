@@ -17,11 +17,11 @@ later run. Prints one line per card sent back, `<task id> <pull request url>`.
 
 A mergeable pull request whose review decision is `CHANGES_REQUESTED` gets the
 review sweep, which `stale_reviews.decide` judges. A changes request on the
-current head, or a failing required check, sends the card back once per head
-with the line `review_head: <sha>`. Otherwise each reviewer whose changes
-request is on an older head, who is not requested now and has no unresolved
-thread, is requested again, and the card's Linear agent session gets an
-activity that names them. That line is `<task id> <pull request url>
+current head, a failing required check, or an unresolved review thread from a
+reviewer who is not requested now sends the card back once per head with the
+line `review_head: <sha>`. Otherwise each reviewer whose changes request is on
+an older head and who is not requested now is requested again, and the card's
+Linear agent session gets an activity that names them. That line is `<task id> <pull request url>
 re-requested <login>,<login>`. A review is never dismissed.
 A failure for one repository or card goes to stderr and the others still run.
 Exits 1 when any failed, or 2 when HERMES_HOME is not a profile home or the
@@ -142,21 +142,19 @@ def send_back(hermes: str, task: dict, text: str, reason: str, sent: bool) -> No
     run(hermes, "kanban", "reopen-review", task_id, "--reason", reason)
 
 
-def re_request(repo: str, task: dict, pull: dict, logins: tuple[str, ...]) -> bool:
+def re_request(repo: str, task: dict, pull: dict, logins: tuple[str, ...]) -> None:
     reviewers = [arg for login in logins for arg in ("-f", f"reviewers[]={login}")]
     run(os.environ.get("GH_BIN", "gh"), "api", "-X", "POST", f"repos/{repo}/pulls/{pull['number']}/requested_reviewers", *reviewers)
     print(f"{task['id']} {pull['url']} re-requested {','.join(logins)}")
     session = SESSION_LINE.search(task.get("body") or "")
     if session is None:
-        print(f"reopen-conflicts: {task['id']}: the card has no linear_agent_session_id line", file=sys.stderr)
-        return False
+        raise Failed("the card has no linear_agent_session_id line")
     cli = Path(os.environ["HERMES_HOME"]) / "plugins" / "linear-agent-session" / "cli.py"
     run(
         sys.executable, str(cli), "activity", "--agent-session-id", session.group(1), "--type", "elicitation",
         "--body", f"Changes are in, re-requested review from {', '.join('@' + login for login in logins)}",
         "--external-url", f"Pull request={pull['url']}",
     )
-    return True
 
 
 def review_outcome(repo: str, pull: dict) -> stale_reviews.Outcome:
@@ -203,7 +201,7 @@ def main() -> int:
                 elif pull["mergeable"] == "MERGEABLE" and pull.get("reviewDecision") == "CHANGES_REQUESTED":
                     outcome = review_outcome(repo, pull)
                     if isinstance(outcome, stale_reviews.Request):
-                        failed = not re_request(repo, task, pull, outcome.logins) or failed
+                        re_request(repo, task, pull, outcome.logins)
                     if not isinstance(outcome, stale_reviews.Handback):
                         continue
                     handback = (REVIEW_MARKER, review_comment_text(pull, outcome.reason), REVIEW_HANDBACK_REASON)

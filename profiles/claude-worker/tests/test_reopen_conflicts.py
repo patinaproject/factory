@@ -345,12 +345,17 @@ class ReopenConflictsTest(unittest.TestCase):
 
         self.assertEqual((proc.stdout, self.writes(), self.cli_calls()), ("", [], []))
 
-    def test_a_reviewer_with_an_unresolved_thread_is_left_alone(self) -> None:
+    def test_a_reviewer_with_an_unresolved_thread_sends_the_card_back_instead(self) -> None:
         stale = [review("rev", "CHANGES_REQUESTED", NEW_HEAD, "2026-01-01T00:00:00Z")]
 
         proc = self.review_case(reviews=stale, threads=[("rev", False), ("other", True)])
 
-        self.assertEqual((proc.stdout, self.writes(), self.cli_calls()), ("", [], []))
+        self.assertEqual(proc.stdout, f"t_1 https://github.com/{REPO}/pull/7\n")
+        self.assertEqual(self.writes(), [
+            ["kanban", "comment", "t_1", self.review_comment(7, "unresolved review threads from rev")],
+            ["kanban", "reopen-review", "t_1", "--reason", "changes-requested review still needs work; see the card comments"],
+        ])
+        self.assertEqual((self.cli_calls(), [call for call in self.gh_calls() if call[:2] == ["api", "-X"]]), ([], []))
 
     def test_a_pending_required_check_changes_nothing(self) -> None:
         stale = [review("rev", "CHANGES_REQUESTED", NEW_HEAD, "2026-01-01T00:00:00Z")]

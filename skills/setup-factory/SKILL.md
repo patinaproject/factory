@@ -1213,8 +1213,9 @@ the card back to its worker. The worker merges the base branch, resolves the
 conflicts, and publishes the merge with `push-signed`. A card is sent back
 once per pull request head, so a worker that blocks on the same head stays
 blocked. The same job re-requests a reviewer whose changes request is on an
-older head once every required check passes. A failing required check or a
-changes request on the current head sends the card back once per head instead.
+older head once every required check passes. A failing required check, a
+changes request on the current head, or the reviewer's unresolved review thread
+sends the card back once per head instead.
 Create the job when `cron list` has no `reopen-conflicts` job:
 
 ```sh
