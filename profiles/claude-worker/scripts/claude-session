@@ -689,7 +689,7 @@ def install_skew() -> str | None:
         return None
     if not differing:
         return None
-    parts = ", ".join("the profile scripts" if name == "profile" else f"the {name} plugin" for name in differing)
+    parts = " and ".join("the profile scripts" if name == "profile" else f"the {name} plugin" for name in differing)
     return (
         f"{parts} in {home} differ from the factory checkout at {repo}, so a factory deploy is in progress or was "
         'left unfinished. Run check-install from the source checkout and finish the deploy steps of "Deploy a '
