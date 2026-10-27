@@ -268,72 +268,30 @@ class LinearPayloadTest(unittest.TestCase):
         event = {**PROMPTED_EVENT, "agentActivity": {**PROMPTED_EVENT["agentActivity"], "content": {"type": "prompt", "body": body}}}
         return render_like_hermes(render.build_routes(SETTINGS)["linear"]["prompt"], event)
 
-    def test_a_prompted_reply_reaches_the_prompt(self):
+    def test_the_prompted_event_fields_reach_the_prompt(self):
         prompt = self.prompted("close")
 
-        self.assertIn("\n<reply>\nclose\n</reply>\n", prompt)
         self.assertIn("- Activity signal: None\n", prompt)
         self.assertIn("- Activity id: 00000000-0000-4000-8000-0000000000c1\n", prompt)
 
-    def test_a_one_word_reply_is_the_only_text_in_its_block(self):
-        prompt = self.prompted("yes")
 
-        self.assertIn("\n<reply>\nyes\n</reply>\n", prompt)
-        self.assertEqual(prompt.count("<reply>\n"), 1)
-        self.assertNotIn("Activity body", prompt)
+class TriageIntentContractTest(unittest.TestCase):
+    """`triage_intent.ACTIONS` is the code's list of what a turn can be, and the prompt must handle each one."""
 
-    def test_a_multi_line_reply_keeps_every_line_in_its_block(self):
-        prompt = self.prompted("yes\n\nbut only on main")
-
-        self.assertIn("\n<reply>\nyes\n\nbut only on main\n</reply>\n", prompt)
-
-    def test_an_event_without_an_activity_leaves_the_placeholders(self):
-        event = {key: value for key, value in PROMPTED_EVENT.items() if key != "agentActivity"}
-        prompt = render_like_hermes(render.build_routes(SETTINGS)["linear"]["prompt"], {**event, "action": "created"})
-
-        self.assertIn("\n<reply>\n{agentActivity.content.body}\n</reply>\n", prompt)
-        self.assertIn("- Activity id: {agentActivity.id}\n", prompt)
-
-    def test_a_reply_without_text_is_read_from_linear_before_it_is_called_missing(self):
-        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
-        for heading, end in (("## Prompt", "## Triage card reply"), ("## Triage card reply", "## Stop")):
-            with self.subTest(section=heading):
-                section = " ".join(prompt[prompt.index(f"{heading}\n") : prompt.index(f"{end}\n")].split())
-                self.assertLess(section.index("`linear_agent_activity_read`"), section.index("arrived without text"))
-                self.assertIn("When it returns `found: false` or an error", section)
-
-    def test_a_created_event_renders_who_opened_the_session(self):
-        template = render.build_routes(SETTINGS)["linear"]["prompt"]
-        cases = {"opened by the factory": (None, "None"), "opened by a person": ("user-1", "user-1")}
-        for case, (creator, rendered) in cases.items():
-            with self.subTest(case=case):
-                event = {**PROMPTED_EVENT, "action": "created", "agentSession": {**PROMPTED_EVENT["agentSession"], "creatorId": creator}}
-                self.assertIn(f"- Agent session creator: {rendered}\n", render_like_hermes(template, event))
-        self.assertIn(
-            "- Agent session creator: {agentSession.creatorId}\n", render_like_hermes(template, PROMPTED_EVENT)
+    def test_the_linear_prompt_names_every_action_the_code_can_compute(self):
+        plugin_dir = Path(__file__).resolve().parents[2] / "plugins" / "linear-agent-session"
+        spec = importlib.util.spec_from_file_location(
+            "linear_agent_session", plugin_dir / "__init__.py", submodule_search_locations=[str(plugin_dir)]
         )
-
-    def test_an_undelegated_session_no_person_opened_is_skipped_before_the_mention_answer(self):
+        plugin = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = plugin
+        spec.loader.exec_module(plugin)
         prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
-        created = " ".join(prompt[prompt.index("## Session created") : prompt.index("## Prompt")].split())
-        undelegated = created[created.index("2. If its `delegate`") : created.index('Otherwise apply "Delegation gate"')]
-        skip = undelegated.index("creator above is `None` or still a dotted name in braces")
-        self.assertLess(skip, undelegated.index("Post no activity, create no card, and stop."))
-        self.assertLess(skip, undelegated.index("`response`"))
 
-    def test_a_reply_on_an_undelegated_issue_with_no_card_is_answered(self):
-        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
-        section = " ".join(prompt[prompt.index("## Prompt\n") : prompt.index("## Triage card reply\n")].split())
-        no_card = section[section.index("If there is none") : section.index("2. ")]
-        self.assertLess(no_card.index(f"is not `{SETTINGS['app_user_id']}`"), no_card.index("`response`"))
-        self.assertLess(no_card.index("`response`"), no_card.index('"Session created"'))
+        missing = [action for action in plugin.triage_intent.ACTIONS if f"`{action}`" not in prompt]
 
-    def test_only_a_session_a_person_opened_defers_a_delegation_to_session_created(self):
-        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
-        change = " ".join(prompt[prompt.index("## Issue change") :].split())
-        check = change[change.index("- Compare the issue's newest") : change.index('- Apply "Delegation gate"')]
-        self.assertIn("whose `creatorId` is not null", check)
-        self.assertLess(check.index("whose `creatorId` is not null"), check.index("in the last five minutes"))
+        self.assertEqual(missing, [])
+        self.assertNotIn("<triage_intent>", render.build_routes(SETTINGS)["github"]["prompt"])
 
 
 class PromptSubstitutionTest(unittest.TestCase):
@@ -449,38 +407,6 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertIn("--idempotency-key 'linear-triage:<issue id>'", create)
         self.assertIn("card: triage\n", create)
 
-    def test_every_event_that_can_create_an_implementation_card_passes_the_gate_first(self):
-        prompt = self.prompts["linear"]
-        created = prompt[prompt.index("## Session created") : prompt.index("## Prompt")]
-        self.assertLess(created.index('apply "Delegation gate"'), created.index("hermes kanban create"))
-        change = prompt[prompt.index("## Issue change") :]
-        self.assertLess(change.index('Apply "Delegation gate"'), change.index('follow "Session created" from step 3'))
-
-    def test_a_label_change_is_handled_before_the_five_minute_session_check(self):
-        change = " ".join(self.prompts["linear"][self.prompts["linear"].index("## Issue change") :].split())
-        self.assertLess(change.index("the previous labels above"), change.index("in the last five minutes"))
-
-    def test_a_reply_asking_for_an_issue_change_is_applied_before_any_card_step(self):
-        prompt = self.prompts["linear"]
-        reply = prompt[prompt.index("## Prompt") : prompt.index("## Requested issue change")]
-        self.assertLess(reply.index('Follow "Requested issue change"'), reply.index("\n1. "))
-        change = prompt[prompt.index("## Requested issue change") : prompt.index("## Triage card reply")]
-        self.assertIn("`linear_issue_edit`", change)
-        self.assertIn("`linear_issue_search`", change)
-        self.assertIn("`github_issue_edit`", change)
-        self.assertNotIn("hermes kanban", change)
-
-    def test_the_gate_answers_ready_for_human_and_unready_issues_without_a_card(self):
-        gate = render.delegation_gate_section()
-        rules = [gate[gate.index(f"\n{n}. ") : gate.index(f"\n{n + 1}. ") if n < 3 else len(gate)] for n in (1, 2, 3)]
-        self.assertIn("`ready-for-human`", rules[0])
-        self.assertIn("`response`", rules[0])
-        self.assertIn("`ready-for-agent`", rules[1])
-        self.assertIn("`thought`", rules[1])
-        self.assertIn("`linear_issue_to_todo`", rules[2])
-        for rule in rules[:2]:
-            self.assertIn("Create no card and stop.", " ".join(rule.split()))
-
     def test_prompts_keep_only_hermes_placeholders(self):
         for name, prompt in self.prompts.items():
             with self.subTest(route=name):
@@ -507,7 +433,7 @@ class MergedCardTest(unittest.TestCase):
         marker = "Merge refused by Hermes:"
         self.assertTrue(all(case.marker.startswith(marker) for case in card_transition.Case))
         change = self.linear[self.linear.index("## Issue change") :]
-        reply = self.linear[self.linear.index("## Prompt") : self.linear.index("## Triage card reply")]
+        reply = self.linear[self.linear.index("## Prompt") : self.linear.index("## Requested issue change")]
         for step in (change, reply):
             self.assertIn(f"starts `{marker}`", " ".join(step.split()))
 

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?[A-Za-z_][A-Za-z0-9_]*\}$")
 GITHUB_EVENT_LINE = re.compile(r"^- Event: (\S+), action (\S+)$", re.MULTILINE)
 SUMMARY_LIMIT = 120
+LINEAR_PAYLOAD_TYPES = ("Issue", "AgentSessionEvent")
 
 _session_store: Any = None
 
@@ -65,7 +66,7 @@ def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> N
             "delivered_at": queue_store.stamp(delivered_at(event)),
             "summary": summarize(event),
             "prompt": event.text,
-            "payload": issue_payload(event),
+            "payload": linear_payload(event),
             "attempts": 0,
             "last_error": "",
             "next_try_at": None,
@@ -148,10 +149,9 @@ def secret_is_unresolved(route: str) -> bool:
     return isinstance(secret, str) and UNRESOLVED_REFERENCE.match(secret) is not None
 
 
-def issue_payload(event: Any) -> Optional[dict]:
-    """A Linear Issue update replays through linear-agent-session's triage-exit check, which reads the payload."""
+def linear_payload(event: Any) -> Optional[dict]:
     payload = event.raw_message
-    return payload if isinstance(payload, dict) and payload.get("type") == "Issue" else None
+    return payload if isinstance(payload, dict) and payload.get("type") in LINEAR_PAYLOAD_TYPES else None
 
 
 def delivered_at(event: Any):

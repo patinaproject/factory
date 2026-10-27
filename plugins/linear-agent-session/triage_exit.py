@@ -81,9 +81,9 @@ def decide(payload: Any, app_user_id: str, triage_cards: list[Card], work_cards:
     if _delegate(data) == app_user_id:
         return passed("the issue is delegated to the agent app")
     issue_id, identifier = data["id"], data["identifier"]
-    if any(_names_issue(card, issue_id) or card.title.startswith(f"{identifier}:") for card in work_cards):
+    if find_card(work_cards, issue_id, identifier, None):
         return passed("the issue has a card on the default board")
-    found = [card for card in triage_cards if _names_issue(card, issue_id)]
+    found = [card for card in triage_cards if names_issue(card, issue_id)]
     if len(found) != 1:
         return passed(f"the issue has {len(found)} triage cards")
     card = found[0]
@@ -122,7 +122,7 @@ def handle(
     branch = live["branch"]
     if not branch:
         return passed("the live issue has no branch")
-    if any(card.branch_name in (branch, branch + TAKEOVER_SUFFIX) for card in work_cards):
+    if find_card(work_cards, payload["data"]["id"], payload["data"]["identifier"], branch):
         return passed("the issue has a card on its branch on the default board")
     if verdict.action == "archive":
         error = archive(verdict.task_id)
@@ -217,5 +217,27 @@ def _delegate(data: Mapping[str, Any]) -> Optional[str]:
     return data.get("delegateId") or (delegate.get("id") if isinstance(delegate, Mapping) else None)
 
 
-def _names_issue(card: Card, issue_id: str) -> bool:
+def names_issue(card: Card, issue_id: str) -> bool:
     return issue_id in LINEAR_ISSUE_ID.findall(card.body)
+
+
+def find_card(
+    cards: list[Card], issue_id: str, identifier: str, branch: Optional[str]
+) -> Optional[tuple[Card, str]]:
+    """The issue's implementation card and the key that found it, or None. Archived cards are never found.
+
+    The branch survives when Hermes rewrites a card's title and body, so it comes first. A card on the factory's own
+    pull request branch has no branch key, so the body line and the title find it. `branch` None skips the branch keys.
+    """
+    live = [card for card in cards if card.status != "archived"]
+    keys = (
+        ("branch", lambda card: bool(branch) and card.branch_name == branch),
+        ("takeover_branch", lambda card: bool(branch) and card.branch_name == branch + TAKEOVER_SUFFIX),
+        ("linear_issue_id", lambda card: names_issue(card, issue_id)),
+        ("title", lambda card: card.title.startswith(f"{identifier}:")),
+    )
+    for key, matches in keys:
+        for card in live:
+            if matches(card):
+                return card, key
+    return None

@@ -101,10 +101,16 @@ class PluginTest(unittest.TestCase):
         self.dispatch(ev)
         self.assertEqual(self.entries()[ev.source.chat_id]["payload"], PAYLOAD)
 
+    def test_a_linear_agent_session_delivery_keeps_its_payload_for_the_replay_intent(self):
+        session = {"type": "AgentSessionEvent", "action": "prompted"}
+        ev = event(payload=session)
+        self.dispatch(ev)
+        self.assertEqual(self.entries()[ev.source.chat_id]["payload"], session)
+
     def test_other_deliveries_keep_no_payload(self):
         github = {"action": "closed", "pull_request": {"number": 1}, "repository": {"full_name": "o/r"}}
-        session = {"type": "AgentSessionEvent", "action": "created"}
-        for name, payload in (("github", github), ("agent session", session), ("not a dict", "raw")):
+        other = {"type": "Comment", "action": "create"}
+        for name, payload in (("github", github), ("other linear type", other), ("not a dict", "raw")):
             with self.subTest(name):
                 ev = event(delivery=name, payload=payload)
                 self.dispatch(ev)
