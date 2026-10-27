@@ -281,6 +281,18 @@ class SafetyTest(unittest.TestCase):
         self.assertGreater(len(reason), blocks.REASON_LIMIT - 2)
         self.assertTrue(reason.endswith("..."))
 
+    def test_long_multiline_reason_is_posted_whole_with_its_line_breaks(self):
+        reason = "Needs a decision on three points:\n- first: which branch\n- second: which name\n- third: " + "y" * 1500
+        client, _ = fire("blocked", "needs_input", reason=reason)
+        ((_, content),) = client.calls
+        self.assertIn(
+            "Reason: Needs a decision on three points:\n- first: which branch\n- second: which name\n- third: "
+            + "y" * 1500
+            + "\n\n",
+            content["body"],
+        )
+        self.assertNotIn("...", content["body"])
+
     def test_missing_reason_is_said_plainly(self):
         client, _ = fire("triage", "needs_input", reason=None)
         ((_, content),) = client.calls
