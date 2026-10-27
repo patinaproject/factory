@@ -1,10 +1,3 @@
-"""Decide what a pull request with a changes-requested review needs next.
-
-`reopen-conflicts` calls `decide` for an open factory pull request whose review
-decision is `CHANGES_REQUESTED`. The outcome is a `Handback` (the card goes back
-to its worker), a `Request` (the reviewers whose review is stale are asked
-again), or `Nothing`. A review is never dismissed.
-"""
 from __future__ import annotations
 
 import json
@@ -41,7 +34,6 @@ Outcome = Union[Handback, Request, Nothing]
 
 
 def latest_reviews(reviews: list) -> dict[str, dict]:
-    """The newest submitted review of each author."""
     latest: dict[str, dict] = {}
     submitted = (r for r in reviews if r["state"] != "PENDING" and r.get("author"))
     for review in sorted(submitted, key=lambda r: r["submittedAt"]):
@@ -86,7 +78,6 @@ def required_contexts(run: Callable[..., str], gh: str, repo: str, base: str) ->
 
 
 def read_reviews(run: Callable[..., str], gh: str, repo: str, number: int) -> tuple[list, list[str], list[str]]:
-    """Returns the reviews, the requested reviewers' logins, and the first commenter of each unresolved thread."""
     owner, name = repo.split("/", 1)
     out = run(gh, "api", "graphql", "-f", f"query={REVIEWS_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={number}")
     try:

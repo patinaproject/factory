@@ -143,7 +143,6 @@ def send_back(hermes: str, task: dict, text: str, reason: str, sent: bool) -> No
 
 
 def re_request(repo: str, task: dict, pull: dict, logins: tuple[str, ...]) -> bool:
-    """Asks the reviewers again, then tells the card's Linear session. False when the session could not be told."""
     reviewers = [arg for login in logins for arg in ("-f", f"reviewers[]={login}")]
     run(os.environ.get("GH_BIN", "gh"), "api", "-X", "POST", f"repos/{repo}/pulls/{pull['number']}/requested_reviewers", *reviewers)
     print(f"{task['id']} {pull['url']} re-requested {','.join(logins)}")
