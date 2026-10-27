@@ -48,9 +48,16 @@ FAKE_TRIAGE_EXIT = textwrap.dedent(
     import json, os, sys
     args = sys.argv[1:]
     payload = json.load(open(args[args.index("--payload-file") + 1]))
+    now = args[args.index("--now") + 1] if "--now" in args else None
     with open(os.environ["FAKE_TRIAGE_LOG"], "a") as log:
-        log.write(json.dumps({"argv": args[:2], "payload": payload, "home": os.environ["HERMES_HOME"]}) + "\\n")
+        log.write(json.dumps({"argv": args[:2], "payload": payload, "now": now, "home": os.environ["HERMES_HOME"]}) + "\\n")
     behavior = json.load(open(os.environ["FAKE_TRIAGE_BEHAVIOR"]))
+    if args[0] == "triage-intent":
+        if behavior.get("intent_exit"):
+            sys.exit(behavior["intent_exit"])
+        intent = json.dumps({"action": "card_reply", "now": now})
+        print("## Computed triage intent\\n\\n<triage_intent>\\n" + intent + "\\n</triage_intent>\\n")
+        sys.exit(0)
     if behavior.get("garble"):
         print("not json")
     else:
@@ -108,6 +115,13 @@ class RetryTest(unittest.TestCase):
 
     def triage_checks(self):
         log = self.home.parent / "triage.log"
+        return [c for c in self.cli_calls(log) if c["argv"][0] == "triage-exit"]
+
+    def intent_checks(self):
+        return [c for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "triage-intent"]
+
+    @staticmethod
+    def cli_calls(log):
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
     def run_retry(self, *args):
@@ -136,7 +150,6 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(chats[0]["argv"][5:], ["-t", "terminal,linear_agent_session", "--source", "webhook-retry"])
         self.assertEqual(chats[0]["home"], str(self.home))
         self.assertIn(older, chats[0]["query"].split("prompt for")[0])
-        self.assertIn("not `date -u`", chats[0]["query"])
         self.assertEqual(
             result.stdout,
             "retried linear older: succeeded\nretried linear newer: succeeded\nwebhook retry queue drained\n",
@@ -153,7 +166,7 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(self.chats(), [])
         self.assertEqual(
             self.triage_checks(),
-            [{"argv": ["triage-exit", "--payload-file"], "payload": TRIAGE_EXIT_PAYLOAD, "home": str(self.home)}],
+            [{"argv": ["triage-exit", "--payload-file"], "payload": TRIAGE_EXIT_PAYLOAD, "now": None, "home": str(self.home)}],
         )
         self.assertEqual(
             result.stdout, "retried linear exit: handled the Triage exit without a turn\nwebhook retry queue drained\n"
@@ -180,6 +193,51 @@ class RetryTest(unittest.TestCase):
         self.run_retry()
 
         self.assertEqual((len(self.triage_checks()), len(self.chats())), (0, 1))
+
+    def test_a_replayed_linear_turn_starts_with_a_freshly_computed_intent_block(self):
+        self.install_triage_exit(handled=False)
+        delivered = ago(hours=2)
+        session_payload = {"type": "AgentSessionEvent", "action": "prompted"}
+        self.seed(entry("reply", delivered=delivered, payload=session_payload))
+
+        self.run_retry()
+
+        self.assertEqual(
+            [(c["payload"], c["now"]) for c in self.intent_checks()], [(session_payload, delivered)]
+        )
+        self.assertEqual(self.triage_checks(), [], "an agent session event has no Triage exit")
+        query = self.chats()[0]["query"]
+        self.assertTrue(query.startswith("This is a replay of a webhook delivery"))
+        self.assertLess(query.index("## Computed triage intent"), query.index("</triage_intent>"))
+        self.assertLess(query.index("</triage_intent>"), query.index("prompt for reply"))
+        self.assertIn(json.dumps({"action": "card_reply", "now": delivered}), query)
+
+    def test_a_replay_whose_intent_cannot_be_computed_starts_with_the_error_intent(self):
+        self.install_triage_exit(handled=False, intent_exit=1)
+        self.seed(entry("broken", payload=TRIAGE_EXIT_PAYLOAD))
+
+        self.run_retry()
+
+        query = self.chats()[0]["query"]
+        block = query[query.index("<triage_intent>\n") + len("<triage_intent>\n") : query.index("\n</triage_intent>")]
+        self.assertEqual(json.loads(block)["action"], "error")
+        self.assertLess(query.index("</triage_intent>"), query.index("prompt for broken"))
+
+    def test_a_replay_without_the_cli_still_starts_with_the_error_intent(self):
+        self.seed(entry("nocli", payload=TRIAGE_EXIT_PAYLOAD))
+
+        self.run_retry()
+
+        self.assertIn('"action": "error"', self.chats()[0]["query"])
+
+    def test_a_delivery_without_a_linear_payload_replays_its_prompt_alone(self):
+        self.install_triage_exit(handled=False)
+        self.seed(entry("github"))
+
+        self.run_retry()
+
+        self.assertEqual(self.intent_checks(), [])
+        self.assertNotIn("triage_intent", self.chats()[0]["query"])
 
     def test_entries_that_are_not_due_wait_and_now_forces_them(self):
         self.seed(entry("later", next_try=(dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")))

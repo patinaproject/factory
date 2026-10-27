@@ -189,6 +189,78 @@ class TeammateReplyTest(unittest.TestCase):
         self.assertEqual(client.calls, [])
 
 
+class IntentHookTest(unittest.TestCase):
+    """The hook puts the computed intent in front of a Linear turn through Hermes' `rewrite` action."""
+
+    def run_intent_hook(self, evt, compute, route="linear", triage_exit=no_triage_exit):
+        hook = plugin.make_dispatch_hook(
+            lambda: RecordingClient(), lambda: route, lambda: RESOLVED_CONFIG, triage_exit, compute
+        )
+        return asyncio.run(hook(event=evt, gateway=object(), session_store=None))
+
+    def test_a_linear_delivery_gets_the_block_in_front_of_its_prompt(self):
+        seen = []
+
+        def compute(payload):
+            seen.append(payload)
+            return plugin.triage_intent.Intent(action="create_card", reply="yes", reply_source="payload")
+
+        evt = event(session_event("prompted"))
+        result = self.run_intent_hook(evt, compute)
+        self.assertEqual(seen, [evt.raw_message])
+        self.assertEqual(result["action"], "rewrite")
+        self.assertTrue(result["text"].startswith("## Computed triage intent\n\n<triage_intent>\n{"))
+        self.assertTrue(result["text"].endswith("</triage_intent>\n\nrendered prompt"))
+        self.assertIn('"action": "create_card"', result["text"])
+
+    def test_a_skip_stays_a_skip_and_computes_nothing(self):
+        skip = types.SimpleNamespace(handled=True, action="archive", reason="archived triage card t_1")
+        payload = {
+            "type": "Issue", "action": "update", "updatedFrom": {"stateId": "s"},
+            "data": {"id": "i", "identifier": "ABC-1", "state": {"type": "backlog"}},
+        }
+
+        def compute(_):
+            raise AssertionError("a skipped delivery needs no intent")
+
+        result = self.run_intent_hook(event(payload), compute, triage_exit=lambda _: skip)
+        self.assertEqual(result, {"action": "skip", "reason": "archived triage card t_1"})
+
+    def test_another_route_gets_no_rewrite(self):
+        def compute(_):
+            raise AssertionError("only the Linear route gets an intent")
+
+        self.assertIsNone(self.run_intent_hook(event(session_event("created"), route="github"), compute))
+
+    def test_a_teammate_reply_is_skipped_before_any_intent(self):
+        def compute(_):
+            raise AssertionError("a skipped delivery needs no intent")
+
+        self.assertEqual(self.run_intent_hook(reply_event(f"{LUKE} what do you think?"), compute), SKIP_TEAMMATE)
+
+    def test_a_slow_intent_becomes_the_error_block_not_a_dropped_turn(self):
+        def compute(_):
+            time.sleep(1.0)
+
+        with mock.patch.object(plugin, "TRIAGE_INTENT_TIMEOUT_SECONDS", 0.1), self.assertLogs("linear_agent_session", "WARNING"):
+            result = self.run_intent_hook(event(session_event("created")), compute)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn('"action": "error"', result["text"])
+        self.assertTrue(result["text"].endswith("rendered prompt"))
+
+    def test_a_failing_intent_becomes_the_error_block_without_a_secret(self):
+        def compute(_):
+            raise RuntimeError("boom lin_api_a1b2c3d4e5")
+
+        fake_redact = types.ModuleType("agent.redact")
+        fake_redact.redact_sensitive_text = lambda text, force=False: text
+        modules = {"agent": types.ModuleType("agent"), "agent.redact": fake_redact}
+        with mock.patch.dict(sys.modules, modules), self.assertLogs("linear_agent_session", "WARNING") as logs:
+            result = self.run_intent_hook(event(session_event("created")), compute)
+        self.assertIn('"action": "error"', result["text"])
+        self.assertNotIn("lin_api_a1b2c3d4e5", result["text"] + "".join(logs.output))
+
+
 class SecretGuardTest(unittest.TestCase):
     def test_unresolved_secret_skips_without_acknowledging(self):
         config = webhook_config(
@@ -400,7 +472,9 @@ class RegisterTest(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", fake):
             asyncio.run(hook(event=event(session_event("created"), route="linear")))
             self.assertEqual(fake.graphql_requests, [])
-            self.assertIsNone(asyncio.run(hook(event=event(session_event("created"), route="agent"))))
+            with mock.patch.object(plugin.triage_intent, "compute", lambda *_, **__: plugin.triage_intent.error_intent("stub")):
+                result = asyncio.run(hook(event=event(session_event("created"), route="agent")))
+            self.assertEqual(result["action"], "rewrite")
         self.assertEqual(
             fake.graphql_requests[0]["variables"],
             {
@@ -443,6 +517,40 @@ class CliTest(unittest.TestCase):
                 cli.main(["issue", "ABC-1"])
         self.assertEqual(len(broker.requests), 2)
         self.assertEqual(fake.graphql_requests[0]["authorization"], "Bearer brokered-1")
+
+    def test_triage_intent_command_prints_the_block_for_a_payload(self):
+        cli = _load_cli()
+        calls = []
+        intent = plugin.triage_intent
+
+        class Plugin:
+            linear = types.SimpleNamespace(client_from_env=lambda: "client", ACTIVITY_TYPES=[])
+            triage_exit = types.SimpleNamespace(configured_app_user_id=lambda: "app", listed_cards=lambda board: [])
+            triage_intent = types.SimpleNamespace(
+                parse_time=lambda text: ("parsed", text),
+                compute=lambda payload, **kwargs: calls.append((payload, kwargs)) or intent.Intent(action="open_session"),
+                error_intent=intent.error_intent,
+                render=intent.render,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(cli, "_load_hyphenated_plugin_dir_as_package", lambda: Plugin):
+            path = os.path.join(tmp, "payload.json")
+            with open(path, "w") as handle:
+                json.dump({"type": "Issue"}, handle)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["triage-intent", "--payload-file", path, "--now", "2026-10-27T12:00:00Z"])
+            self.assertEqual(code, 0)
+            self.assertEqual(calls[0][0], {"type": "Issue"})
+            self.assertEqual(calls[0][1]["now"], ("parsed", "2026-10-27T12:00:00Z"))
+            self.assertTrue(out.getvalue().startswith("## Computed triage intent\n\n<triage_intent>\n"))
+            self.assertIn('"action": "open_session"', out.getvalue())
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["triage-intent", "--payload-file", os.path.join(tmp, "missing.json")])
+            self.assertEqual(code, 0)
+            self.assertIn('"action": "error"', out.getvalue())
 
     def test_activity_command(self):
         fake = FakeLinear([activity_ok("activity-5"), (200, {"data": {"agentSessionUpdate": {"success": True}}})])

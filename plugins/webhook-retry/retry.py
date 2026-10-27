@@ -20,9 +20,15 @@ import queue_store as store  # noqa: E402
 
 REPLAY_PREAMBLE = """\
 This is a replay of a webhook delivery that arrived at {delivered_at} and could not run then because the model's usage limit was reached.
-Treat {delivered_at} as the current time. Wherever a step compares with the current time, such as a freshness check, use {delivered_at} and not `date -u`.
 
 """
+# The shape of `triage_intent.render`, which this script cannot import from the plugin.
+ERROR_BLOCK = (
+    "## Computed triage intent\n\n<triage_intent>\n"
+    + json.dumps({"action": "error", "error": "the replay could not compute the triage intent"}, indent=2, sort_keys=True)
+    + "\n</triage_intent>\n\n"
+)
+TRIAGE_INTENT_TIMEOUT_SECONDS = 120
 # Above the check's own worst case: three `hermes` reads of up to 60 s each, the live issue read, and a 120 s archive.
 TRIAGE_EXIT_TIMEOUT_SECONDS = 360
 SECRET_PATTERNS = (
@@ -133,15 +139,16 @@ class Run:
     def triage_exit_handled(self, entry: dict[str, Any]) -> bool:
         """Run linear-agent-session's triage-exit check. Anything but a clean `handled` answer replays the turn."""
         cli = self.home / "plugins" / "linear-agent-session" / "cli.py"
-        if not isinstance(entry.get("payload"), dict) or not cli.is_file():
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "Issue" or not cli.is_file():
             return False
         with tempfile.TemporaryDirectory(prefix="webhook-retry-") as scratch:
-            payload = Path(scratch) / "payload.json"
-            payload.write_text(json.dumps(entry["payload"]))
-            os.chmod(payload, 0o600)
+            payload_file = Path(scratch) / "payload.json"
+            payload_file.write_text(json.dumps(payload))
+            os.chmod(payload_file, 0o600)
             try:
                 proc = subprocess.run(
-                    [sys.executable, str(cli), "triage-exit", "--payload-file", str(payload)],
+                    [sys.executable, str(cli), "triage-exit", "--payload-file", str(payload_file)],
                     capture_output=True, text=True, timeout=TRIAGE_EXIT_TIMEOUT_SECONDS,
                     env={**os.environ, "HERMES_HOME": str(self.home)},
                 )
@@ -153,6 +160,30 @@ class Run:
             return False
         return proc.returncode == 0 and isinstance(answer, dict) and answer.get("handled") is True
 
+    def intent_block(self, entry: dict[str, Any]) -> str:
+        """The block the dispatch hook adds, recomputed for the stored delivery time because a replay skips the hook.
+
+        A Linear delivery whose CLI fails or times out replays with the `error` intent, so the prompt still starts
+        with a block. Other deliveries have none.
+        """
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            return ""
+        cli = self.home / "plugins" / "linear-agent-session" / "cli.py"
+        with tempfile.TemporaryDirectory(prefix="webhook-retry-") as scratch:
+            payload_file = Path(scratch) / "payload.json"
+            payload_file.write_text(json.dumps(payload))
+            os.chmod(payload_file, 0o600)
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(cli), "triage-intent", "--payload-file", str(payload_file), "--now", entry["delivered_at"]],
+                    capture_output=True, text=True, timeout=TRIAGE_INTENT_TIMEOUT_SECONDS,
+                    env={**os.environ, "HERMES_HOME": str(self.home)},
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                return ERROR_BLOCK
+        return proc.stdout if proc.returncode == 0 and "<triage_intent>" in proc.stdout else ERROR_BLOCK
+
     def replay(self, hermes: str, entry: dict[str, Any]) -> tuple[int, str, Optional[dict]]:
         toolsets = route_toolsets(hermes, self.home, entry["route"])
         if not toolsets:
@@ -160,7 +191,9 @@ class Run:
         with tempfile.TemporaryDirectory(prefix="webhook-retry-") as scratch:
             query = Path(scratch) / "query.txt"
             report = Path(scratch) / "report.json"
-            query.write_text(REPLAY_PREAMBLE.format(delivered_at=entry["delivered_at"]) + entry["prompt"])
+            query.write_text(
+                REPLAY_PREAMBLE.format(delivered_at=entry["delivered_at"]) + self.intent_block(entry) + entry["prompt"]
+            )
             os.chmod(query, 0o600)
             command = [
                 hermes, "chat", "-Q", "--oneshot", "--query-file", str(query), "-t", toolsets, "--source", "webhook-retry",
