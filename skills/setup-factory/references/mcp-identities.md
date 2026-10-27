@@ -100,7 +100,9 @@ factory's Linear server and the repository's own servers.
 A repository server that reads its key through a person's secret session,
 such as a `headersHelper` that signs in to Infisical as a person, gets a
 factory token the same way when it is an HTTP server. Give the factory the
-development credential only.
+development credential only, with read access only. For a repository's own
+content-management server, store it as `CMS_MCP_API_KEY`, which the manifest
+already declares.
 
 Disable these servers with `disabled_mcp_servers`, and record why in the
 private record:

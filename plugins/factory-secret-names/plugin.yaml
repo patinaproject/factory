@@ -56,3 +56,9 @@ optional_env:
       The factory's Featurebase API key, the variable that
       claude_session.mcp_servers.featurebase.token_env names. Only the gateway
       holds it; the run's featurebase server gets it through mcp-headers.
+  - name: CMS_MCP_API_KEY
+    description: >-
+      The factory's development key for a repository's own content-management
+      MCP server, the variable that claude_session.mcp_servers.<server>.token_env
+      names for that server. Only the gateway holds it; the run's server gets
+      it through mcp-headers.

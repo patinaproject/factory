@@ -40,6 +40,7 @@ class ManifestTest(unittest.TestCase):
             "DATAFORSEO_BASIC_TOKEN",
             "CLOUDFLARE_API_TOKEN",
             "FEATUREBASE_API_KEY",
+            "CMS_MCP_API_KEY",
         ):
             with self.subTest(name=name):
                 self.assertIn(name, names)
