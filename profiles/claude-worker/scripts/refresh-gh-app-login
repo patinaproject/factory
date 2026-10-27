@@ -30,6 +30,8 @@ LABEL = "ai.patinaproject.factory.gh-login"
 # gh refuses to store a login while either variable is set, because it would
 # use the variable instead of hosts.yml.
 GH_TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN")
+# launchd starts no new run while one hangs, so a stuck login must not hold the lock past the next interval.
+GH_LOGIN_SECONDS = 60
 
 
 class StepFailed(Exception):
@@ -60,7 +62,10 @@ def login(token: str) -> None:
             capture_output=True,
             text=True,
             env=env,
+            timeout=GH_LOGIN_SECONDS,
         )
+    except subprocess.TimeoutExpired:
+        raise StepFailed("gh auth login", f"did not finish in {GH_LOGIN_SECONDS}s")
     except OSError as exc:
         raise StepFailed("gh auth login", str(exc))
     if proc.returncode != 0:

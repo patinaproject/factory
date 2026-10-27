@@ -1876,12 +1876,16 @@ Hermes process starts. The new helper also writes
    - A `config plugins.entries.linear-agent-session.settings.triage.max_running`
      line: add `"triage": {"max_running": <n>}` to the factory settings and set
      them in both homes as in part 10, before the profile update.
-   - A `cron job refresh-gh-app-login` line: a launchd job replaced it, because
-     `hermes pause` stops Hermes' cron. Run
-     `hermes -p claude-worker cron remove <job id>` with the id from
-     `cron list`. A `service gh login refresh` line: install or fix the job as
-     in [Sign the worker's `gh` in](references/github.md#sign-the-workers-gh-in),
+   - A `service gh login refresh` line: install or fix the job as in
+     [Sign the worker's `gh` in](references/github.md#sign-the-workers-gh-in),
      after the profile update installs `refresh-gh-app-login` and `gh_login.py`.
+     `claude-session` refuses every run until the job has saved
+     `<worker>/gh/token-expiry.json`, so install it right after the profile
+     update.
+   - A `cron job refresh-gh-app-login` line: a launchd job replaced it, because
+     `hermes pause` stops Hermes' cron. Once the launchd job has run, run
+     `hermes -p claude-worker cron remove <job id>` with the id from
+     `cron list`.
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.
