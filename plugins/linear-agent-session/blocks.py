@@ -123,6 +123,13 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit].rstrip() + "..." if len(text) > limit else text
 
 
+def close_older_sessions(client: linear.LinearClient, agent_session: str) -> None:
+    try:
+        client.close_older_sessions(agent_session)
+    except Exception as error:
+        logger.warning("linear-agent-session: closing older sessions failed: %s", type(error).__name__)
+
+
 def make_blocked_hook(
     get_client: Callable[[], linear.LinearClient],
     load: Callable[[str, Optional[str]], Card] = load_card,
@@ -140,6 +147,7 @@ def make_blocked_hook(
                 return
             client = get_client()
             client.create_activity(agent_session, content)
+            close_older_sessions(client, agent_session)
             reply = mention_reply(card, reason, redact, board)
             if reply is not None:
                 client.reply_in_session(agent_session, reply)

@@ -40,6 +40,15 @@ SESSION_THREAD_QUERY = """query AgentSessionThread($id: String!) {
   agentSession(id: $id) { comment { id } issue { id } }
 }"""
 
+ISSUE_SESSIONS_QUERY = """query AgentSessionSiblings($id: String!) {
+  agentSession(id: $id) {
+    url createdAt appUser { id }
+    issue { agentSessions(first: 50) { nodes { id status createdAt appUser { id } } } }
+  }
+}"""
+
+OPEN_SESSION_STATUSES = ("pending", "active", "awaitingInput", "stale")
+
 ACTIVITY_FIELDS = "id createdAt signal content { __typename ... on AgentActivityPromptContent { body } }"
 
 ACTIVITY_QUERY = f"""query AgentActivity($id: String!) {{
@@ -217,6 +226,25 @@ class LinearClient:
         if not payload["success"]:
             raise LinearError("agentActivityCreate reported success: false")
         return payload["agentActivity"]["id"]
+
+    def close_older_sessions(self, agent_session_id: str) -> list:
+        """Ends this app's older open sessions on the issue, which Linear would otherwise mark stale."""
+        session = self._graphql(ISSUE_SESSIONS_QUERY, {"id": agent_session_id})["agentSession"]
+        if session is None or session["issue"] is None:
+            return []
+        closed = []
+        for other in session["issue"]["agentSessions"]["nodes"]:
+            if (
+                other["id"] != agent_session_id
+                and other["appUser"] is not None
+                and other["appUser"]["id"] == session["appUser"]["id"]
+                and other["createdAt"] < session["createdAt"]
+                and other["status"] in OPEN_SESSION_STATUSES
+            ):
+                body = f"Work on this issue continues in [this session]({session['url']})."
+                self.create_activity(other["id"], activity_content("response", body))
+                closed.append(other["id"])
+        return closed
 
     def set_external_urls(self, agent_session_id: str, urls: list) -> None:
         external_urls = [{"label": u["label"], "url": u["url"]} for u in urls]

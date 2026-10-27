@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin
+from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin, sessions_ok
 
 plugin = load_plugin()
 
@@ -374,13 +374,13 @@ class RegisterTest(unittest.TestCase):
             self.assertIsNone(classify(status_code=401))
 
     def test_registered_handlers_call_linear(self):
-        fake = FakeLinear([activity_ok("activity-9")])
+        fake = FakeLinear([activity_ok("activity-9"), sessions_ok()])
         ctx = FakeContext()
         plugin.register(ctx)
         handler = ctx.tools["linear_agent_activity"]["handler"]
         with mock.patch("urllib.request.urlopen", fake):
             output = handler({"agent_session_id": "session-1", "type": "thought", "body": "Working"}, task_id="t")
-        self.assertEqual(json.loads(output), {"ok": True, "agent_activity_id": "activity-9"})
+        self.assertEqual(json.loads(output), {"ok": True, "agent_activity_id": "activity-9", "closed_sessions": []})
 
     def test_registered_handler_without_credentials_reports_the_unreachable_broker(self):
         ctx = FakeContext()

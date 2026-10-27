@@ -237,24 +237,24 @@ one call with the handoff payload:
 
 Then act on the result:
 
-- **Review accepted.** Post one `action` activity with the handoff
-  `external_urls`. Do not post a `response`, because it ends the Linear
-  session before the pull request merges. You are done.
+- **Review accepted.** Post one `elicitation` activity with the handoff
+  `external_urls`. An elicitation moves the Linear session to
+  `awaitingInput`, which Linear never marks stale, and it does not end the
+  session. Do not post a `response`, because it ends the session before the
+  pull request merges. You are done.
   - When the result has `re_requested_reviewers`, `pr-ready-gate` asked
     those reviewers to review again because their changes-requested review
-    is on an older head. Set `action` to
-    `Changes are in, re-requested review from` and `parameter` to the
-    reviewers' logins, each with a leading `@`, separated by a comma and a
-    space.
-  - Otherwise set `action` to `Ready for review` and `parameter` to
-    `published_pr`.
+    is on an older head. Set `body` to `Changes are in, re-requested review
+    from` and the reviewers' logins, each with a leading `@`, separated by a
+    comma and a space.
+  - Otherwise set `body` to `Ready for review:` and `published_pr`.
   - When the result has `re_request_failures`, the gate could not ask
-    someone. Name each failure in the activity's `parameter` after the
-    reviewers or the pull request URL.
+    someone. Name each failure in the `body` after the reviewers or the
+    pull request URL.
   - When the result has `failed_unrequired_checks`, those checks failed but
     no branch rule requires them, so the handoff went through. Add
-    `failing checks no rule requires:` and their names to the activity's
-    `parameter`, so the reviewer sees them.
+    `failing checks no rule requires:` and their names to the `body`, so the
+    reviewer sees them.
 - **Completion accepted.** Post a `response` activity that summarizes the
   change, with the handoff `external_urls`. You are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, an unmet
