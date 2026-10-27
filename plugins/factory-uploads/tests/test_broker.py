@@ -259,7 +259,9 @@ class FakeCredentials:
         self.linear = {"access_token": "lin_oauth_FAKE_access", "expires_at": 1_900_000_000.0}
         self.proxy = "proxy-FAKE-token"
         self.mcp = {"sentry": "sntryu_FAKE", "posthog": None}
-        self.github = {"access_token": "ghs_FAKE_installation", "expires_at": 1_800_003_600.0}
+        self.github = {
+            "access_token": "ghs_FAKE_installation", "expires_at": 1_800_003_600.0, "permissions": {"actions": "write"},
+        }
         self.failure = None
         self.github_failure = None
 
@@ -315,7 +317,10 @@ class CredentialTest(BrokerTestCase):
         )
         self.assertEqual(
             await ask(self.broker.socket_path, {"op": "github_token"}),
-            {"ok": True, "token": "ghs_FAKE_installation", "expires_at": 1_800_003_600.0},
+            {
+                "ok": True, "token": "ghs_FAKE_installation", "expires_at": 1_800_003_600.0,
+                "permissions": {"actions": "write"},
+            },
         )
 
     async def test_a_missing_credential_answers_unavailable(self):

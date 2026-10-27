@@ -74,7 +74,7 @@ class GitHubApp:
         return self.key_path.is_file()
 
     def installation_token(self) -> dict:
-        """{"access_token", "expires_at"}, minted again once it could expire before the next refresh. May block."""
+        """{"access_token", "expires_at", "permissions"}, minted again once it could expire before the next refresh. May block."""
         with self._lock:
             if self._token is None or self._token["expires_at"] - REFRESH_MARGIN <= self._clock():
                 self._token = self._mint(self._jwt())
@@ -121,7 +121,16 @@ class GitHubApp:
             expires = datetime.strptime(body.get("expires_at"), "%Y-%m-%dT%H:%M:%SZ")
         except (TypeError, ValueError):
             raise GitHubAppError("mint installation token", "the response has no expiry") from None
-        return {"access_token": token, "expires_at": expires.replace(tzinfo=timezone.utc).timestamp()}
+        granted = body.get("permissions")
+        permissions = {
+            key: level for key, level in (granted.items() if isinstance(granted, dict) else ())
+            if isinstance(key, str) and isinstance(level, str)
+        }
+        return {
+            "access_token": token,
+            "expires_at": expires.replace(tzinfo=timezone.utc).timestamp(),
+            "permissions": permissions,
+        }
 
 
 def _message(error: urllib.error.HTTPError) -> str:

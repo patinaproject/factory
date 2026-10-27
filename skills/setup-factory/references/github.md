@@ -399,7 +399,12 @@ configured repository, along with a read of the head's workflow runs. It also
 compares the App's permissions with the
 [permission table](#use-gh-on-a-factory-machine). Actions must be read and
 write, because a worker re-runs a job that failed outside its change with
-`gh run rerun --failed`:
+`gh run rerun --failed`.
+
+The App's settings say what the App asks for. The installation keeps its old
+permissions until an org owner accepts the new ones, so the check also asks the
+gateway's broker for an installation token and compares the permissions GitHub
+reported when it minted that token:
 
 ```sh
 GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/check-github-access
@@ -409,7 +414,11 @@ It prints nothing when every read succeeds. Otherwise it prints one line for
 each problem and exits `1`. A line such as
 `grant the App "Commit statuses: Read-only"` names the permission to add with
 [Upgrade an existing App's permissions](#upgrade-an-existing-apps-permissions).
-A `not found (HTTP 404)` line means the installation does not cover the
+A line such as
+`Installation of <app>: accept "Actions: Read and write" on the installation`
+means the App asks for the permission but the installation has not accepted it:
+an org owner accepts it on the installation's settings page. A
+`not found (HTTP 404)` line means the installation does not cover the
 repository. After the operator accepts a new permission, run the
 `refresh-gh-app-login` job, then run the check again.
 
