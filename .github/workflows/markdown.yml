@@ -16,6 +16,10 @@ jobs:
         # actions/checkout@v4.3.1
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
+      - name: Check AGENTS.md size
+        run: |
+          test "$(wc -c < AGENTS.md)" -le 32768 || { echo "::error::AGENTS.md is over 32768 bytes; move code-enforced rules to docs/rules.md"; exit 1; }
+
       - name: Run Markdown lint
         # DavidAnson/markdownlint-cli2-action@v18.0.0
         uses: DavidAnson/markdownlint-cli2-action@eb5ca3ab411449c66620fe7f1b3c9e10547144b0
