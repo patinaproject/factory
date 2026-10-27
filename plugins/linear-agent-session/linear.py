@@ -47,7 +47,8 @@ ISSUE_SESSIONS_QUERY = """query AgentSessionSiblings($id: String!) {
   }
 }"""
 
-OPEN_SESSION_STATUSES = ("pending", "active", "awaitingInput", "stale")
+# An awaitingInput session never goes stale and may hold questions a person has yet to answer.
+OPEN_SESSION_STATUSES = ("pending", "active", "stale")
 
 ACTIVITY_FIELDS = "id createdAt signal content { __typename ... on AgentActivityPromptContent { body } }"
 

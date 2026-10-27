@@ -104,16 +104,16 @@ class ActivityTest(unittest.TestCase):
             ("old-other-app", "active", old, "app-2"),
             ("newer", "active", new, "app-1"),
         ]
-        fake = FakeLinear([sessions_ok(others)] + [activity_ok()] * 4)
+        fake = FakeLinear([sessions_ok(others)] + [activity_ok()] * 3)
         closed = make_client(fake).close_older_sessions("live")
-        self.assertEqual(closed, ["old-pending", "old-active", "old-awaiting", "old-stale"])
+        self.assertEqual(closed, ["old-pending", "old-active", "old-stale"])
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "live"})
         body = f"Work on this issue continues in [this session]({LIVE_SESSION_URL})."
         self.assertEqual(
             [r["variables"]["input"] for r in fake.graphql_requests[1:]],
             [
                 {"agentSessionId": i, "content": {"type": "response", "body": body}}
-                for i in ("old-pending", "old-active", "old-awaiting", "old-stale")
+                for i in ("old-pending", "old-active", "old-stale")
             ],
         )
 

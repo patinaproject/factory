@@ -147,10 +147,10 @@ def make_blocked_hook(
                 return
             client = get_client()
             client.create_activity(agent_session, content)
-            close_older_sessions(client, agent_session)
             reply = mention_reply(card, reason, redact, board)
             if reply is not None:
                 client.reply_in_session(agent_session, reply)
+            close_older_sessions(client, agent_session)
         except Exception:
             logger.exception("linear-agent-session: reporting the block of card %s failed", task_id)
 
