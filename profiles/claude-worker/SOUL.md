@@ -117,30 +117,24 @@ process output once it exits, with `wait` or `log`, never only from the `notify`
 message, because the `blocker-order` hook sees tool results and not that message. It prints one JSON line.
 
 - On success the line holds `session_id`, `resumed`, `worktree`, `branch`,
-  `adopted`, `subtype`, `num_turns`, and `result`. `adopted` is null, or it
+  `progress`, `adopted`, `subtype`, `num_turns`, and `result`. `progress` is
+  true when the run added a commit or changed the worktree. `adopted` is null, or it
   names the existing work the unstarted branch was reset to: its `source`
   (`remote_branch` or `takeover_pr`), `ref`, and `head`. Call
   `kanban_heartbeat` with the whole line as the note.
 - When the `result` starts with `Needs input:`, Claude cannot go on without a
   person, and Hermes refuses board changes from Claude. The `blocker-order`
-  hook blocks the card with kind `needs_input` and the whole `result` as the
-  reason, and adds `needs_input_block` to the tool result. Follow its
-  `instruction`, which says to stop. Post no elicitation yourself, as in
-  triage. Skip steps 4 and 5. When the result has no `needs_input_block`, the
-  hook is not loaded: call `kanban_block` yourself with kind `needs_input` and
-  the whole `result` as the reason, then stop. A `wait` result that has
-  `output_cut` holds only the last 2000 characters, so a long result loses its
-  start: call the process tool's `log` action to read the whole line first.
+  hook blocks the card and adds `needs_input_block` to the tool result.
+  Follow its `instruction`. Post no elicitation yourself, as in triage. Skip
+  steps 4 and 5. A `wait` result that has `output_cut` holds only the last
+  2000 characters, so a long result loses its start: call the process tool's
+  `log` action to read the whole line first.
 - A line of only `waiting_on`, a list of card ids, means that cards of the
   issue's blockers are still open, so Claude did not start. The
-  `blocker-order` hook has already handled it and added `blocker_order` to
-  the tool result. Follow its `instruction`. It either says the card now
-  waits for those cards, and you stop, or it says to post one `thought` and
-  run `claude-session` again with `--ignore-blockers`. Keep that flag on every
-  later `claude-session` run of the card. When the result has no
-  `blocker_order`, the hook is not loaded: post an `error` activity that says
-  the `blocker-order` plugin is missing, call `kanban_block` with kind
-  `capability`, and stop.
+  `blocker-order` hook adds `blocker_order` to the tool result. Follow its
+  `instruction`. When it says to run `claude-session` again with
+  `--ignore-blockers`, keep that flag on every later `claude-session` run of
+  the card.
 - A run whose process has exited without a JSON line crashed. Treat it as a
   failure with the exit code and the output's last lines as the message. A
   timeout is never a crash.
@@ -297,9 +291,8 @@ says. Skip steps 4 and 5.
 After each run, read the first line of the result line's `result`:
 
 - `Needs input:` Claude is waiting for people. The `blocker-order` hook has
-  already blocked the card with kind `needs_input` and the whole `result` as
-  the reason: follow the result's `needs_input_block` `instruction`, and
-  call `kanban_block` yourself only when the result has none. The block posts it on
+  already blocked the card: follow the result's `needs_input_block`
+  `instruction`. The block posts it on
   the agent session as the round's one `elicitation`, with the AI-generated
   disclaimer. Never post that elicitation yourself. A reply from any teammate
   resumes the card.
@@ -325,9 +318,8 @@ Never call `kanban_request_review` for a triage card.
 
 Block instead of looping. Block when Claude says it needs a human decision,
 when two runs in a row make no progress and no comment arrived, or when
-`claude-session` keeps failing. A run made progress when it added a commit or
-changed the worktree: compare `git rev-parse HEAD` and `git status --porcelain`
-before and after the run. A failing tool such as `gh` is a blocker of its own;
+`claude-session` keeps failing. Read a run's progress from `progress` in its
+result line. A failing tool such as `gh` is a blocker of its own;
 name it in the block reason.
 
 - A human must answer a question: post an `elicitation` activity with the

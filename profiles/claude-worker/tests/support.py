@@ -52,6 +52,12 @@ if "--settings" in argv:
 with open(options["log"] + ".tmp", "w") as log:
     json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings, "pid": os.getpid()}, log)
 os.rename(options["log"] + ".tmp", options["log"])
+if options.get("work"):
+    import subprocess
+    open("claude-made.txt", "w").write("work\\n")
+    if options["work"] == "commit":
+        subprocess.run(["git", "add", "claude-made.txt"], check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "work"], check=True)
 if options.get("stderr_env"):
     print("token " + settings["content"]["env"][options["stderr_env"]], file=sys.stderr, flush=True)
 if "init" in options:

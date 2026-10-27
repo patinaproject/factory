@@ -39,6 +39,14 @@ if sys.argv[1:4] == ["kanban", "boards", "list"]:
     boards = os.path.join(os.environ["HERMES_HOME"], "installed-boards.json")
     print(open(boards).read() if os.path.exists(boards) else "[]")
     sys.exit()
+if sys.argv[1:3] == ["plugins", "list"]:
+    listed = os.path.join(os.environ["HERMES_HOME"], "installed-plugins.json")
+    if os.path.exists(listed):
+        print(open(listed).read())
+    else:
+        plugins = os.path.join(os.environ["HERMES_HOME"], "plugins")
+        print(json.dumps([{"name": n, "status": "enabled"} for n in sorted(os.listdir(plugins))] if os.path.isdir(plugins) else []))
+    sys.exit()
 key = sys.argv[3]
 config = os.path.join(os.environ["HERMES_HOME"], "installed-config.json")
 if os.path.exists(config) and key in json.load(open(config)):
@@ -135,11 +143,11 @@ REPO_FILES = {
     "profiles/claude-worker/SOUL.md": "soul\n",
     "profiles/claude-worker/config.yaml": "model: repo\n",
     "profiles/claude-worker/scripts/x": "#!/bin/sh\n",
-    "plugins/p1/__init__.py": "plugin\n",
+    "plugins/p1/__init__.py": "# plugin\n",
     "plugins/p1/tests/test_a.py": "test\n",
-    "plugins/factory-uploads/__init__.py": "uploads\n",
-    "plugins/work/__init__.py": "work\n",
-    "plugins/webhook-retry/__init__.py": "retry\n",
+    "plugins/factory-uploads/__init__.py": "# uploads\n",
+    "plugins/work/__init__.py": "# work\n",
+    "plugins/webhook-retry/__init__.py": "# retry\n",
     "templates/render.py": RENDER,
     ALERT_SOURCE: "#!/usr/bin/env python3\nalert\n",
     RETRY_SOURCE: "#!/usr/bin/env python3\nretry\n",
@@ -175,15 +183,15 @@ class CheckInstallTest(unittest.TestCase):
         self.root = self.tmp / "hermes"
         self.worker = self.root / "profiles" / "claude-worker"
         for home in (self.root, self.worker):
-            self.install(home, "plugins/p1/__init__.py", "plugin\n")
+            self.install(home, "plugins/p1/__init__.py", "# plugin\n")
             self.install(home, f"plugins/factory-secret-names/{SECRET_NAMES}", SECRET_NAMES_MANIFEST)
-        self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
+        self.install(self.root, "plugins/factory-uploads/__init__.py", "# uploads\n")
         (self.root / "plugins" / "linear-agent-session").mkdir(parents=True)
         (self.root / "plugins" / "linear-agent-session" / "broker_client.py").symlink_to(
             REPO / "plugins" / "linear-agent-session" / "broker_client.py"
         )
-        self.install(self.root, "plugins/work/__init__.py", "work\n")
-        self.install(self.root, "plugins/webhook-retry/__init__.py", "retry\n")
+        self.install(self.root, "plugins/work/__init__.py", "# work\n")
+        self.install(self.root, "plugins/webhook-retry/__init__.py", "# retry\n")
         self.install(self.worker, "SOUL.md", "soul\n")
         self.install(self.worker, "scripts/x", "#!/bin/sh\n")
         self.install(self.worker, "config.yaml", "model: local\n")
@@ -208,6 +216,7 @@ class CheckInstallTest(unittest.TestCase):
         self.discovery(["authorization_code_with_pkce", "refresh_tokens"])
         self.dashboard(scopes="openid profile email offline_access")
 
+        install_fake_hermes(self.root)
         self.hermes = self.tmp / "bin" / "fake-hermes"
         self.install(self.tmp, "bin/fake-hermes", with_interpreter(FAKE_HERMES))
         os.chmod(self.hermes, 0o755)
@@ -334,7 +343,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(launchd_name, f"{watch.LABEL}.plist")
 
     def test_plugin_difference_names_the_home(self) -> None:
-        self.install(self.worker, "plugins/p1/__init__.py", "old\n")
+        self.install(self.worker, "plugins/p1/__init__.py", "# old\n")
 
         self.assertEqual(
             self.check(),
@@ -351,7 +360,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (0, ""))
 
     def test_a_root_only_plugin_is_required_in_the_root_home_and_compared_there(self) -> None:
-        self.install(self.root, "plugins/factory-uploads/__init__.py", "old\n")
+        self.install(self.root, "plugins/factory-uploads/__init__.py", "# old\n")
         self.assertEqual(
             self.check(),
             (1, f"plugin factory-uploads in {self.root}: __init__.py differs from main at {self.sha}\n"),
@@ -363,14 +372,14 @@ class CheckInstallTest(unittest.TestCase):
         shutil.rmtree(self.root / "plugins" / "work")
         self.assertEqual(self.check(), (1, f"plugin work in {self.root}: not installed\n"))
 
-        self.install(self.root, "plugins/work/__init__.py", "work\n")
-        self.install(self.worker, "plugins/work/__init__.py", "work\n")
+        self.install(self.root, "plugins/work/__init__.py", "# work\n")
+        self.install(self.worker, "plugins/work/__init__.py", "# work\n")
         self.assertEqual(
             self.check(), (1, f"plugin work in {self.worker}: installed, but it runs only in the root home\n")
         )
 
     def test_a_root_only_plugin_installed_in_the_worker_home_is_reported(self) -> None:
-        self.install(self.worker, "plugins/factory-uploads/__init__.py", "uploads\n")
+        self.install(self.worker, "plugins/factory-uploads/__init__.py", "# uploads\n")
 
         self.assertEqual(
             self.check(),
@@ -380,6 +389,69 @@ class CheckInstallTest(unittest.TestCase):
     def test_plugin_tests_are_ignored(self) -> None:
         self.install(self.worker, "plugins/p1/tests/test_a.py", "different\n")
 
+        self.assertEqual(self.check(), (0, ""))
+
+    # The fixture's fake Hermes lists every installed plugin as enabled unless installed-plugins.json says otherwise.
+    def listing(self, home: Path, **statuses: str) -> None:
+        names = sorted(path.name for path in (home / "plugins").iterdir())
+        entries = [{"name": name, "status": statuses.get(name, "enabled")} for name in names if statuses.get(name) != "absent"]
+        self.install(home, "installed-plugins.json", json.dumps(entries))
+
+    def test_a_plugin_that_is_installed_but_not_enabled_is_reported_by_name(self) -> None:
+        self.listing(self.worker, p1="not enabled")
+
+        self.assertEqual(self.check(), (1, (
+            f"plugin status p1 in {self.worker}: is not enabled in hermes plugins list, so its hooks do not run\n"
+        )))
+
+    def test_a_disabled_plugin_is_reported_by_name(self) -> None:
+        self.listing(self.root, p1="disabled")
+
+        self.assertEqual(self.check(), (1, (
+            f"plugin status p1 in {self.root}: is disabled in hermes plugins list, so its hooks do not run\n"
+        )))
+
+    def test_enabled_plugins_are_silent(self) -> None:
+        self.listing(self.root)
+        self.listing(self.worker)
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_plugin_missing_from_the_list_is_reported(self) -> None:
+        self.listing(self.worker, p1="absent")
+
+        self.assertEqual(self.check(), (1, (
+            f"plugin status p1 in {self.worker}: is not in the list in hermes plugins list, so its hooks do not run\n"
+        )))
+
+    def test_a_list_that_is_not_json_gives_one_row_for_the_home(self) -> None:
+        self.install(self.worker, "installed-plugins.json", "no list here")
+
+        self.assertEqual(self.check(), (1, (
+            f"plugin status {self.worker}: cannot run hermes plugins list: "
+            "did not print a JSON list of plugins with a name and status\n"
+        )))
+
+    def test_a_plugin_that_fails_to_import_is_reported_by_name(self) -> None:
+        self.install(self.worker, "plugins/p1/__init__.py", "raise RuntimeError('boom\\nhere')\n")
+
+        code, out = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertIn(f"plugin import p1 in {self.worker}: fails to import: RuntimeError: boom here\n", out)
+        self.assertEqual(out.count("plugin import"), 1)
+
+    def test_homes_that_cannot_import_give_one_row_each(self) -> None:
+        (self.root / "tools" / "facts.json").unlink()
+
+        reason = f"no Hermes Python in {self.root / 'tools' / 'facts.json'}"
+        self.assertEqual(self.check(), (1, (
+            f"plugin import {self.root}: cannot import the plugins: {reason}\n"
+            f"plugin import {self.worker}: cannot import the plugins: {reason}\n"
+        )))
+
+    def test_a_plugin_with_no_code_is_not_imported(self) -> None:
+        self.assertFalse((self.worker / "plugins" / "factory-secret-names" / "__init__.py").exists())
         self.assertEqual(self.check(), (0, ""))
 
     def test_profile_differences(self) -> None:
@@ -1017,7 +1089,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_webhook_retry_installed_in_the_worker_home_is_reported(self) -> None:
-        self.install(self.worker, "plugins/webhook-retry/__init__.py", "retry\n")
+        self.install(self.worker, "plugins/webhook-retry/__init__.py", "# retry\n")
 
         self.assertEqual(
             self.check(),
@@ -1847,27 +1919,34 @@ import fake_dependency
 PLUGIN = REPO / "plugins" / "blocker-order" / "__init__.py"
 
 
+def install_fake_hermes(root: Path) -> Path:
+    """A Hermes checkout, store Python, and environment under `root`. Returns the checkout."""
+    tree = root / "hermes-agent"
+    tools = tree / "tools"
+    tools.mkdir(parents=True)
+    for name, source in (("__init__", ""), ("registry", FAKE_REGISTRY), ("process_registry", ""),
+                         ("terminal_tool", FAKE_TERMINAL_TOOL)):
+        (tools / f"{name}.py").write_text(source)
+    (tools / "registered.json").write_text(json.dumps({"terminal": "terminal", "process_manage": "terminal"}))
+    python = root / "tools" / "python-9" / "bin"
+    python.mkdir(parents=True)
+    (python / "python3").symlink_to(sys.executable)
+    (root / "tools" / "facts.json").write_text(json.dumps({"packages": {"python": {"entry": "python-9"}}}))
+    site = root / "installs" / "key" / "environments" / "env" / "venv" / "lib" / "python9.9" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "fake_dependency.py").write_text("")
+    (root / "installs" / "key" / "facts.json").write_text(
+        json.dumps({"packages": {"venv": {"environment": str(site.parents[2])}}}))
+    return tree
+
+
 class CheckHermesToolsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         self.root = self.tmp / "root"
-        self.tree = self.root / "hermes-agent"
-        tools = self.tree / "tools"
-        tools.mkdir(parents=True)
-        for name, source in (("__init__", ""), ("registry", FAKE_REGISTRY), ("process_registry", ""),
-                             ("terminal_tool", FAKE_TERMINAL_TOOL)):
-            (tools / f"{name}.py").write_text(source)
+        self.tree = install_fake_hermes(self.root)
         self.register({"terminal": "terminal", "process_manage": "terminal", "read_file": "file"})
-        python = self.root / "tools" / "python-9" / "bin"
-        python.mkdir(parents=True)
-        (python / "python3").symlink_to(sys.executable)
-        (self.root / "tools" / "facts.json").write_text(json.dumps({"packages": {"python": {"entry": "python-9"}}}))
-        site = self.root / "installs" / "key" / "environments" / "env" / "venv" / "lib" / "python9.9" / "site-packages"
-        site.mkdir(parents=True)
-        (site / "fake_dependency.py").write_text("")
-        (self.root / "installs" / "key" / "facts.json").write_text(
-            json.dumps({"packages": {"venv": {"environment": str(site.parents[2])}}}))
         self.plugin = self.tmp / "worker" / "plugins" / "blocker-order" / "__init__.py"
         shutil.copytree(PLUGIN.parent, self.plugin.parent, ignore=shutil.ignore_patterns("tests", "__pycache__"))
 
@@ -1938,6 +2017,51 @@ class CheckHermesToolsTest(unittest.TestCase):
         self.plugin.unlink()
 
         self.assertEqual(self.check(), [])
+
+
+class ImportPluginsTest(unittest.TestCase):
+    def run_helper(self, plugins: dict) -> dict:
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, tmp)
+        dirs = []
+        for name, files in plugins.items():
+            for path, text in files.items():
+                (tmp / "plugins" / name / path).parent.mkdir(parents=True, exist_ok=True)
+                (tmp / "plugins" / name / path).write_text(text)
+            dirs.append(str(tmp / "plugins" / name))
+        (tmp / "checkout").mkdir()
+        (tmp / "site").mkdir()
+        (tmp / "site" / "dependency.py").write_text("VALUE = 1\n")
+        proc = subprocess.run(
+            [sys.executable, "-I", "-B", str(SCRIPTS / "import-plugins"), str(tmp / "checkout"), str(tmp / "site"), *dirs],
+            cwd=tmp, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_each_plugin_maps_to_null_or_its_error(self) -> None:
+        result = self.run_helper({
+            "fine": {"__init__.py": "import dependency\n"},
+            "relative": {"__init__.py": "from . import helper\nfrom .helper import VALUE\n", "helper.py": "VALUE = 2\n"},
+            "broken": {"__init__.py": "raise ValueError('no good')\n"},
+            "missing-import": {"__init__.py": "import nothing_here\n"},
+            "broken-submodule": {"__init__.py": "from . import helper\n", "helper.py": "1 / 0\n"},
+            "exits": {"__init__.py": "raise SystemExit(3)\n"},
+        })
+
+        self.assertEqual(result, {
+            "fine": None,
+            "relative": None,
+            "broken": "ValueError: no good",
+            "missing-import": "ModuleNotFoundError: No module named 'nothing_here'",
+            "broken-submodule": "ZeroDivisionError: division by zero",
+            "exits": "SystemExit: 3",
+        })
+
+    def test_register_is_never_called(self) -> None:
+        result = self.run_helper({"p": {"__init__.py": "def register(ctx):\n    raise RuntimeError('called')\n"}})
+
+        self.assertEqual(result, {"p": None})
 
 
 class CheckServicesTest(unittest.TestCase):

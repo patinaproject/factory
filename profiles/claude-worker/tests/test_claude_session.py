@@ -269,6 +269,7 @@ class ClaudeSessionTest(GitFixture):
             "reason": "new",
             "worktree": str(self.worktree),
             "branch": "abc-123-fix",
+            "progress": False,
             "adopted": None,
             "subtype": "success",
             "num_turns": 7,
@@ -1825,6 +1826,28 @@ class ClaudeSessionTest(GitFixture):
             },
         })
         self.assertEqual((report["subtype"], report["num_turns"]), ("success", 7))
+
+    def progress_of(self, work: str | None) -> bool:
+        self.configure_fake_claude(work=work)
+        status, report = self.run_session()
+        self.assertEqual(status, 0)
+        return report["progress"]
+
+    def test_a_run_that_committed_made_progress(self) -> None:
+        self.assertTrue(self.progress_of("commit"))
+
+    def test_a_run_that_only_edited_a_file_made_progress(self) -> None:
+        self.assertTrue(self.progress_of("edit"))
+
+    def test_a_run_that_changed_nothing_made_no_progress(self) -> None:
+        self.assertFalse(self.progress_of(None))
+
+    def test_a_failed_run_that_committed_reports_progress(self) -> None:
+        self.configure_fake_claude(work="commit", subtype="error_during_execution")
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["progress"]), (1, True))
 
     def test_failed_run_still_reports_its_token_counts(self) -> None:
         self.configure_fake_claude(subtype="error_during_execution", output={"modelUsage": {"claude-opus-5-5": {
