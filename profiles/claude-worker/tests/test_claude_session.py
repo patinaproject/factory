@@ -366,7 +366,8 @@ class ClaudeSessionTest(GitFixture):
         playbook = FACTORY / ".agents/skills/patina-mode/playbooks/triage.md"
         for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token",
                                 f"patina-mode's triage playbook at `{playbook}`", "`## Priority rubric`",
-                                "`Priority: <value>`", "Never change the issue's status, assignee, or delegate"):
+                                "`Priority: <value>, set by triage`", "`Priority: none`",
+                                "Never change the issue's status, assignee, or delegate"):
             self.assertIn(triage_contract, system)
         self.assertTrue(playbook.is_absolute() and playbook.is_file())
         for retired_skill in ("`triage` skill", "`grilling`"):

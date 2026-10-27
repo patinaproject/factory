@@ -191,9 +191,9 @@ TRIAGE_RULE = (
     "else. Do not post the questions yourself: the worker posts them on the issue's agent session with the "
     "disclaimer.\n\n"
     "When triage ends, make the first line of your final message `Triage outcome: <role>`, where <role> is "
-    "`ready-for-agent`, `ready-for-human`, or `wontfix` for a recommendation. Make the second line `Priority: <value>` followed by `set by triage` when "
-    "you wrote it, `kept` when a person's choice stands, or `none` when the issue has none, such as a confident "
-    "duplicate. Then add a short summary."
+    "`ready-for-agent`, `ready-for-human`, or `wontfix` for a recommendation. Make the second line "
+    "`Priority: <value>, set by triage` when you wrote it, `Priority: <value>, kept` when a person's choice "
+    "stands, or `Priority: none` when the issue has none, such as a confident duplicate. Then add a short summary."
 )
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{CLOSING_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 TRIAGE_SYSTEM_PROMPT = f"{TRIAGE_RULE}\n\n{LINEAR_RULE}\n\n{STOP_RULE}"
