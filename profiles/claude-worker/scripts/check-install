@@ -53,14 +53,14 @@ and the factory user cannot read it, judged by ownership and mode only, and
 that the gateway runs no broker of its own.
 
 It also checks that Hermes still registers the tools the installed blocker-order plugin watches, so a
-Hermes upgrade that renames one trips the alert. It runs hermes-tool-names with the store Python on the
+Hermes upgrade that renames one is reported. It runs hermes-tool-names with the store Python on the
 checkout and the selected environment's site-packages, with a scratch HERMES_HOME and no bytecode, and
 never through the `hermes` launcher, which can rebuild environments. It prints a row when Hermes cannot be
 imported. HERMES_AGENT_DIR overrides the checkout, which defaults to <root home>/hermes-agent.
 
 It checks that each repository plugin installed in a home is enabled there, from `hermes plugins list
 --user --json`, and imports each installed plugin the way Hermes does with import-plugins, in the same
-store Python, so a plugin Hermes would skip or fail to load trips the alert. Hermes only logs both.
+store Python, so a plugin Hermes would skip or fail to load is reported. Hermes only logs both.
 
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd and broker user checks at
 another file system root and launchctl, for tests.
