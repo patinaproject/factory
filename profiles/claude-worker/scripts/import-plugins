@@ -1,0 +1,39 @@
+"""Import each plugin directory the way Hermes does, and print a JSON object of name to null or an error line.
+
+Run by check-install with Hermes' own Python:
+`python3 -I -B import-plugins <checkout> <site-packages> <plugin dir>...`.
+It puts the checkout and the installed environment's site-packages on sys.path, then loads each directory's
+__init__.py as the package hermes_plugins.<name> under an empty hermes_plugins namespace, which is how Hermes
+loads a directory plugin. It never calls register, so a plugin does nothing but import. HERMES_HOME must name a
+scratch directory.
+"""
+import importlib.util
+import json
+import sys
+import types
+
+sys.dont_write_bytecode = True
+checkout, site_packages, *plugins = sys.argv[1:]
+sys.path[:0] = [checkout, site_packages]
+
+namespace = types.ModuleType("hermes_plugins")
+namespace.__path__ = []
+sys.modules["hermes_plugins"] = namespace
+
+
+def load(directory):
+    name = directory.rstrip("/").rsplit("/", 1)[-1]
+    module_name = f"hermes_plugins.{name}"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            module_name, f"{directory}/__init__.py", submodule_search_locations=[directory]
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    except BaseException as error:
+        return f"{type(error).__name__}: {' '.join(str(error).split())}"
+    return None
+
+
+print(json.dumps({directory.rstrip("/").rsplit("/", 1)[-1]: load(directory) for directory in plugins}))

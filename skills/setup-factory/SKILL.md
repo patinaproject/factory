@@ -445,7 +445,8 @@ HERMES_HOME=<worker> python3 <worker>/scripts/check-install
 Read only its `plugin <name> in <home>` lines here. Parts 10 and 11 handle
 routes. Skip a plugin's install only when it is listed, enabled, and absent
 from those lines. Reinstall a plugin it names with the install command below
-plus `--force`.
+plus `--force`. Its `plugin status` lines name an installed plugin that Hermes
+does not enable, and its `plugin import` lines name one that fails to import.
 
 **Install** each missing plugin into each home:
 

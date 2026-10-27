@@ -58,6 +58,10 @@ checkout and the selected environment's site-packages, with a scratch HERMES_HOM
 never through the `hermes` launcher, which can rebuild environments. It prints a row when Hermes cannot be
 imported. HERMES_AGENT_DIR overrides the checkout, which defaults to <root home>/hermes-agent.
 
+It checks that each repository plugin installed in a home is enabled there, from `hermes plugins list
+--user --json`, and imports each installed plugin the way Hermes does with import-plugins, in the same
+store Python, so a plugin Hermes would skip or fail to load trips the alert. Hermes only logs both.
+
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd and broker user checks at
 another file system root and launchctl, for tests.
 """
@@ -1345,6 +1349,7 @@ def root_mcp_drifts(root: Path, hermes: str) -> list:
 
 HERMES_TOOLS_SECONDS = 60
 HERMES_TOOL_NAMES = Path(__file__).resolve().parent / "hermes-tool-names"
+IMPORT_PLUGINS = Path(__file__).resolve().parent / "import-plugins"
 BLOCKER_ORDER = "plugins/blocker-order/__init__.py"
 
 
@@ -1367,8 +1372,8 @@ def hermes_python(root: Path) -> tuple:
     return python, site[0]
 
 
-def hermes_tool_names(root: Path) -> list:
-    """The terminal toolset's registered names, read from the installed Hermes without writing to it.
+def run_in_hermes(root: Path, script: Path, *args: str):
+    """The JSON that `script` prints when run with the installed Hermes importable, read without writing to Hermes.
 
     Runs the store Python on the checkout and the selected environment's site-packages directly, never
     through the `hermes` launcher, which leases and can rebuild environments. HERMES_HOME is a scratch
@@ -1381,7 +1386,7 @@ def hermes_tool_names(root: Path) -> list:
     with tempfile.TemporaryDirectory() as scratch:
         try:
             proc = subprocess.run(
-                [str(python), "-I", "-B", str(HERMES_TOOL_NAMES), str(checkout), str(site)],
+                [str(python), "-I", "-B", str(script), str(checkout), str(site), *args],
                 env={"PATH": os.environ.get("PATH", ""), "HERMES_HOME": os.path.join(scratch, "home"), "PYTHONDONTWRITEBYTECODE": "1"},
                 cwd=scratch, capture_output=True, text=True, timeout=HERMES_TOOLS_SECONDS,
             )
@@ -1391,11 +1396,15 @@ def hermes_tool_names(root: Path) -> list:
         lines = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
         raise Refusal(lines[-1] if lines else f"exited {proc.returncode}")
     try:
-        names = json.loads(proc.stdout)
+        return json.loads(proc.stdout)
     except ValueError:
-        names = None
+        raise Refusal(f"exited {proc.returncode} without JSON") from None
+
+
+def hermes_tool_names(root: Path) -> list:
+    names = run_in_hermes(root, HERMES_TOOL_NAMES)
     if not isinstance(names, list):
-        raise Refusal(f"exited {proc.returncode} without a list of names")
+        raise Refusal("exited 0 without a list of names")
     return names
 
 
@@ -1442,6 +1451,67 @@ def check_hermes_tools(root: Path, plugin: Path) -> list:
                 "hermes tool", "blocker-order",
                 f"Hermes registers no {name}, which the plugin watches; {have} (REQUIRED_TOOLS in {BLOCKER_ORDER})",
             ))
+    return drifts
+
+
+def installed_plugins(commit: Commit, homes: list) -> list:
+    """The (home, name) pairs of repository plugins installed where check_plugins wants them."""
+    names = sorted({path.split("/")[1] for path in commit.files("plugins")})
+    return [
+        (home, name) for name in names for home in (homes[:1] if name in ROOT_ONLY_PLUGINS else homes)
+        if (home / "plugins" / name).is_dir()
+    ]
+
+
+def plugin_statuses(home: Path, hermes: str) -> dict:
+    """Plugin name to Hermes' status ("enabled", "disabled", "not enabled") in `home`. Imports no plugin."""
+    proc = subprocess.run(
+        [hermes, "plugins", "list", "--user", "--json"], env={**os.environ, "HERMES_HOME": str(home)},
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise Refusal(proc.stderr.strip() or f"exited {proc.returncode}")
+    try:
+        return {entry["name"]: entry["status"] for entry in json.loads(proc.stdout)}
+    except (ValueError, TypeError, KeyError):
+        raise Refusal("did not print a JSON list of plugins with a name and status") from None
+
+
+def check_plugin_status(commit: Commit, homes: list, hermes: str) -> list:
+    """Alert when a repository plugin is installed in a home but Hermes does not enable it there."""
+    drifts = []
+    pairs = installed_plugins(commit, homes)
+    for home in sorted({home for home, _ in pairs}):
+        try:
+            statuses = plugin_statuses(home, hermes)
+        except Refusal as error:
+            drifts.append(Drift("plugin status", str(home), f"cannot run hermes plugins list: {error}"))
+            continue
+        for name in (name for h, name in pairs if h == home):
+            status = statuses.get(name)
+            if status != "enabled":
+                shown = f"is {status}" if status else "is not in the list"
+                drifts.append(Drift("plugin status", f"{name} in {home}", f"{shown} in hermes plugins list, so its hooks do not run"))
+    return drifts
+
+
+def check_plugin_imports(commit: Commit, homes: list, root: Path) -> list:
+    """Alert when an installed repository plugin fails to import, which Hermes only logs."""
+    drifts = []
+    pairs = installed_plugins(commit, homes)
+    for home in sorted({home for home, _ in pairs}):
+        names = [name for h, name in pairs if h == home and (home / "plugins" / name / "__init__.py").is_file()]
+        try:
+            errors = run_in_hermes(root, IMPORT_PLUGINS, *(str(home / "plugins" / name) for name in names))
+            if not isinstance(errors, dict):
+                raise Refusal("exited 0 without a JSON object")
+        except Refusal as error:
+            drifts.append(Drift("plugin import", str(home), f"cannot import the plugins: {error}"))
+            continue
+        drifts.extend(
+            Drift("plugin import", f"{name} in {home}", f"fails to import: {error}")
+            for name, error in sorted(errors.items()) if error
+        )
     return drifts
 
 
@@ -1524,6 +1594,8 @@ def main() -> int:
             *check_mcp_servers(settings, worker),
             *check_root_mcp_servers(root, hermes),
             *check_hermes_tools(root, worker / "plugins" / "blocker-order" / "__init__.py"),
+            *check_plugin_status(commit, [root, worker], hermes),
+            *check_plugin_imports(commit, [root, worker], root),
         ]
         if sys.platform == "darwin":
             drifts.extend(check_services(launchd_root, launchctl))

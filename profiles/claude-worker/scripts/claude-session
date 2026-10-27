@@ -256,6 +256,11 @@ def git(cwd: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
+def worktree_state(worktree: Path) -> tuple[str, str]:
+    """The commit and the uncommitted changes, so a run's progress is whether either moved."""
+    return git(worktree, "rev-parse", "HEAD"), git(worktree, "status", "--porcelain")
+
+
 def takeover_pull_ref(takeover_pr: str, repo: str) -> str:
     match = PULL_URL.match(takeover_pr)
     if not match or match.group(1).lower() != repo.lower():
@@ -1145,11 +1150,13 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         command += ["--settings", str(settings_path)]
         trust_checkout(Path(repo["path"]).resolve())
         offset = plan.previous.stat().st_size if plan.resumed else 0
+        before = worktree_state(worktree)
         try:
             write_private(settings_path, claude_settings(transport, api_key, settings_path, triage))
             output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
+        progress = worktree_state(worktree) != before
         if output is not None:
             seen_path.write_text(json.dumps([*seen, *map(comment_key, comments)]))
         superseded = links = None
@@ -1163,7 +1170,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
 
     session = result_line.Session(
         session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
-        adopted=adopted._asdict() if adopted else None, superseded=superseded, issue_links=links,
+        progress=progress, adopted=adopted._asdict() if adopted else None, superseded=superseded, issue_links=links,
         triage_documents=documents,
     )
     if output is None:
