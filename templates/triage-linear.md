@@ -223,9 +223,13 @@ Actions `create_card`, `foreign_cards`, and `reuse_card`, and the `then` of
 ## Prompt
 
 Actions `card_reply`, `triage_card_reply`, and `answer_reply`: a human replied
-in the agent session. Follow "Requested issue change" first, then the steps for
-the action unless it stops. A null `reply` means the reply arrived without its
-text, which the steps below handle.
+in the agent session. A null `reply` means the reply arrived without its text,
+which the steps below handle.
+
+Every `prompted` event that is not a stop is a reply, whatever its `action`, so
+follow "Requested issue change" first for each of them, including the actions
+in "Implementation card" and "Delegation gate". Then follow the steps for the
+action unless it stops.
 
 ### `answer_reply`
 
@@ -346,8 +350,12 @@ their cards are. A reply from a bot or an integration changes nothing.
    instead. Otherwise post one `response` that names the target issue and
    what changed: its title, labels, and status from the result, and a short
    summary of a new description.
-8. Stop when the reply asks for nothing but the change. Otherwise handle the
-   `action` for the rest of the reply.
+8. Stop when the reply asks for nothing but the change. Also stop when the
+   change touched this issue's labels and the `action` is `create_card`,
+   `foreign_cards`, or a gate action: the intent read the labels before the
+   change, and the label change sends an `Issue` event that applies the gate
+   again with the new labels. Otherwise handle the `action` for the rest of
+   the reply.
 
 ## Stop
 

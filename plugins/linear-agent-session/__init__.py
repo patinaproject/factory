@@ -241,11 +241,16 @@ def make_dispatch_hook(
         logger.info("linear-agent-session: %s; no triage turn", verdict.reason)
         return {"action": "skip", "reason": verdict.reason}
 
+    def compute_twice(payload: Any) -> triage_intent.Intent:
+        """An `error` intent ends the turn, and an `Issue` event has no session to say so on, so one failed read gets a second try."""
+        intent = compute_intent(payload)
+        return compute_intent(payload) if intent.action == "error" else intent
+
     async def prepend_intent(event: Any) -> dict[str, str]:
         try:
             loop = asyncio.get_running_loop()
             intent = await asyncio.wait_for(
-                loop.run_in_executor(intent_pool, compute_intent, event.raw_message), timeout=TRIAGE_INTENT_TIMEOUT_SECONDS
+                loop.run_in_executor(intent_pool, compute_twice, event.raw_message), timeout=TRIAGE_INTENT_TIMEOUT_SECONDS
             )
         except Exception as failure:
             message = (

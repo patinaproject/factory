@@ -238,6 +238,18 @@ class IntentHookTest(unittest.TestCase):
 
         self.assertEqual(self.run_intent_hook(reply_event(f"{LUKE} what do you think?"), compute), SKIP_TEAMMATE)
 
+    def test_an_error_intent_is_computed_once_more(self):
+        intents = [plugin.triage_intent.error_intent("URLError: timed out"), plugin.triage_intent.Intent(action="issue_closed")]
+        calls = []
+
+        def compute(payload):
+            calls.append(payload)
+            return intents[len(calls) - 1]
+
+        result = self.run_intent_hook(event(session_event("created")), compute)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('"action": "issue_closed"', result["text"])
+
     def test_a_slow_intent_becomes_the_error_block_not_a_dropped_turn(self):
         def compute(_):
             time.sleep(1.0)

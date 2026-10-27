@@ -275,14 +275,6 @@ class LinearPayloadTest(unittest.TestCase):
         self.assertIn("- Activity id: 00000000-0000-4000-8000-0000000000c1\n", prompt)
 
 
-
-
-
-
-
-
-
-
 class TriageIntentContractTest(unittest.TestCase):
     """`triage_intent.ACTIONS` is the code's list of what a turn can be, and the prompt must handle each one."""
 
@@ -414,10 +406,6 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertNotIn("--completion-contract", create)
         self.assertIn("--idempotency-key 'linear-triage:<issue id>'", create)
         self.assertIn("card: triage\n", create)
-
-
-
-
 
     def test_prompts_keep_only_hermes_placeholders(self):
         for name, prompt in self.prompts.items():
