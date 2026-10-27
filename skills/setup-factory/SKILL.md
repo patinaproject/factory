@@ -1151,8 +1151,7 @@ approval. `hermes cron list` for the default home shows none of the worker's
 jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`, and
 `refresh-gh-app-login`, and `dispatch-triage`.
 A copy there runs without the worker's scripts and settings, so remove it the
-same way. The default home holds two jobs, `check-install` and
-`retry-failed-webhooks`, described below. A second setup session runs this check before it
+same way. The default home holds one job, `retry-failed-webhooks`, described below. A second setup session runs this check before it
 creates anything.
 
 **Create** the job only when the list has none:
@@ -1219,7 +1218,7 @@ blocked. Create the job when `cron list` has no `reopen-conflicts` job:
 hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null
 ```
 
-**Install drift job.** `check-install` compares the live worker profile, the
+**Install drift check.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
 `origin/HEAD` of the checkout the profile was installed from. It also checks
 that the dashboard's OIDC sign-in can keep a user signed in. It also reports
@@ -1228,47 +1227,22 @@ machine changes this runbook cannot reproduce: a `config.yaml` key from parts
 missing, duplicated, changed, not created by the runbook, or in the wrong
 profile, a cron job that delivers to a platform with no home channel in its
 profile, a cron job whose last run failed or was not delivered, with the first
-line of its error and secrets masked (a failed run of the `check-install` job
-itself is not reported, because that failure is the previous run's report), the
-root home's `scripts/check-install-alert`, `scripts/retry-failed-webhooks`,
-`scripts/watch-gateway`, and `scripts/restart-gateway`
-when one is missing or differs from the repository, that `watch-gateway` has run in the last 15 minutes
+line of its error and secrets masked, the root home's
+`scripts/retry-failed-webhooks`, `scripts/watch-gateway`, and
+`scripts/restart-gateway` when one is missing or differs from the repository,
+that `watch-gateway` has run in the last 15 minutes
 without spending its restart budget, that `<root>/gateway-heartbeat-url` exists with mode `600`, and, on macOS, a
 launchd service from part 7, 12, or 15
 that is not installed, does not run at load, or is not running (the `watch-gateway` job runs
 only every 5 minutes, so it need only be loaded), and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never
 prints a config value. It prints one line per difference and nothing when the
-install is current. It fetches first, so a merge shows up within the hour.
+install is current. It fetches first, so it compares with the newest merge.
 
-Deliver it where the operator reads it: the home channel of the platform from
-part 13, such as `slack`. Only the default (root) profile runs that platform
-and has its home channel. The gateway refuses the platform's credential in a
-second profile, and Hermes drops the output of a job whose profile has no home
-channel for its `--deliver` platform, logging `no delivery target resolved`.
-So this job belongs to the root profile, unlike the other jobs in this part.
-Hermes runs a cron script from the owning profile's own `scripts/` directory,
-so install the wrapper there. It runs the worker's current `check-install` with
-the worker home, so the job never runs a stale copy. On a first install, do
-this after part 13. A root home that has never run a script job has no
-`scripts/` directory, so create it first. Run it from the factory checkout:
-
-```sh
-install -d <root>/scripts
-install -m 0644 skills/setup-factory/scripts/check-install-alert <root>/scripts/check-install-alert
-```
-
-Then create the job when `hermes cron list` for the root profile has no
-`check-install` job:
-
-```sh
-hermes cron create "every 1h" --name check-install --no-agent --script check-install-alert --deliver <platform> </dev/null
-```
-
-The job exits non-zero while drift exists, so its failure notice goes to the
-same platform. A factory that created this job in the worker profile earlier
-removes that copy with `hermes -p claude-worker cron remove <job id>`, with the
-operator's approval, after the root job exists.
+It runs in part 5 and in every "Deploy a merged factory change", not on a
+schedule. A factory that created an hourly `check-install` cron job earlier
+sees it reported as a job the runbook does not create. Remove it with
+`hermes cron remove <job id>`, and remove `<root>/scripts/check-install-alert`.
 
 **Webhook retry job.** The `webhook-retry` plugin from part 5 keeps a queue in
 `<root>/webhook-retry/`. A delivery whose triage turn fails on a usage limit
@@ -1278,11 +1252,17 @@ Before it reruns a Linear `Issue` update, it runs the `triage-exit` command of
 the `linear-agent-session` plugin, which applies the dispatch hook's check. When
 that command archived the triage card or left a running one to its worker, the
 delivery is done without a turn. It prints a line only when something happened,
-so Hermes delivers nothing on a quiet run. It belongs to the root profile for the same reason as
-`check-install`. Install the wrapper and create the job when `hermes cron list`
+so Hermes delivers nothing on a quiet run. It belongs to the root profile,
+unlike the other jobs in this part, because only that profile runs the chat
+platform from part 13 and has its home channel. Hermes drops the output of a
+job whose profile has no home channel for its `--deliver` platform, and runs a
+cron script from the owning profile's own `scripts/` directory. A root home
+that has never run a script job has no `scripts/` directory, so create it
+first. Install the wrapper and create the job when `hermes cron list`
 for the root profile has no `retry-failed-webhooks` job:
 
 ```sh
+install -d <root>/scripts
 install -m 0644 skills/setup-factory/scripts/retry-failed-webhooks <root>/scripts/retry-failed-webhooks
 hermes cron create "every 10m" --name retry-failed-webhooks --no-agent --script retry-failed-webhooks --deliver <platform> </dev/null
 ```
@@ -1298,9 +1278,9 @@ never run again, because its turn may already have changed a card.
 **Gateway watch.** Hermes reads the factory's secrets only when the gateway
 starts. When the secret source fails then, for example while the network is
 not up after a reboot, the gateway still serves, but every webhook route signs
-with its literal `${NAME}` reference and the upload broker holds no token. The
-`check-install` alert cannot report it, because the chat platform's token comes
-from the same failed source. `watch-gateway` is a launchd job outside the
+with its literal `${NAME}` reference and the upload broker holds no token. A chat
+alert cannot report it, because the chat platform's token comes from the same
+failed source. `watch-gateway` is a launchd job outside the
 gateway. It runs every 5 minutes, never calls the secret source, and reads no
 secret. It reads one non-secret value, the Linear route's `webhook_route` name,
 from `<root>/config.yaml`. It sends each route a delivery signed with the
@@ -1944,8 +1924,7 @@ Hermes process starts. The new helper also writes
      [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
      or allow the `refresh_tokens` grant on the `saas` Access application when
      the line names the issuer. Then restart the dashboard service.
-   - A `script <root>/scripts/check-install-alert` or
-     `<root>/scripts/retry-failed-webhooks` line: install the wrapper again
+   - A `script <root>/scripts/retry-failed-webhooks` line: install the wrapper again
      with the part 12 `install` commands, which create `<root>/scripts` first.
    - A `script <root>/scripts/watch-gateway` or
      `<root>/scripts/restart-gateway` line, a `service gateway watch` line, or
@@ -1958,10 +1937,8 @@ Hermes process starts. The new helper also writes
      profile as in part 12.
    - A `cron job dispatch-triage` line: after the profile update, create the
      job with the part 12 `cron create` command.
-   - A `cron job check-install` line: the job is missing, in the wrong
-     profile, or delivers to a platform with no home channel. Create it in the
-     root profile as in part 12, and remove a leftover copy in the worker
-     profile. Set the platform's home channel in the root home as in part 13.
+   - A `cron job check-install` line that says the job is not one the setup
+     runbook creates: remove it as in part 12's "Install drift check".
    - A `config`, `cron job`, or `service` line: the machine differs from what
      the named part produces. If the runbook is right, run that part again.
      If the machine is right, change the part and its row in `check-install`
