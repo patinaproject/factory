@@ -77,6 +77,23 @@ def session_update_ok():
     return 200, {"data": {"agentSessionUpdate": {"success": True}}}
 
 
+LIVE_SESSION_URL = "https://linear.app/example/agent-session/live"
+
+
+def sessions_ok(others=()):
+    nodes = [{"id": "live", "status": "active", "createdAt": "2026-10-27T10:00:00.000Z", "appUser": {"id": "app-1"}}]
+    nodes += [
+        {"id": i, "status": status, "createdAt": created, "appUser": {"id": app}} for i, status, created, app in others
+    ]
+    session = {
+        "url": LIVE_SESSION_URL,
+        "createdAt": "2026-10-27T10:00:00.000Z",
+        "appUser": {"id": "app-1"},
+        "issue": {"agentSessions": {"nodes": nodes}},
+    }
+    return 200, {"data": {"agentSession": session}}
+
+
 BUSY = {"ok": False, "state": "busy", "message": "The upload broker is busy. Try again in a moment."}
 
 

@@ -9,7 +9,17 @@ import unittest
 
 from unittest import mock
 
-from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin, session_update_ok
+from tests import (
+    BUSY,
+    LIVE_SESSION_URL,
+    FakeBroker,
+    FakeLinear,
+    activity_ok,
+    linear_token,
+    load_plugin,
+    session_update_ok,
+    sessions_ok,
+)
 
 plugin = load_plugin()
 linear = plugin.linear
@@ -32,7 +42,8 @@ def make_client(fake, clock=None, token_cache_path=None):
 
 class ActivityTest(unittest.TestCase):
     def post(self, args):
-        fake = FakeLinear([activity_ok("activity-42"), session_update_ok()])
+        updates = [session_update_ok()] if args.get("external_urls") else []
+        fake = FakeLinear([activity_ok("activity-42"), *updates, sessions_ok()])
         output = json.loads(tools.run_activity(lambda: make_client(fake), args))
         return fake, output
 
@@ -40,7 +51,7 @@ class ActivityTest(unittest.TestCase):
         for activity_type in ("thought", "response", "elicitation", "error"):
             with self.subTest(activity_type):
                 fake, output = self.post({"agent_session_id": "session-1", "type": activity_type, "body": "Hello"})
-                self.assertEqual(output, {"ok": True, "agent_activity_id": "activity-42"})
+                self.assertEqual(output, {"ok": True, "agent_activity_id": "activity-42", "closed_sessions": []})
                 self.assertEqual(
                     fake.graphql_requests[0]["variables"],
                     {"input": {"agentSessionId": "session-1", "content": {"type": activity_type, "body": "Hello"}}},
@@ -79,6 +90,58 @@ class ActivityTest(unittest.TestCase):
         update = fake.graphql_requests[1]
         self.assertIn("agentSessionUpdate(id: $id, input: $input)", update["query"])
         self.assertEqual(update["variables"], {"id": "session-1", "input": {"externalUrls": urls}})
+
+    def test_older_open_sessions_of_the_app_are_closed_with_a_link_to_the_live_one(self):
+        old = "2026-10-27T09:00:00.000Z"
+        new = "2026-10-27T11:00:00.000Z"
+        others = [
+            ("old-pending", "pending", old, "app-1"),
+            ("old-active", "active", old, "app-1"),
+            ("old-awaiting", "awaitingInput", old, "app-1"),
+            ("old-stale", "stale", old, "app-1"),
+            ("old-complete", "complete", old, "app-1"),
+            ("old-error", "error", old, "app-1"),
+            ("old-other-app", "active", old, "app-2"),
+            ("newer", "active", new, "app-1"),
+        ]
+        fake = FakeLinear([sessions_ok(others)] + [activity_ok()] * 3)
+        closed = make_client(fake).close_older_sessions("live")
+        self.assertEqual(closed, ["old-pending", "old-active", "old-stale"])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "live"})
+        body = f"Work on this issue continues in [this session]({LIVE_SESSION_URL})."
+        self.assertEqual(
+            [r["variables"]["input"] for r in fake.graphql_requests[1:]],
+            [
+                {"agentSessionId": i, "content": {"type": "response", "body": body}}
+                for i in ("old-pending", "old-active", "old-stale")
+            ],
+        )
+
+    def test_a_session_with_no_older_siblings_posts_nothing(self):
+        fake = FakeLinear([sessions_ok()])
+        self.assertEqual(make_client(fake).close_older_sessions("live"), [])
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_a_posted_activity_reports_the_sessions_it_closed(self):
+        others = [("old", "active", "2026-10-27T09:00:00.000Z", "app-1")]
+        fake = FakeLinear([activity_ok("activity-42"), sessions_ok(others), activity_ok("closing")])
+        output = json.loads(
+            tools.run_activity(lambda: make_client(fake), {"agent_session_id": "live", "type": "thought", "body": "Hi"})
+        )
+        self.assertEqual(output, {"ok": True, "agent_activity_id": "activity-42", "closed_sessions": ["old"]})
+        self.assertEqual(fake.graphql_requests[2]["variables"]["input"]["agentSessionId"], "old")
+
+    def test_an_ephemeral_activity_closes_nothing(self):
+        fake, output = self.post({"agent_session_id": "session-1", "type": "thought", "body": "Hi", "ephemeral": True})
+        self.assertEqual(output, {"ok": True, "agent_activity_id": "activity-42"})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_a_failure_closing_older_sessions_never_fails_the_post(self):
+        fake = FakeLinear([activity_ok("activity-42"), (200, {"errors": [{"message": "boom"}], "data": None})])
+        output = json.loads(
+            tools.run_activity(lambda: make_client(fake), {"agent_session_id": "live", "type": "thought", "body": "Hi"})
+        )
+        self.assertEqual(output, {"ok": True, "agent_activity_id": "activity-42", "close_error": "LinearError"})
 
     def test_reply_in_session_comments_in_the_session_thread(self):
         thread = (200, {"data": {"agentSession": {"comment": {"id": "comment-1"}, "issue": {"id": "issue-1"}}}})

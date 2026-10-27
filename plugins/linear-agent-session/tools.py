@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Callable, Optional
 
 from . import github_issue
 from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, LinearClient, LinearError, activity_content
+
+logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[], LinearClient]
 
@@ -208,6 +211,12 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
         if args.get("external_urls"):
             client.set_external_urls(session_id, args["external_urls"])
             result["external_urls"] = [u["url"] for u in args["external_urls"]]
+        if not args.get("ephemeral"):
+            try:
+                result["closed_sessions"] = client.close_older_sessions(session_id)
+            except Exception as error:
+                logger.warning("linear-agent-session: closing older sessions failed: %s", type(error).__name__)
+                result["close_error"] = type(error).__name__
         return result
 
     return _tool_result_or_error(run)

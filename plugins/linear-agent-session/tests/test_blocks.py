@@ -29,6 +29,8 @@ class RecordingClient:
     def __init__(self, error=None, delay=0.0):
         self.calls = []
         self.replies = []
+        self.closed_for = []
+        self.close_error = None
         self.error = error
         self.delay = delay
 
@@ -38,6 +40,12 @@ class RecordingClient:
             raise self.error
         self.calls.append((agent_session_id, content))
         return "activity-1"
+
+    def close_older_sessions(self, agent_session_id):
+        if self.close_error:
+            raise self.close_error
+        self.closed_for.append(agent_session_id)
+        return []
 
     def reply_in_session(self, agent_session_id, body):
         self.replies.append((agent_session_id, body))
@@ -64,6 +72,16 @@ class ReportedBlockTest(unittest.TestCase):
                 "so Hermes stopped retrying it.\n\nReason: which branch should I use\n\nReply here to resume it.",
             },
         )
+
+    def test_a_reported_block_closes_the_sessions_older_than_its_own(self):
+        client, _ = fire("blocked", "needs_input")
+        self.assertEqual(client.closed_for, ["session-1"])
+
+    def test_a_failure_closing_older_sessions_does_not_lose_the_report(self):
+        client = RecordingClient()
+        client.close_error = RuntimeError("boom")
+        client, _ = fire("blocked", "needs_input", client=client)
+        self.assertEqual(len(client.calls), 1)
 
     def test_a_transient_card_parked_in_triage_still_posts(self):
         client, _ = fire("triage", "transient")
