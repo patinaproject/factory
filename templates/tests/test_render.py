@@ -17,6 +17,8 @@ from unittest import mock
 _spec = importlib.util.spec_from_file_location("render", Path(__file__).resolve().parent.parent / "render.py")
 render = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(render)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "profiles" / "claude-worker" / "scripts"))
+import card_transition  # noqa: E402
 
 SETTINGS = {
     "app_user_id": "00000000-0000-4000-8000-000000000001",
@@ -380,37 +382,11 @@ class PromptSubstitutionTest(unittest.TestCase):
             with self.subTest(route=name):
                 self.assertEqual(prompt.count(section), 1)
 
-    def test_the_resume_section_runs_the_kanban_commands_in_order(self):
-        commands = [
-            "hermes kanban show <task id> --json",
-            "hermes kanban assign <task id> none",
-            "hermes kanban specify <task id>",
-            "hermes kanban edit <task id> --title",
-            "hermes kanban assign <task id> claude-worker",
-        ]
-        section = render.triage_resume_section()
-        positions = [section.rindex(command) for command in commands]
-        self.assertEqual(positions, sorted(positions))
-        for name, prompt in self.prompts.items():
-            with self.subTest(route=name):
-                self.assertIn(section, prompt)
-
     def test_both_triage_prompts_carry_the_one_unblock_section(self):
         section = render.triage_unblock_section()
         for name, prompt in self.prompts.items():
             with self.subTest(route=name):
                 self.assertEqual(prompt.count(section), 1)
-
-    def test_the_unblock_section_runs_the_kanban_commands_in_order(self):
-        commands = [
-            "hermes kanban unblock <task id>",
-            "hermes kanban request-review <task id>",
-            "hermes kanban reopen-review <task id> --reason",
-        ]
-        section = render.triage_unblock_section().split("When one exists", 1)[1]
-        positions = [section.index(command) for command in commands]
-        self.assertEqual(positions, sorted(positions))
-        self.assertEqual(len(set(positions)), len(commands))
 
     def test_the_github_prompt_unblocks_a_blocked_card_through_the_shared_section(self):
         prompt = self.prompts["github"]
@@ -451,11 +427,6 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertNotIn("unblock", approval_rule)
         self.assertNotIn("reopen-review", approval_rule)
 
-    def test_the_linear_prompt_unblocks_through_the_shared_section_with_its_own_reason(self):
-        prompt = self.prompts["linear"]
-        self.assertIn("resumed from Linear; see the card comments", prompt)
-        self.assertEqual(prompt.count("hermes kanban request-review <task id>"), 1)
-
     def test_only_the_linear_prompt_carries_the_triage_inbox_and_delegation_gate_once(self):
         for section in (render.triage_inbox_section(render.validate(SETTINGS)), render.delegation_gate_section()):
             self.assertEqual(self.prompts["linear"].count(section), 1)
@@ -489,6 +460,16 @@ class PromptSubstitutionTest(unittest.TestCase):
         change = " ".join(self.prompts["linear"][self.prompts["linear"].index("## Issue change") :].split())
         self.assertLess(change.index("the previous labels above"), change.index("in the last five minutes"))
 
+    def test_a_reply_asking_for_an_issue_change_is_applied_before_any_card_step(self):
+        prompt = self.prompts["linear"]
+        reply = prompt[prompt.index("## Prompt") : prompt.index("## Requested issue change")]
+        self.assertLess(reply.index('Follow "Requested issue change"'), reply.index("\n1. "))
+        change = prompt[prompt.index("## Requested issue change") : prompt.index("## Triage card reply")]
+        self.assertIn("`linear_issue_edit`", change)
+        self.assertIn("`linear_issue_search`", change)
+        self.assertIn("`github_issue_edit`", change)
+        self.assertNotIn("hermes kanban", change)
+
     def test_the_gate_answers_ready_for_human_and_unready_issues_without_a_card(self):
         gate = render.delegation_gate_section()
         rules = [gate[gate.index(f"\n{n}. ") : gate.index(f"\n{n + 1}. ") if n < 3 else len(gate)] for n in (1, 2, 3)]
@@ -512,246 +493,62 @@ class PromptSubstitutionTest(unittest.TestCase):
 
 
 class MergedCardTest(unittest.TestCase):
-    """The merged-pull-request rule is machine input to the triage agent, so its commands and their order are a contract."""
-
     def setUp(self):
         routes = render.build_routes(SETTINGS)
         self.section = render.triage_merged_section()
         self.github = routes["github"]["prompt"]
         self.linear = routes["linear"]["prompt"]
 
-    def bullet(self, status: str) -> str:
-        match = re.search(rf"^- `{status}`.*?(?=^- |\Z)", self.section, re.M | re.S)
-        self.assertIsNotNone(match, f"no rule for a {status} card")
-        return match.group(0)
-
-    def positions(self, text: str, commands: list) -> list:
-        for command in commands:
-            self.assertIn(command, text)
-        return [text.index(command) for command in commands]
-
     def test_only_the_github_prompt_carries_the_section_once(self):
         self.assertEqual(self.github.count(self.section), 1)
         self.assertNotIn(self.section, self.linear)
-        self.assertNotRegex(self.github, r"<<[a-z_]+>>")
 
-    def test_the_merged_event_hands_every_status_to_the_section(self):
-        self.assertRegex(self.github, r"`pull_request` action `closed` with merged `True`, complete the card as\s+\"Complete a card whose pull request merged\"")
-        self.assertIn("merged `True`", self.section.split("\n\n")[1])
-        self.assertIn("is not a merge", self.section)
-
-    def test_each_status_has_one_rule(self):
-        statuses = set(re.findall(r"^- `([a-z]+)`", self.section, re.M))
-        self.assertEqual(statuses, {"running", "review", "todo", "triage"})
-        self.assertRegex(self.bullet("review"), r"`review`, `blocked`, or `ready`")
-
-    def test_a_running_card_is_left_to_its_worker(self):
-        rule = self.bullet("running")
-        self.assertNotIn("kanban_complete", rule)
-        self.assertNotIn("hermes kanban complete", rule)
-        self.assertNotIn("completion call", rule)
-        self.assertIn("`running`: do nothing more.", rule)
-        self.assertIn("Never complete, reclaim, or force a running card.", rule)
-
-    def test_review_blocked_and_ready_cards_run_no_command_before_completion(self):
-        rule = self.bullet("review")
-        self.assertIn("completion call", rule)
-        self.assertNotIn("hermes kanban", rule)
-
-    def test_a_todo_card_is_promoted_before_it_is_completed(self):
-        rule = self.bullet("todo")
-        positions = self.positions(rule, ["hermes kanban promote <task id> pull request merged", "completion call"])
-        self.assertEqual(positions, sorted(positions))
-
-    def test_a_triage_card_runs_the_unpark_commands_in_order_then_completes(self):
-        rule = self.bullet("triage")
-        commands = [
-            "hermes kanban show <task id> --json",
-            "hermes kanban assign <task id> none",
-            "hermes kanban specify <task id>",
-            "hermes kanban edit <task id> --title",
-            "hermes kanban promote <task id> pull request merged",
-            "Make the completion call.",
-        ]
-        positions = [rule.index(command) for command in commands]
-        self.assertEqual(positions, sorted(positions))
-        self.assertNotIn(
-            "hermes kanban assign <task id> claude-worker", rule[rule.index("Make the completion call.") :]
-        )
-
-    def completion_call(self) -> str:
-        return self.section[self.section.index("The completion call is") :].split("\n\n")[0]
-
-    def failing_checks(self) -> str:
-        return self.section[self.section.index("### A refused merge") :]
-
-    def test_the_completion_call_names_the_tool_and_its_arguments(self):
-        call = self.completion_call()
-        for needle in ("kanban_complete", "`task_id`", "`summary`", "`published_pr`", "linear_agent_activity", "`Pull request`"):
-            self.assertIn(needle, call)
-        self.assertNotIn("claude-worker", call)
-
-    def test_a_card_is_reassigned_to_the_worker_only_when_specify_fails(self):
-        rule = self.bullet("triage")
-        reassign = "hermes kanban assign <task id> claude-worker"
-        self.assertEqual(rule.count(reassign), 1)
-        specify = rule[rule.index("hermes kanban specify <task id>") :].split("\n  4. ")[0]
-        self.assertIn(f"If it fails, run\n     `{reassign}`", specify)
-        self.assertNotIn(reassign, self.section[self.section.index("  4. ") :])
-
-    def test_a_refused_promote_or_completion_leaves_the_card_unassigned(self):
-        rule = self.bullet("triage")
-        promote = rule[rule.index("  5. ") : rule.index("  6. ")]
-        self.assertIn("comment the refusal with the pull request URL and stop. Leave the card\n     unassigned", promote)
-        self.assertNotIn("claude-worker", promote)
-        call = self.completion_call()
-        self.assertIn("Otherwise comment\nthe refusal with the pull request URL and stop.", call)
-        self.assertIn("Never assign the card after\n`specify` succeeded.", call)
-
-    def test_only_a_failed_acceptance_routes_to_the_failing_checks_rule(self):
-        call = self.completion_call()
-        positions = self.positions(
-            call,
-            [
-                "When it is refused, run\n`gh pr view '<pull request URL>' --json headRefOid`",
-                "`hermes kanban show <task id> --json`",
-                "`pr_acceptance`",
-                "`pr_url` is the pull request URL",
-                "`head_sha` is that `headRefOid`",
-                "`classification` other than `success` or `pending`",
-                '"A refused merge"',
-                "Otherwise comment",
-            ],
-        )
-        self.assertEqual(positions, sorted(positions))
-
-    def test_a_missing_refusal_with_no_checks_routes_to_the_refused_merge_rule(self):
-        call = self.completion_call()
-        positions = self.positions(
-            call,
-            [
-                "`head_sha` is that `headRefOid`",
-                "its own\n`classification` is `missing` and its `checks` is empty",
-                '"A refused merge"',
-                "Otherwise comment",
-            ],
-        )
-        self.assertEqual(positions, sorted(positions))
-
-    def test_a_missing_refusal_skips_the_check_lookup_and_writes_the_marker(self):
-        rule = self.failing_checks()
-        merged = render.merged_checks_command(render.hermes_home())
-        positions = self.positions(
-            rule,
-            [
-                "own `classification` is `missing` and its `checks` is empty",
-                "Skip the check lookup below and go to step 1.",
-                f"{merged} '<pull request URL>'",
-                "1. Comment on the card",
-                "`Merge refused by Hermes: the base branch has no required checks.`",
-                "`linear_issue`",
-                "merged, but its base branch has no required checks",
-            ],
-        )
-        self.assertEqual(positions, sorted(positions))
-
-    def test_the_rule_sorts_the_refused_checks_before_it_writes_anything(self):
-        rule = self.failing_checks()
-        merged = render.merged_checks_command(render.hermes_home())
-        positions = self.positions(
-            rule,
-            [f"{merged} '<pull request URL>' '<name>'", "When `real` is not empty", "When `real` is empty", "1. Comment on the card"],
-        )
-        self.assertEqual(positions, sorted(positions))
-
-    def test_the_comment_and_reason_say_which_case_it_is(self):
-        rule = self.failing_checks()
-        self.assertIn("`Merge refused by Hermes: required checks failed: <names>.`", rule)
-        self.assertIn("Hermes counted failed runs that newer passing runs replaced: <names>.`", rule)
-        self.assertIn("merged, but required checks failed: <names>.", rule)
-        self.assertIn("passed on their newest runs", rule)
-        self.assertIn("If `head_sha` is not\nthe event's `head_sha`, comment the refusal", rule)
-
-    def test_failing_checks_archive_a_completed_issue_after_the_marker_comment(self):
-        rule = self.failing_checks()
-        archive = f"{render.archive_card_command(render.hermes_home())} <task id>"
-        positions = self.positions(
-            rule, ["Merge refused by Hermes:", "`linear_issue`", "`stateType` of `completed`", archive]
-        )
-        self.assertEqual(positions, sorted(positions))
-        self.assertNotIn("hermes kanban archive", rule)
-
-    def test_a_refused_merge_never_hands_off_or_assigns_the_card(self):
-        rule = self.failing_checks()
-        for needle in ("reopen-review", "request-review", "unblock", "assign claude-worker", "kanban_complete"):
-            self.assertNotIn(needle, rule)
-        assigns = re.findall(r"hermes kanban assign <task id> (\w+)", rule)
-        self.assertEqual(assigns, ["none"])
-
-    def test_a_refused_merge_unassigns_the_card_before_any_state_command(self):
-        rule = self.failing_checks()
-        unassign = "hermes kanban assign <task id> none"
-        self.assertEqual(rule.count(unassign), 1)
-        state_commands = re.findall(r"hermes kanban (?!assign|show)[a-z-]+", rule)
-        self.assertEqual(set(state_commands), {"hermes kanban block"})
-        self.assertLess(rule.index(unassign), rule.index("hermes kanban block"))
-        self.assertLess(rule.index(unassign), rule.index("`linear_agent_activity`"))
-
-    def test_a_review_card_stays_in_review_and_gets_the_elicitation_directly(self):
-        rule = self.failing_checks()
-        review = rule[rule.index("   - `review`") : rule.index("   - `blocked`")]
-        self.assertNotIn("hermes kanban", review)
-        self.assertIn("leave the card in `review`", review)
-        post = rule[rule.index("`review` or `blocked`, or the block command failed") :]
-        self.assertIn("`elicitation`", post)
-        self.assertIn("`linear_agent_activity`", post)
-
-    def test_failing_checks_block_a_ready_card_once_as_needs_input(self):
-        rule = self.failing_checks()
-        block = "hermes kanban block <task id> '<reason>' --kind needs_input"
-        ready = rule[rule.index("   - `ready`") : rule.index("   - `review`")]
-        self.assertIn(block, ready)
-        self.assertEqual(rule.count(block), 1)
-        blocked = rule[rule.index("   - `blocked`") :].split("\n\n")[0]
-        self.assertNotIn("hermes kanban", blocked.replace("`block_kind` is null, run the `ready` command", ""))
-        self.assertIn("`block_kind` is null, run the `ready` command", blocked)
-
-    def test_an_unreadable_issue_blocks_the_card_and_never_archives_it(self):
-        rule = self.failing_checks()
-        step = rule[rule.index("\n2. ") : rule.index("\n3. ")]
-        archive = f"{render.archive_card_command(render.hermes_home())} <task id>"
-        self.assertEqual(step.count(archive), 1)
-        positions = self.positions(
-            step,
-            ["Only a read that returns a `stateType` of `completed`", archive, "returns nothing", "never archive the\n   card", "Go to step 3 and block it"],
-        )
-        self.assertEqual(positions, sorted(positions))
-        self.assertNotIn("comment the error on the card and stop", step)
-
-    def test_linear_triage_archives_on_the_marker_the_github_route_writes(self):
+    def test_linear_triage_reads_the_marker_that_card_transition_writes(self):
         marker = "Merge refused by Hermes:"
-        self.assertIn(f"`{marker} required checks failed: <names>.`", self.failing_checks())
+        self.assertTrue(all(case.marker.startswith(marker) for case in card_transition.Case))
         change = self.linear[self.linear.index("## Issue change") :]
-        step = change[change.index("\n4. ") : change.index("\n5. ")]
-        positions = self.positions(step, ["merged", f"`{marker}`", 'archive it as "Rules" says', "Otherwise"])
-        self.assertEqual(positions, sorted(positions))
+        reply = self.linear[self.linear.index("## Prompt") : self.linear.index("## Triage card reply")]
+        for step in (change, reply):
+            self.assertIn(f"starts `{marker}`", " ".join(step.split()))
 
-    def test_a_linear_reply_never_resumes_a_card_merged_with_failing_checks(self):
-        prompt = self.linear[self.linear.index("## Prompt") : self.linear.index("## Stop")]
-        step = prompt[prompt.index("\n4. ") : prompt.index("\n5. ")]
-        positions = self.positions(
-            step, ["`Merge refused by Hermes:`", "Do not unblock, reopen, or resume it.", "and stop.", "unblock it as"]
-        )
-        self.assertEqual(positions, sorted(positions))
 
-    def test_a_rewritten_card_is_never_completed(self):
-        rule = self.bullet("triage")
-        self.assertIn("Never complete the card while its title and body are the rewritten ones.", rule)
+class TransitionCommandTest(unittest.TestCase):
+    """A card's status and assignee change only through card_transition.py, whose tests pin each sequence."""
 
-    def test_the_merge_step_no_longer_limits_completion_to_three_statuses(self):
-        step = self.github[self.github.index("2. For `pull_request` action `closed`") :].split("\n3. ")[0]
-        self.assertNotIn("when the card is", step)
-        self.assertNotIn("kanban_complete", step)
+    TRANSITION = re.compile(
+        r"hermes kanban (?:--board \S+ )?"
+        r"(?:(?:specify|assign|promote|request-review|reopen-review|unblock|block|complete)\b|edit <task id> --title)"
+    )
+
+    def setUp(self):
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
+            routes = render.build_routes(SETTINGS)
+        self.prompts = {name: routes[name]["prompt"] for name in routes}
+
+    def test_no_prompt_runs_a_transition_command_itself(self):
+        for name, prompt in self.prompts.items():
+            with self.subTest(route=name):
+                self.assertEqual(self.TRANSITION.findall(prompt), [])
+                self.assertNotIn("kanban_complete", prompt)
+
+    def test_both_prompts_run_the_worker_profile_script(self):
+        command = "python3 /srv/hermes/profiles/claude-worker/scripts/card_transition.py"
+        for name, prompt in self.prompts.items():
+            with self.subTest(route=name):
+                self.assertIn(f"`{command} resume <task id>`", prompt)
+                self.assertIn(f"`{command} unblock <task id> --repo '<repo>'", prompt)
+
+    def test_the_pattern_finds_each_command_the_prompts_used_to_run(self):
+        for command in (
+            "hermes kanban assign <task id> none",
+            "hermes kanban --board triage unblock <task id>",
+            "hermes kanban edit <task id> --title '<kept title>'",
+            "hermes kanban block <task id> stopped",
+            "hermes kanban reopen-review <task id> --reason stopped",
+        ):
+            with self.subTest(command):
+                self.assertTrue(self.TRANSITION.search(command))
+        self.assertFalse(self.TRANSITION.search("hermes kanban edit <task id> --body '<new body>'"))
 
 
 class ValidationTest(unittest.TestCase):

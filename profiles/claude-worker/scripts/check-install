@@ -73,7 +73,6 @@ import os
 import plistlib
 import pwd
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -85,8 +84,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+import factory_settings
 import factory_source
 import kanban_board
+from factory_settings import SETTINGS_KEY, find_hermes
 
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
@@ -112,7 +113,6 @@ ROOT_WRAPPERS = (ROOT_ALERT_SCRIPT, "retry-failed-webhooks", "watch-gateway", "r
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
-SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 # aiohttp's access line in the gateway log, stamped in local time by Hermes' log format.
 REJECTED = re.compile(r'^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ .*"POST /webhooks/([^ ?"]+)[^"]*" 429 ')
 
@@ -555,28 +555,8 @@ SECRET_NAMES = "plugins/factory-secret-names/plugin.yaml"
 DECLARED_NAME = re.compile(r"^\s*-\s*name:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", re.MULTILINE)
 
 
-def claude_session_settings(settings) -> dict:
-    session = settings.get("claude_session") if isinstance(settings, dict) else None
-    return session if isinstance(session, dict) else {}
-
-
-def token_variable(settings) -> str:
-    return claude_session_settings(settings).get("auth_token_env") or ""
-
-
-def mcp_token_variables(settings) -> dict:
-    servers = claude_session_settings(settings).get("mcp_servers")
-    if not isinstance(servers, dict):
-        return {}
-    return {
-        name: server["token_env"] for name, server in servers.items()
-        if isinstance(server, dict) and isinstance(server.get("token_env"), str) and server["token_env"]
-    }
-
-
 def check_worker_secrets(commit: Commit, worker: Path, hermes: str, settings) -> list:
-    token_env = token_variable(settings)
-    mcp_envs = mcp_token_variables(settings)
+    token_env, mcp_envs = factory_settings.token_variables(settings)
     live = config_value(worker, hermes, "secrets.command")
     enabled = isinstance(live, dict) and live.get("enabled") is True
     helper = f"python3 {worker}/scripts/worker-secrets"
@@ -1207,6 +1187,20 @@ def check_model_tiers(settings, worker: Path) -> list:
     )]
 
 
+def check_settings(settings, worker: Path) -> list:
+    """Report each settings value that makes claude-session refuse a run, with the text of its refusal."""
+    if not isinstance(settings, dict):
+        return []
+    problems = factory_settings.validate(settings)
+    return [
+        *(Drift("config", f"claude_session in {worker}", error) for error in problems.global_errors),
+        *(
+            Drift("config", f"{full_name} in {worker}", error)
+            for full_name, found in sorted(problems.repository_errors.items()) for error in found
+        ),
+    ]
+
+
 MCP_STATUS_SECONDS = 120
 
 
@@ -1230,11 +1224,9 @@ def mcp_probe(worker: Path, full_name: str) -> dict | str:
 def check_mcp_servers(settings, worker: Path) -> list:
     if not isinstance(settings, dict) or not (worker / "scripts" / "claude-session").is_file():
         return []
+    if factory_settings.validate(settings).global_errors:
+        return []
     drifts = []
-    if "sentry_token_env" in claude_session_settings(settings):
-        drifts.append(Drift(
-            "config", "claude_session.sentry_token_env", "is replaced by mcp_servers.sentry, so every worker run is refused (part 10)"
-        ))
     repositories = [r for r in settings.get("repositories") or [] if Path(r["path"]).is_dir()]
     # One at a time: each probe rewrites Claude Code's global config to trust its checkout.
     reports = [mcp_probe(worker, r["full_name"]) for r in repositories]
@@ -1479,15 +1471,6 @@ def resolve_commit(repo: Path, ref: str | None) -> Commit:
     return Commit(repo, sha, label)
 
 
-def find_hermes() -> str:
-    # A cron job's PATH can lack the installer's bin directory, so fall back to where it puts hermes.
-    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
-    for candidate in filter(None, candidates):
-        if os.access(candidate, os.X_OK):
-            return candidate
-    raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", type=Path, help="factory checkout; defaults to the worker's distribution source")
@@ -1515,7 +1498,7 @@ def main() -> int:
             *check_plugins(commit, [root, worker]),
             *check_config({ROOT: root, WORKER: worker}, hermes, CONFIG if broker is None else BROKER_USER_CONFIG),
             *check_worker_secrets(commit, worker, hermes, settings),
-            *check_upload_broker(root, token_variable(settings), mcp_token_variables(settings)),
+            *check_upload_broker(root, *factory_settings.token_variables(settings)),
             *check_cron(commit, root, worker, hermes),
             *check_routes(commit, root, hermes),
             *check_dashboard(root, hermes),
@@ -1536,6 +1519,7 @@ def main() -> int:
                 config_value(root, hermes, "plugins.entries.work.settings.skills_dir"),
                 config_value(root, hermes, "plugins.entries.work.settings.allow"),
             ),
+            *check_settings(settings, worker),
             *check_model_tiers(settings, worker),
             *check_mcp_servers(settings, worker),
             *check_root_mcp_servers(root, hermes),
@@ -1547,7 +1531,7 @@ def main() -> int:
             drifts.extend(check_broker_user(commit, launchd_root, root, launchctl, broker, live_accounts()))
         if drifts and args.ref is None:
             drifts.extend(check_source_checkout(commit))
-    except Refusal as exc:
+    except (Refusal, factory_settings.SettingsError) as exc:
         print(f"check-install: {exc}", file=sys.stderr)
         return 2
     for drift in drifts:

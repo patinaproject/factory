@@ -1068,8 +1068,8 @@ the worker needs, so turn the decomposer off. A looping card then waits in
 `triage` for a person, and a reply on its Linear issue, a changes-requested
 review, or an actionable comment on its pull request resumes it.
 
-Leave `kanban.default_assignee` unset. The resume steps in the triage prompt
-unassign a card so the dispatcher skips it while `kanban specify` rewrites it,
+Leave `kanban.default_assignee` unset. `card_transition.py resume`, which the
+triage prompts run, unassigns a card so the dispatcher skips it while `kanban specify` rewrites it,
 and a default assignee would route the unassigned card to a worker first.
 
 **Check.** `hermes config get kanban.review_dispatch` and
