@@ -1181,14 +1181,10 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         before = worktree_state(worktree)
         try:
             write_private(settings_path, claude_settings(transport, api_key, settings_path, triage))
-        except BaseException:
+            output, exit_code, detail = run_claude(command, worktree)
+        finally:
             settings_path.unlink(missing_ok=True)
-            raise
         try:
-            try:
-                output, exit_code, detail = run_claude(command, worktree)
-            finally:
-                settings_path.unlink(missing_ok=True)
             progress = worktree_state(worktree) != before
             if output is not None:
                 seen_path.write_text(json.dumps([*seen, *map(comment_key, comments)]))
@@ -1313,6 +1309,7 @@ def main() -> int:
             parser.error("the following arguments are required: " + ", ".join(f"--{f.replace('_', '-')}" for f in missing))
     skew = None if args.mcp_status else install_skew()
     if skew:
+        # The line is written by hand because a skewed home's result_line is the module that cannot be trusted.
         print(json.dumps({"error": skew, "transient": True}))
         return 2
     try:

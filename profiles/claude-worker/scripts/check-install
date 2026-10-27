@@ -92,9 +92,8 @@ import factory_settings
 import factory_source
 import kanban_board
 from factory_settings import SETTINGS_KEY, find_hermes
-from install_drift import Commit, GitError, compare_files
+from install_drift import PROFILE, Commit, GitError, compare_files
 
-PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
 OWNED_REFS = "owned-refs.json"
 TRIAGE_REFS = "triage-refs.json"

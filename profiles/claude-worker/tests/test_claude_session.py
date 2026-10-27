@@ -1640,6 +1640,14 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual((code, report["servers"]), (0, [{"name": "linear", "status": "connected"}]))
 
+    def test_a_claude_that_cannot_start_is_not_reported_as_crashed(self) -> None:
+        missing = self.tmp / "no-claude"
+
+        status, report = self.run_session(env={"CLAUDE_BIN": str(missing)})
+
+        self.assertEqual(status, 1)
+        self.assertEqual(report, {"error": f"FileNotFoundError: [Errno 2] No such file or directory: '{missing}'"})
+
     def test_a_failure_after_claude_ran_reports_its_session_as_crashed(self) -> None:
         module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
         text = module.read_text()
