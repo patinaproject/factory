@@ -7,7 +7,10 @@ for chat work and cron jobs only. This script waits, up to `--timeout`
 seconds, until no board has a `running` card. It then engages `hermes pause`
 so the dispatcher spawns no new card, confirms the board is still empty,
 restarts the gateway, and lifts the pause it engaged. When the wait expires,
-it names the running cards and exits 1 without restarting.
+it names the running cards and exits 1 without restarting. With `--wait-only`
+it runs the same wait and settle check, exits 0 once no card is running, and
+never pauses, restarts, or resumes, so a deploy can drain the board while its
+operator holds the pause.
 """
 from __future__ import annotations
 
@@ -79,18 +82,22 @@ def restart(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     out=sys.stdout,
+    wait_only: bool = False,
 ) -> int:
     deadline = clock() + timeout
     last: list[Card] | None = None
     while True:
         cards = running_cards(run)
         if not cards:
-            ours = not paused()
+            ours = not wait_only and not paused()
             if ours:
                 checked(run, ["pause", "--reason", "restart-gateway: restarting the gateway"])
             try:
                 sleep(settle)
                 cards = running_cards(run)
+                if not cards and wait_only:
+                    print("restart-gateway: no Kanban card is running", file=out, flush=True)
+                    return 0
                 if not cards:
                     print("restart-gateway: no Kanban card is running; restarting the gateway", file=out, flush=True)
                     return run(["gateway", "restart"]).returncode
@@ -116,13 +123,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=3600, help="seconds to wait for running cards (default 3600)")
     parser.add_argument("--poll", type=float, default=30, help="seconds between board checks (default 30)")
     parser.add_argument("--hermes", default="hermes", help="the Hermes CLI to run (default: hermes on PATH)")
+    parser.add_argument("--wait-only", action="store_true", help="exit 0 once no card is running; never pause, restart, or resume")
     args = parser.parse_args(argv)
     if args.timeout < 0 or args.poll <= 0:
         parser.error("--timeout must be at least 0 and --poll above 0")
     root = Path.home() / ".hermes"
     home = Path(os.environ.get("HERMES_HOME") or root)
     try:
-        return restart(run_hermes(args.hermes), lambda: operator_paused(home, root), args.timeout, args.poll)
+        return restart(
+            run_hermes(args.hermes), lambda: operator_paused(home, root), args.timeout, args.poll, wait_only=args.wait_only
+        )
     except (RuntimeError, OSError, json.JSONDecodeError) as exc:
         print(f"restart-gateway: {exc}; not restarting", file=sys.stderr)
         return 1

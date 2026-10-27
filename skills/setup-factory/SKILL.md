@@ -1826,18 +1826,33 @@ it at `<home>/bin/factory-secrets`. Hermes runs the new helper the next time a
 Hermes process starts. The new helper also writes
 `<home>/logs/factory-secrets.log`, which needs no gateway restart.
 
-1. Find the source checkout. It is the checkout `<worker>/distribution.yaml`
+1. Pause the board and let running cards finish before anything changes. A
+   run that starts while the scripts and plugins come from two commits
+   refuses as `transient`, and a card that is running keeps the old scripts it
+   loaded. `hermes pause` holds only new cards, so run it and then wait until
+   no board has a running card:
+
+   ```sh
+   hermes pause --reason "factory deploy"
+   python3 <repo>/skills/setup-factory/scripts/restart-gateway --wait-only
+   ```
+
+   Run the second command again until it exits `0`. It pauses, restarts, and
+   resumes nothing. It exits `1` and lists the running cards when its
+   `--timeout` expires. The pause stays until the last step, and a
+   `restart-gateway` run during the deploy leaves it in place.
+2. Find the source checkout. It is the checkout `<worker>/distribution.yaml`
    points at, and this command prints it:
 
    ```sh
    HERMES_HOME=<worker> python3 <worker>/scripts/check-install --print-source
    ```
 
-   Fast-forward only that checkout to `origin/HEAD`. It must be on the default
+   Only now fast-forward that checkout to `origin/HEAD`. It must be on the default
    branch with no uncommitted changes. Never touch the worker-owned
    checkouts, which are the configured repository checkouts the worker profile
    uses. They change only through a Kanban card or `refresh-checkouts`.
-2. List what is out of date. Run the copy in the source checkout, not the
+3. List what is out of date. Run the copy in the source checkout, not the
    installed one. The installed copy predates the change, so it cannot report
    a board, config key, or cron job that the change adds:
 
@@ -1845,7 +1860,7 @@ Hermes process starts. The new helper also writes
    HERMES_HOME=<worker> python3 <source checkout>/profiles/claude-worker/scripts/check-install
    ```
 
-3. Install each item it names in this order: the part 10 `kanban board` and
+4. Install each item it names in this order: the part 10 `kanban board` and
    `config` lines, then the profile, then the part 12 `cron job` lines, and
    the route last. The new profile's cron jobs read the boards and settings on
    their first run, one minute after the profile update. `refresh-owned-refs`
@@ -1901,14 +1916,13 @@ Hermes process starts. The new helper also writes
      before the gateway runs the new broker gets each token request refused.
      The worker's `factory-secret-names` before its new scripts makes the old
      `claude-session` lose `CLAUDE_PROXY_TOKEN` and refuse the run. Deploy in
-     this order. First, install the root home's plugins and run
-     `restart-gateway`, then confirm that `{"op":"status"}` reports
-     `linear_ready` and `proxy_token_present` true. Second, run `hermes pause`.
-     Update the profile, install the worker's `linear-agent-session` and
-     `factory-secret-names`, and set the worker's `terminal.env_passthrough`
+     this order, with the board already paused by step 1. First, install the
+     root home's plugins and run `restart-gateway`, then confirm that
+     `{"op":"status"}` reports `linear_ready` and `proxy_token_present` true.
+     Second, update the profile, install the worker's `linear-agent-session`
+     and `factory-secret-names`, and set the worker's `terminal.env_passthrough`
      to `[]`, all together. Third, retire the worker's identity as the next
-     line says, run `check-install` until it is clean, and then run
-     `hermes resume`.
+     line says and run `check-install` until it is clean.
    - A `secret <name> in <worker>/.env` line: the worker holds a secret only
      the gateway may hold. Follow
      [Retire the worker's identity](references/infisical.md#retire-the-workers-identity),
@@ -1943,8 +1957,8 @@ Hermes process starts. The new helper also writes
      the named part produces. If the runbook is right, run that part again.
      If the machine is right, change the part and its row in `check-install`
      in one pull request, as the replicability rule in `AGENTS.md` requires.
-4. Run `check-install` again. It prints nothing.
-5. Check that the worker home's factory settings match the root home's:
+5. Run `check-install` again. It prints nothing.
+6. Check that the worker home's factory settings match the root home's:
 
    ```sh
    python3 <source checkout>/skills/setup-factory/scripts/check-settings
@@ -1959,7 +1973,7 @@ Hermes process starts. The new helper also writes
    check against the settings file does. When it prints a line, find which
    home is right with the operator, and set that home's settings in the other
    as in part 10.
-6. If step 3 changed a plugin, a webhook config key, or a work skills setting:
+7. If step 4 changed a plugin, a webhook config key, or a work skills setting:
 
    > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
    > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes.
@@ -1968,7 +1982,11 @@ Hermes process starts. The new helper also writes
    > that
    > `~/.hermes/logs/gateway.log` shows a startup after the install.
 
-7. Record the deployed commit in the private configuration record.
+8. Record the deployed commit in the private configuration record.
+9. Run `hermes resume`, only after `check-install` from the source checkout
+   reports no `profile` line and no `plugin` line, and after any gateway
+   restart that step 7 calls for. Until then a worker run on a half-installed
+   home refuses as `transient`.
 
 ## Report
 
