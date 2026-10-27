@@ -7,6 +7,9 @@ the reads that pr-ready-gate and Hermes' Kanban completion contract make: a
 pull request, its base branch rules, its check runs, its commit statuses, and its
 workflow runs, and the repository activity that card_branch reads to tell the App's
 branches from a person's. Actions needs write so a worker can re-run failed jobs.
+The App's settings name the permissions it asks for, but an installation keeps
+the old ones until an org owner accepts the new, so the check also compares the
+permissions of the installation token that the gateway's broker mints.
 
 Silent when every read succeeds. Prints one line per missing permission or
 refused read, naming the permission to grant, and exits 1. Exits 2 when it
@@ -25,6 +28,7 @@ from urllib.parse import quote
 
 import factory_settings
 
+HOME = Path(__file__).resolve().parents[1]
 GH_TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN")
 LEVELS = {"read": 1, "write": 2}
 LEVEL_LABELS = {"read": "Read-only", "write": "Read and write"}
@@ -91,13 +95,57 @@ def gh(permission: Permission, repo: str, what: str, *args: str):
     return json.loads(proc.stdout)
 
 
-def check_app(login: str) -> list[str]:
-    slug = login.removesuffix("[bot]")
-    granted = gh(METADATA, slug, "the App", f"apps/{slug}").get("permissions") or {}
+def shortfalls(granted: dict) -> list[tuple[Permission, str]]:
     return [
-        f"App {slug}: grant {permission.grant()}, it has {granted.get(permission.key) or 'no access'}"
+        (permission, granted.get(permission.key) or "no access")
         for permission in REQUIRED
         if LEVELS.get(granted.get(permission.key), 0) < LEVELS[permission.level]
+    ]
+
+
+def check_app(slug: str) -> tuple[list[str], set]:
+    """Report each permission the App's settings lack, and return their keys."""
+    try:
+        granted = gh(METADATA, slug, "the App", f"apps/{slug}").get("permissions") or {}
+    except Refused as refused:
+        return [str(refused)], set()
+    missing = shortfalls(granted)
+    return [f"App {slug}: grant {permission.grant()}, it has {has}" for permission, has in missing], {
+        permission.key for permission, _ in missing
+    }
+
+
+def installation_permissions(slug: str) -> dict:
+    """The permissions the installation accepted, as GitHub reported them when it minted the broker's token."""
+    sys.path.insert(0, str(HOME / "plugins" / "linear-agent-session"))
+    try:
+        import broker_client
+    except ImportError as error:
+        raise Refused(f"Installation of {slug}: cannot read its permissions: {error}")
+
+    try:
+        reply = broker_client.request(broker_client.socket_path({"HERMES_HOME": str(HOME)}), "github_token")
+    except broker_client.BrokerError as error:
+        raise Refused(f"Installation of {slug}: cannot read its permissions: {error}")
+    permissions = reply.get("permissions")
+    if not isinstance(permissions, dict):
+        raise Refused(
+            f"Installation of {slug}: the gateway's broker does not report the installation's permissions; "
+            "deploy the current factory to the broker"
+        )
+    return permissions
+
+
+def check_installation(slug: str, app_missing: set) -> list[str]:
+    """Report each permission the App asks for that the installation has not accepted."""
+    try:
+        granted = installation_permissions(slug)
+    except Refused as refused:
+        return [str(refused)]
+    return [
+        f"Installation of {slug}: accept {permission.grant()} on the installation, it has {has}"
+        for permission, has in shortfalls(granted)
+        if permission.key not in app_missing
     ]
 
 
@@ -157,10 +205,9 @@ def run(settings_file: str | None) -> list[str]:
     repositories = [repo.get("full_name") for repo in settings.get("repositories") or []]
     if not repositories:
         raise Refusal("no repositories are configured")
-    try:
-        problems = check_app(login)
-    except Refused as refused:
-        problems = [str(refused)]
+    slug = login.removesuffix("[bot]")
+    problems, app_missing = check_app(slug)
+    problems.extend(check_installation(slug, app_missing))
     for repo in repositories:
         problems.extend(check_repository(repo))
     return problems

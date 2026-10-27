@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import SCRIPTS, with_interpreter
+from tests.support import REPO as CHECKOUT, SCRIPTS, FakeBroker, with_interpreter
 
 REPO = "example-org/example-repo"
 SHA = "a" * 40
@@ -17,6 +17,12 @@ ALL_PERMISSIONS = {
     "contents": "write", "pull_requests": "write", "issues": "write", "checks": "read",
     "statuses": "read", "actions": "write", "metadata": "read",
 }
+TOKEN = "ghs_FAKEinstallationtoken"
+
+
+def minted(permissions: dict | None) -> dict:
+    reply = {"ok": True, "token": TOKEN, "expires_at": 4102444800.0}
+    return reply if permissions is None else {**reply, "permissions": permissions}
 
 FAKE_GH = r"""#!/usr/bin/env python3
 import json, os, sys
@@ -75,6 +81,16 @@ class CheckGithubAccessTest(unittest.TestCase):
         self.gh.write_text(with_interpreter(FAKE_GH))
         os.chmod(self.gh, 0o755)
         self.log = self.tmp / "gh-calls.jsonl"
+        root = self.tmp / "root"
+        self.worker = root / "profiles" / "claude-worker"
+        plugin = self.worker / "plugins" / "linear-agent-session"
+        plugin.mkdir(parents=True)
+        (plugin / "broker_client.py").symlink_to(CHECKOUT / "plugins" / "linear-agent-session" / "broker_client.py")
+        (self.worker / "scripts").mkdir()
+        for name in ("check-github-access", "factory_settings.py"):
+            shutil.copy(SCRIPTS / name, self.worker / "scripts" / name)
+        self.broker_path = root / "factory-uploads.sock"
+        self.installation = dict(ALL_PERMISSIONS)
         self.settings = self.tmp / "settings.json"
         self.settings.write_text(json.dumps({
             "repositories": [{"full_name": REPO, "path": "/srv/example-repo", "routing": "default"}],
@@ -88,7 +104,12 @@ class CheckGithubAccessTest(unittest.TestCase):
             "deny": [],
         }
 
-    def check(self, env: dict | None = None) -> tuple:
+    def check(self, env: dict | None = None, broker: list | None = None) -> tuple:
+        if broker is None:
+            broker = [minted(self.installation)]
+        self.broker = FakeBroker(self.broker_path, github_token=broker) if broker else None
+        if self.broker:
+            self.addCleanup(self.broker.close)
         state = self.tmp / "state.json"
         state.write_text(json.dumps(self.state))
         base = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
@@ -96,9 +117,10 @@ class CheckGithubAccessTest(unittest.TestCase):
                     FAKE_GH_LOG=str(self.log))
         base.update(env or {})
         proc = subprocess.run(
-            [sys.executable, str(SCRIPTS / "check-github-access"), "--settings-json", str(self.settings)],
+            [sys.executable, str(self.worker / "scripts" / "check-github-access"), "--settings-json", str(self.settings)],
             env=base, capture_output=True, text=True,
         )
+        self.assertNotIn(TOKEN, proc.stdout + proc.stderr)
         return proc.returncode, proc.stdout.splitlines(), proc.stderr
 
     def endpoints(self) -> list:
@@ -108,6 +130,7 @@ class CheckGithubAccessTest(unittest.TestCase):
         status, lines, _ = self.check()
 
         self.assertEqual((status, lines), (0, []))
+        self.assertEqual(self.broker.requests, ["github_token"])
         self.assertEqual(self.endpoints(), [
             "apps/example-app",
             f"repos/{REPO}/pulls?state=all&per_page=1",
@@ -170,6 +193,59 @@ class CheckGithubAccessTest(unittest.TestCase):
 
         self.assertEqual(status, 1)
         self.assertEqual(lines, ['App example-app: grant "Actions: Read and write", it has read'])
+
+    def test_an_installation_that_never_accepted_actions_write_cannot_rerun_failed_jobs(self) -> None:
+        self.installation["actions"] = "read"
+
+        status, lines, _ = self.check()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, [
+            'Installation of example-app: accept "Actions: Read and write" on the installation, it has read',
+        ])
+
+    def test_a_permission_the_app_lacks_is_reported_once_as_a_grant(self) -> None:
+        self.state["app_permissions"] = {**ALL_PERMISSIONS, "actions": "read"}
+        self.installation["actions"] = "read"
+        del self.installation["checks"]
+
+        status, lines, _ = self.check()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, [
+            'App example-app: grant "Actions: Read and write", it has read',
+            'Installation of example-app: accept "Checks: Read-only" on the installation, it has no access',
+        ])
+
+    def test_a_broker_that_does_not_report_permissions_is_reported(self) -> None:
+        status, lines, _ = self.check(broker=[minted(None)])
+
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, [
+            "Installation of example-app: the gateway's broker does not report the installation's permissions; "
+            "deploy the current factory to the broker",
+        ])
+
+    def test_a_broker_that_refuses_the_token_is_reported(self) -> None:
+        refusal = {"ok": False, "state": "unavailable", "message": "The gateway holds no GitHub App private key."}
+
+        status, lines, _ = self.check(broker=[refusal])
+
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, [
+            "Installation of example-app: cannot read its permissions: the gateway's broker refused github_token: "
+            "The gateway holds no GitHub App private key.",
+        ])
+
+    def test_a_home_without_the_broker_client_is_reported(self) -> None:
+        (self.worker / "plugins" / "linear-agent-session" / "broker_client.py").unlink()
+
+        status, lines, _ = self.check()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, [
+            "Installation of example-app: cannot read its permissions: No module named 'broker_client'",
+        ])
 
     def test_refused_pull_requests_still_checks_the_default_branch(self) -> None:
         self.state["deny"] = ["pull_requests", "statuses"]
@@ -243,6 +319,7 @@ class CheckGithubAccessTest(unittest.TestCase):
         self.assertEqual((status, lines), (2, []))
         self.assertIn("GH_TOKEN is set", stderr)
         self.assertFalse(self.log.exists())
+        self.assertEqual(self.broker.requests, [])
 
 
 if __name__ == "__main__":

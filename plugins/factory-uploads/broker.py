@@ -101,7 +101,7 @@ class Credentials(Protocol):
     def github_ready(self) -> bool: ...
 
     def github_token(self) -> dict | None:
-        """{"access_token", "expires_at"} of a GitHub App installation token, or None without a key. May block."""
+        """{"access_token", "expires_at", "permissions"} of a GitHub App installation token, or None without a key. May block."""
 
 
 class NoCredentials:
@@ -297,7 +297,11 @@ class Broker:
             self._audit({**entry, "state": "unavailable"})
             return self._failure("unavailable", CREDENTIAL_MESSAGES[op])
         self._audit({**entry, "state": "ok"})
-        return {"ok": True, "token": token, "expires_at": expires_at}
+        reply = {"ok": True, "token": token, "expires_at": expires_at}
+        if op == "github_token":
+            # The installation's accepted permissions, which check-github-access compares with the App's.
+            reply["permissions"] = issued.get("permissions", {})
+        return reply
 
     async def _upload_request(self, request: dict, reader, pid: int | None) -> dict:
         repo, name, size = request.get("repo"), request.get("name"), request.get("size")
