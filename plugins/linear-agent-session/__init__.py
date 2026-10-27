@@ -22,6 +22,9 @@ TRIAGE_EXIT_TIMEOUT_SECONDS = 300.0
 TRIAGE_EXIT_WORKERS = 4
 # Hermes leaves a secret like this verbatim when its variable is unset, and anyone can sign with that text.
 UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$")
+# Linear writes a mention in an agent activity body as `<user id="<user id>" notify>name</user>`.
+MENTION = re.compile(r"<user\b[^>]*\bid=\"([^\"]+)\"")
+TEAMMATE_REPLY = "the session reply mentions teammates and not the agent"
 
 
 def register(ctx: Any) -> None:
@@ -97,6 +100,27 @@ def register(ctx: Any) -> None:
         handler=lambda args, **_: tools.run_to_todo(get_client, args),
         description=tools.TO_TODO_SCHEMA["description"],
     )
+    ctx.register_tool(
+        name="linear_issue_edit",
+        toolset=TOOLSET,
+        schema=tools.EDIT_SCHEMA,
+        handler=lambda args, **_: tools.run_edit(get_client, args),
+        description=tools.EDIT_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="linear_issue_search",
+        toolset=TOOLSET,
+        schema=tools.SEARCH_SCHEMA,
+        handler=lambda args, **_: tools.run_search(get_client, args),
+        description=tools.SEARCH_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="github_issue_edit",
+        toolset=TOOLSET,
+        schema=tools.GITHUB_EDIT_SCHEMA,
+        handler=lambda args, **_: tools.run_github_edit(args),
+        description=tools.GITHUB_EDIT_SCHEMA["description"],
+    )
     ctx.register_hook(
         "pre_gateway_dispatch",
         make_dispatch_hook(
@@ -158,6 +182,9 @@ def make_dispatch_hook(
                 variable,
             )
             return {"action": "skip", "reason": f"route {route} secret is the unresolved reference ${{{variable}}}"}
+        if route == webhook_route() and addressed_to_teammate(event.raw_message):
+            logger.info("linear-agent-session: %s; no acknowledgement or triage turn", TEAMMATE_REPLY)
+            return {"action": "skip", "reason": TEAMMATE_REPLY}
         await acknowledge_best_effort(event, route)
         return await archive_triage_exit(event, route)
 
@@ -209,6 +236,19 @@ def _delivery_route(event: Any) -> Optional[str]:
     if source.platform.value != "webhook" or not source.user_id.startswith("webhook:"):
         return None
     return source.user_id.removeprefix("webhook:")
+
+
+def addressed_to_teammate(payload: Any) -> bool:
+    """A session reply that mentions people but not the agent app is one teammate talking to another."""
+    if not isinstance(payload, dict) or payload.get("type") != "AgentSessionEvent" or payload.get("action") != "prompted":
+        return False
+    activity = payload.get("agentActivity") or {}
+    body = (activity.get("content") or {}).get("body")
+    app_user_id = payload.get("appUserId")
+    if activity.get("signal") == "stop" or not isinstance(body, str) or not app_user_id:
+        return False
+    mentioned = set(MENTION.findall(body))
+    return bool(mentioned) and app_user_id not in mentioned
 
 
 def _ack_session_id(event: Any, route: str, webhook_route: str) -> Optional[str]:

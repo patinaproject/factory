@@ -12,12 +12,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 
-import card_branch
+import closing
 
-FIX_TYPE = re.compile(r"^fix(?:\([^)]*\))?!?:[ \t]*#(?P<number>[1-9][0-9]*)\b", re.IGNORECASE)
 EXEMPT_HEAD_PREFIXES = ("release-please--", "bot/bump-")
 EXEMPT_AUTHORS = ("dependabot[bot]",)
 
@@ -26,26 +24,18 @@ def exempt(head_ref: str, author: str) -> bool:
     return head_ref.startswith(EXEMPT_HEAD_PREFIXES) or author in EXEMPT_AUTHORS
 
 
-def title_closes(title: str, repo: str) -> set[str]:
-    found = {ref for ref in card_branch.closes(title, repo) if ref.startswith("#")}
-    typed = FIX_TYPE.match(title)
-    if typed:
-        found.add("#" + typed["number"])
-    return found
-
-
 def missing(title: str, body: str, repo: str) -> list[str]:
-    in_body = card_branch.closes(body, repo)
+    in_body = closing.closes(body, repo)
     return [
         f"The title closes {ref} when it merges, but the body has no `Closes {ref}` line. "
         f"Retitle to the issue this pull request completes (a dedicated sub-issue), or use another type "
         f"such as `feat` or `refactor` and keep `Part of {ref}` in the body."
-        for ref in sorted(title_closes(title, repo) - in_body, key=lambda ref: int(ref[1:]))
+        for ref in sorted(closing.message_closes(title, repo) - in_body, key=lambda ref: int(ref[1:]))
     ]
 
 
 def missing_from_commits(commits: list[dict[str, str]], body: str, repo: str) -> list[str]:
-    in_body = card_branch.closes(body, repo)
+    in_body = closing.closes(body, repo)
     return [
         f"Commit {commit['sha']} closes {ref} when it merges, but the body has no `Closes {ref}` line. "
         f"If this pull request completes {ref}, close it in the body. Otherwise the commit cannot be reworded, "
@@ -54,7 +44,7 @@ def missing_from_commits(commits: list[dict[str, str]], body: str, repo: str) ->
         f"commit it with a type that does not close {ref} (`feat` or `refactor`) and `Part of {ref}` in the "
         f"message, run push-signed, open a pull request from the new branch, and close this one."
         for commit in commits
-        for ref in sorted(title_closes(commit["message"], repo) - in_body, key=lambda ref: int(ref[1:]))
+        for ref in sorted(closing.message_closes(commit["message"], repo) - in_body, key=lambda ref: int(ref[1:]))
     ]
 
 

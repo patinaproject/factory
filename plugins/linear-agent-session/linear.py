@@ -5,12 +5,16 @@ import contextlib
 import json
 import os
 import re
-import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Callable, Mapping, Optional
+
+if __package__:
+    from . import broker_client
+else:
+    import broker_client
 
 API_URL = "https://api.linear.app/graphql"
 TOKEN_URL = "https://api.linear.app/oauth/token"
@@ -18,11 +22,6 @@ TOKEN_URL = "https://api.linear.app/oauth/token"
 # client credentials tokens when a request asks for a different scope set.
 TOKEN_SCOPE = "read,write,app:assignable,app:mentionable"
 TOKEN_REFRESH_MARGIN_SECONDS = 60
-BROKER_SOCKET = "factory-uploads.sock"
-BROKER_TIMEOUT_SECONDS = 30
-BROKER_REPLY_LIMIT = 65536
-# A busy or restarting broker gets a few seconds; a card waits on it far longer in the queue.
-BROKER_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0)
 
 BODY_ACTIVITY_TYPES = ("thought", "response", "elicitation", "error")
 ACTIVITY_TYPES = BODY_ACTIVITY_TYPES + ("action",)
@@ -64,7 +63,7 @@ PRIORITIES = {0: ("No priority", 0), 1: ("Urgent", 4), 2: ("High", 3), 3: ("Medi
 
 ISSUE_QUERY = """query Issue($id: String!) {
   issue(id: $id) {
-    id identifier title url branchName priority
+    id identifier title description url branchName priority
     state { name type }
     delegate { id }
     labels { nodes { name } }
@@ -134,6 +133,22 @@ ISSUE_STATES_QUERY = """query IssueStates($id: String!) {
   }
 }"""
 
+ISSUE_EDIT_QUERY = """query IssueEdit($id: String!) {
+  issue(id: $id) {
+    id identifier title description
+    state { name }
+    labels { nodes { id name parent { id } } }
+    team { states { nodes { id name } } labels(first: 250) { nodes { id name isGroup parent { id } } } }
+  }
+  issueLabels(first: 250, filter: { team: { null: true } }) { nodes { id name isGroup parent { id } } }
+}"""
+
+ISSUE_SEARCH_QUERY = """query IssueSearch($term: String!, $first: Int!) {
+  searchIssues(term: $term, first: $first) { nodes { identifier title url team { name } state { name } } }
+}"""
+
+GITHUB_ISSUE_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+")
+
 ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
 }"""
@@ -151,12 +166,7 @@ class LinearError(Exception):
     pass
 
 
-class BrokerUnavailable(LinearError):
-    """The broker was busy, unreachable, or slow, which a later run can outlast."""
-
-    def __init__(self, message: str, *, retry: bool = True) -> None:
-        super().__init__(message)
-        self.retry = retry
+CLIENT_ERRORS = (LinearError, broker_client.BrokerError)
 
 
 def activity_content(
@@ -263,6 +273,8 @@ class LinearClient:
             "priority": priority,
             "priorityName": priority_name,
             "cardPriority": card_priority,
+            "description": issue["description"] or "",
+            "githubIssues": [a["url"] for a in issue["attachments"]["nodes"] if GITHUB_ISSUE_URL.fullmatch(a["url"])],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
             "labels": _label_names(issue),
             "blockedBy": _blocking_issues(issue["inverseRelations"]),
@@ -364,6 +376,64 @@ class LinearClient:
         if not payload["issueUpdate"]["success"]:
             raise LinearError("issueUpdate reported success: false")
         return {**result, "moved": True, "state": target["name"]}
+
+    def edit_issue(
+        self,
+        id_or_identifier: str,
+        *,
+        add_labels: list = (),
+        remove_labels: list = (),
+        state: Optional[str] = None,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> dict:
+        """An added label replaces the issue's other labels in its group, because Linear allows one per group."""
+        data = self._graphql(ISSUE_EDIT_QUERY, {"id": id_or_identifier})
+        issue = data["issue"]
+        if issue is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        known = {n["id"]: n for n in issue["team"]["labels"]["nodes"] + data["issueLabels"]["nodes"]}
+        current = {n["id"]: n for n in issue["labels"]["nodes"]}
+        labels = dict(current)
+        for name in remove_labels:
+            for label_id in [i for i, n in labels.items() if role_key(n["name"]) == role_key(name)]:
+                del labels[label_id]
+        for name in add_labels:
+            label = _by_name(known.values(), name, "label")
+            if label["isGroup"]:
+                raise LinearError(f"{label['name']} is a label group; name one of its labels")
+            group = (label["parent"] or {}).get("id")
+            if group:
+                labels = {i: n for i, n in labels.items() if (n["parent"] or {}).get("id") != group}
+            labels[label["id"]] = label
+        update: dict = {}
+        if title is not None and title != issue["title"]:
+            update["title"] = title
+        if description is not None and description != (issue["description"] or ""):
+            update["description"] = description
+        if labels.keys() != current.keys():
+            update["labelIds"] = sorted(labels)
+        target = _by_name(issue["team"]["states"]["nodes"], state, "status") if state else None
+        if target and target["name"] != issue["state"]["name"]:
+            update["stateId"] = target["id"]
+        if update:
+            payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": update})
+            if not payload["issueUpdate"]["success"]:
+                raise LinearError("issueUpdate reported success: false")
+        return {
+            "identifier": issue["identifier"],
+            "changed": bool(update),
+            "title": update.get("title", issue["title"]),
+            "labels": sorted(n["name"] for n in labels.values()),
+            "state": target["name"] if target else issue["state"]["name"],
+        }
+
+    def search_issues(self, term: str) -> list:
+        nodes = self._graphql(ISSUE_SEARCH_QUERY, {"term": term, "first": 10})["searchIssues"]["nodes"]
+        return [
+            {"identifier": n["identifier"], "title": n["title"], "url": n["url"], "team": n["team"]["name"], "state": n["state"]["name"]}
+            for n in nodes
+        ]
 
     def list_delegated_issues(self, *, include_closed: bool = False) -> list:
         issue_filter: dict = {"delegate": {"isMe": {"eq": True}}}
@@ -513,49 +583,8 @@ class BrokerLinearClient(LinearClient):
         self._socket_path = socket_path
 
     def _mint_token(self) -> dict:
-        reply = broker_request(self._socket_path, "linear_token")
+        reply = broker_client.request(self._socket_path, "linear_token")
         return {"client_id": "", "access_token": reply["token"], "expires_at": float(reply["expires_at"])}
-
-
-def broker_request(socket_path: str, op: str, *, timeout: float = BROKER_TIMEOUT_SECONDS, **fields) -> dict:
-    for delay in (*BROKER_RETRY_DELAYS, None):
-        try:
-            return _broker_attempt(socket_path, {"op": op, **fields}, timeout)
-        except BrokerUnavailable as error:
-            if delay is None or not error.retry:
-                raise
-            time.sleep(delay)
-
-
-def _broker_attempt(socket_path: str, request: dict, timeout: float) -> dict:
-    reply = b""
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(timeout)
-            client.connect(socket_path)
-            client.sendall(json.dumps(request).encode() + b"\n")
-            while not reply.endswith(b"\n") and len(reply) < BROKER_REPLY_LIMIT:
-                chunk = client.recv(4096)
-                if not chunk:
-                    break
-                reply += chunk
-    except TimeoutError:
-        # A broker that accepted the request and then stalled would stall a retry the same way.
-        raise BrokerUnavailable(f"the gateway's broker at {socket_path} did not answer in {timeout}s", retry=False) from None
-    except OSError as error:
-        raise BrokerUnavailable(
-            f"the gateway's broker at {socket_path} did not answer: {error.strerror or error}"
-        ) from None
-    try:
-        document = json.loads(reply)
-    except ValueError:
-        raise BrokerUnavailable(f"the gateway's broker at {socket_path} closed the connection without an answer") from None
-    if isinstance(document, dict) and document.get("state") == "busy":
-        raise BrokerUnavailable(f"the gateway's broker is busy and refused {request['op']}")
-    if not isinstance(document, dict) or document.get("ok") is not True:
-        message = document.get("message") if isinstance(document, dict) else None
-        raise LinearError(f"the gateway's broker refused {request['op']}: {message or 'no reason given'}")
-    return document
 
 
 class _Unauthorized(Exception):
@@ -595,6 +624,17 @@ def role_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.casefold())
 
 
+def _by_name(nodes, name: str, kind: str) -> dict:
+    matches = [n for n in nodes if role_key(n["name"]) == role_key(name)]
+    exact = [n for n in matches if n["name"] == name]
+    if len(exact) == 1 or len(matches) == 1:
+        return (exact or matches)[0]
+    if matches:
+        raise LinearError(f"more than one {kind} matches {name!r}: " + ", ".join(sorted(n["name"] for n in matches)))
+    names = ", ".join(sorted({n["name"] for n in nodes if not n.get("isGroup")}))
+    raise LinearError(f"no {kind} named {name!r}; the issue's team has: {names}")
+
+
 def _label_names(issue: dict) -> list:
     return sorted(label["name"] for label in issue["labels"]["nodes"])
 
@@ -613,7 +653,7 @@ def client_from_env(environ: Mapping[str, str] = os.environ, *, timeout: float =
     client_id = environ.get("LINEAR_CLIENT_ID")
     client_secret = environ.get("LINEAR_CLIENT_SECRET")
     if not client_id or not client_secret:
-        return BrokerLinearClient(broker_socket_path(environ), timeout=timeout, **kwargs)
+        return BrokerLinearClient(broker_client.socket_path(environ), timeout=timeout, **kwargs)
     return LinearClient(
         client_id,
         client_secret,
@@ -621,13 +661,6 @@ def client_from_env(environ: Mapping[str, str] = os.environ, *, timeout: float =
         timeout=timeout,
         **kwargs,
     )
-
-
-def broker_socket_path(environ: Mapping[str, str]) -> str:
-    home = os.path.realpath(environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes"))
-    parent = os.path.dirname(home)
-    root = os.path.dirname(parent) if os.path.basename(parent) == "profiles" else home
-    return os.path.join(root, BROKER_SOCKET)
 
 
 def token_cache_path(environ: Mapping[str, str]) -> Optional[str]:

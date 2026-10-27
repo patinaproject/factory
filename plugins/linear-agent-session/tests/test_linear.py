@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import socket
 import stat
 import tempfile
 import unittest
@@ -242,7 +241,7 @@ class BrokerClientTest(unittest.TestCase):
         self.socket = os.path.join(self.root, "factory-uploads.sock")
 
     def broker(self, *replies):
-        broker = FakeBroker(self.socket, replies)
+        broker = FakeBroker(self.socket, linear_token=list(replies))
         self.addCleanup(broker.close)
         return broker
 
@@ -253,7 +252,7 @@ class BrokerClientTest(unittest.TestCase):
         client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=fake)
         client.create_activity("session-1", {"type": "thought", "body": "x"})
 
-        self.assertEqual(broker.requests, [{"op": "linear_token"}])
+        self.assertEqual(broker.bodies, [{"op": "linear_token"}])
         self.assertEqual(fake.token_requests, [])
         self.assertEqual(fake.graphql_requests[0]["authorization"], "Bearer brokered-1")
 
@@ -289,20 +288,24 @@ class BrokerClientTest(unittest.TestCase):
 
         self.assertEqual(os.listdir(self.worker), [])
 
-    def test_a_broker_that_does_not_answer_is_a_linear_error(self):
+    def test_a_broker_that_does_not_answer_is_a_client_error_a_later_run_can_outlast(self):
         client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()]))
 
-        with self.assertRaisesRegex(linear.LinearError, f"the gateway's broker at {self.socket} did not answer"):
+        with mock.patch("time.sleep"), self.assertRaisesRegex(
+            linear.broker_client.BrokerUnavailable, f"the gateway's broker at {self.socket} did not answer"
+        ) as raised:
             client.create_activity("session-1", {"type": "thought", "body": "x"})
+        self.assertIsInstance(raised.exception, linear.CLIENT_ERRORS)
 
     def test_a_broker_refusal_names_its_reason(self):
         self.broker({"ok": False, "state": "unavailable", "message": "The gateway holds no Linear app credentials."})
         client = linear.client_from_env({"HERMES_HOME": self.worker}, urlopen=FakeLinear([activity_ok()]))
 
         with self.assertRaisesRegex(
-            linear.LinearError, "refused linear_token: The gateway holds no Linear app credentials."
-        ):
+            linear.broker_client.BrokerError, "refused linear_token: The gateway holds no Linear app credentials."
+        ) as raised:
             client.access_token()
+        self.assertIsInstance(raised.exception, linear.CLIENT_ERRORS)
 
     def test_a_busy_broker_is_asked_again_until_it_answers(self):
         broker = self.broker(BUSY, BUSY, linear_token("brokered-1"))
@@ -313,44 +316,6 @@ class BrokerClientTest(unittest.TestCase):
 
         self.assertEqual(len(broker.requests), 3)
         self.assertEqual(len(sleep.call_args_list), 2)
-
-    def test_a_broker_that_stays_busy_or_down_is_unavailable_after_a_bounded_wait(self):
-        broker = self.broker(BUSY)
-        for case in ("busy", "down"):
-            with self.subTest(case=case), mock.patch("time.sleep") as sleep:
-                if case == "down":
-                    broker.close()
-                    os.unlink(self.socket)
-                with self.assertRaises(linear.BrokerUnavailable):
-                    linear.broker_request(self.socket, "proxy_token")
-                waited = sum(call.args[0] for call in sleep.call_args_list)
-                self.assertGreater(len(sleep.call_args_list), 1)
-                self.assertLessEqual(waited, 10)
-        self.assertEqual(len(broker.requests), len(sleep.call_args_list) + 1)
-
-    def test_a_broker_that_stalls_is_unavailable_without_a_retry(self):
-        stalled = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.addCleanup(stalled.close)
-        stalled.bind(self.socket)
-        stalled.listen()
-
-        with mock.patch("time.sleep") as sleep, self.assertRaisesRegex(linear.BrokerUnavailable, "did not answer in 0.2s"):
-            linear.broker_request(self.socket, "proxy_token", timeout=0.2)
-
-        self.assertEqual(sleep.call_args_list, [])
-
-    def test_a_refusal_is_not_retried_and_is_not_unavailability(self):
-        broker = self.broker({"ok": False, "state": "unavailable", "message": "The gateway holds no proxy token."})
-
-        with mock.patch("time.sleep") as sleep, self.assertRaises(linear.LinearError) as raised:
-            linear.broker_request(self.socket, "proxy_token")
-
-        self.assertNotIsInstance(raised.exception, linear.BrokerUnavailable)
-        self.assertEqual((len(broker.requests), sleep.call_args_list), (1, []))
-
-    def test_the_broker_lives_in_the_root_home(self):
-        self.assertEqual(linear.broker_socket_path({"HERMES_HOME": self.worker}), self.socket)
-        self.assertEqual(linear.broker_socket_path({"HERMES_HOME": self.root}), self.socket)
 
     def test_a_home_with_app_credentials_never_asks_the_broker(self):
         broker = self.broker()
@@ -387,6 +352,7 @@ class IssueArgumentTest(unittest.TestCase):
         "linear_agent_session_create": lambda fake, args: tools.run_session_create(lambda: make_client(fake), args),
         "linear_issue_undelegate": lambda fake, args: tools.run_undelegate(lambda: make_client(fake), args),
         "linear_issue_to_todo": lambda fake, args: tools.run_to_todo(lambda: make_client(fake), args),
+        "linear_issue_edit": lambda fake, args: tools.run_edit(lambda: make_client(fake), {**args, "state": "Done"}),
     }
 
     def test_issue_tools_take_the_names_models_guess(self):
@@ -407,7 +373,7 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_hermes_lets_every_guessed_name_reach_the_handler(self):
         # Hermes refuses a deferred tool_call that lacks a name in the schema's "required" list.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA):
             for name in ("issue", "id", "issue_id"):
                 with self.subTest(tool=schema["name"], name=name):
                     missing = [r for r in schema["parameters"].get("required", []) if r not in {name: "ABC-9"}]
@@ -415,7 +381,7 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_the_deferred_catalog_line_names_the_argument(self):
         # Hermes lists a deferred tool by the first 60 characters of its description.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA):
             with self.subTest(tool=schema["name"]):
                 self.assertIn("`issue`", schema["description"][:60])
 
@@ -521,6 +487,7 @@ class IssueTest(unittest.TestCase):
                 "id": "2f9a6f0e-0000-4000-8000-000000000001",
                 "identifier": "ABC-123",
                 "title": "Fix checkout",
+                "description": "Checkout fails.",
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "branchName": "abc-123-fix-checkout",
                 "priority": 2.0,
@@ -529,7 +496,8 @@ class IssueTest(unittest.TestCase):
                 "labels": {"nodes": [{"name": "ready-for-agent"}, {"name": "bug"}]},
                 "attachments": {
                     "nodes": [
-                        {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
+                        {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"},
+                        {"url": "https://github.com/example-org/example-repo/pull/10", "sourceType": "github"},
                     ]
                 },
                 "inverseRelations": {
@@ -568,11 +536,14 @@ class IssueTest(unittest.TestCase):
                 "cardPriority": 3,
                 "state": "Todo",
                 "stateType": "unstarted",
+                "description": "Checkout fails.",
+                "githubIssues": ["https://github.com/example-org/example-repo/issues/9"],
                 "delegate": "app-user-1",
                 "labels": ["bug", "ready-for-agent"],
                 "role_labels": {"ready-for-agent": "Ready for agent"},
                 "attachments": [
-                    {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
+                    {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"},
+                    {"url": "https://github.com/example-org/example-repo/pull/10", "sourceType": "github"},
                 ],
                 "blockedBy": [
                     {"id": "uuid-b1", "identifier": "ABC-122", "gitBranchName": "abc-122-first", "stateType": "started",
@@ -743,6 +714,179 @@ class ToTodoTest(unittest.TestCase):
         fake, output = self.run_to_todo([issue_states("triage", [("Triage", "triage", 0)])])
         self.assertEqual(output, {"error": "ABC-1's team has no unstarted status to move it to"})
         self.assertEqual(len(fake.graphql_requests), 1)
+
+
+def label(name, group=None, is_group=False):
+    return {"id": f"label-{name}", "name": name, "isGroup": is_group, "parent": {"id": group} if group else None}
+
+
+TEAM_LABELS = [
+    label("Triage", is_group=True),
+    label("Needs info", "label-Triage"),
+    label("Ready for agent", "label-Triage"),
+    label("Factory"),
+]
+WORKSPACE_LABELS = [label("bug")]
+
+
+def issue_for_edit(labels, state="Triage"):
+    issue = {
+        "id": "issue-uuid",
+        "identifier": "ABC-1",
+        "title": "Old title",
+        "description": "Old text.",
+        "state": {"name": state},
+        "labels": {"nodes": [{k: n[k] for k in ("id", "name", "parent")} for n in labels]},
+        "team": {
+            "states": {"nodes": [{"id": f"state-{n}", "name": n} for n in ("Triage", "Todo", "Done", "Canceled")]},
+            "labels": {"nodes": TEAM_LABELS},
+        },
+    }
+    return 200, {"data": {"issue": issue, "issueLabels": {"nodes": WORKSPACE_LABELS}}}
+
+
+class EditTest(unittest.TestCase):
+    def edit(self, responses, **args):
+        fake = FakeLinear(responses)
+        return fake, json.loads(tools.run_edit(lambda: make_client(fake), {"issue": "ABC-1", **args}))
+
+    def test_sets_labels_and_status_by_any_spelling_of_their_names(self):
+        fake, output = self.edit(
+            [issue_for_edit([TEAM_LABELS[3]]), UPDATE_OK], add_labels=["ready-for-agent", "BUG"], state="canceled"
+        )
+        self.assertEqual(
+            output,
+            {
+                "identifier": "ABC-1",
+                "changed": True,
+                "title": "Old title",
+                "labels": ["Factory", "Ready for agent", "bug"],
+                "state": "Canceled",
+            },
+        )
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"],
+            {
+                "id": "issue-uuid",
+                "input": {"labelIds": ["label-Factory", "label-Ready for agent", "label-bug"], "stateId": "state-Canceled"},
+            },
+        )
+
+    def test_an_added_label_replaces_the_other_label_in_its_group(self):
+        fake, output = self.edit([issue_for_edit(TEAM_LABELS[1:2] + TEAM_LABELS[3:]), UPDATE_OK], add_labels="Ready for agent")
+        self.assertEqual(output["labels"], ["Factory", "Ready for agent"])
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"]["input"], {"labelIds": ["label-Factory", "label-Ready for agent"]}
+        )
+
+    def test_removes_a_label(self):
+        fake, output = self.edit([issue_for_edit(TEAM_LABELS[1:2] + TEAM_LABELS[3:]), UPDATE_OK], remove_labels=["needs-info"])
+        self.assertEqual(output["labels"], ["Factory"])
+        self.assertEqual(fake.graphql_requests[1]["variables"]["input"], {"labelIds": ["label-Factory"]})
+
+    def test_an_issue_that_already_matches_is_not_updated(self):
+        fake, output = self.edit([issue_for_edit([TEAM_LABELS[3]], state="Todo")], add_labels=["factory"], state="todo")
+        self.assertEqual(
+            output, {"identifier": "ABC-1", "changed": False, "title": "Old title", "labels": ["Factory"], "state": "Todo"}
+        )
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_an_unknown_name_changes_nothing_and_lists_the_names(self):
+        fake, output = self.edit([issue_for_edit([])], add_labels=["urgent"])
+        self.assertEqual(
+            output, {"error": "no label named 'urgent'; the issue's team has: Factory, Needs info, Ready for agent, bug"}
+        )
+        fake, output = self.edit([issue_for_edit([])], state="Shipped")
+        self.assertEqual(output, {"error": "no status named 'Shipped'; the issue's team has: Canceled, Done, Todo, Triage"})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_a_label_group_is_refused(self):
+        fake, output = self.edit([issue_for_edit([])], add_labels=["triage"])
+        self.assertEqual(output, {"error": "Triage is a label group; name one of its labels"})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_without_a_change_it_asks_for_one(self):
+        fake, output = self.edit([])
+        self.assertEqual(output, {"error": "pass title, description, add_labels, remove_labels, or state"})
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_edits_the_title_and_description_of_any_named_issue(self):
+        fake = FakeLinear([issue_for_edit([]), UPDATE_OK])
+        output = json.loads(
+            tools.run_edit(lambda: make_client(fake), {"issue": "XYZ-9", "title": "New title", "description": "New text."})
+        )
+        self.assertEqual(
+            output, {"identifier": "ABC-1", "changed": True, "title": "New title", "labels": [], "state": "Triage"}
+        )
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "XYZ-9"})
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"],
+            {"id": "issue-uuid", "input": {"title": "New title", "description": "New text."}},
+        )
+
+    def test_an_unchanged_title_and_description_are_not_written(self):
+        fake, output = self.edit([issue_for_edit([])], title="Old title", description="Old text.")
+        self.assertFalse(output["changed"])
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_an_assignee_or_delegate_argument_is_refused_before_linear_is_asked(self):
+        for key in ("assignee", "assigneeId", "delegate", "delegate_id"):
+            with self.subTest(key=key):
+                fake, output = self.edit([], title="New title", **{key: "user-1"})
+                self.assertEqual(
+                    output, {"error": f"this tool never changes assignee or delegate; drop {key}"}
+                )
+                self.assertEqual(fake.graphql_requests, [])
+
+    def test_a_blank_title_is_refused(self):
+        fake, output = self.edit([], title=" ", description="New text.")
+        self.assertEqual(output, {"error": "a title cannot be blank"})
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_the_schema_requires_no_argument(self):
+        self.assertNotIn("required", tools.EDIT_SCHEMA["parameters"])
+        self.assertNotIn("required", tools.SEARCH_SCHEMA["parameters"])
+        self.assertNotIn("required", tools.GITHUB_EDIT_SCHEMA["parameters"])
+
+
+class SearchTest(unittest.TestCase):
+    def search(self, responses, args):
+        fake = FakeLinear(responses)
+        return fake, json.loads(tools.run_search(lambda: make_client(fake), args))
+
+    def test_returns_up_to_ten_matching_issues(self):
+        node = {
+            "identifier": "ABC-57",
+            "title": "Upgrade to SDK 57",
+            "url": "https://linear.app/example/issue/ABC-57",
+            "team": {"name": "Apps"},
+            "state": {"name": "Todo"},
+        }
+        fake, output = self.search([(200, {"data": {"searchIssues": {"nodes": [node]}}})], {"query": "SDK 57"})
+        self.assertEqual(
+            output,
+            {
+                "issues": [
+                    {
+                        "identifier": "ABC-57",
+                        "title": "Upgrade to SDK 57",
+                        "url": "https://linear.app/example/issue/ABC-57",
+                        "team": "Apps",
+                        "state": "Todo",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"term": "SDK 57", "first": 10})
+
+    def test_takes_the_names_models_guess(self):
+        fake, output = self.search([(200, {"data": {"searchIssues": {"nodes": []}}})], {"term": "SDK"})
+        self.assertEqual(output, {"issues": []})
+
+    def test_without_a_query_it_asks_for_one(self):
+        fake, output = self.search([], {})
+        self.assertEqual(output, {"error": "pass query, the words to search issues for"})
+        self.assertEqual(fake.graphql_requests, [])
 
 
 def issue_node(identifier, attachments=()):

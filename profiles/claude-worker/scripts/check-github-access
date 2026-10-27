@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
-SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
+import factory_settings
+
 GH_TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN")
 LEVELS = {"read": 1, "write": 2}
 LEVEL_LABELS = {"read": "Read-only", "write": "Read and write"}
@@ -66,14 +67,7 @@ class Refused(Exception):
 
 
 def load_settings(settings_file: str | None) -> dict:
-    if settings_file:
-        text = Path(settings_file).read_text()
-    else:
-        proc = subprocess.run(["hermes", "config", "get", SETTINGS_KEY, "--json", "--raw"], capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise Refusal(f"hermes config get {SETTINGS_KEY} failed: {proc.stderr.strip()}")
-        text = proc.stdout
-    settings = json.loads(text)
+    settings = json.loads(Path(settings_file).read_text()) if settings_file else factory_settings.read(raw=True)
     if not isinstance(settings, dict):
         raise Refusal("settings must be an object")
     return settings
@@ -178,7 +172,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         problems = run(args.settings_json)
-    except (Refusal, OSError, ValueError) as exc:
+    except (Refusal, factory_settings.SettingsError, OSError, ValueError) as exc:
         print(f"check-github-access: {exc}", file=sys.stderr)
         return 2
     for problem in problems:

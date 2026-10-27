@@ -24,14 +24,13 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import card_branch
+import factory_settings
 
-SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 REPO_LINE = re.compile(r"^repo:\s*(\S+)\s*$", re.MULTILINE)
 MARKER = "conflict_head: "
 HANDBACK_REASON = "merge conflict with the base branch; see the card comments"
@@ -46,15 +45,6 @@ class Refusal(Exception):
 
 class Failed(Exception):
     pass
-
-
-def find_hermes() -> str:
-    # A cron job's PATH can lack the installer's bin directory, so fall back to where it puts hermes.
-    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
-    for candidate in filter(None, candidates):
-        if os.access(candidate, os.X_OK):
-            return candidate
-    raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
 
 
 def check_profile_home() -> None:
@@ -76,12 +66,9 @@ def run(*command: str) -> str:
     return proc.stdout
 
 
-def app_login(hermes: str) -> str:
-    proc = subprocess.run([hermes, "config", "get", SETTINGS_KEY, "--json", "--raw"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise Refusal(f"hermes config get {SETTINGS_KEY} failed")
+def app_login() -> str:
     try:
-        login = json.loads(proc.stdout)["github"]["login"]
+        login = factory_settings.read(raw=True)["github"]["login"]
     except (ValueError, KeyError, TypeError):
         login = None
     if not isinstance(login, str) or not login:
@@ -139,8 +126,8 @@ def main() -> int:
     failed = False
     try:
         check_profile_home()
-        hermes = find_hermes()
-        login = app_login(hermes)
+        hermes = factory_settings.find_hermes()
+        login = app_login()
         try:
             by_repo = candidates(json.loads(run(hermes, "kanban", "list", "--json")))
         except (Failed, ValueError) as failure:
@@ -148,6 +135,9 @@ def main() -> int:
     except Refusal as exc:
         print(f"reopen-conflicts: {exc}", file=sys.stderr)
         return exc.code
+    except factory_settings.SettingsError as exc:
+        print(f"reopen-conflicts: {exc}", file=sys.stderr)
+        return 2
     for repo, tasks in sorted(by_repo.items()):
         try:
             pulls = open_pulls(repo)

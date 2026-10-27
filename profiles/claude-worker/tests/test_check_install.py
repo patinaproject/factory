@@ -7,19 +7,17 @@ import json
 import os
 import plistlib
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, SCRIPTS, git, with_interpreter
+from tests.support import REPO, SCRIPTS, FakeBroker, git, with_interpreter
 
 ROUTE_KEY = "platforms.webhook.extra.routes.linear"
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
@@ -64,12 +62,12 @@ if target not in states:
 print("ai.example = {\\n\\tactive count = 1\\n\\tstate = " + states[target] + "\\n}")
 """
 
-TEAM_SKILLS = Path(tempfile.mkdtemp()).resolve()
-atexit.register(shutil.rmtree, TEAM_SKILLS, ignore_errors=True)
-(TEAM_SKILLS / "example-skill").mkdir()
-(TEAM_SKILLS / "example-skill" / "SKILL.md").write_text("---\nname: example-skill\n---\n")
-TEAM_KEY = "plugins.entries.team.settings.skills_dir"
-TEAM_ALLOW_KEY = "plugins.entries.team.settings.allow"
+WORK_SKILLS = Path(tempfile.mkdtemp()).resolve()
+atexit.register(shutil.rmtree, WORK_SKILLS, ignore_errors=True)
+(WORK_SKILLS / "example-skill").mkdir()
+(WORK_SKILLS / "example-skill" / "SKILL.md").write_text("---\nname: example-skill\n---\n")
+WORK_KEY = "plugins.entries.work.settings.skills_dir"
+WORK_ALLOW_KEY = "plugins.entries.work.settings.allow"
 
 SETTINGS = {"app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}}
 MAX_RUNNING_KEY = "plugins.entries.linear-agent-session.settings.triage.max_running"
@@ -83,13 +81,14 @@ ROOT_CONFIG = {
     "plugins.entries.linear-agent-session.settings": SETTINGS,
     MAX_RUNNING_KEY: 2,
     "kanban.max_in_progress": 4,
+    "kanban.max_spawn": 2,
     "kanban.review_dispatch": False,
     "kanban.auto_decompose": False,
     "streaming.enabled": True,
     "platforms.slack.extra.native_task_cards": True,
     "platforms.factory_uploads.enabled": True,
     "platforms.factory_uploads.extra.repositories": ["example-org/example-repo"],
-    TEAM_KEY: str(TEAM_SKILLS),
+    WORK_KEY: str(WORK_SKILLS),
 }
 WORKER_CONFIG = {
     **{key: ROOT_CONFIG[key] for key in (
@@ -139,7 +138,7 @@ REPO_FILES = {
     "plugins/p1/__init__.py": "plugin\n",
     "plugins/p1/tests/test_a.py": "test\n",
     "plugins/factory-uploads/__init__.py": "uploads\n",
-    "plugins/team/__init__.py": "team\n",
+    "plugins/work/__init__.py": "work\n",
     "plugins/webhook-retry/__init__.py": "retry\n",
     "templates/render.py": RENDER,
     ALERT_SOURCE: "#!/usr/bin/env python3\nalert\n",
@@ -147,48 +146,15 @@ REPO_FILES = {
 }
 
 
-class FakeBroker:
-    """A Unix socket that answers each request with `reply` and records what it was sent."""
-
-    def __init__(self, path: Path, reply: bytes):
-        self.requests: list = []
-        self.reply = reply
-        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.server.bind(str(path))
-        self.server.listen()
-        self.thread = threading.Thread(target=self.serve, daemon=True)
-        self.thread.start()
-
-    def serve(self) -> None:
-        while True:
-            try:
-                client, _ = self.server.accept()
-            except OSError:
-                return
-            with client:
-                request = b""
-                while not request.endswith(b"\n"):
-                    chunk = client.recv(4096)
-                    if not chunk:
-                        break
-                    request += chunk
-                self.requests.append(request)
-                client.sendall(self.reply)
-
-    def close(self) -> None:
-        self.server.close()
-
-
 STATUS = {
     "ok": True, "token_present": True, "linear_ready": True, "proxy_token_present": True, "github_app_ready": True,
     "last_state": None,
 }
-OK_STATUS = json.dumps(STATUS).encode() + b"\n"
 
 
 class CheckInstallTest(unittest.TestCase):
-    def broker(self, reply: bytes = OK_STATUS) -> FakeBroker:
-        broker = FakeBroker(self.root / "factory-uploads.sock", reply)
+    def broker(self) -> FakeBroker:
+        broker = FakeBroker(self.root / "factory-uploads.sock", status=[STATUS])
         self.addCleanup(broker.close)
         return broker
 
@@ -212,7 +178,11 @@ class CheckInstallTest(unittest.TestCase):
             self.install(home, "plugins/p1/__init__.py", "plugin\n")
             self.install(home, f"plugins/factory-secret-names/{SECRET_NAMES}", SECRET_NAMES_MANIFEST)
         self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
-        self.install(self.root, "plugins/team/__init__.py", "team\n")
+        (self.root / "plugins" / "linear-agent-session").mkdir(parents=True)
+        (self.root / "plugins" / "linear-agent-session" / "broker_client.py").symlink_to(
+            REPO / "plugins" / "linear-agent-session" / "broker_client.py"
+        )
+        self.install(self.root, "plugins/work/__init__.py", "work\n")
         self.install(self.root, "plugins/webhook-retry/__init__.py", "retry\n")
         self.install(self.worker, "SOUL.md", "soul\n")
         self.install(self.worker, "scripts/x", "#!/bin/sh\n")
@@ -389,14 +359,14 @@ class CheckInstallTest(unittest.TestCase):
         shutil.rmtree(self.root / "plugins" / "factory-uploads")
         self.assertEqual(self.check(), (1, f"plugin factory-uploads in {self.root}: not installed\n"))
 
-    def test_the_team_plugin_is_root_only(self) -> None:
-        shutil.rmtree(self.root / "plugins" / "team")
-        self.assertEqual(self.check(), (1, f"plugin team in {self.root}: not installed\n"))
+    def test_the_work_plugin_is_root_only(self) -> None:
+        shutil.rmtree(self.root / "plugins" / "work")
+        self.assertEqual(self.check(), (1, f"plugin work in {self.root}: not installed\n"))
 
-        self.install(self.root, "plugins/team/__init__.py", "team\n")
-        self.install(self.worker, "plugins/team/__init__.py", "team\n")
+        self.install(self.root, "plugins/work/__init__.py", "work\n")
+        self.install(self.worker, "plugins/work/__init__.py", "work\n")
         self.assertEqual(
-            self.check(), (1, f"plugin team in {self.worker}: installed, but it runs only in the root home\n")
+            self.check(), (1, f"plugin work in {self.worker}: installed, but it runs only in the root home\n")
         )
 
     def test_a_root_only_plugin_installed_in_the_worker_home_is_reported(self) -> None:
@@ -576,19 +546,19 @@ class CheckInstallTest(unittest.TestCase):
     def test_healthy_broker_gets_only_a_status_request(self) -> None:
         self.assertEqual(self.check(), (0, ""))
 
-        self.assertEqual(self.uploads.requests, [b'{"op":"status"}\n'])
+        self.assertEqual(self.uploads.bodies, [{"op": "status"}])
 
     def test_broker_that_is_not_listening(self) -> None:
         self.uploads.close()
-        (self.root / "factory-uploads.sock").unlink()
 
         self.assertEqual(
             self.check(),
-            (1, f"upload broker {self.root}/factory-uploads.sock: is unreachable: no broker is listening on it (part 5)\n"),
+            (1, f"upload broker {self.root}/factory-uploads.sock: is unreachable: the gateway's broker at "
+                f"{self.root}/factory-uploads.sock did not answer: No such file or directory (part 5)\n"),
         )
 
     def test_broker_without_a_token(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "token_present": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "token_present": False}]
 
         self.assertEqual(
             self.check(),
@@ -600,7 +570,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_linear_credentials_leaves_every_worker_without_linear(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "linear_ready": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "linear_ready": False}]
 
         self.assertEqual(
             self.check(),
@@ -612,7 +582,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_the_github_app_leaves_the_workers_gh_to_expire(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "github_app_ready": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "github_app_ready": False}]
 
         self.assertEqual(
             self.check(),
@@ -624,7 +594,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_the_proxy_token_matters_only_when_one_is_configured(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "proxy_token_present": False}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "proxy_token_present": False}]
         self.assertEqual(self.check(), (0, ""))
 
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper())
@@ -639,7 +609,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_broker_without_an_mcp_token_matters_only_for_a_configured_server(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True, "posthog": False}}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True, "posthog": False}}]
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "SENTRY_ACCESS_TOKEN"})
         self.assertEqual(self.check(), (0, ""))
 
@@ -659,7 +629,7 @@ class CheckInstallTest(unittest.TestCase):
     def test_broker_that_does_not_answer_a_status_request_properly(self) -> None:
         for reply in (b"not json\n", b'{"ok": false}\n', b"[]\n", b""):
             with self.subTest(reply=reply):
-                self.uploads.reply = reply
+                self.uploads.answers["status"] = [reply]
 
                 code, out = self.check()
 
@@ -713,8 +683,30 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"config model.default in {self.root}: is not set to the operator's model alias (part 4)\n"
-                f"config kanban.max_in_progress in {self.root}: is not set to the operator's card limit (part 10)\n"),
+                f"config kanban.max_in_progress in {self.root}: is not a positive card limit (part 10)\n"),
         )
+
+    def test_capacity_limits_that_are_not_positive_integers(self) -> None:
+        for bad in (True, 2.0, "8", 0, None):
+            with self.subTest(bad=bad):
+                config = {**ROOT_CONFIG, "kanban.max_in_progress": bad, "kanban.max_spawn": bad}
+                if bad is None:
+                    del config["kanban.max_in_progress"], config["kanban.max_spawn"]
+                self.config(self.root, config)
+
+                self.assertEqual(self.check(), (1, (
+                    f"config kanban.max_in_progress in {self.root}: is not a positive card limit (part 10)\n"
+                    f"config kanban.max_spawn in {self.root}: is not a positive limit on worker spawns per board "
+                    "(part 10)\n"
+                )))
+
+    def test_capacity_that_leaves_triage_no_reserved_slot(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "kanban.max_spawn": 3})
+
+        self.assertEqual(self.check(), (1, (
+            "kanban capacity kanban.max_spawn: 3 plus triage.max_running 2 is more than kanban.max_in_progress 4, so "
+            "the default board can take every slot triage needs (part 10)\n"
+        )))
 
     def test_factory_settings_that_differ_between_homes(self) -> None:
         settings = {**SETTINGS, "app_user_id": "u2"}
@@ -797,7 +789,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertNotIn("s3cr3t", out)
 
     def test_an_mcp_token_in_the_worker_env_is_reported_by_name_only(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True}}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "SENTRY_ACCESS_TOKEN"})
         self.install(self.worker, ".env", "SENTRY_ACCESS_TOKEN=s3cr3t-6\n")
 
@@ -811,7 +803,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertNotIn("s3cr3t", out)
 
     def test_an_mcp_token_variable_hermes_would_pass_to_every_process(self) -> None:
-        self.uploads.reply = json.dumps({**STATUS, "mcp_tokens_present": {"sentry": True}}).encode() + b"\n"
+        self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
         self.proxy("CLAUDE_PROXY_TOKEN", self.helper(), {"sentry": "OTHER_SENTRY_TOKEN"})
 
         self.assertEqual(
@@ -1082,15 +1074,33 @@ class CheckInstallTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as board:
             board.execute(f"CREATE TABLE tasks ({columns})")
+            board.execute("CREATE TABLE task_events (task_id, kind, created_at)")
         board.close()
         return path
 
     def test_board_databases_that_hold_the_columns_the_blocker_check_reads_are_silent(self) -> None:
-        columns = "id, title, body, branch_name, status, assignee"
+        columns = "id, title, body, branch_name, status, assignee, claim_lock, created_at"
         self.kanban_database(self.root / "kanban.db", columns)
         self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", columns)
 
         self.assertEqual(self.check(), (0, ""))
+
+    def test_a_triage_board_with_a_stranded_card_is_reported_by_the_full_check(self) -> None:
+        board = self.kanban_database(
+            self.root / "kanban" / "boards" / "triage" / "kanban.db",
+            "id, title, body, branch_name, status, assignee, claim_lock, created_at",
+        )
+        with sqlite3.connect(board) as db:
+            db.execute(
+                "INSERT INTO tasks (id, status, assignee, created_at) VALUES ('t_old', 'ready', 'claude-worker', ?)",
+                (time.time() - 3 * 3600 - 30,),
+            )
+        db.close()
+
+        self.assertEqual(self.check(), (1, (
+            f"stranded triage card t_old: has waited 180 minutes in ready with an assignee and "
+            "no worker, so the default board is probably holding every worker slot (part 10)\n"
+        )))
 
     def test_a_board_database_missing_a_column_the_blocker_check_reads(self) -> None:
         triage = self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", "id, title, body, state")
@@ -1098,6 +1108,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (1, (
             f"kanban board database {triage}: has no tasks.branch_name, tasks.status, so a card cannot wait for "
             "its blockers (part 15, check 29)\n"
+            f"stranded triage card check {triage}: cannot be read: no such column: t.created_at (part 10)\n"
         )))
 
     def test_a_board_database_that_cannot_be_read(self) -> None:
@@ -1208,6 +1219,30 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (0, ""))
 
+    def test_a_setting_that_refuses_a_worker_run_is_reported_with_the_refusal_text(self) -> None:
+        self.claude_session(fresh_after_tokens=-1)
+
+        self.assertEqual(self.check(), (
+            1, f"config claude_session in {self.worker}: claude_session.fresh_after_tokens -1 must be a positive integer\n",
+        ))
+
+    def test_a_leftover_sentry_token_env_is_reported(self) -> None:
+        self.claude_session(sentry_token_env="SENTRY_ACCESS_TOKEN")
+
+        self.assertEqual(self.check(), (1, (
+            f"config claude_session in {self.worker}: "
+            "claude_session.sentry_token_env is replaced by claude_session.mcp_servers.sentry\n"
+        )))
+
+    def test_a_repository_setting_that_refuses_its_run_is_reported_though_its_checkout_is_missing(self) -> None:
+        settings = {**SETTINGS, "repositories": [{"full_name": "org/gone", "path": str(self.tmp / "gone"), "worker_entry": "{x}"}]}
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+
+        status, output = self.check()
+
+        self.assertEqual(status, 1)
+        self.assertIn(f"config org/gone in {self.worker}: worker_entry '{{x}}' must be a plain prefix", output)
+
     def checkout(self) -> Path:
         path = self.tmp / "checkout"
         git(self.tmp, "clone", "-q", str(self.tmp / "seed"), str(path))
@@ -1235,56 +1270,56 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (1, f"checkout {missing}: does not exist (part 10)\n"))
 
-    def test_team_skills_directory_that_does_not_exist(self) -> None:
+    def test_work_skills_directory_that_does_not_exist(self) -> None:
         missing = self.tmp / "missing"
-        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(missing)})
+        self.config(self.root, {**ROOT_CONFIG, WORK_KEY: str(missing)})
 
-        self.assertEqual(self.check(), (1, f"team skills {missing}: does not exist (part 5)\n"))
+        self.assertEqual(self.check(), (1, f"work skills {missing}: does not exist (part 5)\n"))
 
-    def test_team_skills_directory_with_no_skill(self) -> None:
+    def test_work_skills_directory_with_no_skill(self) -> None:
         (self.tmp / "skills" / "not-a-skill").mkdir(parents=True)
-        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(self.tmp / "skills")})
+        self.config(self.root, {**ROOT_CONFIG, WORK_KEY: str(self.tmp / "skills")})
 
-        self.assertEqual(self.check(), (1, f"team skills {self.tmp}/skills: holds no <name>/SKILL.md (part 5)\n"))
+        self.assertEqual(self.check(), (1, f"work skills {self.tmp}/skills: holds no <name>/SKILL.md (part 5)\n"))
 
-    def test_team_skills_allow_naming_a_skill_the_directory_lacks(self) -> None:
-        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: ["example-skill", "ghost", "alpha"]})
-
-        self.assertEqual(
-            self.check(),
-            (1, f"team skills {TEAM_SKILLS}: lacks the allowed skill alpha (part 5)\n"
-                f"team skills {TEAM_SKILLS}: lacks the allowed skill ghost (part 5)\n"),
-        )
-
-    def test_team_skills_allow_that_is_not_a_list(self) -> None:
-        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: "example-skill"})
+    def test_work_skills_allow_naming_a_skill_the_directory_lacks(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, WORK_ALLOW_KEY: ["example-skill", "ghost", "alpha"]})
 
         self.assertEqual(
             self.check(),
-            (1, "team skills plugins.entries.team.settings.allow: is not a list of skill names (part 5)\n"),
+            (1, f"work skills {WORK_SKILLS}: lacks the allowed skill alpha (part 5)\n"
+                f"work skills {WORK_SKILLS}: lacks the allowed skill ghost (part 5)\n"),
         )
 
-    def test_team_skills_directory_holding_only_an_invalid_name(self) -> None:
+    def test_work_skills_allow_that_is_not_a_list(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, WORK_ALLOW_KEY: "example-skill"})
+
+        self.assertEqual(
+            self.check(),
+            (1, "work skills plugins.entries.work.settings.allow: is not a list of skill names (part 5)\n"),
+        )
+
+    def test_work_skills_directory_holding_only_an_invalid_name(self) -> None:
         skills = self.tmp / "skills"
         (skills / "bad.name").mkdir(parents=True)
         (skills / "bad.name" / "SKILL.md").write_text("---\nname: bad.name\n---\n")
-        self.config(self.root, {**ROOT_CONFIG, TEAM_KEY: str(skills)})
+        self.config(self.root, {**ROOT_CONFIG, WORK_KEY: str(skills)})
 
-        self.assertEqual(self.check(), (1, f"team skills {skills}: holds no <name>/SKILL.md (part 5)\n"))
+        self.assertEqual(self.check(), (1, f"work skills {skills}: holds no <name>/SKILL.md (part 5)\n"))
 
-    def test_team_skills_with_a_matching_allow_is_silent(self) -> None:
-        self.config(self.root, {**ROOT_CONFIG, TEAM_ALLOW_KEY: ["example-skill"]})
+    def test_work_skills_with_a_matching_allow_is_silent(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, WORK_ALLOW_KEY: ["example-skill"]})
 
         self.assertEqual(self.check(), (0, ""))
 
-    def test_unset_team_skills_directory_is_reported_once_by_the_config_row(self) -> None:
+    def test_unset_work_skills_directory_is_reported_once_by_the_config_row(self) -> None:
         config = dict(ROOT_CONFIG)
-        del config[TEAM_KEY]
+        del config[WORK_KEY]
         self.config(self.root, config)
 
         self.assertEqual(
             self.check(),
-            (1, f"config {TEAM_KEY} in {self.root}: is not set to the team skills directory (part 5)\n"),
+            (1, f"config {WORK_KEY} in {self.root}: is not set to the work skills directory (part 5)\n"),
         )
 
     def test_a_merge_after_the_last_fetch_is_seen(self) -> None:
@@ -1415,6 +1450,133 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual((proc.returncode, proc.stdout), (2, ""))
 
 
+class CheckTriageCapacityTest(unittest.TestCase):
+    def rows(self, max_spawn, max_in_progress, max_running) -> list:
+        return [str(d) for d in check_install.check_triage_capacity(max_spawn, max_in_progress, max_running)]
+
+    def test_limits_that_fit_report_nothing(self) -> None:
+        self.assertEqual(self.rows(2, 4, 2), [])
+        self.assertEqual(self.rows(3, 4, 1), [])
+
+    def test_the_spawn_cap_and_triage_cap_together_exceed_the_host_limit(self) -> None:
+        self.assertEqual(self.rows(3, 4, 2), [(
+            "kanban capacity kanban.max_spawn: 3 plus triage.max_running 2 is more than kanban.max_in_progress 4, so "
+            "the default board can take every slot triage needs (part 10)"
+        )])
+
+    def test_the_triage_cap_exceeds_the_spawn_cap(self) -> None:
+        self.assertEqual(self.rows(1, 4, 2), [(
+            "kanban capacity kanban.max_spawn: triage.max_running 2 is more than kanban.max_spawn 1, so triage cannot run "
+            "that many cards on its own board (part 10)"
+        )])
+
+    def test_both_rules_report_separately(self) -> None:
+        self.assertEqual(len(self.rows(2, 3, 3)), 2)
+
+    def test_a_value_that_is_not_a_positive_integer_reports_nothing(self) -> None:
+        for bad in (True, 2.0, "8", 0, -1, None):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.rows(bad, 4, 2), [])
+                self.assertEqual(self.rows(2, bad, 2), [])
+                self.assertEqual(self.rows(2, 4, bad), [])
+
+
+class CheckStrandedTriageTest(unittest.TestCase):
+    NOW = 1_000_000.0
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "hermes"
+        self.path = self.root / "kanban" / "boards" / "triage" / "kanban.db"
+        self.path.parent.mkdir(parents=True)
+        self.db = sqlite3.connect(self.path)
+        self.addCleanup(self.db.close)
+        self.db.execute("CREATE TABLE tasks (id, assignee, status, created_at, claim_lock)")
+        self.db.execute("CREATE TABLE task_events (task_id, kind, created_at)")
+
+    def card(self, id: str, *, assignee="claude-worker", status="ready", age=3600, claim=None, events=()) -> None:
+        self.db.execute(
+            "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)", (id, assignee, status, self.NOW - age * 60, claim)
+        )
+        for kind, event_age in events:
+            self.db.execute("INSERT INTO task_events VALUES (?, ?, ?)", (id, kind, self.NOW - event_age * 60))
+        self.db.commit()
+
+    def rows(self) -> list:
+        return [str(d) for d in check_install.check_stranded_triage(self.root, self.NOW)]
+
+    def test_an_assigned_ready_card_with_no_claim_past_the_threshold(self) -> None:
+        self.card("t_stuck", age=95)
+
+        self.assertEqual(self.rows(), [(
+            "stranded triage card t_stuck: has waited 95 minutes in ready with an assignee and no worker, so "
+            "the default board is probably holding every worker slot (part 10)"
+        )])
+
+    def test_a_card_that_waits_for_an_assignee_is_not_stranded(self) -> None:
+        self.card("t_none", assignee=None)
+        self.card("t_blank", assignee="  ")
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_claimed_card_is_not_stranded(self) -> None:
+        self.card("t_claimed", claim="lock-1")
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_card_in_another_status_is_not_stranded(self) -> None:
+        self.card("t_run", status="running")
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_card_under_the_threshold_is_not_stranded(self) -> None:
+        self.card("t_new", age=29)
+
+        self.assertEqual(self.rows(), [])
+
+    def test_the_wait_starts_at_the_threshold(self) -> None:
+        self.card("t_edge", age=30)
+
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_the_latest_event_sets_the_wait(self) -> None:
+        self.card("t_assigned", age=300, events=[("created", 300), ("assigned", 10)])
+        self.card("t_promoted", age=300, events=[("created", 300), ("promoted", 45)])
+
+        self.assertEqual(self.rows(), [(
+            "stranded triage card t_promoted: has waited 45 minutes in ready with an assignee and no worker, so "
+            "the default board is probably holding every worker slot (part 10)"
+        )])
+
+    def test_other_events_do_not_reset_the_wait(self) -> None:
+        self.card("t_comment", age=300, events=[("commented", 1)])
+
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_a_card_with_no_events_waits_from_its_creation(self) -> None:
+        self.card("t_bare", age=40)
+
+        self.assertEqual(self.rows(), [
+            "stranded triage card t_bare: has waited 40 minutes in ready with an assignee and no worker, so "
+            "the default board is probably holding every worker slot (part 10)"
+        ])
+
+    def test_a_missing_database_is_silent(self) -> None:
+        self.path.unlink()
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_database_that_cannot_be_read_is_reported(self) -> None:
+        self.db.close()
+        self.path.write_text("not a database")
+
+        rows = self.rows()
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].startswith(f"stranded triage card check {self.path}: cannot be read: "))
+
+
 class Launchd:
     """A file system root with the runbook's two plists and a fake launchctl that reports their state."""
 
@@ -1512,13 +1674,11 @@ class CheckMcpServersTest(unittest.TestCase):
             "mcp example-org/site: cannot read the MCP server status: exited 0 without a report (part 10)",
         ])
 
-    def test_a_leftover_sentry_token_env_is_reported(self) -> None:
+    def test_a_setting_that_refuses_every_run_skips_the_probes(self) -> None:
         self.settings["claude_session"] = {"sentry_token_env": "SENTRY_ACCESS_TOKEN"}
-        report = {"servers": [], "disabled": []}
+        report = {"servers": [{"name": "sentry", "status": "failed"}], "disabled": []}
 
-        self.assertEqual(self.check({"example-org/app": [0, report], "example-org/site": [0, report]}), [
-            "config claude_session.sentry_token_env: is replaced by mcp_servers.sentry, so every worker run is refused (part 10)",
-        ])
+        self.assertEqual(self.check({"example-org/app": [0, report], "example-org/site": [0, report]}), [])
 
     def test_a_report_that_is_not_an_object_is_named(self) -> None:
         self.assertEqual(self.check({"example-org/app": [2, ["no"]], "example-org/site": [0, "no"]}), [
@@ -1531,6 +1691,134 @@ class CheckMcpServersTest(unittest.TestCase):
 
         self.assertEqual(self.check({}), [])
         self.assertEqual([str(d) for d in check_install.check_mcp_servers(None, self.worker)], [])
+
+
+FAKE_ROOT_MCP_HERMES = """#!/usr/bin/env python3
+import json, os, sys
+home = os.environ["HERMES_HOME"]
+if sys.argv[1:3] == ["mcp", "test"]:
+    sys.exit(0 if sys.argv[3] in json.load(open(os.path.join(home, "connects.json"))) else 1)
+sys.exit("check-install must read mcp_servers from config.yaml, not from hermes: " + " ".join(sys.argv[1:]))
+"""
+
+FAKE_RUAMEL = """import json
+
+
+class YAML:
+    def __init__(self, typ="rt", pure=False):
+        assert typ == "safe" and pure is True
+    def load(self, stream):
+        text = stream.read()
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise ValueError("while parsing a flow sequence: " + text) from None
+"""
+
+SECRET = "sntryu_0123456789abcdef"
+ROOT_SERVER = {
+    "url": "https://mcp.example/mcp/<org>",
+    "headers": {"Authorization": "Sentry-Bearer ${SENTRY_ACCESS_TOKEN}"},
+    "sampling": {"enabled": False},
+}
+
+
+class CheckRootMcpServersTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "root"
+        self.root.mkdir()
+        self.hermes = self.tmp / "hermes"
+        self.hermes.write_text(with_interpreter(FAKE_ROOT_MCP_HERMES))
+        self.hermes.chmod(0o755)
+        (self.root / "tools" / "py").mkdir(parents=True)
+        (self.root / "tools" / "py" / "bin").mkdir()
+        (self.root / "tools" / "py" / "bin" / "python3").symlink_to(sys.executable)
+        (self.root / "tools" / "facts.json").write_text(json.dumps({"packages": {"python": {"entry": "py"}}}))
+        env = self.tmp / "env"
+        site = env / "lib" / "python3" / "site-packages"
+        (site / "ruamel" / "yaml").mkdir(parents=True)
+        (site / "ruamel" / "yaml" / "__init__.py").write_text(FAKE_RUAMEL)
+        (self.root / "installs" / "one").mkdir(parents=True)
+        (self.root / "installs" / "one" / "facts.json").write_text(
+            json.dumps({"packages": {"venv": {"environment": str(env)}}})
+        )
+
+    def check(self, servers, connects=("sentry",)) -> list:
+        (self.root / "config.yaml").write_text(json.dumps({"model": "x", "mcp_servers": servers}))
+        (self.root / "connects.json").write_text(json.dumps(list(connects)))
+        return [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+
+    def test_a_connected_server_with_sampling_off_and_a_reference_is_silent(self) -> None:
+        self.assertEqual(self.check({"sentry": ROOT_SERVER}), [])
+
+    def test_a_server_that_does_not_connect_is_reported(self) -> None:
+        self.assertEqual(self.check({"sentry": ROOT_SERVER}, connects=()), [
+            f"root mcp sentry in {self.root}: does not connect: run hermes mcp test sentry (part 10)",
+        ])
+
+    def test_sampling_on_or_missing_is_reported(self) -> None:
+        for sampling in ({"enabled": True}, {}, None):
+            with self.subTest(sampling=sampling):
+                server = {k: v for k, v in {**ROOT_SERVER, "sampling": sampling}.items() if v is not None}
+                self.assertEqual(self.check({"sentry": server}), [
+                    f"root mcp sentry in {self.root}: does not set sampling.enabled to false (part 10)",
+                ])
+
+    def test_a_literal_header_is_reported_without_its_value(self) -> None:
+        for value in (f"Sentry-Bearer {SECRET}", f"Bearer {SECRET} ${{SENTRY_ACCESS_TOKEN}}", f"{SECRET}${{X}}"):
+            with self.subTest(value=value):
+                lines = self.check({"sentry": {**ROOT_SERVER, "headers": {"Authorization": value}}})
+
+                self.assertEqual(lines, [
+                    f"root mcp sentry in {self.root}: header Authorization holds a literal value, not a ${{VAR}} reference (part 10)",
+                ])
+                self.assertNotIn(SECRET, "".join(lines))
+
+    def test_a_bare_reference_is_a_reference(self) -> None:
+        self.assertEqual(self.check({"sentry": {**ROOT_SERVER, "headers": {"X-Token": "${SENTRY_ACCESS_TOKEN}"}}}), [])
+
+    def test_a_disabled_server_is_skipped(self) -> None:
+        self.assertEqual(self.check({"sentry": {**ROOT_SERVER, "sampling": {}, "enabled": False}}, connects=()), [])
+
+    def test_no_servers_is_silent(self) -> None:
+        (self.root / "config.yaml").write_text('{"model": "x"}')
+        self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
+
+    def test_a_missing_config_is_check_configs_to_report(self) -> None:
+        self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
+
+    def test_a_reference_is_never_expanded_and_never_reported(self) -> None:
+        (self.root / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
+        (self.root / "connects.json").write_text('["sentry"]')
+        with mock.patch.dict(os.environ, {"SENTRY_ACCESS_TOKEN": SECRET}):
+            self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
+
+    def test_a_config_that_does_not_parse_is_one_drift_that_quotes_none_of_it(self) -> None:
+        (self.root / "config.yaml").write_text(f"mcp_servers: [unclosed Sentry-Bearer {SECRET}\n")
+
+        lines = [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+
+        self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: ValueError (part 10)"])
+
+    def test_a_config_read_that_times_out_is_one_drift(self) -> None:
+        (self.root / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
+        with mock.patch.object(check_install.subprocess, "run", side_effect=subprocess.TimeoutExpired("python3", 60)):
+            lines = [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+
+        self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: timed out (part 10)"])
+
+    def test_a_malformed_config_is_one_drift(self) -> None:
+        for servers, problem in (
+            (["sentry"], "mcp_servers is not a mapping"),
+            ({"sentry": "url"}, "mcp_servers.sentry is not a mapping"),
+            ({"sentry": {**ROOT_SERVER, "headers": {"Authorization": 5}}}, "mcp_servers.sentry.headers.Authorization is not a string"),
+            ({"sentry": {**ROOT_SERVER, "headers": ["x"]}}, "mcp_servers.sentry.headers is not a mapping"),
+            ({"sentry": {**ROOT_SERVER, "sampling": True}}, "mcp_servers.sentry.sampling is not a mapping"),
+        ):
+            with self.subTest(servers=servers):
+                self.assertEqual(self.check(servers), [f"root mcp {self.root}: cannot check: {problem} (part 10)"])
 
 
 FAKE_REGISTRY = """import json
@@ -1581,8 +1869,7 @@ class CheckHermesToolsTest(unittest.TestCase):
         (self.root / "installs" / "key" / "facts.json").write_text(
             json.dumps({"packages": {"venv": {"environment": str(site.parents[2])}}}))
         self.plugin = self.tmp / "worker" / "plugins" / "blocker-order" / "__init__.py"
-        self.plugin.parent.mkdir(parents=True)
-        shutil.copy(PLUGIN, self.plugin)
+        shutil.copytree(PLUGIN.parent, self.plugin.parent, ignore=shutil.ignore_patterns("tests", "__pycache__"))
 
     def register(self, tools: dict) -> None:
         (self.tree / "tools" / "registered.json").write_text(json.dumps(tools))

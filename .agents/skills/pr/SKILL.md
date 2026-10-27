@@ -11,7 +11,7 @@ metadata:
 
 # Write a PR body
 
-This is the Engineering copy of [Matt Pocock's pr skill](https://github.com/mattpocock/skills/blob/4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d/skills/engineering/pr/SKILL.md).
+This is the Code copy of [Matt Pocock's pr skill](https://github.com/mattpocock/skills/blob/4588b32ecab9ecc9fc8cc6b6c5e7d675b6004b0d/skills/engineering/pr/SKILL.md).
 Read [CREDITS.md](CREDITS.md) for attribution.
 
 Use this template whenever you create or rewrite a PR body:
@@ -170,16 +170,11 @@ You may use one of these, you may use several, it is unlikely you will use all o
 
 Concrete evidence that the change works. Show a before and after.
 
-Readiness evidence belongs under this heading. For each accepted observation,
-include its machine-readable claim in the section:
-`<!-- pr-readiness: {"observationId":"...","obligation":"...","validity":"observed-current"} -->`.
-Use the validity returned by `pr-readiness check`; do not invent IDs or labels.
-
 Screenshots are S-tier - when the environment is set up for it and the change is visual.
 
 Execution-based evidence is A-tier. Test results, console output. Show the exact test that now fails and passes, using pseudocode.
 
-When attachments are used, follow [the upload guide](references/media.md).
+When the body includes uploaded images or video, follow [the upload guide](references/media.md).
 
 ### Happy Path
 

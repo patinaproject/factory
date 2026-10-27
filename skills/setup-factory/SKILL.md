@@ -73,7 +73,7 @@ below first, and ask only when it prints nothing:
 | SST app, stage, Cloudflare account, and zone | `find ~ -maxdepth 4 -name 'sst.config.ts' -not -path '*/node_modules/*'`, then the stage configuration in that app. `dig +short <hostname>` shows whether the hostname already points at Cloudflare |
 | Existing tunnel | The `cloudflared` system service. On macOS, find its plist with `ls /Library/LaunchDaemons/*cloudflared*` and read only `Label` and `Program` with `plutil -extract <key> raw <plist>`, falling back to `ProgramArguments.0` when `Program` is absent. Never print full `launchctl print` output or any `ProgramArguments` entry after index 0, which can hold the tunnel token. Use the filtered check in [`references/cloudflare-sst.md`](references/cloudflare-sst.md) |
 | Slack workspace and channels | The connected Slack account, and the `SLACK_*` key names in `<home>/.env` or the secret source. Read key names only |
-| `kanban.max_in_progress` and the webhook port | `hermes config get kanban.max_in_progress` and `hermes config get platforms.webhook.extra.port` |
+| `kanban.max_in_progress`, `kanban.max_spawn`, and the webhook port | `hermes config get kanban.max_in_progress`, `hermes config get kanban.max_spawn`, and `hermes config get platforms.webhook.extra.port` |
 
 When `gh` or `hermes` is not on the session's `PATH`, call it by its full
 path, such as `~/.local/bin/gh`. Never run any of these with `--raw`, which
@@ -88,7 +88,8 @@ your task notes, not in the repository.
 | Hermes release tag to pin, `v0.21.4` or later | Hermes |
 | Model alias for Hermes' own agent loop, for example `sonnet` | Model provider |
 | Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
-| `kanban.max_in_progress` | Kanban |
+| `kanban.max_in_progress`, how many workers may run at once on the host | Kanban |
+| `kanban.max_spawn`, how many workers the default board may run at once | Kanban |
 | `triage.max_running`, how many triage cards may run at once | Kanban |
 | Factory hostname, Cloudflare account, and zone | Ingress |
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
@@ -129,8 +130,8 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
 | `GITHUB_UPLOAD_TOKEN`, the operator's upload-only token | The factory's Infisical folder only, entered by the operator. The gateway loads it. Neither `.env` holds it, and the broker never hands it out |
 | `platforms.factory_uploads.enabled` and `platforms.factory_uploads.extra.repositories` | `<home>/config.yaml` only |
-| `plugins.entries.team.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
-| `kanban.max_in_progress`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
+| `plugins.entries.work.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
+| `kanban.max_in_progress`, `kanban.max_spawn`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
 | The `default` and `triage` boards' `default_workdir` | Kanban board metadata, not `config.yaml` |
 
@@ -427,7 +428,7 @@ hermes -p claude-worker plugins list
 
 Both list `linear-agent-session`, `pr-ready-gate`, `blocker-order`, and
 `factory-secret-names`,
-enabled. The root home also lists `factory-uploads`, `team`, and
+enabled. The root home also lists `factory-uploads`, `work`, and
 `webhook-retry`, enabled, and the worker home lists none of them. On a fresh
 machine, install both now and skip the content check.
 
@@ -603,7 +604,7 @@ runs `/Library/Developer/CommandLineTools/usr/bin/python3`, not
    >
    > ```sh
    > cat "/Library/Application Support/factory-broker/installed-commit"
-   > git diff <installed>..<sha> -- plugins/factory-uploads plugins/linear-agent-session/linear.py skills/setup-factory/scripts/setup-broker-user
+   > git diff <installed>..<sha> -- plugins/factory-uploads plugins/linear-agent-session/linear.py plugins/linear-agent-session/broker_client.py skills/setup-factory/scripts/setup-broker-user
    > ```
    >
    > Then ask them to run, in their own terminal:
@@ -655,8 +656,8 @@ runs `/Library/Developer/CommandLineTools/usr/bin/python3`, not
    broker's log is `/Library/Application Support/factory-broker/home/broker.log`,
    which only root and the broker user read.
 
-**Team skills, root home only.** The `team` plugin registers the skills in a
-directory on the machine as `team:<name>` skills. It reads the directory in
+**Work skills, root home only.** The `work` plugin registers the skills in a
+directory on the machine as `work:<name>` skills. It reads the directory in
 place and copies nothing, so no skill content enters this repository. Install
 it in the root home and never in the worker's home. `check-install` reports an
 install in the worker home.
@@ -664,23 +665,31 @@ install in the worker home.
 1. Install and enable the plugin in the root home:
 
    ```sh
-   hermes plugins install "file://<repo>#plugins/team" --enable --yes-deps </dev/null
+   hermes plugins install "file://<repo>#plugins/work" --enable --yes-deps </dev/null
    ```
 
-2. Point it at the team skills directory. Each subdirectory that holds a
+2. Point it at the work skills directory. Each subdirectory that holds a
    `SKILL.md` is one skill. The real path goes in Hermes config and the
    private record only:
 
    ```sh
-   hermes config set plugins.entries.team.settings.skills_dir <team skills directory>
+   hermes config set plugins.entries.work.settings.skills_dir <work skills directory>
    ```
 
-   To register only some skills, set `plugins.entries.team.settings.allow` to
+   To register only some skills, set `plugins.entries.work.settings.allow` to
    a list of skill names. An empty or unset `allow` registers every skill. A
    name the directory lacks stops the plugin from loading.
 3. **Check.** `check-install` reports a `skills_dir` that is unset, missing,
    or empty, and an `allow` name the directory lacks. It prints no skill
    content.
+
+A root home set up before the `team` plugin became `work` still has the `team`
+plugin and `plugins.entries.team` settings. Move it over: uninstall the
+`team` plugin from the root home with Hermes, install `work` as in step 1,
+set `plugins.entries.work.settings.skills_dir` and any `allow` to the values
+under `plugins.entries.team.settings`, remove the old `plugins.entries.team`
+block, and restart the gateway. Agents then see `work:<name>` where they saw
+`team:<name>`.
 
 Adding, renaming, or removing a skill, or changing its description, takes
 effect at the next gateway restart. An edit to the content of an existing
@@ -842,7 +851,11 @@ servers a worker does not load, as [MCP server
 identities](references/mcp-identities.md) describes. Both stay empty until
 the operator creates the first identity. `check-install` reports each
 repository server that a worker run does not see connected and that
-`disabled_mcp_servers` does not list.
+`disabled_mcp_servers` does not list. The root agent gets a static-token
+server through `mcp_servers` in the root home's `config.yaml`, with sampling
+off (see "Root agent" in the same reference). `check-install` reports each
+root server that does not connect, has sampling on, or holds a literal header
+value.
 
 A card that waits in review leaves its Claude session idle past the 5-minute
 prompt cache, and a resumed large session re-writes its whole context at the
@@ -974,7 +987,7 @@ it. When no installed version matches, install it as the operator's user, in
 a shell where nvm is loaded: `nvm install <version>`. Install any other tool
 a repository needs, such as `pnpm`, before the first card runs.
 
-A repository that enables the Engineering plugin runs its issue-handoff gate
+A repository that enables the Code plugin runs its issue-handoff gate
 with Bun. `<bin dir>` is the directory that holds `gh` and the other tools
 setup installs, such as `~/.local/bin`. Check with `command -v bun` and with
 `ls <bin dir>/bun`, because a non-login shell can lack `<bin dir>` on `PATH`.
@@ -1000,6 +1013,7 @@ Continue only when
 
 ```sh
 hermes config set kanban.max_in_progress <n>
+hermes config set kanban.max_spawn <m>
 hermes config set kanban.review_dispatch false
 hermes config set kanban.auto_decompose false
 hermes kanban boards set-default-workdir default <path of the default repository>
@@ -1025,6 +1039,21 @@ same playbook in every repository, whatever that repository vendors.
 `check-install` reports it. Update the checkout to the factory's default
 branch to restore it.
 
+Reserve worker slots for triage. Hermes applies `kanban.max_in_progress` to
+the whole host and `kanban.max_spawn` to each board's own running count. The
+dispatcher ticks the `default` board first, so with `max_spawn` at the host
+limit it takes every free slot and triage cards wait. Set `<m>` so that
+`kanban.max_spawn + triage.max_running <= kanban.max_in_progress` and
+`triage.max_running <= kanban.max_spawn`. The slots left for triage stay empty
+when no triage card waits. The gateway reads `kanban.max_spawn` only when it
+starts, so a change needs `restart-gateway`. Under `elevated` memory pressure
+Hermes allows one spawn per tick and the `default` board takes it, so a triage
+card can still wait. `check-install` reports a triage card that stays assigned
+in `ready` for 30 minutes or more. The rule assumes that only the `default` and
+`triage` boards exist, because `max_spawn` applies to every board, and that the
+gateway never sets `HERMES_KANBAN_DB`. `check-install` reports a value that
+breaks the rule.
+
 A worker hands a card with a merge-ready pull request to the `review` lane.
 With `kanban.review_dispatch` set to `false`, Hermes spawns no agent reviewer,
 so the card waits there for a person. GitHub triage moves it to `done` when the
@@ -1039,8 +1068,8 @@ the worker needs, so turn the decomposer off. A looping card then waits in
 `triage` for a person, and a reply on its Linear issue, a changes-requested
 review, or an actionable comment on its pull request resumes it.
 
-Leave `kanban.default_assignee` unset. The resume steps in the triage prompt
-unassign a card so the dispatcher skips it while `kanban specify` rewrites it,
+Leave `kanban.default_assignee` unset. `card_transition.py resume`, which the
+triage prompts run, unassigns a card so the dispatcher skips it while `kanban specify` rewrites it,
 and a default assignee would route the unassigned card to a worker first.
 
 **Check.** `hermes config get kanban.review_dispatch` and
@@ -1378,9 +1407,9 @@ factory, do these before the restart:
 - Check `kanban.max_spawn`. It caps the running cards the gateway's dispatcher
   allows, so `0` means the dispatcher never starts a card. An older factory can
   set it to `0` because its own triage started cards. Factory triage only
-  queues cards, so set `kanban.max_spawn` to the same value as
-  `kanban.max_in_progress`. To keep the dispatcher from also starting the older
-  factory's cards, set `kanban.dispatch_profiles` to `[claude-worker]`. Confirm
+  queues cards, so set `kanban.max_spawn` as part 10 describes, at most
+  `kanban.max_in_progress` minus `triage.max_running`. To keep the dispatcher
+  from also starting the older factory's cards, set `kanban.dispatch_profiles` to `[claude-worker]`. Confirm
   with `hermes kanban dispatch --dry-run --json`: `spawned` lists only
   `claude-worker` cards.
 - `hermes gateway restart` waits for chat work and in-process cron jobs, and
@@ -1518,8 +1547,10 @@ each check. Report each result.
     `git -C <repo> worktree add` can check that branch out even when the
     archived card kept a dirty worktree.
 11. A mention without delegation gets an answer and creates no card.
-12. No more than `kanban.max_in_progress` workers run at once, and no `claude`
-    process runs outside a Kanban worker.
+12. No more than `kanban.max_in_progress` workers run at once, no more than
+    `kanban.max_spawn` of them on the `default` board, and no `claude`
+    process runs outside a Kanban worker. A triage card never stays assigned in
+    `ready` for 30 minutes.
 13. `git -C <install> status --porcelain` still prints nothing, and `HEAD` is
     still the pinned tag.
 14. `git -C <repo> status --porcelain` prints nothing. This repository holds no
@@ -1849,6 +1880,13 @@ Hermes process starts. The new helper also writes
    cards to close. The reverse order drops every closure until the next
    cron run. `check-install` reports a route that filters on issue ids while
    the file holds none.
+   - A `config kanban.max_spawn` or `config kanban.max_in_progress` line, or a
+     `kanban capacity` line: set the keys as part 10 describes. The gateway
+     reads `kanban.max_spawn` only when it starts, so restart it with
+     `restart-gateway` afterwards.
+   - A `stranded triage card` line: the `default` board is probably holding
+     every worker slot. Check the capacity rule first, then
+     `hermes kanban dispatch --dry-run --json`.
    - A `kanban board <name>` line: run the part 10 Kanban commands before the
      profile update. For a missing `triage` board, run
      `hermes kanban boards create triage --name Triage --default-workdir <path of the default repository>`.
@@ -1860,7 +1898,7 @@ Hermes process starts. The new helper also writes
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.
-   - A `team skills` line: the team skills directory is missing, empty, or
+   - A `work skills` line: the work skills directory is missing, empty, or
      lacks a skill that `allow` names. Fix the directory or the part 5
      setting.
    - A `webhook config <key>` line: run the part 11 install for that key.
@@ -1943,7 +1981,7 @@ Hermes process starts. The new helper also writes
    check against the settings file does. When it prints a line, find which
    home is right with the operator, and set that home's settings in the other
    as in part 10.
-6. If step 3 changed a plugin, a webhook config key, or a team skills setting:
+6. If step 3 changed a plugin, a webhook config key, or a work skills setting:
 
    > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
    > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes.

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import importlib
 import json
 import os
 import re
@@ -44,14 +45,15 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import parse_qsl, quote, urlsplit
+from urllib.parse import quote
 
 import blockers
 import card_branch
+import closing
+import factory_settings
 import factory_source
 import kanban_board
 
-SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_WORKER_ENTRY = (
     "Work Linear issue {issue_identifier} ({issue_url}) in {repo} on branch {branch}. "
     "First start the issue through this repository's own issue-start workflow, which moves it to In Progress. "
@@ -198,19 +200,10 @@ LINEAR_MCP_SERVER = {
     "url": "https://mcp.linear.app/mcp",
     "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
 }
-MCP_SERVER_KEYS = frozenset({"url", "token_env", "scheme", "headers"})
 MCP_STATUS_SECONDS = 90.0
 UNREACHABLE_MODEL_URL = "http://127.0.0.1:9"
-# Fixed headers and the URL reach argv in --mcp-config, where ps shows them, so a name or value that could carry a secret is refused.
-CREDENTIAL_NAME = re.compile(r"auth|key|token|secret|cookie|password|cred|session|sig|pass|pwd|jwt|bearer|access", re.IGNORECASE)
-AUTHORIZATION_VALUE = re.compile(r"\s*(?:bearer|basic|token|sentry-bearer)(?:\s|$)", re.IGNORECASE)
-# `sk-` alone is a language tag such as sk-SK, so it counts only with a token's worth of characters after it.
-TOKEN_SHAPE = re.compile(
-    r"\s*(?:(?:ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|sntrys_|sntryu_|lin_api_|phx_|xoxb-|xoxp-)|sk-[A-Za-z0-9_-]{20})"
-)
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
-DEFAULT_FRESH_AFTER_TOKENS = 100_000
 HANDOFF_RESULT_CHARS = 2000
 USAGE_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 MODEL_USAGE_KEYS = (
@@ -226,10 +219,7 @@ LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
-ISSUE_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/([0-9]+)$")
 GITHUB_ISSUE_LINE = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
-CLOSING_KEYWORD = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:\[[^\]]*\]\()?"
-HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 
 class Refusal(Exception):
@@ -424,22 +414,14 @@ def link_issues(
             return {"action": "waiting", "reason": f"no open pull request by {login} on {branch}"}
         result = {"pr": pull["html_url"]}
         body = pull.get("body") or ""
-        key = re.escape(identifier) + r"(?![0-9])"
-        linear = rf"https://linear\.app/[^/\s]+/issue/{key}"
-        edited = re.sub(rf"({CLOSING_KEYWORD}){key}", lambda m: m.group(1) + linear_url, body, flags=re.I)
-        # A reference left inside the template's HTML comment does not render, so it does not count.
-        visible = HTML_COMMENT.sub("", edited)
-        missing = []
-        issue = ISSUE_URL.match(github_issue or "")
+        edited = closing.with_url(body, identifier, linear_url)
+        written = {}
+        issue = closing.ISSUE_URL.match(github_issue or "")
         if issue:
-            issue_repo, number = issue.groups()
-            refs = [re.escape(f"{issue_repo}#{number}"), re.escape(f"https://github.com/{issue_repo}/issues/{number}")]
-            if issue_repo.lower() == repo.lower():
-                refs.append(f"#{number}")
-            if not re.search(rf"{CLOSING_KEYWORD}(?:{'|'.join(refs)})(?![0-9])", visible, re.I):
-                missing.append(f"#{number}" if issue_repo.lower() == repo.lower() else f"{issue_repo}#{number}")
-        if not re.search(CLOSING_KEYWORD + linear, visible, re.I):
-            missing.append(linear_url)
+            ref = closing.github_reference(*issue.groups(), repo)
+            written[ref] = ref
+        written[identifier.upper()] = linear_url
+        missing = [written[ref] for ref in closing.missing(edited, repo, written)]
         if missing:
             edited = f"{edited.rstrip()}\n\nCloses {', closes '.join(missing)}".strip()
         if edited == body:
@@ -453,14 +435,7 @@ def link_issues(
 def load_settings(settings_file: str | None) -> dict:
     if settings_file:
         return json.loads(Path(settings_file).read_text())
-    proc = subprocess.run(
-        ["hermes", "config", "get", SETTINGS_KEY, "--json", "--raw"],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise Refusal(f"hermes config get {SETTINGS_KEY} failed: {proc.stderr.strip()}")
-    return json.loads(proc.stdout)
+    return factory_settings.read(raw=True)
 
 
 def find_repository(settings: dict, full_name: str) -> dict:
@@ -585,13 +560,6 @@ def model_usage(output: dict) -> dict | None:
     }
 
 
-def fresh_after_tokens(transport: dict) -> int:
-    value = transport.get("fresh_after_tokens", DEFAULT_FRESH_AFTER_TOKENS)
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise Refusal(f"claude_session.fresh_after_tokens {value!r} must be a positive integer")
-    return value
-
-
 def plan_session(key: str, worktree: Path, threshold: int, now: float) -> SessionPlan:
     generation, latest = 0, None
     while found := find_transcript(session_id_for(key, generation), worktree):
@@ -638,9 +606,6 @@ def node_bin_for(worktree: Path) -> Path | None:
     return max(matches, key=lambda d: version_key(d.name)) / "bin"
 
 
-MODEL_TIERS = ("sonnet", "haiku", "fable")
-
-
 # What Claude Code and the tools it runs need: a shell, locale, temp dir, the worker's gh login, its
 # own config dir, and where the Java, Android, and Xcode toolchains live. Nothing else from the worker's
 # environment crosses, so no secret can.
@@ -665,11 +630,8 @@ def child_env(worktree: Path) -> dict:
 
 def check_toolchain(repo: dict, worktree: Path) -> None:
     """Run the repository's toolchain checks in the environment Claude Code gets, and refuse on a failure."""
-    checks = repo.get("toolchain_checks") or []
-    if not isinstance(checks, list) or not all(isinstance(check, str) for check in checks):
-        raise Refusal(f"toolchain_checks {checks!r} must be a list of shell commands")
     env = child_env(worktree)
-    for check in checks:
+    for check in factory_settings.toolchain_checks(repo):
         try:
             result = subprocess.run(
                 ["/bin/sh", "-c", check], cwd=worktree, env=env, stdin=subprocess.DEVNULL,
@@ -685,22 +647,27 @@ def check_toolchain(repo: dict, worktree: Path) -> None:
             )
 
 
-def linear_access() -> tuple:
-    """A client and a token from the worker home's linear-agent-session plugin, which gets tokens from the gateway's broker."""
+def plugin_module(plugin: str, name: str):
+    """Module `name` of the worker home's copy of `plugin`, such as linear-agent-session's `linear`."""
     home = os.environ.get("HERMES_HOME")
     if not home:
-        raise Refusal("HERMES_HOME is not set; claude-session reads the Linear token through the worker home's plugin")
-    plugin = Path(home) / "plugins" / "linear-agent-session"
-    if not (plugin / "linear.py").is_file():
-        raise Refusal(f"the linear-agent-session plugin is not installed in {home}")
-    sys.path.insert(0, str(plugin))
-    import linear
+        raise Refusal(f"HERMES_HOME is not set; claude-session imports {name} from the worker home's {plugin} plugin")
+    path = Path(home) / "plugins" / plugin
+    if not (path / f"{name}.py").is_file():
+        raise Refusal(f"the {plugin} plugin is not installed in {home}")
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+    return importlib.import_module(name)
 
+
+def linear_access() -> tuple:
+    """A client and a token from the worker home's linear-agent-session plugin, which gets tokens from the gateway's broker."""
+    linear = plugin_module("linear-agent-session", "linear")
     try:
         client = linear.client_from_env()
         return client, client.access_token()
-    except linear.LinearError as error:
-        raise Refusal(f"Linear token: {error}", transient=isinstance(error, linear.BrokerUnavailable)) from None
+    except linear.CLIENT_ERRORS as error:
+        raise Refusal(f"Linear token: {error}", transient=isinstance(error, linear.broker_client.BrokerUnavailable)) from None
 
 
 def triage_playbook() -> Path:
@@ -720,7 +687,7 @@ def title_triage_documents(client, issue_id: str) -> dict:
     The result goes in the run's report and never changes its status: a failure here must not lose the
     triage outcome that the worker relays.
     """
-    import linear
+    linear = plugin_module("linear-agent-session", "linear")
 
     try:
         issue = client.issue_documents(issue_id)
@@ -734,18 +701,18 @@ def title_triage_documents(client, issue_id: str) -> dict:
                 renamed.append(prefixed)
             elif title not in titles and prefixed not in titles:
                 missing.append(title)
-    except (linear.LinearError, OSError) as error:
+    except (*linear.CLIENT_ERRORS, OSError) as error:
         return {"error": f"checking the triage Documents failed: {error}"}
     return {"renamed": renamed, "missing": missing}
 
 
 def triage_mentions(client, issue_id: str, identifier: str) -> str:
     """Resolved here, not by the model, because a team can list several triage people and the model picked one."""
-    import linear
+    linear = plugin_module("linear-agent-session", "linear")
 
     try:
         people = client.triage_people(issue_id)
-    except (linear.LinearError, OSError) as error:
+    except (*linear.CLIENT_ERRORS, OSError) as error:
         raise Refusal(f"reading who answers Linear issue {identifier}'s triage questions failed: {error}") from None
     owner = people["assignee"] or people["triage"]
     reporter = people["creator"] or owner
@@ -761,17 +728,17 @@ def triage_mentions(client, issue_id: str, identifier: str) -> str:
 
 
 def require_ready(client, issue_id: str, identifier: str) -> None:
-    import linear
+    linear = plugin_module("linear-agent-session", "linear")
 
     try:
         labels = client.issue_labels(issue_id)
-    except linear.LinearError as error:
+    except linear.CLIENT_ERRORS as error:
         raise Refusal(f"reading the labels of Linear issue {identifier} failed: {error}") from None
     if linear.role_key(READY_LABEL) in map(linear.role_key, labels):
         return
     try:
         live = client.role_labels(issue_id).get(READY_LABEL)
-    except linear.LinearError as error:
+    except linear.CLIENT_ERRORS as error:
         raise Refusal(f"reading the labels of Linear issue {identifier} failed: {error}") from None
     wanted = f"`{live}`" if live else f"a label for the `{READY_LABEL}` role (Linear has none)"
     raise Refusal(
@@ -786,7 +753,7 @@ def triage_activity(client, issue_id: str, result: str | None) -> str | None:
     first = (result or "").partition("\n")[0]
     if not first.startswith(TRIAGE_OUTCOME):
         return None
-    import linear
+    linear = plugin_module("linear-agent-session", "linear")
 
     role = linear.role_key(first.removeprefix(TRIAGE_OUTCOME))
     if role not in map(linear.role_key, TRIAGE_ROLES):
@@ -796,23 +763,9 @@ def triage_activity(client, issue_id: str, result: str | None) -> str | None:
 
     try:
         return "thought" if client.delegated_to_self(issue_id) else "response"
-    except (linear.LinearError, OSError):
+    except (*linear.CLIENT_ERRORS, OSError):
         # Ending a delegated issue's session under its implementation card is worse than leaving one open.
         return "thought"
-
-
-def tier_models(transport: dict) -> dict:
-    value = transport.get("tier_models")
-    if value is None:
-        return {}
-    ok = isinstance(value, dict) and set(value) <= set(MODEL_TIERS) and all(
-        isinstance(model, str) and model for model in value.values()
-    )
-    if not ok:
-        raise Refusal(
-            f"claude_session.tier_models {value!r} must map {', '.join(MODEL_TIERS)} to non-empty model ids"
-        )
-    return value
 
 
 def model_environment(transport: dict, tiers: dict) -> dict:
@@ -820,62 +773,23 @@ def model_environment(transport: dict, tiers: dict) -> dict:
     # answers `unknown provider for model ...` for an id it does not serve.
     model = transport["model"]
     env = {"ANTHROPIC_MODEL": model, "ANTHROPIC_DEFAULT_OPUS_MODEL": model}
-    env.update({f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL": tiers.get(tier, model) for tier in MODEL_TIERS})
+    env.update({f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL": tiers.get(tier, model) for tier in factory_settings.MODEL_TIERS})
     # A subagent that names no model takes this alias. CLAUDE_CODE_SUBAGENT_MODEL_FORCE stays unset so
     # an explicit model on the Agent call still wins.
     env["CLAUDE_CODE_SUBAGENT_MODEL"] = "sonnet" if "sonnet" in tiers else model
     return env
 
 
-def factory_mcp_servers(transport: dict) -> dict:
-    if "sentry_token_env" in transport:
-        raise Refusal("claude_session.sentry_token_env is replaced by claude_session.mcp_servers.sentry")
-    servers = transport.get("mcp_servers") or {}
-    if not isinstance(servers, dict):
-        raise Refusal(f"claude_session.mcp_servers {servers!r} must map server names to servers")
-    for name, server in servers.items():
-        where = f"claude_session.mcp_servers.{name}"
-        if name == "linear":
-            raise Refusal(f"{where}: the factory owns the linear server")
-        if not isinstance(server, dict) or not set(server) <= MCP_SERVER_KEYS:
-            raise Refusal(f"{where} must be an object with only {', '.join(sorted(MCP_SERVER_KEYS))}")
-        if not (isinstance(server.get("url"), str) and server["url"].startswith("https://")):
-            raise Refusal(f"{where}.url must be an https URL")
-        if not (isinstance(server.get("token_env"), str) and server["token_env"]):
-            raise Refusal(f"{where}.token_env must name the gateway's variable that holds the token")
-        scheme = server.get("scheme", "Bearer")
-        if not (isinstance(scheme, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", scheme)):
-            raise Refusal(f"{where}.scheme must be one Authorization scheme word, such as Bearer")
-        headers = server.get("headers", {})
-        if not (isinstance(headers, dict) and all(isinstance(v, str) for v in headers.values())):
-            raise Refusal(f"{where}.headers must map header names to fixed strings")
-        if any(CREDENTIAL_NAME.search(header) for header in headers):
-            raise Refusal(f"{where}.headers must hold no credential; mcp-headers sends the token as Authorization")
-        url = urlsplit(server["url"])
-        if "@" in url.netloc:
-            raise Refusal(f"{where}.url must hold no userinfo; mcp-headers sends the token as Authorization")
-        query = parse_qsl(url.query, keep_blank_values=True)
-        if any(CREDENTIAL_NAME.search(key) for key, _ in query):
-            raise Refusal(f"{where}.url must hold no credential in its query string; mcp-headers sends the token as Authorization")
-        values = (*headers.values(), *(value for _, value in query))
-        if any(AUTHORIZATION_VALUE.match(value) for value in values):
-            raise Refusal(f"{where} must hold no Authorization scheme in a header value or URL query value; mcp-headers sends the token")
-        if any(TOKEN_SHAPE.match(value) for value in values):
-            raise Refusal(f"{where} must hold no known token prefix in a header value or URL query value; mcp-headers sends the token")
-    return servers
-
-
 def require_mcp_tokens(servers: dict) -> None:
     if not servers:
         return
-    import linear
+    broker_client = plugin_module("linear-agent-session", "broker_client")
 
     try:
-        status = linear.broker_request(linear.broker_socket_path(os.environ), "status")
-    except linear.LinearError as error:
-        raise Refusal(f"MCP tokens: {error}", transient=isinstance(error, linear.BrokerUnavailable)) from None
-    present = status.get("mcp_tokens_present") or {}
-    missing = sorted(name for name in servers if present.get(name) is not True)
+        status = broker_client.status(broker_client.socket_path(os.environ))
+    except broker_client.BrokerError as error:
+        raise Refusal(f"MCP tokens: {error}", transient=isinstance(error, broker_client.BrokerUnavailable)) from None
+    missing = sorted(name for name in servers if not status.mcp_tokens_present.get(name))
     if missing:
         raise Refusal(f"MCP tokens: the gateway's broker holds no token for {', '.join(missing)}")
 
@@ -896,13 +810,6 @@ def mcp_config(servers: dict) -> str:
     return json.dumps({"mcpServers": config})
 
 
-def disabled_mcp_servers(transport: dict) -> list[str]:
-    value = transport.get("disabled_mcp_servers") or []
-    if not isinstance(value, list) or not all(isinstance(name, str) and name for name in value):
-        raise Refusal(f"claude_session.disabled_mcp_servers {value!r} must be a list of MCP server names")
-    return value
-
-
 def publish_denials() -> list[str]:
     push_signed = Path(__file__).resolve().with_name("push-signed")
     return [
@@ -921,7 +828,7 @@ def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = Fa
     env = {"LINEAR_API_KEY": api_key, "ENABLE_TOOL_SEARCH": "true"}
     if transport.get("base_url"):
         env["ANTHROPIC_BASE_URL"] = transport["base_url"]
-    tiers = tier_models(transport)
+    tiers = factory_settings.tier_models(transport)
     if transport.get("model"):
         env.update(model_environment(transport, tiers))
     # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
@@ -938,7 +845,7 @@ def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = Fa
     }}
     if transport.get("auth_token_env"):
         settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)
-    disabled = disabled_mcp_servers(transport)
+    disabled = factory_settings.disabled_mcp_servers(transport)
     if disabled:
         settings["disabledMcpjsonServers"] = disabled
     if triage:
@@ -966,22 +873,8 @@ def write_private(path: Path, settings: dict) -> None:
 
 
 def max_turns_args(transport: dict) -> list[str]:
-    value = transport.get("max_turns")
-    if value is None or value == 0:
-        return []
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise Refusal(f"claude_session.max_turns {value!r} must be a positive integer, or 0 for no limit")
-    return ["--max-turns", str(value)]
-
-
-def worker_entry_prefix(repo: dict) -> str:
-    prefix = repo.get("worker_entry") or ""
-    if "{" in prefix:
-        raise Refusal(
-            f"worker_entry {prefix!r} must be a plain prefix such as /patina-mode; "
-            "claude-session adds the issue, URL, repository, and branch itself"
-        )
-    return prefix
+    turns = factory_settings.max_turns(transport)
+    return [] if turns is None else ["--max-turns", str(turns)]
 
 
 def handoff_text(plan: SessionPlan, branch: str, head: str, triage: bool = False) -> str | None:
@@ -1000,7 +893,7 @@ def handoff_text(plan: SessionPlan, branch: str, head: str, triage: bool = False
 def read_card(card_json: str | None, task_id: str) -> dict:
     if card_json:
         return json.loads(Path(card_json).read_text())
-    proc = subprocess.run(["hermes", "kanban", "show", task_id, "--json"], capture_output=True, text=True)
+    proc = subprocess.run([factory_settings.find_hermes(), "kanban", "show", task_id, "--json"], capture_output=True, text=True)
     if proc.returncode != 0:
         raise Refusal(f"hermes kanban show {task_id} failed: {proc.stderr.strip()}")
     return json.loads(proc.stdout)
@@ -1169,18 +1062,23 @@ def end_run(proc: subprocess.Popen) -> set[int]:
     return leftovers
 
 
-def run(args: argparse.Namespace) -> tuple[int, dict]:
+def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
+    import result_line
+
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
         raise Refusal("HERMES_KANBAN_WORKSPACE is not set; claude-session runs only inside a Kanban worker")
     triage = os.environ.get("HERMES_KANBAN_BOARD") == TRIAGE_BOARD
     settings = load_settings(args.settings_json)
     repo = find_repository(settings, args.repo)
+    problems = factory_settings.validate(settings).for_repository(args.repo)
+    if problems:
+        raise Refusal("; ".join(problems))
     transport = settings.get("claude_session") or {}
     turn_limit = max_turns_args(transport)
-    servers = factory_mcp_servers(transport)
-    threshold = fresh_after_tokens(transport)
-    prefix = worker_entry_prefix(repo)
+    servers = factory_settings.mcp_servers(transport)
+    threshold = factory_settings.fresh_after_tokens(transport)
+    prefix = factory_settings.worker_entry(repo)
     worktree = resolve_worktree(workspace, repo["path"])
     check_toolchain(repo, worktree)
     lock_path = Path(git(worktree, "rev-parse", "--absolute-git-dir")) / LOCK_NAME
@@ -1218,7 +1116,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         if not triage and plan.reason == "new":
             waiting, blocker_error = blocker_wait(client, args.issue_id, args.ignore_blockers)
             if waiting:
-                return 0, {"waiting_on": waiting}
+                return 0, result_line.Waiting(tuple(waiting))
 
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         login = (settings.get("github") or {}).get("login")
@@ -1263,18 +1161,24 @@ def run(args: argparse.Namespace) -> tuple[int, dict]:
         documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
         first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
 
-    report = {"session_id": session_id, "resumed": plan.resumed, "reason": plan.reason, "worktree": str(worktree), "branch": branch, "adopted": adopted._asdict() if adopted else None, "superseded": superseded, "issue_links": links, "triage_documents": documents}
-    if blocker_error:
-        report["blocker_error"] = blocker_error
+    session = result_line.Session(
+        session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
+        adopted=adopted._asdict() if adopted else None, superseded=superseded, issue_links=links,
+        triage_documents=documents,
+    )
     if output is None:
-        return 1, {"error": f"claude exited {exit_code} without JSON output: {detail}", **report}
-    report.update(subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"))
-    report.update(usage=model_usage(output), first_context_tokens=first)
-    if report["subtype"] not in COMPLETED_SUBTYPES:
-        return 1, {"error": f"claude run ended with {report['subtype']} (exit {exit_code})", **report}
-    if triage:
-        report["activity"] = triage_activity(client, args.issue_id, report["result"])
-    return 0, report
+        error = f"claude exited {exit_code} without JSON output: {detail}"
+        return 1, result_line.Failed(error, session, blocker_error=blocker_error)
+    outcome = result_line.Outcome(
+        subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"),
+        usage=model_usage(output), first_context_tokens=first,
+    )
+    if outcome.subtype not in COMPLETED_SUBTYPES:
+        error = f"claude run ended with {outcome.subtype} (exit {exit_code})"
+        return 1, result_line.Failed(error, session, outcome, blocker_error)
+    if not triage:
+        return 0, result_line.Done(session, outcome, blocker_error)
+    return 0, result_line.Done(session, outcome, blocker_error, triage_activity(client, args.issue_id, outcome.result))
 
 
 def read_init(proc: subprocess.Popen, timeout: float) -> dict | None:
@@ -1308,7 +1212,7 @@ def mcp_status(args: argparse.Namespace) -> tuple[int, dict]:
     settings = load_settings(args.settings_json)
     repo = find_repository(settings, args.repo)
     transport = settings.get("claude_session") or {}
-    servers = factory_mcp_servers(transport)
+    servers = factory_settings.mcp_servers(transport)
     main = Path(repo["path"]).resolve()
     _, api_key = linear_access()
     require_mcp_tokens(servers)
@@ -1366,16 +1270,25 @@ def main() -> int:
         if missing:
             parser.error("the following arguments are required: " + ", ".join(f"--{f.replace('_', '-')}" for f in missing))
     try:
+        result_line = plugin_module("blocker-order", "result_line")
+    except Refusal as refusal:
+        # Without the plugin no hook reads the line, so this error reaches only the worker.
+        print(json.dumps({"error": str(refusal)}))
+        return 2
+
+    try:
         status, report = mcp_status(args) if args.mcp_status else run(args)
     except Stopped as stopped:
         signal.signal(stopped.signum, signal.SIG_DFL)
         os.kill(os.getpid(), stopped.signum)
         raise
     except Refusal as refusal:
-        status, report = 2, {"error": str(refusal), **({"transient": True} if refusal.transient else {})}
+        status, report = 2, result_line.Refused(str(refusal), refusal.transient)
+    except factory_settings.SettingsError as error:
+        status, report = 2, result_line.Refused(str(error))
     except Exception as error:
-        status, report = 1, {"error": f"{type(error).__name__}: {error}"}
-    print(json.dumps(report))
+        status, report = 1, result_line.Refused(f"{type(error).__name__}: {error}")
+    print(json.dumps(report) if isinstance(report, dict) else result_line.line(report))
     return status
 
 
