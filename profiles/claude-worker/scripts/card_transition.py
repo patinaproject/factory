@@ -9,15 +9,17 @@ Usage: card_transition.py [--board <board>] <command> <task id> [options]
   Hermes' hold on a card whose comments name a pull request. `specify` asks the model through the
   proxy, and Hermes strips the proxy token from the triage agent's commands, so `specify` alone gets
   the token, from the gateway's broker, in the variable `claude_session.auth_token_env` names.
-- `triage-reply`: resume a card on the `triage` board after a person replied: a `blocked` card is
-  unassigned and unblocked, a `triage` card is resumed without the assignment. `dispatch-triage`
-  assigns it when a triage slot is free.
+- `triage-reply`: resume a card on the `triage` board after a person replied: a `scheduled` card,
+  which waits for that reply, or a `blocked` card is unassigned and unblocked, and a `triage` card is
+  resumed without the assignment. Unassigning first, while the card cannot be dispatched, leaves it
+  `ready` and unassigned, and `dispatch-triage` assigns it when a triage slot is free.
 - `unblock --repo <r> --branch <b> --reason <text>`: unblock a card. When the branch has a pull
   request, Hermes holds the `ready` card for 24 hours after a comment that names it, and only the
   review reopen lifts the hold, so the card is unblocked, sent to review, and reopened.
 - `reopen --reason <text>`: hand a `review` card back to its worker.
 - `stop`: block a card whatever it is doing. Hermes blocks only a `ready` or `running` card, so a
-  `review` card is reopened first.
+  `review` card is reopened first, and a `scheduled` card is unassigned and unblocked first, so it is
+  never dispatchable while it stops.
 - `merged --pr <url> --linear-state <stateType or unreadable>`: finish a card whose pull request
   merged. A refused completion is a refused merge when the newest `pr_acceptance` event is for this
   pull request at its head and names a check that did not pass, or names no required checks. A
@@ -158,7 +160,7 @@ def resume(card: Card, assign: bool = True) -> dict:
 
 def triage_reply(card: Card) -> dict:
     status = card.status()
-    if status == "blocked":
+    if status in ("blocked", "scheduled"):
         card.call("assign", "none")
         card.call("unblock")
         return result("unblocked", pull_request=False)
@@ -197,6 +199,10 @@ def stop(card: Card) -> dict:
     status = card.status()
     if status == "review":
         card.call("reopen-review", "--reason", STOPPED)
+        status = card.status()
+    if status == "scheduled":
+        card.call("assign", "none")
+        card.call("unblock")
         status = card.status()
     if status in ("ready", "running", "todo"):
         card.call("block", STOPPED)

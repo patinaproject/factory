@@ -53,6 +53,9 @@ elif verb == "complete":
         sys.exit(f"cannot complete {task['id']} (unknown id or terminal state)")
     task["status"] = "done"
 elif verb == "block":
+    if status == "scheduled":
+        save()
+        sys.exit(f"cannot block {task['id']}")
     if status == "blocked":
         if "--kind" not in argv or task["block_kind"]:
             save()
@@ -61,6 +64,9 @@ elif verb == "block":
     else:
         task["status"] = "blocked"
 elif verb == "unblock":
+    if status not in ("blocked", "scheduled"):
+        save()
+        sys.exit(f"cannot unblock {task['id']} (not blocked/scheduled?)")
     task["status"] = "ready"
 elif verb == "request-review":
     task["status"] = "review"
@@ -260,6 +266,27 @@ class TriageReplyTest(CardTransitionTest):
         self.assertEqual(self.state_changes(), [["assign", "t_1", "none"], ["unblock", "t_1"]])
         self.assertEqual(self.state["gh_calls"], [])
 
+    def test_a_scheduled_triage_card_is_unassigned_then_unblocked_and_left_for_dispatch_triage(self):
+        self.given("scheduled")
+        code, out = self.transition("--board", "triage", "triage-reply", "t_1")
+        self.assertEqual((code, out), (0, {"action": "unblocked", "post": None, "pull_request": False}))
+        self.assertEqual(self.state_changes(), [["assign", "t_1", "none"], ["unblock", "t_1"]])
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("ready", None))
+
+        code, out = self.transition("--board", "triage", "triage-reply", "t_1")
+        self.assertEqual((code, out), (0, {"action": "none", "post": None, "status": "ready"}))
+        self.assertEqual(self.state_changes(), [["assign", "t_1", "none"], ["unblock", "t_1"]])
+
+    def test_a_rerun_after_a_crash_between_the_steps_finishes_the_move(self):
+        self.given("scheduled")
+        self.state["fail"]["unblock"] = 1
+        self.assertEqual(self.transition("--board", "triage", "triage-reply", "t_1")[0], 1)
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("scheduled", None))
+
+        code, out = self.transition("--board", "triage", "triage-reply", "t_1")
+        self.assertEqual((code, out["action"]), (0, "unblocked"))
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("ready", None))
+
     def test_any_other_status_is_left_alone(self):
         self.given("running")
         code, out = self.transition("--board", "triage", "triage-reply", "t_1")
@@ -314,6 +341,13 @@ class ReopenAndStopTest(CardTransitionTest):
                 code, out = self.transition("stop", "t_1")
                 self.assertEqual((code, out), (0, {"action": "stopped", "post": None, "status": "blocked"}))
                 self.assertEqual(self.state_changes(), [["block", "t_1", "stopped"]])
+
+    def test_stop_ends_a_scheduled_card_blocked_as_stopped_and_unassigned(self):
+        self.given("scheduled")
+        code, out = self.transition("--board", "triage", "stop", "t_1")
+        self.assertEqual((code, out), (0, {"action": "stopped", "post": None, "status": "blocked"}))
+        self.assertEqual(self.state_changes(), [["assign", "t_1", "none"], ["unblock", "t_1"], ["block", "t_1", "stopped"]])
+        self.assertIsNone(self.state["task"]["assignee"])
 
     def test_stop_leaves_a_blocked_card_as_it_is(self):
         self.given("blocked")

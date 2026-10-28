@@ -73,9 +73,10 @@ class DispatchTriageTest(unittest.TestCase):
         self.assertEqual((proc.returncode, proc.stdout), (0, ""))
         self.assertIsNone(self.assignees()["t_waiting"])
 
-    def test_blocked_done_and_review_cards_do_not_use_the_cap(self) -> None:
+    def test_blocked_scheduled_done_and_review_cards_do_not_use_the_cap(self) -> None:
         proc = self.run_script([
             task("t_blocked", "blocked", "claude-worker"),
+            task("t_asking", "scheduled", "claude-worker"),
             task("t_done", "done", "claude-worker"),
             task("t_review", "review", "claude-worker"),
             task("t_parked", "triage", "claude-worker"),
