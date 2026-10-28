@@ -428,8 +428,8 @@ hermes -p claude-worker plugins list
 
 Both list `linear-agent-session`, `pr-ready-gate`, `blocker-order`, and
 `factory-secret-names`,
-enabled. The root home also lists `factory-uploads`, `work`, and
-`webhook-retry`, enabled, and the worker home lists none of them. On a fresh
+enabled. The root home also lists `factory-uploads`, `work`, `webhook-retry`,
+and `factory-deploy`, enabled, and the worker home lists none of them. On a fresh
 machine, install both now and skip the content check.
 
 On a re-run, `<worker>` already exists, and a listed plugin can still be
@@ -709,6 +709,17 @@ install in the worker home. It takes effect at the next gateway restart.
 hermes plugins install "file://<repo>#plugins/webhook-retry" --enable --yes-deps </dev/null
 ```
 
+**Factory deploy, root home only.** The `factory-deploy` plugin runs inside
+the gateway. For each push that the `github` route keeps, which is only a push
+to the factory's own default branch, it starts the `auto-deploy` launchd job
+from part 12 and runs no agent turn. Install and enable it in the root home and
+never in the worker's home. `check-install` reports an install in the worker
+home. It takes effect at the next gateway restart.
+
+```sh
+hermes plugins install "file://<repo>#plugins/factory-deploy" --enable --yes-deps </dev/null
+```
+
 **Worker profile.** If `<worker>` does not exist, install it. If it exists,
 update it. An update keeps the installed `config.yaml`. Pass `--force-config`
 only when the operator asks to reset it.
@@ -830,6 +841,7 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "kanban_url": "https://<hostname>/kanban",
+  "factory_repository": {"full_name": "<owner>/<factory>", "default_branch": "<branch>"},
   "triage": {"max_running": <n>},
   "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0}
 }
@@ -902,6 +914,12 @@ empty to post no link. Set `github.login` to the App's
 `[bot]` login. It is required: `render.py` rejects a value that does not end
 in `[bot]`, and `claude-session` refuses a run that checks a branch for
 adoption without one.
+
+`factory_repository` names this factory's own repository and its default
+branch, such as `main`. The `github` route keeps a push to that branch, and
+the push starts `auto-deploy` (part 12). It is required: `render.py` refuses
+settings without it, so `check-install` reports a `render.py failed` line until
+it is set. Its values belong in the private record.
 
 **Check** both homes:
 
@@ -1100,7 +1118,7 @@ python3 <repo>/templates/render.py --check
 
 It prints one line per route, such as
 `route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference`, then
-`rate_limit: matches 600`. It exits `0` only when every route and the rate
+`rate_limit: matches 1200`. It exits `0` only when every route and the rate
 limit match and every secret is its reference. A
 `differs in <keys>` line names the keys that differ. A secret line other than
 `is the ... reference` means the route holds a literal secret, or Hermes has no
@@ -1153,7 +1171,8 @@ approval. `hermes cron list` for the default home shows none of the worker's
 jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`, and
 `dispatch-triage`.
 A copy there runs without the worker's scripts and settings, so remove it the
-same way. The default home holds one job, `retry-failed-webhooks`, described below. A second setup session runs this check before it
+same way. The default home holds two jobs, `retry-failed-webhooks` and
+`report-deploy`, described below. A second setup session runs this check before it
 creates anything.
 
 **Create** the job only when the list has none:
@@ -1239,13 +1258,16 @@ missing, duplicated, changed, not created by the runbook, or in the wrong
 profile, a cron job that delivers to a platform with no home channel in its
 profile, a cron job whose last run failed or was not delivered, with the first
 line of its error and secrets masked, the root home's
-`scripts/retry-failed-webhooks`, `scripts/watch-gateway`, and
-`scripts/restart-gateway` when one is missing or differs from the repository,
+`scripts/retry-failed-webhooks`, `scripts/watch-gateway`,
+`scripts/restart-gateway`, `scripts/auto-deploy`, and `scripts/report-deploy`
+when one is missing or differs from the repository,
 that `watch-gateway` has run in the last 15 minutes
 without spending its restart budget, that `<root>/gateway-heartbeat-url` exists with mode `600`, and, on macOS, a
 launchd service from part 7, 10, 12, or 15
-that is not installed, does not run at load, does not set its `EnvironmentVariables` or `StartInterval`, or is not running (the `watch-gateway`
-and `refresh-gh-app-login` jobs run on an interval, so they need only be loaded), and
+that is not installed, does not run at load, does not set its `EnvironmentVariables` or `StartInterval`, or is not running (the `watch-gateway`,
+`refresh-gh-app-login`, and `auto-deploy` jobs run on an interval or on demand, so they need only be loaded),
+what a dead `auto-deploy` run left engaged, a default-branch commit that
+`auto-deploy` has not deployed a day after it was committed, and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never
 prints a config value. It prints one line per difference and nothing when the
 install is current. It fetches first, so it compares with the newest merge.
@@ -1326,10 +1348,14 @@ come from `.env`.
 **The gateway lock.** The watcher restarts nothing while
 `<root>/factory-gateway.lock` exists. Hermes writes its own `<root>/gateway.lock`
 every time the gateway starts and keeps it while the gateway runs, so never
-create, edit, or delete that file, and never name it as the deploy lock. A
-person or an agent that deploys and restarts the gateway creates
-`<root>/factory-gateway.lock` first, writing its purpose and the time, and
-removes it when the restart is done. A lock that outlives its deploy keeps the
+create, edit, or delete that file, and never name it as the deploy lock. Two
+holders create `<root>/factory-gateway.lock`. A person or an agent that deploys
+and restarts the gateway by hand creates it first, writing its purpose and the
+time, and removes it when the restart is done. `auto-deploy` creates it with its
+own pid before it installs, and removes it when the run ends. It never removes
+a lock whose content is not its own pid, and records `BLOCKED` while a person
+holds the lock. A later `auto-deploy` run removes a lock that a dead run
+recorded as its own. A lock that outlives its deploy keeps the
 heartbeat quiet, which alerts a person. A machine whose deploys already hold
 another file passes `--lock <that file>` to `--print-plist`, and the plist then
 carries it. The real path stays in the private record. `check-install` reports
@@ -1362,6 +1388,81 @@ Run `python3 <root>/scripts/watch-gateway --root <root>` once and read
 gateway is not healthy or has just become healthy. After a deploy that changes
 `watch-gateway` or `restart-gateway`, install the copies again and run
 `launchctl kickstart -k gui/$(id -u)/ai.patinaproject.factory.gateway-watch`.
+
+**Auto deploy.** A merge that moves the factory repository's default branch
+deploys itself. GitHub sends a `push` delivery, which needs the App's Push
+subscription from [`references/github.md`](references/github.md). The `github`
+route keeps a push only to the `factory_repository` branch from part 10, from
+any sender, the App included. The `factory-deploy` plugin from part 5 then
+starts the `auto-deploy` launchd job and runs no agent turn. A lost delivery
+deploys nothing until the next push, which deploys every commit since the
+last deployed one. One run does this:
+
+1. It holds new cards. It records the hold in `<root>/auto-deploy.json`, then
+   sets `kanban.dispatch_profiles` to an empty list in the root home's
+   `config.yaml`. Hermes' dispatcher then claims no card on any board, `ready`
+   or `review`. Chat, webhook, and cron turns keep running, and no assignee
+   changes.
+2. It waits up to 3600 seconds for no running card. When cards still run, it
+   releases the hold, records `WAITING`, and installs nothing. The next push
+   tries again.
+3. It writes its pid to `<root>/factory-gateway.lock`, resets the source
+   checkout to `origin/<default>`, and runs that checkout's copy of
+   `auto-deploy`, so a change to the script deploys itself.
+4. It runs the checkout's `check-install --json` and applies every install
+   line in the order of the `Step` enum in
+   `profiles/claude-worker/scripts/install_plan.py`, under one short
+   `hermes pause`. A local edit is overwritten with the repository's version.
+   When an install needs it, it restarts the gateway through `restart-gateway`,
+   at most once per commit. These restarts do not count against
+   `watch-gateway`'s budget. A manual line never holds an install. The run
+   records it, and `report-deploy` reports it.
+5. It checks that `check-install` reports no install line and that
+   `check-settings` passes. It records `DEPLOYED` or `FAILED`, lifts its pause,
+   unsets `kanban.dispatch_profiles`, and removes its gateway lock. It deploys
+   again when the branch moved during the run.
+
+`auto-deploy` is the second automatic gateway restarter, beside
+`watch-gateway`. It never lifts a pause or unsets a key that it did not set.
+Under an operator's `hermes pause` it changes nothing and records `BLOCKED`. It
+records `BLOCKED` too when a person already set `kanban.dispatch_profiles` or
+holds the gateway lock. A run first releases what a dead run recorded as its
+own, so a crash or a reboot never leaves the cards held. The job runs at load,
+so a reboot also deploys a push that arrived while the machine was down. A
+`FAILED` commit is not tried again until the branch moves, or until a person
+runs `auto-deploy --retry`. `--status` prints the state file, and `--dry-run`
+prints the plan for the source checkout as it is and changes nothing:
+
+```sh
+HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --status
+HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --dry-run
+```
+
+`report-deploy` is a `--no-agent` cron job in the root profile, like
+`retry-failed-webhooks`, and runs every 5 minutes. It reads only
+`<root>/auto-deploy.json`. It prints each `FAILED`, `WAITING`, or `BLOCKED`
+run once, the first `DEPLOYED` of each commit once, and each manual line once
+while the line stays. A quiet run prints nothing, so Hermes delivers nothing.
+
+Install the scripts, the launchd job, and the cron job from the factory
+checkout. The plist sets `HERMES_HOME`, a `PATH` with `~/.local/bin`, and
+`GH_CONFIG_DIR`, and holds no secret:
+
+```sh
+install -d <root>/scripts
+install -m 0644 skills/setup-factory/scripts/auto-deploy <root>/scripts/auto-deploy
+install -m 0644 skills/setup-factory/scripts/report-deploy <root>/scripts/report-deploy
+hermes cron create "every 5m" --name report-deploy --no-agent --script report-deploy --deliver <platform> </dev/null
+python3 skills/setup-factory/scripts/auto-deploy --root <root> --print-plist \
+  > ~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist
+```
+
+Loading the job starts its first run. Read its outcome with `--status`, and
+its log in `<root>/logs/auto-deploy.log`. A first run that failed, for example
+because the gateway service from part 15 does not exist yet, deploys again
+with `HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --retry` once the
+cause is fixed.
 
 **Verify.** Run each job through Hermes once, then read its status:
 
@@ -1842,6 +1943,21 @@ A merged change to `plugins/`, `profiles/`, or `templates/` is not live until
 it is installed. Hermes loads plugins and webhook routes only when the gateway
 starts. The worker reads `SOUL.md` and its scripts on each run.
 
+`auto-deploy` from part 12 deploys each merge by itself. It applies every
+install line and records each manual line, which `report-deploy` reports.
+Follow these steps by hand to fix a manual line, after a `FAILED`, `WAITING`,
+or `BLOCKED` report, or on a machine without `auto-deploy`. Before step 1,
+create `<root>/factory-gateway.lock` with your purpose and the time, so
+`auto-deploy` records `BLOCKED` instead of installing beside you. Step 7
+starts `auto-deploy` once, so it records the commit you deployed. This command
+starts it:
+
+```sh
+launchctl kickstart gui/$(id -u)/ai.patinaproject.factory.auto-deploy
+```
+
+Over SSH, use `user/$(id -u)` in place of `gui/$(id -u)`.
+
 A merged change to `skills/setup-factory/scripts/factory-secrets` is live only
 after the render steps in
 [Configure both homes](references/infisical.md#configure-both-homes) install
@@ -1868,22 +1984,14 @@ Hermes process starts. The new helper also writes
    HERMES_HOME=<worker> python3 <source checkout>/profiles/claude-worker/scripts/check-install
    ```
 
-3. Install each item it names in this order: the part 10 `kanban board` and
-   `config` lines, then the profile, then the part 12 `cron job` lines, and
-   the route last. The new profile's cron jobs read the boards and settings on
-   their first run, one minute after the profile update. `refresh-owned-refs`
-   lists the `triage` board and fails on each run until the board exists.
-   `dispatch-triage` reads `triage.max_running`. A cron job runs a profile
-   script, so create a missing job only after the profile update installs its
-   script. The `linear` route drops a completed or canceled `Issue` update unless its
-   issue id is in `<root>/owned-refs.json`. Update the profile, run
-   `refresh-owned-refs` once, confirm the file holds issue UUIDs, and only then
-   re-render the route. Find the job id with `hermes -p claude-worker cron list`
-   and run it with `hermes -p claude-worker cron run <job id>`, or wait one
-   minute for the cron schedule. An empty board (`[]`) is fine: it holds no
-   cards to close. The reverse order drops every closure until the next
-   cron run. `check-install` reports a route that filters on issue ids while
-   the file holds none.
+3. Install each item it names in the order of the `Step` enum in
+   `profiles/claude-worker/scripts/install_plan.py`. Its docstring gives the
+   reason for the order. `check-install --json` prints each line with its
+   remedy: an `install` command and its step, a `manual` action, or
+   `advisory` for runtime health that no install changes. Run each install
+   command as printed, with `HERMES_HOME=<root>`. The fixes below explain the
+   lines whose remedy is manual or needs care. `check-install` reports a route
+   that filters on issue ids while `<root>/owned-refs.json` holds none.
    - A `config kanban.max_spawn` or `config kanban.max_in_progress` line, or a
      `kanban capacity` line: set the keys as part 10 describes. The gateway
      reads `kanban.max_spawn` only when it starts, so restart it with
@@ -1970,6 +2078,40 @@ Hermes process starts. The new helper also writes
      profile as in part 12.
    - A `cron job dispatch-triage` line: after the profile update, create the
      job with the part 12 `cron create` command.
+   - A `cron job report-deploy` line, a `script <root>/scripts/auto-deploy`
+     or `<root>/scripts/report-deploy` line, or a `service auto deploy` line:
+     follow the part 12 "Auto deploy" steps.
+   - A `plugin factory-deploy in <root>` line: run the part 5 install command
+     for the root home. A `plugin factory-deploy in <worker>` line: remove it
+     from the worker home with `hermes -p claude-worker plugins remove factory-deploy`.
+   - An `auto deploy <root>/auto-deploy.json: is missing` line: `auto-deploy`
+     has never run. Load the job as in part 12, or start it with the
+     `launchctl kickstart` command above.
+   - An `auto deploy <root>/auto-deploy.json: is unreadable` line: move the
+     file aside and start `auto-deploy`. With no state file, the run deploys
+     `origin/<default>` again.
+   - An `auto deploy <root>/auto-deploy.lock` line: the run that wrote the
+     lock is not running. The next run reclaims it, so this line needs no fix.
+   - An `auto deploy kanban.dispatch_profiles in <root>` line that names an
+     `auto-deploy` run, an `auto deploy <root>/auto-deploy.json` line that
+     records a pause, or an `auto deploy <root>/factory-gateway.lock` line: a
+     run died and left its hold. Start `auto-deploy` with the
+     `launchctl kickstart` command above. It first unsets the key, lifts the
+     pause, and removes the lock that the dead run recorded as its own.
+   - An `auto deploy kanban.dispatch_profiles in <root>` line that says no
+     run set it: a person holds the cards, and `auto-deploy` records
+     `BLOCKED` until the key is gone. Ask who set it. When the hold is no
+     longer wanted, run `hermes config unset kanban.dispatch_profiles` with
+     the root home.
+   - An `auto deploy origin/<default> at <commit>` line: the commit is not
+     deployed a day after it was committed. When the line names no outcome,
+     its push did not start a run. Check that the App subscribes to Push and
+     that the gateway log shows the delivery, then start `auto-deploy`. When
+     it names `WAITING`, cards ran for the whole wait. Start `auto-deploy`
+     again when fewer cards run. When it names `BLOCKED`, fix what the reason
+     names. When it names `FAILED`, fix the cause, then run
+     `HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --retry`. A
+     cause in the repository is fixed by a merge, which deploys itself.
    - A `cron job check-install` line that says the job is not one the setup
      runbook creates: remove it as in part 12's "Install drift check".
    - A `config`, `cron job`, or `service` line: the machine differs from what
@@ -1996,12 +2138,13 @@ Hermes process starts. The new helper also writes
 
    > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
    > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes.
-   > Before the restart, create the watcher's lock (`<root>/factory-gateway.lock`,
-   > or the file the plist's `--lock` names), and remove it afterwards. Then confirm
+   > Keep the watcher's lock from before step 1 (`<root>/factory-gateway.lock`,
+   > or also the file the plist's `--lock` names) until the restart is done. Then confirm
    > that
    > `~/.hermes/logs/gateway.log` shows a startup after the install.
 
-7. Record the deployed commit in the private configuration record.
+7. Remove the lock and start `auto-deploy` once with the `launchctl kickstart`
+   command above. Record the deployed commit in the private configuration record.
 
 ## Report
 
