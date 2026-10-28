@@ -724,6 +724,7 @@ class IssueTest(unittest.TestCase):
                 "id": "2f9a6f0e-0000-4000-8000-000000000001",
                 "identifier": "ABC-123",
                 "title": "Fix checkout",
+                "cardTitle": "ABC-123: Fix checkout",
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "gitBranchName": "abc-123-fix-checkout",
                 "priority": 2,
@@ -1212,6 +1213,17 @@ class UndelegateTest(unittest.TestCase):
     def test_unsuccessful_update_is_an_error(self):
         _, output = self.run_undelegate([issue_delegate("app-user-1"), (200, {"data": {"issueUpdate": {"success": False}}})])
         self.assertEqual(output, {"error": "issueUpdate reported success: false"})
+
+
+class CardTitleTest(unittest.TestCase):
+    def test_unsafe_characters_are_removed_and_spaces_collapsed(self):
+        self.assertEqual(
+            linear.card_title("PAT-1", 'Fix "quoted" [bracket] title: it’s $(rm) — ok?'),
+            "PAT-1: Fix quoted bracket title its rm ok",
+        )
+
+    def test_dots_hyphens_and_digits_stay(self):
+        self.assertEqual(linear.card_title("PAT-2", "  v1.2 - re-run  "), "PAT-2: v1.2 - re-run")
 
 
 if __name__ == "__main__":

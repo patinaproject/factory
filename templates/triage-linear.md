@@ -178,12 +178,8 @@ Actions `create_card`, `foreign_cards`, and `reuse_card`, and the `then` of
    `thought` on the session, create no card, and stop. When it prints `error`
    (exit code 1), post that error as one `thought` and stop.
 
-   Never write a pull request URL in a card comment. Hermes treats a card
-   whose comments name a pull request as already having one.
-
    Create the card with the chosen repository's card flags, the branch you
-   chose, and a title made of the identifier, a colon, and the issue title
-   with every character except letters, digits, spaces, `.` and `-` removed:
+   chose, and the issue's `cardTitle` exactly as `linear_issue` returns it as the title:
 
    ````sh
    hermes kanban create '<title>' \
