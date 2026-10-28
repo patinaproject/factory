@@ -1293,7 +1293,7 @@ It also asks the broker for `token_present`. The broker's socket is
 `<root>/factory-uploads.sock`, or the `socket` that
 `/Library/Application Support/factory-broker/broker.json` names once the
 broker runs as its own user. An unresolved route secret runs
-`restart-gateway`, which waits for running cards, and the watcher gives up
+`restart-gateway`, which waits only for at-risk cards, and the watcher gives up
 after 3 restarts in an hour. A missing broker token alone restarts nothing:
 the gateway works, and a restart does not fix a broker user's token. The
 heartbeat stays quiet instead, and `check-install` reports the broker. A
@@ -1395,13 +1395,17 @@ factory, do these before the restart:
   `claude-worker` cards.
 - `hermes gateway restart` waits for chat work and in-process cron jobs, and
   the gateway refuses webhooks while it waits. It does not wait for Kanban
-  workers. They run inside the gateway's launchd job, so a bare restart kills
-  every running card. Restart only with `restart-gateway`, which waits until
-  no board has a `running` card, then holds new cards with `hermes pause`
-  while it restarts, and lifts the pause afterwards. When the wait expires, it
-  names the running cards, exits 1, and does not restart. `--timeout` sets
-  the wait in seconds, 3600 by default. An operator's own `hermes pause` stays
-  in place. Restart when no long cron job is running.
+  workers. Most survive a restart, because Hermes starts each in its own
+  session. The exception is a worker child that the gateway adopted at startup
+  from the worker profile's `processes.json`, which the gateway kills at its
+  next shutdown. Restart only with `restart-gateway`. It waits until no
+  running card's worker has a child that started no later than 300 s after
+  the gateway, then holds new cards with `hermes pause` while it restarts, and
+  lifts the pause afterwards. Other running cards never delay it. When the
+  wait expires, it names the at-risk cards, exits 1, and does not restart. A
+  gateway record, process table, or card it cannot read counts as at risk.
+  `--timeout` sets the wait in seconds, 3600 by default. An operator's own
+  `hermes pause` stays in place. Restart when no long cron job is running.
 
 > **HUMAN CHECKPOINT.** Ask the operator to run
 > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, not from a Hermes session or tool.
