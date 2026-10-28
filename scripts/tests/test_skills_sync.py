@@ -104,7 +104,7 @@ class FakeGitHub:
 
     def branch_head(self, repo, branch):
         self.branch_reads += 1
-        if self.move_branch and self.branch_reads > 1:
+        if self.move_branch and branch == "bot/bump-skills" and self.branch_reads > 1:
             return "moved-by-someone-else"
         return self.branches.get(branch)
 
@@ -124,7 +124,9 @@ class FakeGitHub:
         self.writes.append("create_commit")
         return {"sha": sha, "verified": self.verified, "reason": "valid" if self.verified else "unsigned"}
 
-    def set_branch(self, repo, branch, sha, exists):
+    def set_branch(self, repo, branch, sha, observed, checkout):
+        if self.branches.get(branch) != observed:
+            raise skills_sync.SyncError(f"lease on {branch} failed")
         self.branches[branch] = sha
         self.writes.append("set_branch")
 
@@ -158,6 +160,7 @@ class SkillsSyncTest(unittest.TestCase):
         self.upstream = Upstream(self.tmp / "upstream")
         self.gh = FakeGitHub()
         self.targets = 0
+        self.main: str | None = None
 
     def publish_release(self, tag: str, files: dict[str, str], delete: tuple[str, ...] = (), **flags) -> str:
         commit = self.upstream.release(tag, files, delete)
@@ -181,6 +184,7 @@ class SkillsSyncTest(unittest.TestCase):
 
     def sync(self, target: Path, *args: str, checks: bool = False) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
+        self.gh.branches["main"] = self.main or git(target, "rev-parse", "HEAD")
         argv = ["--target", str(target), "--repo", REPO, "--source-url", f"file://{self.upstream.root}", *args]
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = skills_sync.main(argv if checks else [*argv, "--no-checks"], github=self.gh)
@@ -239,9 +243,10 @@ class SkillsSyncTest(unittest.TestCase):
         write(bin_dir, "pnpm", '#!/bin/sh\n[ "$1" = test ]\n')
         (bin_dir / "pnpm").chmod(0o755)
         with mock.patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}):
-            code, out, _ = self.sync(self.make_target(), checks=True)
+            code, out, err = self.sync(self.make_target(), checks=True)
 
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "skills-sync: pnpm lint:md failed on v1.0.0\n")
         self.assertIn("### Checks\n\n- `pnpm test`: pass\n- `pnpm lint:md`: fail\n", self.gh.pulls[0]["body"])
 
     def test_the_same_release_changes_nothing_and_closes_an_obsolete_pull_request(self) -> None:
@@ -406,6 +411,27 @@ class SkillsSyncTest(unittest.TestCase):
         self.assertEqual(err, "skills-sync: bot/bump-skills moved from None to moved-by-someone-else during the run\n")
         self.assertEqual(self.gh.writes, [])
 
+    def test_a_checkout_behind_the_default_branch_is_not_published(self) -> None:
+        self.publish_release("v1.0.0", V1)
+        self.main = "a-newer-main"
+        target = self.make_target()
+        head = git(target, "rev-parse", "HEAD")
+
+        code, _, err = self.sync(target)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(err, f"skills-sync: the checkout is at {head}, not the head of main\n")
+        self.assertEqual(self.gh.writes, [])
+
+    def test_files_the_installer_changes_outside_the_agents_are_listed(self) -> None:
+        machinery = MACHINERY + 'mkdir -p "$repo/.claude/hooks" && echo hook > "$repo/.claude/hooks/session-start.sh"\n'
+        self.publish_release("v1.0.0", {**V1, f"{SETUP}/scripts/install-machinery.sh": machinery})
+
+        code, _, _ = self.sync(self.make_target())
+
+        self.assertEqual(code, 0)
+        self.assertIn("### Other files changed\n\n- `.claude/hooks/session-start.sh`\n", self.gh.pulls[0]["body"])
+
     def test_an_unverified_commit_never_becomes_the_branch(self) -> None:
         self.publish_release("v1.0.0", V1)
         self.gh.verified = False
@@ -414,7 +440,7 @@ class SkillsSyncTest(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("is not verified (unsigned)", err)
-        self.assertEqual(self.gh.branches, {})
+        self.assertNotIn("bot/bump-skills", self.gh.branches)
         self.assertEqual(self.gh.pulls, [])
 
     def test_the_command_line_launcher_runs_the_sync(self) -> None:

@@ -137,11 +137,16 @@ class GitHub:
         return {"sha": commit["sha"], "verified": commit["verification"]["verified"],
                 "reason": commit["verification"]["reason"]}
 
-    def set_branch(self, repo: str, branch: str, sha: str, exists: bool) -> None:
-        if exists:
-            self.call("PATCH", f"repos/{repo}/git/refs/heads/{branch}", {"sha": sha, "force": True})
-        else:
-            self.call("POST", f"repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha})
+    def set_branch(self, repo: str, branch: str, sha: str, observed: str | None, checkout: Path) -> None:
+        """Move the branch to `sha` only while it still points at `observed`, or does not exist when that is None."""
+        # The REST refs API has no expected-head check, so a git push with a lease moves the branch atomically.
+        credential = base64.b64encode(f"x-access-token:{self.token}".encode()).decode()
+        env = {**os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
+               "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credential}"}
+        url = f"https://github.com/{repo}.git"
+        run(["git", "fetch", "-q", url, sha], checkout, env=env)
+        run(["git", "push", "-q", f"--force-with-lease=refs/heads/{branch}:{observed or ''}", url,
+             f"{sha}:refs/heads/{branch}"], checkout, env=env)
 
     def open_pull(self, repo: str, branch: str) -> dict[str, Any] | None:
         owner = repo.split("/")[0]
@@ -160,9 +165,10 @@ class GitHub:
         self.call("PATCH", f"repos/{repo}/pulls/{number}", {"state": "closed"})
 
 
-def run(command: list[str], cwd: Path | str, binary: bool = False, check: bool = True) -> Any:
+def run(command: list[str], cwd: Path | str, binary: bool = False, check: bool = True,
+        env: dict[str, str] | None = None) -> Any:
     try:
-        proc = subprocess.run(command, cwd=cwd, capture_output=True, text=not binary, timeout=1800)
+        proc = subprocess.run(command, cwd=cwd, capture_output=True, text=not binary, timeout=1800, env=env)
     except OSError as error:
         raise SyncError(f"cannot run {command[0]}: {error}")
     if check and proc.returncode != 0:
@@ -208,13 +214,13 @@ def select_release(releases: list[dict[str, Any]], source: str, tag: str | None)
     return max(stable, key=lambda release: version(release["tag_name"])) if stable else None
 
 
-def ignored(releases: list[dict[str, Any]]) -> str:
+def skipped_releases(releases: list[dict[str, Any]]) -> str:
     kinds = [f"{r['tag_name']} {'draft' if r['draft'] else 'prerelease'}" for r in releases
              if r["draft"] or r["prerelease"]]
     return ", ".join(kinds) or "none"
 
 
-def check_progress(config: dict[str, Any], release: Release) -> None:
+def refuse_regression(config: dict[str, Any], release: Release) -> None:
     vendored = config.get("release")
     if not vendored:
         return
@@ -333,6 +339,14 @@ def run_checks(target: Path) -> list[tuple[str, bool]]:
     return [(label, run(command, target, check=False).returncode == 0) for label, command in CHECKS]
 
 
+def other_changes(target: Path) -> list[str]:
+    """Changed paths outside the skills, the lock, the agents, and the config, such as the installer's hooks."""
+    managed = (".agents/skills/", ".claude/skills/", f"{AGENTS_DIR}/", LOCK, CONFIG)
+    paths = git(target, "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames", binary=True)
+    return sorted(path for path in (entry[3:] for entry in paths.decode().split("\0") if entry)
+                  if not path.startswith(managed))
+
+
 def render_report(release: Release, changes: dict[str, list[str]], checks: list[tuple[str, bool]] | None) -> str:
     lines = [f"Release [{release.tag}]({release.url}) of the skills repository.", "",
              f"- Tag: `{release.tag}`", f"- Commit: `{release.commit}`", ""]
@@ -366,6 +380,8 @@ def publish(gh: GitHub, repo: str, target: Path, release: Release, body: str, ob
     title = f"chore: sync skills {release.tag}"
     parent = git(target, "rev-parse", "HEAD")
     base = gh.default_branch(repo)
+    if gh.branch_head(repo, base) != parent:
+        raise SyncError(f"the checkout is at {parent}, not the head of {base}")
     tree = gh.create_tree(repo, parent, staged_changes(target))
     pull = gh.open_pull(repo, BRANCH)
     head = gh.branch_head(repo, BRANCH)
@@ -376,7 +392,7 @@ def publish(gh: GitHub, repo: str, target: Path, release: Release, body: str, ob
         commit = gh.create_commit(repo, tree, parent, f"{title}\n\nRelease: {release.url}")
         if not commit["verified"]:
             raise SyncError(f"the sync commit is not verified ({commit['reason']}); is the token a GitHub App's?")
-        gh.set_branch(repo, BRANCH, commit["sha"], exists=head is not None)
+        gh.set_branch(repo, BRANCH, commit["sha"], head, target)
     if pull:
         gh.update_pull(repo, pull["number"], title, body)
         return pull["url"]
@@ -396,10 +412,10 @@ def sync(args: argparse.Namespace, gh: GitHub) -> int:
     releases = gh.releases(source)
     chosen = select_release(releases, source, args.tag)
     if chosen is None:
-        print(f"no change: {source} has no published stable release (ignored: {ignored(releases)})")
+        print(f"no change: {source} has no published stable release (ignored: {skipped_releases(releases)})")
         return 0
     release = Release(chosen["tag_name"], gh.tag_commit(source, chosen["tag_name"]), chosen["html_url"])
-    check_progress(config, release)
+    refuse_regression(config, release)
 
     before = {"skills": lock_hashes(target), "agents": agent_files(target)}
     previous_agents = bundled_agents(target)
@@ -410,6 +426,7 @@ def sync(args: argparse.Namespace, gh: GitHub) -> int:
     config["release"] = {"tag": release.tag, "commit": release.commit, "url": release.url}
     (target / CONFIG).write_text(json.dumps(config, indent=2) + "\n")
     changes = delta(before, {"skills": lock_hashes(target), "agents": agent_files(target)})
+    changes["other files changed"] = other_changes(target)
 
     if not git(target, "status", "--porcelain", "--untracked-files=all"):
         print(f"no change: the vendored skills and agents already equal {release.tag}")
@@ -423,9 +440,13 @@ def sync(args: argparse.Namespace, gh: GitHub) -> int:
     report = render_report(release, changes, checks)
     if args.dry_run:
         print(f"would publish {release.tag}\n\n{report}", end="")
-        return 0
-    url = publish(gh, repo, target, release, report, observed)
-    print(f"published {release.tag}: {url}\n\n{report}", end="")
+    else:
+        url = publish(gh, repo, target, release, report, observed)
+        print(f"published {release.tag}: {url}\n\n{report}", end="")
+    failed = [label for label, passed in checks or [] if not passed]
+    if failed:
+        print(f"skills-sync: {', '.join(failed)} failed on {release.tag}", file=sys.stderr)
+        return 1
     return 0
 
 
