@@ -22,6 +22,8 @@ LINEAR_TOKEN = re.compile(r"lin_(?:api|oauth)_[A-Za-z0-9]+")
 # Linear shows a bare profile URL as "@name", so an "@" written before one shows as "@@name".
 PROFILE_MENTION = re.compile(r"@+(?=https://linear\.app/[^/\s]+/profiles/)")
 PROFILE_URL = re.compile(r"https://linear\.app/[^/\s]+/profiles/[\w-]+(?:\.[\w-]+)*")
+PROFILE_URL_AND_SPACE = re.compile(PROFILE_URL.pattern + r"[ \t]*")
+NEEDS_INPUT_MARKER = re.compile(r"^\s*Needs input:[ \t]*")
 MENTION_REPLY = "Triage needs your answer to the questions above."
 SESSION_LINE = re.compile(r"^linear_agent_session_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 
@@ -76,7 +78,7 @@ def activity_for(
             redact,
         )
     if _triage_round(card, board):
-        questions = _clip(_questions(reason, redact) or "no questions given", TEXT_LIMIT)
+        questions = _clip(_triage_questions(reason, redact) or "no questions given", TEXT_LIMIT)
         return linear.activity_content("elicitation", f"{TRIAGE_DISCLAIMER}\n\n{questions}\n\nReply here to answer.")
     if card.status == "blocked" and card.block_kind == "needs_input":
         return _activity(
@@ -110,6 +112,16 @@ def _triage_round(card: Card, board: Optional[str]) -> bool:
 
 def _questions(reason: Optional[str], redact: Callable[[str], str]) -> str:
     return PROFILE_MENTION.sub("", redact(reason or "")).strip()
+
+
+def _triage_questions(reason: Optional[str], redact: Callable[[str], str]) -> str:
+    # The reply mentions each person; a URL left in the elicitation renders as a second, non-notifying @name.
+    lines = []
+    for line in _questions(reason, redact).splitlines():
+        kept = PROFILE_URL_AND_SPACE.sub("", NEEDS_INPUT_MARKER.sub("", line)).strip()
+        if kept or not line.strip():
+            lines.append(kept)
+    return "\n".join(lines).strip()
 
 
 def _activity(type: str, headline: str, reason: Optional[str], resume: str, redact: Callable[[str], str]) -> dict:
