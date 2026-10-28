@@ -6,7 +6,7 @@ not archived. A `done` card stays listed, so a late event on its branch still
 reaches triage. The route's `in_file` clauses keep a pull request, review,
 `workflow_run`, or `check_run` event only when its branch, and an `issues` event
 or an `issue_comment` on an issue only when its issue URL, is listed in
-`<root>/owned-refs.json`. The `linear` route keeps a completed or canceled `Issue`
+`<root>/owned-refs.json`. The `linear` route keeps a completed, canceled, or duplicate `Issue`
 update only when its issue id is listed, so the file also holds each card's
 `linear_issue_id` body line. The script also writes the `linear_issue_id` of
 every card on the Triage board to `<root>/triage-refs.json`, which the `linear`

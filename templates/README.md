@@ -14,7 +14,7 @@ whose values are what `hermes config set` installs at them:
   repository, so the factory sets 1200.
 
 The `linear` route keeps every `AgentSessionEvent` and every `Issue` update that
-changes `delegateId`. It keeps a completed or canceled `Issue` update only when
+changes `delegateId`. It keeps a completed, canceled, or duplicate `Issue` update only when
 the issue's id is listed in `<home>/owned-refs.json`, which holds each card's
 `linear_issue_id`. Deploy the profile and run `refresh-owned-refs` once before
 you re-render this route.

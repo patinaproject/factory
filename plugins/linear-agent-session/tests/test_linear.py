@@ -1063,7 +1063,7 @@ class DelegatedIssuesTest(unittest.TestCase):
                 "attachments": [{"url": pr, "sourceType": "github"}],
             },
         )
-        open_filter = {"delegate": {"isMe": {"eq": True}}, "state": {"type": {"nin": ["completed", "canceled"]}}}
+        open_filter = {"delegate": {"isMe": {"eq": True}}, "state": {"type": {"nin": ["completed", "canceled", "duplicate"]}}}
         self.assertEqual(
             [r["variables"] for r in fake.graphql_requests],
             [{"filter": open_filter, "after": None}, {"filter": open_filter, "after": "cursor-1"}],
