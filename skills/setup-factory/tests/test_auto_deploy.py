@@ -218,6 +218,38 @@ class AutoDeployTest(unittest.TestCase):
         self.assertEqual([argv[0] for argv in self.m.changes()].count("pause"), 1)
         self.assertTrue(self.m.released())
 
+    def test_a_failed_restart_stays_pending_until_a_later_run_restarts(self) -> None:
+        first = self.m.head
+        self.m.drifts([self.m.install("plugins", "install", "x", restarts=True)])
+        self.m.tools(**{"restart-gateway": 1})
+        self.deploy()
+        self.assertEqual(self.m.outcomes(), [("FAILED", first)])
+        self.assertEqual((self.m.state()["restart_pending"], self.m.state()["restarted"]), (first, None))
+
+        self.m.drifts([])
+        self.m.tools()
+        self.deploy("--retry")
+        self.assertEqual(self.m.outcomes()[-1], ("DEPLOYED", first))
+        self.assertEqual(len(self.m.calls("restart-gateway")), 2)
+        self.assertEqual((self.m.state()["restart_pending"], self.m.state()["restarted"]), (None, first))
+
+        self.m.push("B")
+        self.deploy()
+        self.assertEqual(len(self.m.calls("restart-gateway")), 2)
+        self.assertTrue(self.m.released())
+
+    def test_a_pending_restart_is_done_by_the_next_commits_run(self) -> None:
+        state = auto_deploy.fresh_state()
+        state["restart_pending"] = "a" * 40
+        (self.m.root / "auto-deploy.json").write_text(json.dumps(state))
+
+        self.deploy()
+
+        self.assertEqual(self.m.outcomes(), [("DEPLOYED", self.m.head)])
+        self.assertEqual(len(self.m.calls("restart-gateway")), 1)
+        self.assertEqual((self.m.state()["restart_pending"], self.m.state()["restarted"]), (None, self.m.head))
+        self.assertTrue(self.m.released())
+
     def test_a_restart_waits_only_as_long_as_the_budget_has_left(self) -> None:
         self.m.drifts([self.m.install("config", "set", "kanban.max_spawn", "2", step="CONFIG", restarts=True)])
         self.deploy("--timeout", "30")

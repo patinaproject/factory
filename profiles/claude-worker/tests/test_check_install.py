@@ -1909,6 +1909,18 @@ class CheckAutoDeployTest(unittest.TestCase):
             "watch-gateway restarts nothing",
         ])
 
+    def test_a_pending_restart_with_no_live_run_is_reported(self) -> None:
+        self.state(restart_pending=self.SHA)
+        pending = self.check()
+        (self.root / "auto-deploy.lock").write_text("4242\n")
+        self.alive.add(4242)
+        running = self.check()
+
+        self.assertEqual((pending, running), ([
+            f"auto deploy {self.root}/auto-deploy.json: records a gateway restart for {self.SHA[:12]} that has not "
+            "succeeded, so the gateway may still run the plugins and config from before it",
+        ], []))
+
     def test_a_hold_whose_run_is_alive_is_silent(self) -> None:
         self.state(hold=self.hold(dispatch_profiles=True, gateway_lock=True))
         (self.root / "factory-gateway.lock").write_text("4242\n")

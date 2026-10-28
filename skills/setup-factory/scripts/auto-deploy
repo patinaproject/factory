@@ -99,7 +99,7 @@ def write_private(path: Path, data: dict) -> None:
 def fresh_state() -> dict:
     return {
         "deployed": None, "attempted": None, "failed": None, "outcome": None, "detail": "", "manual": [],
-        "restarted": None, "hold": None, "events": [], "updated_at": None,
+        "restarted": None, "restart_pending": None, "hold": None, "events": [], "updated_at": None,
     }
 
 
@@ -427,7 +427,13 @@ class Deploy:
     def install(self, target: str, deadline: float) -> str:
         plan = self.plan()
         self.log(f"{len(plan.installs)} install(s) and {len(plan.manual)} manual line(s) for {short(target)}")
-        if plan.installs:
+        if plan.restarts_gateway:
+            if self.state["restarted"] == target:
+                self.log(f"the gateway already restarted once for {short(target)}; not restarting again")
+            else:
+                self.state["restart_pending"] = target
+                self.save()
+        if plan.installs or self.state["restart_pending"]:
             reason = f"auto-deploy {self.pid}: installing {short(target)}"
             self.set_hold(pause=reason)
             self.hermes_cli("pause", "--reason", reason)
@@ -436,7 +442,7 @@ class Deploy:
                 for install in plan.installs:
                     self.log(f"{install.step.name}: {' '.join(install.argv)}")
                     self.checked(install.argv, self.root_env)
-                if plan.restarts_gateway:
+                if self.state["restart_pending"]:
                     self.restart(target, deadline)
             finally:
                 if reason in self.pauses():
@@ -453,11 +459,6 @@ class Deploy:
         return self.record(DEPLOYED, target, "", after.manual)
 
     def restart(self, target: str, deadline: float) -> None:
-        if self.state["restarted"] == target:
-            self.log(f"the gateway already restarted once for {short(target)}; not restarting again")
-            return
-        self.state["restarted"] = target
-        self.save()
         script = self.source / "skills" / "setup-factory" / "scripts" / "restart-gateway"
         left = max(deadline - self.clock(), 0.0)
         proc = self.run(
@@ -468,6 +469,9 @@ class Deploy:
             self.log(line)
         if proc.returncode != 0:
             raise DeployError(f"restart-gateway exited {proc.returncode}")
+        self.state["restarted"] = target
+        self.state["restart_pending"] = None
+        self.save()
 
     def status(self) -> int:
         self.load_state()
@@ -490,7 +494,7 @@ class Deploy:
         print(f"plan from {self.source} as it is now:")
         for install in plan.installs:
             print(self.redact(f"  install {install.step.name}: {' '.join(install.argv)}"))
-        if plan.restarts_gateway:
+        if plan.restarts_gateway or self.state["restart_pending"]:
             print("  then restart the gateway through restart-gateway")
         for line in plan.manual:
             print(self.redact(f"  manual {line.line}: {line.action}"))

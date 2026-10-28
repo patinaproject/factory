@@ -1414,7 +1414,9 @@ last deployed one. One run does this:
    `profiles/claude-worker/scripts/install_plan.py`, under one short
    `hermes pause`. A local edit is overwritten with the repository's version.
    When an install needs it, it restarts the gateway through `restart-gateway`,
-   at most once per commit. These restarts do not count against
+   at most once per commit. It records the restart as pending before the first
+   install and clears it only when `restart-gateway` succeeds, so a failed or
+   interrupted restart is done by the next run that deploys. These restarts do not count against
    `watch-gateway`'s budget. A manual line never holds an install. The run
    records it, and `report-deploy` reports it.
 5. It checks that `check-install` reports no install line and that
@@ -2103,6 +2105,11 @@ Hermes process starts. The new helper also writes
      `BLOCKED` until the key is gone. Ask who set it. When the hold is no
      longer wanted, run `hermes config unset kanban.dispatch_profiles` with
      the root home.
+   - An `auto deploy <root>/auto-deploy.json` line that records a gateway
+     restart that has not succeeded: the installs are on disk, but the gateway
+     may still run the plugins and config from before them. Run
+     `HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --retry`. It
+     restarts the gateway through `restart-gateway` and clears the record.
    - An `auto deploy origin/<default> at <commit>` line: the commit is not
      deployed a day after it was committed. When the line names no outcome,
      its push did not start a run. Check that the App subscribes to Push and

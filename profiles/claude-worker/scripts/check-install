@@ -64,7 +64,7 @@ store Python, so a plugin Hermes would skip or fail to load is reported. Hermes 
 
 On macOS, while no auto-deploy run is alive, it reports a missing or unreadable <root>/auto-deploy.json, a
 stale run lock, kanban.dispatch_profiles set in the root home, a hermes pause and a factory-gateway.lock that a
-dead run left, and a default-branch commit that auto-deploy has not deployed a day after it was committed. The
+dead run left, a gateway restart that auto-deploy recorded and that has not succeeded, and a default-branch commit that auto-deploy has not deployed a day after it was committed. The
 stranded triage check is silent while auto-deploy holds the cards.
 
 --json prints the same drift as a JSON list of records, each with the remedy that install_plan.py names:
@@ -1027,6 +1027,15 @@ def check_auto_deploy(
         drifts.append(Drift(
             "auto deploy", str(gateway_lock),
             f"holds auto-deploy run {pid}, which is not running, so watch-gateway restarts nothing", START_DEPLOY,
+        ))
+    pending = state.get("restart_pending")
+    if pending:
+        drifts.append(Drift(
+            "auto deploy", str(state_path),
+            f"records a gateway restart for {str(pending)[:12]} that has not succeeded, so the gateway may still run "
+            "the plugins and config from before it",
+            Manual("run auto-deploy --retry, which restarts the gateway through restart-gateway, as Deploy a merged "
+                   "factory change describes"),
         ))
     if commit is not None and committed_at is not None and state.get("deployed") != commit.sha and now - committed_at >= UNDEPLOYED_SECONDS:
         outcome = state.get("outcome") if state.get("attempted") == commit.sha else None
