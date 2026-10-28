@@ -1,10 +1,4 @@
-"""Keep the vendored skills and their bundled agents equal to the latest stable release of the skills repository.
-
-`scripts/skills-sync` runs `main`. The sync reads `.agents/skills-sync.json` for the source repository and the
-skills to vendor, selects a release, reconciles a checkout of this repository to it, and either reports the
-result (`--dry-run`) or publishes it as one signed commit on `bot/bump-skills` with a pull request.
-Every GitHub call goes through the `GitHub` class, which tests replace.
-"""
+"""Keep the vendored skills and their bundled agents equal to the latest stable release of the skills repository."""
 from __future__ import annotations
 
 import argparse
@@ -59,7 +53,7 @@ console.log(JSON.stringify(hashes));
 
 
 class SyncError(Exception):
-    """A refusal or a failure. The message is the one-line reason."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -70,8 +64,6 @@ class Release:
 
 
 class GitHub:
-    """The only place that calls GitHub."""
-
     def __init__(self, token: str | None) -> None:
         self.token = token
 
@@ -121,7 +113,6 @@ class GitHub:
         return {"tree": commit["tree"]["sha"], "parents": [parent["sha"] for parent in commit["parents"]]}
 
     def create_tree(self, repo: str, base_commit: str, entries: list[dict[str, Any]]) -> str:
-        """Entries are `{"path", "mode", "content"}`, with `content` None to delete the path."""
         tree = []
         for entry in entries:
             sha = None
@@ -138,7 +129,6 @@ class GitHub:
                 "reason": commit["verification"]["reason"]}
 
     def set_branch(self, repo: str, branch: str, sha: str, observed: str | None, checkout: Path) -> None:
-        """Move the branch to `sha` only while it still points at `observed`, or does not exist when that is None."""
         # The REST refs API has no expected-head check, so a git push with a lease moves the branch atomically.
         credential = base64.b64encode(f"x-access-token:{self.token}".encode()).decode()
         env = {**os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
@@ -198,7 +188,6 @@ def version(tag: str) -> tuple[int, ...]:
 
 
 def select_release(releases: list[dict[str, Any]], source: str, tag: str | None) -> dict[str, Any] | None:
-    """The release to vendor, or None when the source has no published stable release."""
     if tag:
         named = [release for release in releases if release["tag_name"] == tag]
         if not named:
@@ -231,7 +220,6 @@ def refuse_regression(config: dict[str, Any], release: Release) -> None:
 
 
 def selected_skills(checkout: Path, config: dict[str, Any]) -> dict[str, str]:
-    """Skill name to its path in the source repository."""
     found: dict[str, str] = {}
 
     def add(name: str, path: str) -> None:
@@ -340,7 +328,6 @@ def run_checks(target: Path) -> list[tuple[str, bool]]:
 
 
 def other_changes(target: Path) -> list[str]:
-    """Changed paths outside the skills, the lock, the agents, and the config, such as the installer's hooks."""
     managed = (".agents/skills/", ".claude/skills/", f"{AGENTS_DIR}/", LOCK, CONFIG)
     paths = git(target, "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames", binary=True)
     return sorted(path for path in (entry[3:] for entry in paths.decode().split("\0") if entry)
@@ -361,7 +348,6 @@ def render_report(release: Release, changes: dict[str, list[str]], checks: list[
 
 
 def staged_changes(target: Path) -> list[dict[str, Any]]:
-    """The reconciled tree against HEAD as API tree entries."""
     git(target, "add", "-A")
     tokens = git(target, "diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", "HEAD",
                  binary=True).decode().split("\0")[:-1]

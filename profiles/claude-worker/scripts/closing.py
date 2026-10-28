@@ -39,7 +39,6 @@ EXEMPT_AUTHORS = ("dependabot[bot]",)
 
 
 def exempt(head_ref: str, author: str) -> bool:
-    """Whether a pull request is one of the no-issue exceptions: release, bump, or dependabot."""
     return head_ref.startswith(EXEMPT_HEAD_PREFIXES) or author in EXEMPT_AUTHORS
 
 

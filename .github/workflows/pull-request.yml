@@ -15,7 +15,6 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     if: "${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') && !(github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'release-please--')) }}"
     env:
-      # Only a branch of this repository earns the no-issue exception of a `bot/bump-*` head.
       PR_HEAD_REF: "${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref || '' }}"
       PR_AUTHOR: ${{ github.event.pull_request.user.login }}
     steps:
