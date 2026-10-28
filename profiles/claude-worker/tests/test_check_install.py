@@ -2276,9 +2276,10 @@ def install_fake_hermes(root: Path) -> Path:
     tools = tree / "tools"
     tools.mkdir(parents=True)
     for name, source in (("__init__", ""), ("registry", FAKE_REGISTRY), ("process_registry", ""),
-                         ("terminal_tool", FAKE_TERMINAL_TOOL)):
+                         ("terminal_tool", FAKE_TERMINAL_TOOL), ("kanban_tools", "")):
         (tools / f"{name}.py").write_text(source)
-    (tools / "registered.json").write_text(json.dumps({"terminal": "terminal", "process_manage": "terminal"}))
+    (tools / "registered.json").write_text(json.dumps(
+        {"terminal": "terminal", "process_manage": "terminal", "kanban_schedule": "kanban"}))
     python = root / "tools" / "python-9" / "bin"
     python.mkdir(parents=True)
     (python / "python3").symlink_to(sys.executable)
@@ -2297,7 +2298,7 @@ class CheckHermesToolsTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.root = self.tmp / "root"
         self.tree = install_fake_hermes(self.root)
-        self.register({"terminal": "terminal", "process_manage": "terminal", "read_file": "file"})
+        self.register({"terminal": "terminal", "process_manage": "terminal", "kanban_schedule": "kanban", "read_file": "file"})
         self.plugin = self.tmp / "worker" / "plugins" / "blocker-order" / "__init__.py"
         shutil.copytree(PLUGIN.parent, self.plugin.parent, ignore=shutil.ignore_patterns("tests", "__pycache__"))
 
@@ -2311,24 +2312,33 @@ class CheckHermesToolsTest(unittest.TestCase):
         self.assertEqual(self.check(), [])
 
     def test_the_legacy_process_name_alone_still_counts(self) -> None:
-        self.register({"terminal": "terminal", "process": "terminal"})
+        self.register({"terminal": "terminal", "process": "terminal", "kanban_schedule": "kanban"})
 
         self.assertEqual(self.check(), [])
 
     def test_a_renamed_process_tool_names_the_missing_tool(self) -> None:
-        self.register({"terminal": "terminal", "process_run": "terminal", "read_file": "file"})
+        self.register({"terminal": "terminal", "process_run": "terminal", "kanban_schedule": "kanban", "read_file": "file"})
 
         self.assertEqual(self.check(), [
             "hermes tool blocker-order: Hermes registers none of process_manage, process, which the plugin watches; "
-            "its terminal toolset registers process_run, terminal (PROCESS_TOOLS in plugins/blocker-order/__init__.py)",
+            "its terminal and kanban toolsets register kanban_schedule, process_run, terminal (PROCESS_TOOLS in plugins/blocker-order/__init__.py)",
         ])
 
     def test_a_missing_terminal_tool_is_named(self) -> None:
-        self.register({"process_manage": "terminal"})
+        self.register({"process_manage": "terminal", "kanban_schedule": "kanban"})
 
         self.assertEqual(self.check(), [
-            "hermes tool blocker-order: Hermes registers no terminal, which the plugin watches; "
-            "its terminal toolset registers process_manage (REQUIRED_TOOLS in plugins/blocker-order/__init__.py)",
+            "hermes tool blocker-order: Hermes registers no terminal, which the plugin needs; "
+            "its terminal and kanban toolsets register kanban_schedule, process_manage (REQUIRED_TOOLS in plugins/blocker-order/__init__.py)",
+        ])
+
+    def test_a_missing_kanban_schedule_tool_is_named(self) -> None:
+        self.register({"terminal": "terminal", "process_manage": "terminal", "kanban_block": "kanban"})
+
+        self.assertEqual(self.check(), [
+            "hermes tool blocker-order: Hermes registers no kanban_schedule, which the plugin needs; "
+            "its terminal and kanban toolsets register kanban_block, process_manage, terminal "
+            "(REQUIRED_TOOLS in plugins/blocker-order/__init__.py)",
         ])
 
     def test_the_probe_runs_in_a_scratch_home_and_writes_no_bytecode(self) -> None:

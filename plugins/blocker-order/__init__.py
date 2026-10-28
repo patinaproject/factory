@@ -15,8 +15,14 @@ no card, the result tells the worker to post one notice and run `claude-session`
 `--ignore-blockers`, so the card starts as it did before.
 
 The hook also reads each `claude-session` report whose `result` starts with `Needs input:`, from the first
-run and from every resume, and blocks the card with kind `needs_input` and that result as the reason. The
-worker's steps differ by run, so no step of its prompt is what makes that block happen: the tool result is.
+run and from every resume, and turns it into the card's one board change for that result. The worker's steps
+differ by run, so no step of its prompt is what makes that change happen: the tool result is.
+
+- On the `triage` board it parks the card in `scheduled` with that result as the reason, then asks
+  `linear-agent-session`'s `linear_triage_round` tool to post the round. Hermes counts a second block of the
+  same kind after an unblock as a loop and parks the card in its own `triage` status, so a triage round
+  never blocks the card. A reply unblocks it.
+- On every other board it blocks the card with kind `needs_input` and that result as the reason.
 
 `result_line.py` defines the report line, which `claude-session` writes and this hook reads.
 """
@@ -32,8 +38,10 @@ from . import result_line
 # `model_tools.py`), so a hook sees `process_manage`. Older Hermes passes `process`.
 # `check-install` reads both lists and reports when Hermes registers none of PROCESS_TOOLS or no REQUIRED_TOOLS.
 PROCESS_TOOLS = ("process_manage", "process")
-REQUIRED_TOOLS = ("terminal",)
-WATCHED_TOOLS = (*PROCESS_TOOLS, *REQUIRED_TOOLS)
+REQUIRED_TOOLS = ("terminal", "kanban_schedule")
+WATCHED_TOOLS = (*PROCESS_TOOLS, "terminal")
+TRIAGE_BOARD = "triage"
+ROUND_TOOL = "linear_triage_round"
 CYCLE_REFUSAL = "would create a cycle"
 # Hermes' turn-end guard looks for a kanban_block call in the transcript, not on the board. Without this,
 # it would push the worker to block a card that this hook already moved to todo.
@@ -84,6 +92,29 @@ def block_for_input(reason: str, dispatch: Dispatch) -> dict:
     return {"blocked": True, "instruction": (
         "Claude needs input, so the blocker-order hook blocked this card with kind needs_input and the whole "
         "result as the reason. Stop now: call no other tool and do not run claude-session again."
+    )}
+
+
+def wait_for_reply(task: str, reason: str, dispatch: Dispatch) -> dict:
+    """Park first, then post, so nobody is told the card waits when it does not."""
+    answer = _call(dispatch, "kanban_schedule", {"reason": reason})
+    if not answer.get("ok"):
+        return {"parked": False, "posted": False, "instruction": (
+            f"The blocker-order hook could not park this card: {answer.get('error')}. Call kanban_schedule with "
+            "the whole result as the reason, then stop. Do not call kanban_block, and do not run claude-session again."
+        )}
+    os.environ[STOP_NUDGE] = "off"
+    post = _call(dispatch, ROUND_TOOL, {"task_id": task, "board": TRIAGE_BOARD, "reason": reason})
+    if not post.get("posted"):
+        return {"parked": True, "posted": False, "instruction": (
+            "Claude needs input, so the blocker-order hook parked this card in scheduled until a person replies, "
+            f"but it could not post the questions: {post.get('error')}. Post the whole result as one elicitation "
+            "with linear_agent_activity on the card's Linear agent session, then stop. Do not run claude-session again."
+        )}
+    return {"parked": True, "posted": True, "instruction": (
+        "Claude needs input, so the blocker-order hook parked this card in scheduled until a person replies and "
+        "posted its questions on the Linear agent session. Stop now: call no other tool and do not run "
+        "claude-session again."
     )}
 
 
@@ -154,7 +185,9 @@ def make_hook(ctx: Any):
         reason = needs_input(output)
         if reason is not None:
             key = (task, run, reason)
-            if key not in _handled:
+            if key not in _handled and os.environ.get("HERMES_KANBAN_BOARD") == TRIAGE_BOARD:
+                _handled[key] = json.dumps({**payload, "triage_round": wait_for_reply(task, reason, ctx.dispatch_tool)})
+            elif key not in _handled:
                 _handled[key] = json.dumps({**payload, "needs_input_block": block_for_input(reason, ctx.dispatch_tool)})
             return _handled[key]
         cards = waiting_on(output)

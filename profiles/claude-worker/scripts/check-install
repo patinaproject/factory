@@ -1682,7 +1682,7 @@ HERMES_TOOL_FIX = Manual("change the blocker-order plugin to Hermes' new tool na
 
 
 def check_hermes_tools(root: Path, plugin: Path) -> list:
-    """Alert when Hermes no longer registers a tool the installed blocker-order plugin watches."""
+    """Alert when Hermes no longer registers a tool the installed blocker-order plugin watches or calls."""
     if not plugin.is_file():
         return []
     try:
@@ -1692,7 +1692,7 @@ def check_hermes_tools(root: Path, plugin: Path) -> list:
         return [Drift("hermes tool", "blocker-order", f"cannot read Hermes' tool names: {error}", ADVISORY)]
     except Exception as error:
         return [Drift("hermes tool", "blocker-order", f"cannot read Hermes' tool names: {type(error).__name__}: {error}", ADVISORY)]
-    have = f"its terminal toolset registers {', '.join(registered) or 'nothing'}"
+    have = f"its terminal and kanban toolsets register {', '.join(registered) or 'nothing'}"
     drifts = []
     if not set(process_tools) & set(registered):
         drifts.append(Drift(
@@ -1704,7 +1704,7 @@ def check_hermes_tools(root: Path, plugin: Path) -> list:
         if name not in registered:
             drifts.append(Drift(
                 "hermes tool", "blocker-order",
-                f"Hermes registers no {name}, which the plugin watches; {have} (REQUIRED_TOOLS in {BLOCKER_ORDER})",
+                f"Hermes registers no {name}, which the plugin needs; {have} (REQUIRED_TOOLS in {BLOCKER_ORDER})",
                 HERMES_TOOL_FIX,
             ))
     return drifts
