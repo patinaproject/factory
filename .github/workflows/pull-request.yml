@@ -14,6 +14,10 @@ jobs:
     name: Validate pull request
     runs-on: blacksmith-2vcpu-ubuntu-2404
     if: "${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') && !(github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'release-please--')) }}"
+    env:
+      # Only a branch of this repository earns the no-issue exception of a `bot/bump-*` head.
+      PR_HEAD_REF: "${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref || '' }}"
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
     steps:
       - name: Enforce ASCII-only title
         env:
@@ -45,7 +49,7 @@ jobs:
           requireScope: false
           disallowScopes: |
             .+
-          subjectPattern: '^#[1-9]\d* .+$'
+          subjectPattern: "${{ startsWith(env.PR_HEAD_REF, 'bot/bump-') && '.+' || '^#[1-9]\\d* .+$' }}"
           subjectPatternError: |
             PR title subject must start with a GitHub issue reference. Example:
               feat: #123 add boot timeline
@@ -77,8 +81,6 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
         run: |

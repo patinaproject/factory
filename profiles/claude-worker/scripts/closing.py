@@ -4,8 +4,9 @@ Code, HTML comments, struck-out text, and blockquotes do not render, so a refere
 References are written `#n` for an issue of the repository, `owner/name#n` in lower case for another
 repository's issue, and a Linear identifier in upper case.
 
-As a command, it is the pull request workflow's body check: it reads `PR_BODY` and `GITHUB_REPOSITORY` and
-exits 1 unless the body closes an issue of the repository.
+As a command, it is the pull request workflow's body check: it reads `PR_BODY`, `GITHUB_REPOSITORY`,
+`PR_HEAD_REF`, and `PR_AUTHOR` and exits 1 unless the body closes an issue of the repository. Release, bump,
+and dependabot pull requests are skipped.
 """
 from __future__ import annotations
 
@@ -31,6 +32,15 @@ CLOSING = re.compile(
 # The `fix` commit type is itself a closing keyword, so a squash commit titled `fix: #5 ...` closes #5.
 FIX_TYPE = re.compile(r"^fix(?:\([^)]*\))?!?:[ \t]*#(?P<number>[1-9][0-9]*)\b", re.IGNORECASE)
 HIDDEN = re.compile(r"<!--.*?-->|^(```|~~~).*?^\1|`[^`\n]*`|~~.*?~~|^[ \t]*>.*?$", re.DOTALL | re.MULTILINE)
+
+
+EXEMPT_HEAD_PREFIXES = ("release-please--", "bot/bump-")
+EXEMPT_AUTHORS = ("dependabot[bot]",)
+
+
+def exempt(head_ref: str, author: str) -> bool:
+    """Whether a pull request is one of the no-issue exceptions: release, bump, or dependabot."""
+    return head_ref.startswith(EXEMPT_HEAD_PREFIXES) or author in EXEMPT_AUTHORS
 
 
 def github_reference(issue_repo: str, number: str, repo: str) -> str:
@@ -98,6 +108,9 @@ def with_link(body: str, identifier: str, url: str) -> str:
 
 
 def main() -> int:
+    if exempt(os.environ.get("PR_HEAD_REF", ""), os.environ.get("PR_AUTHOR", "")):
+        print("Release, bump, and dependabot pull requests skip the body closing check.")
+        return 0
     body, repo = os.environ.get("PR_BODY", ""), os.environ["GITHUB_REPOSITORY"]
     if not body.strip():
         print('::error::PR body is empty. Add "Closes #N".')
