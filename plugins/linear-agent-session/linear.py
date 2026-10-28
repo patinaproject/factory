@@ -62,6 +62,33 @@ SESSION_ACTIVITIES_QUERY = f"""query AgentSessionActivities($id: String!) {{
   agentSession(id: $id) {{ activities(first: 50, orderBy: createdAt) {{ nodes {{ {ACTIVITY_FIELDS} }} }} }}
 }}"""
 
+SESSION_READ_QUERY = """query AgentSessionRead($id: String!, $after: String) {
+  agentSession(id: $id) {
+    id status issue { identifier }
+    activities(first: 50, after: $after, orderBy: createdAt) {
+      nodes {
+        createdAt signal
+        content {
+          __typename
+          ... on AgentActivityThoughtContent { body }
+          ... on AgentActivityResponseContent { body }
+          ... on AgentActivityPromptContent { body }
+          ... on AgentActivityElicitationContent { body }
+          ... on AgentActivityErrorContent { body }
+          ... on AgentActivityActionContent { action parameter result }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
+
+SESSION_REFERENCE = re.compile(
+    r"^(?:https://linear\.app/[^/\s]+/agent-session/)?"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{13})/?(?:[?#]\S*)?$",
+    re.I,
+)
+
 # Linear returns the newest activities first with `first` and `orderBy: createdAt`, so the limit keeps the newest.
 THREAD_LIMIT = 30
 THREAD_BODY_LIMIT = 2000
@@ -354,6 +381,33 @@ class LinearClient:
                     "body": node["content"]["body"],
                 }
         return {"found": False}
+
+    def read_session(self, session_reference: str) -> dict:
+        """A session by URL, UUID, or slugId, with every activity oldest first."""
+        match = SESSION_REFERENCE.match(session_reference.strip())
+        if not match:
+            raise LinearError(f"{session_reference!r} is not an agent session URL, UUID, or slugId")
+        session_id = match.group(1)
+        activities, after = [], None
+        while True:
+            try:
+                session = self._graphql(SESSION_READ_QUERY, {"id": session_id, "after": after})["agentSession"]
+            except LinearError as error:
+                raise LinearError(f"agent session {session_id}: {error}") from None
+            if session is None:
+                raise LinearError(f"agent session {session_id}: Entity not found: AgentSession")
+            page = session["activities"]
+            activities += page["nodes"]
+            if not page["pageInfo"]["hasNextPage"]:
+                break
+            after = page["pageInfo"]["endCursor"]
+        issue = session["issue"]
+        return {
+            "id": session["id"],
+            "issue": issue["identifier"] if issue else None,
+            "status": session["status"],
+            "activities": [_session_activity(node) for node in sorted(activities, key=lambda n: n["createdAt"])],
+        }
 
     def session_thread(self, agent_session_id: str) -> list:
         session = self._graphql(SESSION_HISTORY_QUERY, {"id": agent_session_id})["agentSession"]
@@ -796,6 +850,14 @@ class TokenLinearClient(LinearClient):
 
 class _Unauthorized(Exception):
     pass
+
+
+def _session_activity(node: dict) -> dict:
+    content = node["content"]
+    kind = content["__typename"].removeprefix("AgentActivity").removesuffix("Content").lower()
+    fields = ("action", "parameter", "result") if kind == "action" else ("body",)
+    signal = {"signal": node["signal"]} if node["signal"] else {}
+    return {"createdAt": node["createdAt"], "type": kind, **signal, **{f: content[f] for f in fields}}
 
 
 def _session_summary(title: str) -> str:

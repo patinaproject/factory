@@ -1876,8 +1876,10 @@ memory file. They say that credentials live in the gateway, that `gh` acts as
 the App through `GH_CONFIG_DIR`, that Linear is reached through the
 `linear-agent-session` tools, and that a Slack message proves Slack works.
 
-**Block check.** The machine-wide block must equal its render. This prints
-`PASS`, or `FAIL` with a diff of the live block against the render:
+**Block check.** The machine-wide block must equal its render, and
+`~/.claude/settings.json` must hold the allow rules rendered from the same
+values. This prints `PASS`, or `FAIL` with a diff of the live block against
+the render or the name of each missing rule:
 
 ```sh
 python3 <repo>/skills/setup-factory/scripts/agent-block --values <values file>

@@ -281,6 +281,16 @@ def run_session_create(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(run)
 
 
+def run_session_read(client_factory: ClientFactory, args: dict) -> str:
+    def run() -> dict:
+        session = args.get("session")
+        if not session:
+            raise LinearError("pass session: the agent session URL, UUID, or slugId")
+        return client_factory().read_session(session)
+
+    return _tool_result_or_error(run)
+
+
 def run_issue(client_factory: ClientFactory, args: dict) -> str:
     def run() -> dict:
         client = client_factory()
