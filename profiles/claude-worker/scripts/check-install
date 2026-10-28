@@ -102,6 +102,8 @@ TRIAGE_BOARD = "triage"
 STRANDED_MINUTES = 30  # Hermes' own threshold for a card stranded in ready
 # Hermes' events that start a card's wait in ready; `assigned` is the dispatch-triage assignment.
 WAIT_EVENTS = ("created", "promoted", "reclaimed", "unblocked", "assigned")
+# Hermes' events that put a card back in ready for its worker.
+READY_EVENTS = (*WAIT_EVENTS, "review_reopened", "changes_requested")
 LINEAR_ISSUE_FIELD = "data.id"
 LINEAR_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Deliver values that name no platform, so no home channel is needed.
@@ -1072,6 +1074,40 @@ def check_stranded_triage(root: Path, now: float) -> list:
     ]
 
 
+def check_guarded_cards(root: Path, now: float) -> list:
+    """A card that Hermes' dispatcher holds in `ready` with `active_pr`, so no worker ever starts it.
+
+    Hermes logs `respawn_guarded` each tick while a card comment from the last day holds a pull request URL and
+    no handoff event came in a later second. Nothing else reports the hold, and a person's reply does not lift it."""
+    ready = ", ".join(f"'{kind}'" for kind in READY_EVENTS)
+    sql = (
+        "SELECT t.id AS id, s.since AS since FROM tasks t JOIN (SELECT task_id, MAX(created_at) AS since "
+        f"FROM task_events WHERE kind IN ({ready}) GROUP BY task_id) s ON s.task_id = t.id "
+        "WHERE t.status = 'ready' AND EXISTS (SELECT 1 FROM task_events g WHERE g.task_id = t.id "
+        "AND g.kind = 'respawn_guarded' AND g.created_at >= s.since AND g.payload LIKE '%\"active_pr\"%') ORDER BY t.id"
+    )
+    drifts = []
+    for path in sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")]):
+        if not path.is_file():
+            continue
+        try:
+            cards = kanban_board.read(str(path), sql)
+        except sqlite3.Error as error:
+            drifts.append(Drift("guarded card check", path, f"cannot be read: {error}"))
+            continue
+        drifts += [
+            Drift(
+                "guarded card", card["id"],
+                f"has waited {int((now - card['since']) // 60)} minutes in ready while Hermes holds it from its "
+                "worker as active_pr, because a card comment holds a pull request URL and no handoff came after "
+                "it; run `hermes kanban request-review` and `hermes kanban reopen-review` on it",
+            )
+            for card in cards
+            if now - card["since"] >= STRANDED_MINUTES * 60
+        ]
+    return drifts
+
+
 def check_kanban_boards(root: Path) -> list:
     """Probe every board database the way `claude-session` reads it, for the columns its blocker check needs.
 
@@ -1590,6 +1626,7 @@ def main() -> int:
                 triage_max_running(settings),
             ),
             *check_stranded_triage(root, time.time()),
+            *check_guarded_cards(root, time.time()),
             *check_triage_playbook(repo),
             *check_checkouts(settings),
             *check_work_skills(

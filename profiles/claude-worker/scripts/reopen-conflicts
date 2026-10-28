@@ -25,7 +25,11 @@ comments already hold that line for the current head is skipped. A worker that
 blocks on the same head is not unblocked in a loop, and a worker that pushes a
 new head that still fails is told again. A `review` card that holds the line is
 a handback that failed partway, because the ready gate refuses a conflicting
-head and a failing required check, so the review reopen runs again. Prints one
+head and a failing required check, so the review reopen runs again. A card
+comment names a pull request as `<owner>/<name>#<number>`, never by URL,
+because Hermes holds a `ready` card from its worker while a card comment from
+the last day holds a pull request URL and no handoff event came in a later
+second, and the reopen lands in the same second as the comment. Prints one
 line per card sent back, `<task id> <pull request url>`. A failure for one
 repository or card goes to stderr and the others still run.
 
@@ -66,6 +70,7 @@ REVIEW_MARKER = "review_head: "
 CONFLICT_REASON = "merge conflict with the base branch; see the card comments"
 FAILED_CHECK_REASON = "a required check failed; see the card comments"
 REVIEW_REASON = "changes-requested review still needs work; see the card comments"
+PULL_URL = re.compile(r"https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)", re.IGNORECASE)
 PR_FIELDS = "number,url,headRefName,headRefOid,baseRefName,author,mergeable,reviewDecision"
 
 
@@ -242,6 +247,11 @@ def handback_for(pull: dict, task: dict, repo: str, cache: dict) -> Handback | N
     return review_handback(pull, outcome.reason) if isinstance(outcome, stale_reviews.Handback) else None
 
 
+def without_pull_urls(text: str) -> str:
+    """Hermes' respawn guard matches `PULL_URL` in any card comment and would hold the reopened card."""
+    return PULL_URL.sub(lambda match: f"{match[1]}/{match[2]}#{match[3]}", text)
+
+
 def send_back(hermes: str, task: dict, handback: Handback, sent: bool) -> None:
     """Every step either moves the card or leaves it where the next run repeats the step."""
     task_id = task["id"]
@@ -249,7 +259,7 @@ def send_back(hermes: str, task: dict, handback: Handback, sent: bool) -> None:
         run(hermes, "kanban", "unblock", task_id)
         run(hermes, "kanban", "request-review", task_id)
     if not sent:
-        run(hermes, "kanban", "comment", task_id, handback.text)
+        run(hermes, "kanban", "comment", task_id, without_pull_urls(handback.text))
     run(hermes, "kanban", "reopen-review", task_id, "--reason", handback.reason)
 
 
