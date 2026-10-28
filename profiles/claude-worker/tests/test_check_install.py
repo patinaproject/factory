@@ -115,7 +115,6 @@ def cron_job(name: str, minutes: int, deliver: str = "local", **fields) -> dict:
 
 
 WORKER_JOBS = [
-    cron_job("refresh-gh-app-login", 30),
     cron_job("refresh-checkouts", 60),
     cron_job("refresh-owned-refs", 1),
     cron_job("reopen-conflicts", 5),
@@ -335,7 +334,7 @@ class CheckInstallTest(unittest.TestCase):
             (check_install.WATCH_STATE, check_install.HEARTBEAT_FILE, check_install.WATCH_INTERVAL, check_install.RESTARTS_PER_HOUR),
             (watch.STATE_FILE, watch.HEARTBEAT_FILE, watch.INTERVAL_SECONDS, watch.RESTARTS_PER_HOUR),
         )
-        launchd_name = Path(check_install.SERVICES[-1].plist).name
+        launchd_name = Path(next(s.plist for s in check_install.SERVICES if s.name == "gateway watch")).name
         self.assertEqual(launchd_name, f"{watch.LABEL}.plist")
 
     def test_plugin_difference_names_the_home(self) -> None:
@@ -910,8 +909,7 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_cron_job_changed_by_hand(self) -> None:
         self.cron(self.worker, [
-            cron_job("refresh-gh-app-login", 30, enabled=False),
-            cron_job("refresh-checkouts", 15, no_agent=False),
+            cron_job("refresh-checkouts", 15, enabled=False, no_agent=False),
             cron_job("refresh-owned-refs", 1),
             cron_job("reopen-conflicts", 5),
             cron_job("dispatch-triage", 1),
@@ -920,12 +918,21 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(
             self.check(),
-            (1, f"cron job refresh-gh-app-login in {self.worker}: is disabled (part 10)\n"
+            (1, f"cron job refresh-checkouts in {self.worker}: is disabled (part 12)\n"
                 f"cron job refresh-checkouts in {self.worker}: runs every 15m, not every 60m (part 12)\n"
                 f"cron job refresh-checkouts in {self.worker}: is not a script-only job that runs refresh-checkouts "
                 "(part 12)\n"
                 f'cron job {RETRY_SCRIPT} in {self.root}: delivers to "local", not the operator\'s chat platform '
                 "(part 12)\n"),
+        )
+
+    def test_the_login_refresh_cron_job_that_launchd_replaced_is_reported(self) -> None:
+        self.cron(self.worker, [*WORKER_JOBS, cron_job("refresh-gh-app-login", 30)])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-gh-app-login in {self.worker}: is replaced by a launchd job; "
+                "remove it with hermes cron remove (part 10)\n"),
         )
 
     def test_cron_jobs_the_runbook_does_not_create(self) -> None:
@@ -1470,6 +1477,7 @@ class CheckInstallTest(unittest.TestCase):
         self.launchd.plist(
             f"{agents}/ai.patinaproject.factory.gateway-watch.plist", "ai.patinaproject.factory.gateway-watch"
         )
+        self.launchd.plist(f"{agents}/ai.patinaproject.factory.gh-login.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS)
         env = {"PATH": "/usr/bin:/bin", **self.launchd.env, "HOME": str(home), "HERMES_HOME": str(self.worker)}
         proc = subprocess.run(
             ["/usr/bin/env", "python3", str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True
@@ -1611,6 +1619,12 @@ class CheckStrandedTriageTest(unittest.TestCase):
         self.assertTrue(rows[0].startswith(f"stranded triage card check {self.path}: cannot be read: "))
 
 
+GH_LOGIN_LABEL = "ai.patinaproject.factory.gh-login"
+GH_LOGIN_FIELDS = {
+    "StartInterval": 900, "EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/w"},
+}
+
+
 class Launchd:
     """A file system root with the runbook's two plists and a fake launchctl that reports their state."""
 
@@ -1630,10 +1644,14 @@ class Launchd:
             f"{str(self.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist",
             "ai.patinaproject.factory.gateway-watch",
         )
+        self.gh_login = self.plist(
+            f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{GH_LOGIN_LABEL}.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS,
+        )
         uid = os.getuid()
         self.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
             f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+            f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
         })
         self.env = {
             "LAUNCHD_ROOT": str(self.root), "LAUNCHCTL_BIN": str(self.launchctl),
@@ -2046,6 +2064,7 @@ class CheckServicesTest(unittest.TestCase):
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
             f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+            f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
         })
 
         self.assertEqual(self.check(), [])
@@ -2069,6 +2088,7 @@ class CheckServicesTest(unittest.TestCase):
             "service cloudflared tunnel: is waiting, not running (part 7)",
             "service Hermes gateway: is not loaded in launchd (part 15)",
             "service gateway watch: is not loaded in launchd (part 12)",
+            "service gh login refresh: is not loaded in launchd (part 10)",
         ])
 
     def test_a_missing_watch_job_is_reported(self) -> None:
@@ -2077,6 +2097,38 @@ class CheckServicesTest(unittest.TestCase):
         self.assertEqual(self.check(), [
             "service gateway watch: no plist matches ~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist (part 12)",
         ])
+
+    def test_a_missing_login_refresh_job_is_reported(self) -> None:
+        self.launchd.gh_login.unlink()
+
+        self.assertEqual(self.check(), [
+            "service gh login refresh: no plist matches "
+            "~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist (part 10)",
+        ])
+
+    def login_refresh_with(self, **fields) -> None:
+        self.launchd.plist(
+            f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/{GH_LOGIN_LABEL}.plist", GH_LOGIN_LABEL, **fields
+        )
+        uid = os.getuid()
+        self.launchd.states({
+            "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "waiting",
+        })
+
+    def test_a_login_refresh_job_without_its_environment_is_reported_by_name_only(self) -> None:
+        self.login_refresh_with(StartInterval=900, EnvironmentVariables={"GH_CONFIG_DIR": "/w/gh", "TOKEN": "s3cr3t"})
+
+        self.assertEqual(self.check(), ["service gh login refresh: does not set HERMES_HOME (part 10)"])
+
+        self.login_refresh_with(StartInterval=900)
+
+        self.assertEqual(self.check(), ["service gh login refresh: does not set GH_CONFIG_DIR, HERMES_HOME (part 10)"])
+
+    def test_a_login_refresh_job_that_runs_at_another_interval_is_reported(self) -> None:
+        self.login_refresh_with(**{**GH_LOGIN_FIELDS, "StartInterval": 1800})
+
+        self.assertEqual(self.check(), ["service gh login refresh: does not run every 900 seconds (part 10)"])
 
     def watch_with(self, *lock: str, root: tuple = ("--root", "/h")) -> None:
         self.launchd.plist(
@@ -2088,6 +2140,7 @@ class CheckServicesTest(unittest.TestCase):
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
             f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+            f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
         })
 
     def test_a_watcher_whose_lock_is_hermes_own_gateway_lock_is_reported(self) -> None:

@@ -83,7 +83,7 @@ def explain(stderr: str, permission: Permission, repo: str) -> str:
     if "HTTP 404" in stderr or "Could not resolve to a Repository" in stderr:
         return f"not found (HTTP 404): install the App on {repo}, or grant it {permission.grant()}"
     if "HTTP 401" in stderr:
-        return "unauthorized (HTTP 401): the installation token expired; run the refresh-gh-app-login job"
+        return "unauthorized (HTTP 401): the installation token expired; kickstart the gh-login launchd job"
     detail = stderr.strip().splitlines()[0] if stderr.strip() else "no error output"
     return f"failed: {detail}"
 
