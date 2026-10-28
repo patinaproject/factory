@@ -1694,7 +1694,7 @@ class CheckInstallTest(unittest.TestCase):
             f"{agents}/ai.patinaproject.factory.gateway-watch.plist", "ai.patinaproject.factory.gateway-watch"
         )
         self.launchd.plist(f"{agents}/ai.patinaproject.factory.gh-login.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS)
-        self.launchd.plist(f"{agents}/ai.patinaproject.factory.auto-deploy.plist", "ai.patinaproject.factory.auto-deploy")
+        self.launchd.plist(f"{agents}/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL, **AUTO_DEPLOY_FIELDS)
         env = {"PATH": "/usr/bin:/bin", **self.launchd.env, "HOME": str(home), "HERMES_HOME": str(self.worker)}
         proc = subprocess.run(
             ["/usr/bin/env", "python3", str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True
@@ -1848,6 +1848,8 @@ GH_LOGIN_LABEL = "ai.patinaproject.factory.gh-login"
 GH_LOGIN_FIELDS = {
     "StartInterval": 900, "EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/w"},
 }
+AUTO_DEPLOY_LABEL = "ai.patinaproject.factory.auto-deploy"
+AUTO_DEPLOY_FIELDS = {"EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/h", "PATH": "/h/.local/bin:/usr/bin"}}
 class CheckAutoDeployTest(unittest.TestCase):
     NOW = 2_000_000.0
     SHA = "c" * 40
@@ -1978,6 +1980,8 @@ class CheckAutoDeployTest(unittest.TestCase):
         service = next(s for s in check_install.SERVICES if s.name == "auto deploy")
 
         self.assertEqual((Path(service.plist).name, check_install.HOLD_KEY), (f"{deploy.LABEL}.plist", deploy.HOLD_KEY))
+        printed = plistlib.loads(deploy.plist(Path("/h"), Path("/h/profiles/claude-worker")))
+        self.assertEqual(sorted(printed["EnvironmentVariables"]), sorted(service.env))
         self.assertEqual(hook.LABEL, deploy.LABEL)
         self.assertIn("factory-deploy", check_install.ROOT_ONLY_PLUGINS)
 
@@ -2005,8 +2009,8 @@ class Launchd:
             f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{GH_LOGIN_LABEL}.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS,
         )
         self.deploy = self.plist(
-            f"{str(self.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
-            "ai.patinaproject.factory.auto-deploy",
+            f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL,
+            **AUTO_DEPLOY_FIELDS,
         )
         uid = os.getuid()
         self.states({
@@ -2507,7 +2511,7 @@ class CheckServicesTest(unittest.TestCase):
         unloaded = self.check()
         self.launchd.plist(
             f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
-            "ai.patinaproject.factory.auto-deploy", RunAtLoad=False,
+            "ai.patinaproject.factory.auto-deploy", RunAtLoad=False, **AUTO_DEPLOY_FIELDS,
         )
         self.launchd.states({**states, f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running"})
         not_at_load = self.check()
@@ -2519,6 +2523,20 @@ class CheckServicesTest(unittest.TestCase):
             ["service auto deploy: does not run at load (part 12)"],
             ["service auto deploy: no plist matches ~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist (part 12)"],
         ))
+
+    def test_an_auto_deploy_job_without_its_environment_is_reported_by_name_only(self) -> None:
+        uid = os.getuid()
+        self.launchd.plist(
+            f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL,
+            EnvironmentVariables={"HERMES_HOME": "/h", "TOKEN": "s3cr3t"},
+        )
+        self.launchd.states({
+            "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"user/{uid}/{AUTO_DEPLOY_LABEL}": "not running",
+        })
+
+        self.assertEqual(self.check(), ["service auto deploy: does not set GH_CONFIG_DIR, PATH (part 12)"])
 
     def watch_with(self, *lock: str, root: tuple = ("--root", "/h")) -> None:
         self.launchd.plist(

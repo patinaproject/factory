@@ -288,7 +288,10 @@ SERVICES = (
         scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME"), interval=gh_login.REFRESH_INTERVAL_SECONDS,
     ),
     # Runs at load and whenever the factory-deploy plugin starts it for a push.
-    Service(12, "auto deploy", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist", scheduled=True),
+    Service(
+        12, "auto deploy", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
+        scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME", "PATH"),
+    ),
 )
 # watch-gateway's own files in the root home. WATCH_INTERVAL and RESTARTS_PER_HOUR equal the script's.
 HERMES_GATEWAY_LOCK = "gateway.lock"
