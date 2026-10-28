@@ -1,6 +1,6 @@
 """Move a Kanban card through the transitions that triage makes, in the order Hermes needs.
 
-Usage: card_transition.py [--board <board>] <command> <task id> [options]
+Usage: card_transition.py [--board <board>] <command> [<task id>] [options]
 
 - `resume`: take a card out of `triage`. Hermes' `kanban specify` is the only command that leaves
   `triage`, and it rewrites the card's title and body and makes the card dispatchable. The card is
@@ -9,17 +9,32 @@ Usage: card_transition.py [--board <board>] <command> <task id> [options]
   Hermes' hold on a card whose comments name a pull request. `specify` asks the model through the
   proxy, and Hermes strips the proxy token from the triage agent's commands, so `specify` alone gets
   the token, from the gateway's broker, in the variable `claude_session.auth_token_env` names.
-- `triage-reply`: resume a card on the `triage` board after a person replied: a `scheduled` card,
-  which waits for that reply, or a `blocked` card is unassigned and unblocked, and a `triage` card is
-  resumed without the assignment. Unassigning first, while the card cannot be dispatched, leaves it
-  `ready` and unassigned, and `dispatch-triage` assigns it when a triage slot is free.
+- `triage-reply`: record a person's reply on a card on the `triage` board and resume the card. The reply's
+  text arrives on standard input, so it is never part of a command line. The card gets one comment that starts
+  `Linear reply:` and names each pull request as `<owner>/<name>#<number>`, whatever its status, unless the
+  card's newest reply comment holds the same text, so a replayed turn writes it once. Then a `scheduled` card
+  is released when the release rule says so, a `blocked` card is unassigned and unblocked, a `triage` card is
+  resumed without the assignment, and any other status is `none`: the next run reads the comment.
+- `park-waiting`: park every card on the board that waits for input the old way in `scheduled`, posting
+  nothing. A card blocked with kind `needs_input` is scheduled, and a card in Hermes' `triage` status with
+  that kind leaves it through `specify` first. Run it while dispatch is paused, so no worker claims a card
+  between the two steps. It takes no task id and prints `{"parked": [task id, ...]}`.
+
+The release rule: a `scheduled` card is released when it holds a reply comment past the `comments_seen`
+count in the reason of its newest `scheduled` event. A park with no readable count is released by a reply
+comment written after it. The rule reads a card's comments and events in the shape `hermes kanban show
+--json` gives them, so `triage-reply` and `dispatch-triage`'s `sweep` feed it the same way. The release is
+`assign none` and then `unblock`: unassigned while it cannot be dispatched, the card lands `ready` and
+unassigned, and `dispatch-triage` alone assigns it within `triage.max_running`. A card the other caller
+already released is not an error.
+
 - `unblock --repo <r> --branch <b> --reason <text>`: unblock a card. When the branch has a pull
   request, Hermes holds the `ready` card for 24 hours after a comment that names it, and only the
   review reopen lifts the hold, so the card is unblocked, sent to review, and reopened.
 - `reopen --reason <text>`: hand a `review` card back to its worker.
 - `stop`: block a card whatever it is doing. Hermes blocks only a `ready` or `running` card, so a
-  `review` card is reopened first, and a `scheduled` card is unassigned and unblocked first, so it is
-  never dispatchable while it stops.
+  `review` card is reopened first. A `scheduled` card stays `scheduled`, is unassigned, and gets a `stopped`
+  comment, which has no reply prefix, so the next reply releases it like any wait.
 - `merged --pr <url> --linear-state <stateType or unreadable>`: finish a card whose pull request
   merged. A refused completion is a refused merge when the newest `pr_acceptance` event is for this
   pull request at its head and names a check that did not pass, or names no required checks. A
@@ -28,8 +43,8 @@ Usage: card_transition.py [--board <board>] <command> <task id> [options]
   succeeded, because an assignment lifts the `active_pr` hold and a worker would start on a merged
   pull request.
 
-Every command prints one JSON line. It exits 0 with `{"action", "post", ...}`, or 1 with
-`{"error": reason}`. The actions:
+Every command prints one JSON line. It exits 0 with `{"action", "post", ...}`, or `park-waiting`'s line, or 1
+with `{"error": reason}`. The actions:
 
 | action | meaning | extra keys |
 | --- | --- | --- |
@@ -37,7 +52,7 @@ Every command prints one JSON line. It exits 0 with `{"action", "post", ...}`, o
 | `resumed` | the card left `triage` with its own title and body | `assigned` |
 | `unblocked` | the card is ready for its worker again | `pull_request` |
 | `reopened` | the `review` card went back to its worker | |
-| `stopped` | the card is blocked, or was already | `status` |
+| `stopped` | the card is blocked, or was already, or waits unassigned in `scheduled` | `status` |
 | `completed` | Hermes accepted the merged pull request and the card is `done` | |
 | `commented` | the merge left the card as it was, with `reason` commented on it | `reason` |
 | `archived` | a refused merge whose Linear issue is completed | |
@@ -54,15 +69,19 @@ import argparse
 import json
 import re
 import os
+import sqlite3
 import subprocess
 import sys
+import time
 from enum import Enum
 from pathlib import Path
 from typing import Callable, NamedTuple
 
 import factory_settings
+import kanban_board
 import merged_checks
-from archive_card import Failed, archive, kanban_command, last_line, run_kanban
+import reply_inbox
+from archive_card import Failed, archive, kanban_command, last_line, run, run_kanban
 
 WORKER = "claude-worker"
 STOPPED = "stopped"
@@ -110,12 +129,18 @@ class Card:
         archive(self.kanban, self.id)
 
 
+def plugin_module(plugin: str, name: str):
+    """Module `name` of this home's copy of `plugin`, as `claude-session` imports it."""
+    home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+    path = str(Path(home) / "plugins" / plugin)
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    return __import__(name)
+
+
 def specify_environment() -> dict:
     """This environment with the proxy token, which Hermes strips from the triage agent's commands."""
-    home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
-    sys.path.insert(0, str(Path(home) / "plugins" / "linear-agent-session"))
-    import broker_client
-
+    broker_client = plugin_module("linear-agent-session", "broker_client")
     try:
         variable = factory_settings.token_variables(factory_settings.read(raw=False))[0]
     except factory_settings.SettingsError as error:
@@ -158,15 +183,93 @@ def resume(card: Card, assign: bool = True) -> dict:
     return result("resumed", assigned=assign)
 
 
-def triage_reply(card: Card) -> dict:
-    status = card.status()
-    if status in ("blocked", "scheduled"):
+def replied(show: dict) -> bool:
+    """The release rule, for a `scheduled` card as `hermes kanban show --json` gives it."""
+    result_line = plugin_module("blocker-order", "result_line")
+    park = [event for event in show["events"] if event["kind"] == "scheduled"][-1]
+    _, seen = result_line.read_comments_seen((park["payload"] or {}).get("reason"))
+    replies = [(at, comment) for at, comment in enumerate(show["comments"]) if reply_inbox.is_reply(comment["body"])]
+    if seen is not None:
+        return any(at >= seen for at, _ in replies)
+    # Hermes stamps whole seconds, so a reply in the park's own second counts as after it.
+    return any(comment["created_at"] >= park["created_at"] for _, comment in replies)
+
+
+def release(card: Card) -> None:
+    """`assign none`, then `unblock`; each step is a no-op once the other caller released the card."""
+    for step in (("assign", "none"), ("unblock",)):
+        try:
+            card.call(*step)
+        except Failed:
+            if card.status() == "scheduled":
+                raise
+            return
+
+
+def triage_reply(card: Card, text: str) -> dict:
+    if not text.strip():
+        raise Failed("triage-reply needs the reply's text on standard input")
+    show = card.show()
+    body = f"{reply_inbox.REPLY_PREFIX} {pull_ref(text.strip())}"
+    replies = [comment["body"] for comment in show["comments"] if reply_inbox.is_reply(comment["body"])]
+    if not replies or replies[-1].strip() != body:
+        card.call("comment", body)
+        show["comments"].append({"author": None, "body": body, "created_at": int(time.time())})
+    status = show["task"]["status"]
+    if status == "scheduled":
+        if not replied(show):
+            return result("none", status=status)
+        release(card)
+        return result("unblocked", pull_request=False)
+    if status == "blocked":
         card.call("assign", "none")
         card.call("unblock")
         return result("unblocked", pull_request=False)
     if status == "triage":
         return resume(card, assign=False)
     return result("none", status=status)
+
+
+def board_database(board: str | None) -> str:
+    slug = board or "default"
+    boards = json.loads(run(*kanban_command(None), "boards", "list", "--json"))
+    path = next((each["db_path"] for each in boards if each["slug"] == slug), None)
+    if path is None:
+        raise Failed(f"Hermes has no board {slug}")
+    return path
+
+
+def sweep(board: str) -> dict:
+    """Release every `scheduled` card the release rule says to; `dispatch-triage` runs it each minute."""
+    released, failed = [], {}
+    for task_id, show in sorted(kanban_board.scheduled(board_database(board)).items()):
+        if not replied(show):
+            continue
+        try:
+            release(Card(board, task_id))
+        except Failed as failure:
+            failed[task_id] = str(failure)
+            continue
+        released.append(task_id)
+    return {"released": released, "failed": failed}
+
+
+def park_waiting(board: str | None) -> dict:
+    result_line = plugin_module("blocker-order", "result_line")
+    parked = []
+    for row in kanban_board.blocked_for_input(board_database(board)):
+        card = Card(board, row["id"])
+        status = card.status()
+        if status not in ("blocked", "triage"):
+            continue
+        if status == "triage":
+            leave_triage(card)
+        # `hermes kanban schedule` comments its reason first, so the count excludes that comment.
+        seen = len(card.show()["comments"])
+        reason = f"{result_line.NEEDS_INPUT} waits for a reply, parked from {status} by park-waiting"
+        card.call("schedule", result_line.mark_comments_seen(reason, seen))
+        parked.append(row["id"])
+    return {"parked": parked}
 
 
 def has_pull_request(repo: str, branch: str) -> bool:
@@ -202,8 +305,8 @@ def stop(card: Card) -> dict:
         status = card.status()
     if status == "scheduled":
         card.call("assign", "none")
-        card.call("unblock")
-        status = card.status()
+        card.call("comment", STOPPED)
+        return result("stopped", status=status)
     if status in ("ready", "running", "todo"):
         card.call("block", STOPPED)
         status = card.status()
@@ -359,6 +462,7 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     root.add_argument("--board", help="the card's board, when it is not the current one")
     commands = root.add_subparsers(dest="command", required=True)
+    commands.add_parser("park-waiting")
 
     def command(name: str) -> argparse.ArgumentParser:
         sub = commands.add_parser(name)
@@ -381,10 +485,11 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    card = Card(args.board, args.task_id)
+    card = Card(args.board, args.task_id) if hasattr(args, "task_id") else None
     commands = {
+        "park-waiting": lambda: park_waiting(args.board),
         "resume": lambda: resume(card),
-        "triage-reply": lambda: triage_reply(card),
+        "triage-reply": lambda: triage_reply(card, sys.stdin.read()),
         "unblock": lambda: unblock(card, args.repo, args.branch, args.reason),
         "reopen": lambda: reopen(card, args.reason),
         "stop": lambda: stop(card),
@@ -392,7 +497,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         output = commands[args.command]()
-    except (Failed, KeyError, ValueError) as failure:
+    except (Failed, KeyError, ValueError, sqlite3.Error) as failure:
         print(json.dumps({"error": pull_ref(str(failure))}))
         return 1
     print(json.dumps(output))
