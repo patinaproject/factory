@@ -76,6 +76,13 @@ python3 <repo>/skills/setup-factory/scripts/agent-block --values <values file> -
 
 `--print` writes the render to stdout and changes nothing.
 
+The check and the write also cover `settings.json` in the same directory. It
+must hold the allow rules that `agent-block` renders from the same values, such
+as the rule that lets an operator session run `cli.py session` without a prompt.
+The write adds a missing rule, keeps every other entry, creates the file when it
+is absent, and backs it up first. It refuses a file that is not a JSON object, or whose
+`permissions.allow` is not a list.
+
 ## Verify
 
 Start a new Claude Code session outside every checkout and ask it about the
