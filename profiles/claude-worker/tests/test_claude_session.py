@@ -166,6 +166,12 @@ class ClaudeSessionTest(GitFixture):
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
         self.card = self.tmp / "card.json"
         self.set_comments()
+        self.gh_config = self.tmp / "gh"
+        self.gh_config.mkdir()
+        self.save_login_expiry(time.time() + 3600)
+
+    def save_login_expiry(self, expires_at) -> None:
+        (self.gh_config / "token-expiry.json").write_text(json.dumps({"expires_at": expires_at}))
 
     def start_broker(self, **answers: list) -> FakeBroker:
         broker = FakeBroker(self.tmp / "hermes" / "factory-uploads.sock", **answers)
@@ -365,7 +371,9 @@ class ClaudeSessionTest(GitFixture):
             self.assertNotIn(implementation_rule, system)
         playbook = FACTORY / ".agents/skills/patina-mode/playbooks/triage.md"
         for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token",
-                                f"patina-mode's triage playbook at `{playbook}`"):
+                                f"patina-mode's triage playbook at `{playbook}`", "`## Priority rubric`",
+                                "`Priority: <value>, set by triage`", "`Priority: none`",
+                                "Never change the issue's status, assignee, or delegate"):
             self.assertIn(triage_contract, system)
         self.assertTrue(playbook.is_absolute() and playbook.is_file())
         for retired_skill in ("`triage` skill", "`grilling`"):
@@ -1713,6 +1721,52 @@ class ClaudeSessionTest(GitFixture):
         })
         self.assertFalse(self.log.exists())
 
+    def test_a_login_with_less_than_15_minutes_left_is_refused_as_transient_before_claude_starts(self) -> None:
+        self.save_login_expiry(time.time() + 14 * 60)
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report.get("transient")), (2, True))
+        self.assert_reads_back(report, RESULT_LINE.Refused)
+        self.assertRegex(report["error"], r"^the worker's gh login in .*/gh has 13 minutes left, under the 15 needed")
+        self.assertFalse(self.log.exists())
+
+    def test_a_login_with_exactly_15_minutes_left_starts(self) -> None:
+        self.save_login_expiry(time.time() + 15 * 60 + 30)
+
+        status, _ = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertTrue(self.log.exists())
+
+    def test_an_unusable_login_expiry_is_refused_as_transient_before_claude_starts(self) -> None:
+        expiry = self.gh_config / "token-expiry.json"
+        for setup in (
+            lambda: expiry.unlink(),
+            lambda: expiry.write_text("not json"),
+            lambda: expiry.write_text('{"expires_at": "tomorrow"}'),
+            lambda: expiry.write_text("{}"),
+        ):
+            with self.subTest(case=setup):
+                setup()
+
+                status, report = self.run_session()
+
+                self.assertEqual((status, report.get("transient")), (2, True))
+                self.assertIn("token-expiry.json", report["error"])
+                self.assertFalse(self.log.exists())
+
+    def test_a_missing_gh_config_dir_is_refused_as_transient_before_claude_starts(self) -> None:
+        command, env = self.session_command()
+        del env["GH_CONFIG_DIR"]
+
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
+
+        report = json.loads(proc.stdout)
+        self.assertEqual((proc.returncode, report.get("transient")), (2, True))
+        self.assertIn("GH_CONFIG_DIR is not set", report["error"])
+        self.assertFalse(self.log.exists())
+
     def test_a_gateway_that_is_down_sends_the_card_back_to_the_queue_before_claude_starts(self) -> None:
         self.broker.close()
 
@@ -2557,19 +2611,23 @@ class FencedPromptTest(unittest.TestCase):
     )
 
     @staticmethod
-    def conflict_comment() -> str:
+    def handback_comments() -> dict[str, str]:
         loader = importlib.machinery.SourceFileLoader("reopen_conflicts_under_test", str(SCRIPTS / "reopen-conflicts"))
         module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(module)
         pull = {"url": "https://github.com/o/r/pull/7", "baseRefName": "main", "headRefOid": "a" * 40}
-        return module.comment_text(pull)
+        failures = {"lint": "https://github.com/o/r/actions/runs/1", "test": None}
+        return {
+            "reopen-conflicts comment": module.conflict_handback(pull).text,
+            "reopen-conflicts failed check comment": module.failed_check_handback(pull, failures).text,
+        }
 
     def texts(self) -> dict[str, str]:
         module = ClaudeSessionTest.session_module()
         return {
             "SYSTEM_PROMPT": module.SYSTEM_PROMPT,
             "TRIAGE_SYSTEM_PROMPT": module.TRIAGE_SYSTEM_PROMPT,
-            "reopen-conflicts comment": self.conflict_comment(),
+            **self.handback_comments(),
         }
 
     def test_no_text_tells_claude_to_change_the_board(self) -> None:
@@ -2580,4 +2638,5 @@ class FencedPromptTest(unittest.TestCase):
 
     def test_the_conflict_comment_and_rule_ask_for_a_needs_input_message(self) -> None:
         self.assertIn("`Needs input:`", self.texts()["reopen-conflicts comment"])
+        self.assertIn("`Needs input:`", self.texts()["reopen-conflicts failed check comment"])
         self.assertIn("`Needs input:`", self.texts()["SYSTEM_PROMPT"])

@@ -117,7 +117,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` only. The gateway's broker gives the worker a Linear access token on request, so the worker never holds the app's credentials |
 | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
-| `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
+| `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which the `refresh-gh-app-login` launchd job renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository. With the broker user, `/Library/Application Support/factory-broker/home/github-app.pem` instead, and neither home sets `github.private_key_path`. The broker mints the worker's installation tokens from it |
 | `CLAUDE_PROXY_TOKEN`, the proxy's token that `claude_session.auth_token_env` names | `<home>/.env`. The worker's `worker-secrets` asks the gateway's broker for it when a worker process starts, because the worker's own agent loop sends it to the proxy, and Claude Code gets it through `apiKeyHelper`. Never store it in `<worker>/.env`, and never name it `ANTHROPIC_*` |
 | Each MCP server token that `claude_session.mcp_servers.<name>.token_env` names, such as `SENTRY_ACCESS_TOKEN` | `<home>/.env`. The run's server of that name gets it through `mcp-headers`, which asks the gateway's broker. Never store it in `<worker>/.env`. See [MCP server identities](references/mcp-identities.md) |
@@ -1149,7 +1149,7 @@ belongs to the worker profile.
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
 jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`, and
-`refresh-gh-app-login`, and `dispatch-triage`.
+`dispatch-triage`.
 A copy there runs without the worker's scripts and settings, so remove it the
 same way. The default home holds one job, `retry-failed-webhooks`, described below. A second setup session runs this check before it
 creates anything.
@@ -1206,17 +1206,22 @@ hermes -p claude-worker cron create "every 1m" --name dispatch-triage --no-agent
 ```
 
 **Conflict job.** GitHub sends no webhook when a pull request starts to
-conflict because its base branch moved. `reopen-conflicts` lists the App's
-open pull requests for every `review` or `blocked` card every 5 minutes. For
-each one GitHub reports as `CONFLICTING`, it comments on the card and hands
-the card back to its worker. The worker merges the base branch, resolves the
-conflicts, and publishes the merge with `push-signed`. A card is sent back
-once per pull request head, so a worker that blocks on the same head stays
-blocked. The same job re-requests a reviewer whose changes request is on an
-older head once every required check passes. A failing required check, a
-changes request on the current head, or the reviewer's unresolved review thread
-sends the card back once per head instead.
-Create the job when `cron list` has no `reopen-conflicts` job:
+conflict because its base branch moved, or when a required check fails after
+the worker handed the card off. `reopen-conflicts` lists the App's open pull
+requests for every `review` or `blocked` card every 5 minutes. For each one
+GitHub reports as `CONFLICTING`, it comments on the card and hands the card
+back to its worker. It does the same for a `review` card whose pull request is
+`MERGEABLE` and whose newest run of a check that a rule of the base branch
+requires failed on the current head. A pull request with a pending or missing
+required check waits, and a `blocked` card is never sent back for a failed
+check, because its worker stopped for a person. The worker merges the base branch and resolves the
+conflicts, or fixes the failing check, and publishes with `push-signed`. A card
+is sent back once per pull request head and reason, so a worker that blocks on
+the same head stays blocked. The same job re-requests a reviewer whose changes
+request is on an older head once every required check passes. A changes
+request on the current head, or the reviewer's unresolved review thread, sends
+the card back once per head instead. Create the job when `cron list` has no
+`reopen-conflicts` job:
 
 ```sh
 hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null
@@ -1236,9 +1241,9 @@ line of its error and secrets masked, the root home's
 `scripts/restart-gateway` when one is missing or differs from the repository,
 that `watch-gateway` has run in the last 15 minutes
 without spending its restart budget, that `<root>/gateway-heartbeat-url` exists with mode `600`, and, on macOS, a
-launchd service from part 7, 12, or 15
-that is not installed, does not run at load, or is not running (the `watch-gateway` job runs
-only every 5 minutes, so it need only be loaded), and
+launchd service from part 7, 10, 12, or 15
+that is not installed, does not run at load, does not set its `EnvironmentVariables` or `StartInterval`, or is not running (the `watch-gateway`
+and `refresh-gh-app-login` jobs run on an interval, so they need only be loaded), and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never
 prints a config value. It prints one line per difference and nothing when the
 install is current. It fetches first, so it compares with the newest merge.
@@ -1297,7 +1302,7 @@ It also asks the broker for `token_present`. The broker's socket is
 `<root>/factory-uploads.sock`, or the `socket` that
 `/Library/Application Support/factory-broker/broker.json` names once the
 broker runs as its own user. An unresolved route secret runs
-`restart-gateway`, which waits for running cards, and the watcher gives up
+`restart-gateway`, which waits only for at-risk cards, and the watcher gives up
 after 3 restarts in an hour. A missing broker token alone restarts nothing:
 the gateway works, and a restart does not fix a broker user's token. The
 heartbeat stays quiet instead, and `check-install` reports the broker. A
@@ -1399,13 +1404,17 @@ factory, do these before the restart:
   `claude-worker` cards.
 - `hermes gateway restart` waits for chat work and in-process cron jobs, and
   the gateway refuses webhooks while it waits. It does not wait for Kanban
-  workers. They run inside the gateway's launchd job, so a bare restart kills
-  every running card. Restart only with `restart-gateway`, which waits until
-  no board has a `running` card, then holds new cards with `hermes pause`
-  while it restarts, and lifts the pause afterwards. When the wait expires, it
-  names the running cards, exits 1, and does not restart. `--timeout` sets
-  the wait in seconds, 3600 by default. An operator's own `hermes pause` stays
-  in place. Restart when no long cron job is running.
+  workers. Most survive a restart, because Hermes starts each in its own
+  session. The exception is a worker child that the gateway adopted at startup
+  from the worker profile's `processes.json`, which the gateway kills at its
+  next shutdown. Restart only with `restart-gateway`. It waits until no
+  running card's worker has a child that started no later than 300 s after
+  the gateway, then holds new cards with `hermes pause` while it restarts, and
+  lifts the pause afterwards. Other running cards never delay it. When the
+  wait expires, it names the at-risk cards, exits 1, and does not restart. A
+  gateway record, process table, or card it cannot read counts as at risk.
+  `--timeout` sets the wait in seconds, 3600 by default. An operator's own
+  `hermes pause` stays in place. Restart when no long cron job is running.
 
 > **HUMAN CHECKPOINT.** Ask the operator to run
 > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, not from a Hermes session or tool.
@@ -1880,6 +1889,16 @@ Hermes process starts. The new helper also writes
    - A `config plugins.entries.linear-agent-session.settings.triage.max_running`
      line: add `"triage": {"max_running": <n>}` to the factory settings and set
      them in both homes as in part 10, before the profile update.
+   - A `service gh login refresh` line: install or fix the job as in
+     [Sign the worker's `gh` in](references/github.md#sign-the-workers-gh-in),
+     after the profile update installs `refresh-gh-app-login` and `gh_login.py`.
+     `claude-session` refuses every run until the job has saved
+     `<worker>/gh/token-expiry.json`, so install it right after the profile
+     update.
+   - A `cron job refresh-gh-app-login` line: a launchd job replaced it, because
+     `hermes pause` stops Hermes' cron. Once the launchd job has run, run
+     `hermes -p claude-worker cron remove <job id>` with the id from
+     `cron list`.
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.

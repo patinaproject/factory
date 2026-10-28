@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import urllib.parse
 from dataclasses import dataclass
 from typing import Callable, Union
 
-from merged_checks import newest_runs, passed
+from merged_checks import passed
 
 REVIEWS_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){"
@@ -41,13 +40,8 @@ def latest_reviews(reviews: list) -> dict[str, dict]:
     return latest
 
 
-def failed(check: dict) -> bool:
-    if passed(check):
-        return False
-    return check.get("state") not in ("PENDING", "EXPECTED") and check.get("status", "COMPLETED") == "COMPLETED"
-
-
-def decide(pull: dict, reviews: list, requested: list[str], thread_authors: list[str], required_contexts: list[str]) -> Outcome:
+def decide(pull: dict, reviews: list, requested: list[str], thread_authors: list[str], newest: dict[str, list[dict]], required_contexts: set[str]) -> Outcome:
+    """`newest` maps each check name to its newest runs, as `merged_checks.newest_runs` returns them."""
     requesters = {login: r for login, r in latest_reviews(reviews).items() if r["state"] == "CHANGES_REQUESTED"}
     if not requesters:
         return Nothing()
@@ -55,29 +49,13 @@ def decide(pull: dict, reviews: list, requested: list[str], thread_authors: list
     current = [login for login, r in requesters.items() if (r.get("commit") or {}).get("oid") == head]
     if current:
         return Handback(f"{', '.join(current)} requested changes on the current head")
-    runs = newest_runs(pull.get("statusCheckRollup") or [])
-    failing = [name for name in required_contexts if any(failed(run) for run in runs.get(name, []))]
-    if failing:
-        return Handback(f"required checks failed: {', '.join(failing)}")
-    if any(not runs.get(name) or not all(passed(run) for run in runs[name]) for name in required_contexts):
+    if any(not newest.get(name) or not all(passed(run) for run in newest[name]) for name in required_contexts):
         return Nothing()
     waiting = [login for login in requesters if login not in requested]
     open_threads = [login for login in waiting if login in thread_authors]
     if open_threads:
         return Handback(f"unresolved review threads from {', '.join(open_threads)}")
     return Request(tuple(waiting)) if waiting else Nothing()
-
-
-def required_contexts(run: Callable[..., str], gh: str, repo: str, base: str) -> list[str]:
-    rules = json.loads(run(gh, "api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100"))
-    if not isinstance(rules, list):
-        raise ValueError(f"the branch rules of {repo}:{base} are not a list")
-    return [
-        check["context"]
-        for rule in rules
-        if rule.get("type") == "required_status_checks"
-        for check in rule["parameters"]["required_status_checks"]
-    ]
 
 
 def read_reviews(run: Callable[..., str], gh: str, repo: str, number: int) -> tuple[list, list[str], list[str]]:
