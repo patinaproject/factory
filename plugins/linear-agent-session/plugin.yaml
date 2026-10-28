@@ -11,7 +11,7 @@ description: >-
   tells the card's agent session when a card blocks or is
   parked in triage, and gives agents the linear_agent_activity,
   linear_agent_activity_read, linear_issue, linear_agent_session_create, linear_delegated_issues,
-  linear_issue_undelegate, linear_issue_to_todo, linear_issue_edit, linear_issue_search, and github_issue_edit tools, acting as the
+  linear_issue_undelegate, linear_issue_to_todo, linear_issue_edit, linear_issue_relate, linear_issue_search, and github_issue_edit tools, acting as the
   Linear agent app.
 provides_hooks: [pre_gateway_dispatch, pre_tool_call, kanban_task_blocked, transform_api_error_classification]
 provides_tools:
@@ -23,6 +23,7 @@ provides_tools:
   - linear_issue_undelegate
   - linear_issue_to_todo
   - linear_issue_edit
+  - linear_issue_relate
   - linear_issue_search
   - github_issue_edit
 config_schema:
@@ -38,6 +39,12 @@ config_schema:
     type: list
     default: []
     description: Repositories the factory works, each with full_name, path, routing, and an optional worker_entry, such as /patina-mode, that claude-session puts before its built-in task prompt.
+  factory_repository:
+    type: dict
+    default: {}
+    description: >-
+      The factory's own repository, as full_name and default_branch. The github route keeps a push to
+      that branch from any sender, and factory-deploy starts auto-deploy for it.
   kanban_url:
     type: str
     default: ""

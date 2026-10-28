@@ -34,7 +34,7 @@ ACTIONS = {
     "stop_triage_card": "stop the live triage card",
     "stop_card": "stop the issue's card",
     "nothing_to_stop": "a stop with no card to stop",
-    "issue_closed": "the issue is completed or canceled",
+    "issue_closed": "the issue is completed, canceled, or a duplicate",
     "undelegated": "the issue is not delegated to the agent app",
     "session_created_handles_it": "a recent session a person opened handles this delegation; do nothing",
     "use_session": "the issue is delegated; handle it on `agent_session_id`, or open a session when it is null",
@@ -146,7 +146,7 @@ def _session_prompted(facts: Intent, stop: bool) -> str:
 
 
 def _issue_update(facts: Intent, labels_changed: bool) -> str:
-    if facts.issue["state_type"] in ("completed", "canceled"):
+    if facts.issue["state_type"] in ("completed", "canceled", "duplicate"):
         return "issue_closed"
     if not facts.delegated:
         return "undelegated"

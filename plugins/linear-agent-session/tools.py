@@ -5,7 +5,7 @@ import logging
 from typing import Callable, Optional
 
 from . import github_issue
-from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, LinearClient, LinearError, activity_content
+from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, SESSION_VERBS, LinearClient, LinearError, activity_content
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +98,20 @@ SESSION_CREATE_SCHEMA = {
     "name": "linear_agent_session_create",
     "description": (
         "Open an agent session on `issue` (UUID or ABC-123). Acts as the agent app, for a delegation "
-        "that arrived without a session. Returns the agent_session_id."
+        "that arrived without a session, titled by `purpose`. Returns the agent_session_id and session_title."
     ),
-    "parameters": ISSUE_PARAMETERS,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            **ISSUE_PARAMETERS["properties"],
+            "purpose": {
+                "type": "string",
+                "enum": list(SESSION_VERBS),
+                "description": "Required. triage for a triage card's session, work for an implementation card's.",
+            },
+        },
+        "required": ["purpose"],
+    },
 }
 
 
@@ -156,6 +167,25 @@ EDIT_SCHEMA = {
             "add_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to add."},
             "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to remove."},
             "state": {"type": "string", "description": "Status name to move the issue to, such as Canceled."},
+        },
+    },
+}
+
+RELATE_SCHEMA = {
+    "name": "linear_issue_relate",
+    "description": (
+        "Relate `issue` (UUID or ABC-123) to another Linear issue: pass duplicate_of to mark `issue` a duplicate "
+        "of it, or blocked_by to block `issue` on it, exactly one of the two. A duplicate moves to the team's "
+        "duplicate status and loses its related relation to the original, and no other relation changes. "
+        "Refuses a conflicting relation and more than 50 relations, changing nothing. Never changes assignee "
+        "or delegate. Returns identifier, related_issue, relation, created, removed_related, and state."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            **ISSUE_PARAMETERS["properties"],
+            "duplicate_of": {"type": "string", "description": "The issue that `issue` duplicates: UUID or ABC-123."},
+            "blocked_by": {"type": "string", "description": "The issue that blocks `issue`: UUID or ABC-123."},
         },
     },
 }
@@ -235,9 +265,20 @@ def run_activity_read(client_factory: ClientFactory, args: dict) -> str:
 
 
 def run_session_create(client_factory: ClientFactory, args: dict) -> str:
-    return _tool_result_or_error(
-        lambda: {"agent_session_id": client_factory().create_session_on_issue(_issue_argument(args))}
-    )
+    def run() -> dict:
+        issue = _issue_argument(args)
+        purpose = args.get("purpose")
+        if purpose not in SESSION_VERBS:
+            raise LinearError(f"pass purpose: one of {', '.join(SESSION_VERBS)}")
+        client = client_factory()
+        session_id = client.create_session_on_issue(issue)
+        try:
+            title = {"title": client.title_session(session_id, issue, purpose)}
+        except (*CLIENT_ERRORS, OSError) as error:
+            title = {"error": f"titling the agent session failed: {error}"}
+        return {"agent_session_id": session_id, "session_title": title}
+
+    return _tool_result_or_error(run)
 
 
 def run_issue(client_factory: ClientFactory, args: dict) -> str:
@@ -279,6 +320,19 @@ def run_edit(client_factory: ClientFactory, args: dict) -> str:
         return client_factory().edit_issue(
             issue, add_labels=add, remove_labels=remove, state=state, title=title, description=description
         )
+
+    return _tool_result_or_error(run)
+
+
+def run_relate(client_factory: ClientFactory, args: dict) -> str:
+    def run() -> dict:
+        _refuse_people(args)
+        issue = _issue_argument(args)
+        asked = {kind: args[name] for name, kind in (("duplicate_of", "duplicate"), ("blocked_by", "blocks")) if args.get(name)}
+        if len(asked) != 1:
+            raise LinearError("pass exactly one of duplicate_of or blocked_by")
+        ((kind, other),) = asked.items()
+        return client_factory().relate_issues(issue, other, kind)
 
     return _tool_result_or_error(run)
 

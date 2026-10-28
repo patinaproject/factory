@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import enum
+import importlib.util
 import json
 import os
 import tempfile
@@ -21,6 +22,16 @@ class Platform(enum.Enum):
 RECEIVED = dt.datetime(2026, 10, 15, 8, 30, 0, tzinfo=dt.timezone.utc)
 CONFIG = {"platforms": {"webhook": {"extra": {"routes": {"linear": {"secret": "resolved"}}}}}}
 PAYLOAD = {"type": "Issue", "action": "update", "data": {"identifier": "PAT-5290"}}
+PUSH = {
+    "ref": "refs/heads/main",
+    "before": "1" * 40,
+    "after": "2" * 40,
+    "repository": {"full_name": "example-org/factory"},
+    "pusher": {"name": "example-app", "email": "pusher@example.com"},
+    "sender": {"login": "example-app[bot]"},
+    "head_commit": {"message": "feat: #1 ship it"},
+}
+FACTORY_DEPLOY = Path(__file__).resolve().parents[2] / "factory-deploy" / "__init__.py"
 
 
 def event(delivery="d1", route="linear", platform=Platform.WEBHOOK, payload=PAYLOAD, text="triage this"):
@@ -333,6 +344,47 @@ class PluginTest(unittest.TestCase):
         (worker / "ESTOP").unlink()
         with mock.patch("pathlib.Path.exists", side_effect=PermissionError("denied")):
             self.assertTrue(paused(worker))
+
+    def test_a_push_that_factory_deploy_owns_is_never_recorded_paused_or_not(self):
+        push = event("d-push", route="github", payload=PUSH, text="- Event: push\n- Repository: example-org/factory")
+        pull = event("d-pull", route="github", payload={"action": "closed", **PUSH}, text="- Event: pull_request, action closed")
+        results = []
+        for self.paused in (False, True):
+            results.append(self.dispatch(push))
+
+        self.assertEqual(results, [None, None])
+        self.assertEqual(self.entries(), {})
+        self.dispatch(pull)
+        self.assertEqual(list(self.entries()), [pull.source.chat_id])
+
+    def test_webhook_retry_and_factory_deploy_agree_on_what_a_push_is(self):
+        spec = importlib.util.spec_from_file_location("factory_deploy_agreement", FACTORY_DEPLOY)
+        factory_deploy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(factory_deploy)
+        cases = {
+            "push": PUSH,
+            "push from the App, no head commit": {**{k: v for k, v in PUSH.items() if k != "head_commit"}},
+            "push without a pusher": {k: v for k, v in PUSH.items() if k != "pusher"},
+            "push without before": {k: v for k, v in PUSH.items() if k != "before"},
+            "pull_request with every push key": {"action": "closed", **PUSH},
+            "check_run with a ref": {"action": "completed", "ref": "refs/heads/main", "check_run": {}},
+            "Linear issue": PAYLOAD,
+            "a list": ["refs/heads/main"],
+            "nothing": None,
+        }
+        verdicts = {name: (self.plugin.is_push(payload), factory_deploy.is_push(payload)) for name, payload in cases.items()}
+
+        self.assertEqual(verdicts, {
+            "push": (True, True),
+            "push from the App, no head commit": (True, True),
+            "push without a pusher": (False, False),
+            "push without before": (False, False),
+            "pull_request with every push key": (False, False),
+            "check_run with a ref": (False, False),
+            "Linear issue": (False, False),
+            "a list": (False, False),
+            "nothing": (False, False),
+        })
 
     def test_registers_the_four_hooks(self):
         registered = {}

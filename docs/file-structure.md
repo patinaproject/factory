@@ -16,6 +16,7 @@
 │   ├── issue-publishing.md    # Issue-writing rules
 │   ├── issue-tracker.md       # Symlink to docs/agents/issue-tracker.md
 │   ├── release-flow.md        # How releases are cut
+│   ├── rules.md               # Each rule and what enforces it
 │   └── wiki-index.md          # Planned wiki pages
 ├── plugins/
 │   ├── blocker-order/         # transform_tool_result hook that links and blocks a card behind its issue's open blocker cards, and blocks a card whose Claude run ends with `Needs input:`

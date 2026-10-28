@@ -91,6 +91,29 @@ class ActivityTest(unittest.TestCase):
         self.assertIn("agentSessionUpdate(id: $id, input: $input)", update["query"])
         self.assertEqual(update["variables"], {"id": "session-1", "input": {"externalUrls": urls}})
 
+    def title(self, issue_title, purpose="work"):
+        issue = {**IssueTest.RESPONSE["data"]["issue"], "title": issue_title}
+        fake = FakeLinear([(200, {"data": {"issue": issue}}), session_update_ok()])
+        summary = make_client(fake).title_session("session-1", "ABC-123", purpose)
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "session-1", "input": {"summary": summary}})
+        return summary
+
+    def test_a_session_title_names_its_purpose_and_the_issue(self):
+        self.assertEqual(self.title("Fix checkout", "work"), "Work on ABC-123: Fix checkout")
+        self.assertEqual(self.title("Fix checkout", "triage"), "Triage ABC-123: Fix checkout")
+
+    def test_a_session_title_is_one_line_of_at_most_255_characters(self):
+        prefix = "Work on ABC-123: first line second line "
+        self.assertEqual(self.title("first line\n\n  second\tline " + "x" * 300), prefix + "x" * (255 - len(prefix)))
+
+    def test_a_cut_title_does_not_end_in_a_space(self):
+        self.assertEqual(self.title("a" * (254 - len("Work on ABC-123: ")) + " b"), "Work on ABC-123: " + "a" * (254 - len("Work on ABC-123: ")))
+
+    def test_a_session_update_that_reports_failure_is_an_error(self):
+        fake = FakeLinear([(200, IssueTest.RESPONSE), (200, {"data": {"agentSessionUpdate": {"success": False}}})])
+        with self.assertRaisesRegex(linear.LinearError, "success: false"):
+            make_client(fake).title_session("session-1", "ABC-123", "work")
+
     def test_older_open_sessions_of_the_app_are_closed_with_a_link_to_the_live_one(self):
         old = "2026-10-27T09:00:00.000Z"
         new = "2026-10-27T11:00:00.000Z"
@@ -404,18 +427,54 @@ class TokenClientTest(unittest.TestCase):
 
 
 class SessionCreateTest(unittest.TestCase):
-    def test_creates_a_session_on_the_issue(self):
-        fake = FakeLinear(
-            [(200, {"data": {"agentSessionCreateOnIssue": {"success": True, "agentSession": {"id": "session-77"}}}})]
+    CREATED = (200, {"data": {"agentSessionCreateOnIssue": {"success": True, "agentSession": {"id": "session-77"}}}})
+
+    def issue(self):
+        return 200, {"data": {"issue": {**IssueTest.RESPONSE["data"]["issue"], "title": "Fix checkout"}}}
+
+    def create(self, fake, args):
+        return json.loads(tools.run_session_create(lambda: make_client(fake), args))
+
+    def test_creates_a_session_on_the_issue_and_titles_it_for_its_purpose(self):
+        fake = FakeLinear([self.CREATED, self.issue(), session_update_ok()])
+        output = self.create(fake, {"issue": "ABC-123", "purpose": "triage"})
+        self.assertEqual(
+            output, {"agent_session_id": "session-77", "session_title": {"title": "Triage ABC-123: Fix checkout"}}
         )
-        output = json.loads(tools.run_session_create(lambda: make_client(fake), {"issue": "ABC-123"}))
-        self.assertEqual(output, {"agent_session_id": "session-77"})
-        self.assertEqual(fake.graphql_requests[0]["variables"], {"input": {"issueId": "ABC-123"}})
-        self.assertIn("agentSessionCreateOnIssue", fake.graphql_requests[0]["query"])
+        create, _, update = fake.graphql_requests
+        self.assertEqual(create["variables"], {"input": {"issueId": "ABC-123"}})
+        self.assertIn("agentSessionCreateOnIssue", create["query"])
+        self.assertIn("agentSessionUpdate", update["query"])
+        self.assertEqual(
+            update["variables"], {"id": "session-77", "input": {"summary": "Triage ABC-123: Fix checkout"}}
+        )
+
+    def test_a_work_session_is_titled_work_on_the_issue(self):
+        fake = FakeLinear([self.CREATED, self.issue(), session_update_ok()])
+        output = self.create(fake, {"issue": "ABC-123", "purpose": "work"})
+        self.assertEqual(output["session_title"], {"title": "Work on ABC-123: Fix checkout"})
+
+    def test_a_failed_title_still_returns_the_session_id(self):
+        fake = FakeLinear([self.CREATED, self.issue(), (200, {"errors": [{"message": "Entity not found"}]})])
+        output = self.create(fake, {"issue": "ABC-123", "purpose": "triage"})
+        self.assertEqual(
+            output,
+            {
+                "agent_session_id": "session-77",
+                "session_title": {"error": "titling the agent session failed: Entity not found"},
+            },
+        )
+
+    def test_a_missing_or_unknown_purpose_is_an_error_before_any_session_is_created(self):
+        for args in ({"issue": "ABC-123"}, {"issue": "ABC-123", "purpose": "review"}):
+            with self.subTest(args=args):
+                fake = FakeLinear([])
+                self.assertEqual(self.create(fake, args), {"error": "pass purpose: one of triage, work"})
+                self.assertEqual(fake.graphql_requests, [])
 
     def test_unsuccessful_create_is_an_error(self):
         fake = FakeLinear([(200, {"data": {"agentSessionCreateOnIssue": {"success": False, "agentSession": None}}})])
-        output = json.loads(tools.run_session_create(lambda: make_client(fake), {"issue": "ABC-123"}))
+        output = self.create(fake, {"issue": "ABC-123", "purpose": "work"})
         self.assertEqual(output, {"error": "agentSessionCreateOnIssue reported success: false"})
 
 
@@ -424,10 +483,13 @@ class IssueArgumentTest(unittest.TestCase):
 
     RUNNERS = {
         "linear_issue": lambda fake, args: tools.run_issue(lambda: make_client(fake), args),
-        "linear_agent_session_create": lambda fake, args: tools.run_session_create(lambda: make_client(fake), args),
+        "linear_agent_session_create": lambda fake, args: tools.run_session_create(
+            lambda: make_client(fake), {**args, "purpose": "work"}
+        ),
         "linear_issue_undelegate": lambda fake, args: tools.run_undelegate(lambda: make_client(fake), args),
         "linear_issue_to_todo": lambda fake, args: tools.run_to_todo(lambda: make_client(fake), args),
         "linear_issue_edit": lambda fake, args: tools.run_edit(lambda: make_client(fake), {**args, "state": "Done"}),
+        "linear_issue_relate": lambda fake, args: tools.run_relate(lambda: make_client(fake), {**args, "duplicate_of": "ABC-2"}),
     }
 
     def test_issue_tools_take_the_names_models_guess(self):
@@ -448,15 +510,16 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_hermes_lets_every_guessed_name_reach_the_handler(self):
         # Hermes refuses a deferred tool_call that lacks a name in the schema's "required" list.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA, tools.RELATE_SCHEMA):
             for name in ("issue", "id", "issue_id"):
                 with self.subTest(tool=schema["name"], name=name):
-                    missing = [r for r in schema["parameters"].get("required", []) if r not in {name: "ABC-9"}]
+                    required = [r for r in schema["parameters"].get("required", []) if r != "purpose"]
+                    missing = [r for r in required if r not in {name: "ABC-9"}]
                     self.assertEqual(missing, [])
 
     def test_the_deferred_catalog_line_names_the_argument(self):
         # Hermes lists a deferred tool by the first 60 characters of its description.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA, tools.RELATE_SCHEMA):
             with self.subTest(tool=schema["name"]):
                 self.assertIn("`issue`", schema["description"][:60])
 

@@ -86,11 +86,14 @@ private record, never to the repository.
   {{worker_checkouts}}.
   Change them only through a Kanban card.
 - The gateway runs as a service. Restart it only when the operator asks,
-  from a shell outside Hermes. The one other restarter is `watch-gateway`,
-  a launchd job that restarts a gateway whose secrets did not resolve. Leave
-  it running.
-- A merged factory change is not live until it is deployed. Follow the
-  setup-factory runbook's "Deploy a merged factory change" section.
+  from a shell outside Hermes. Two launchd jobs also restart it, each
+  through `restart-gateway`. `watch-gateway` restarts a gateway whose
+  secrets did not resolve. `auto-deploy` restarts it after it installs a
+  merged factory change that needs a restart. Leave both running.
+- `auto-deploy` deploys each merge to the factory's default branch. While
+  it installs, it holds `factory-gateway.lock`. To fix what it reports, or
+  to deploy by hand, follow the setup-factory runbook's "Deploy a merged
+  factory change" section.
   `HERMES_HOME={{worker}} python3 {{worker}}/scripts/check-install` lists what is out of
   date.
 <!-- factory:end -->
