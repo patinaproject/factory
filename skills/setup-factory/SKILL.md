@@ -697,10 +697,12 @@ effect at the next gateway restart. An edit to the content of an existing
 skill is served at once.
 
 **Webhook retry, root home only.** The `webhook-retry` plugin runs inside the
-gateway. It records each webhook delivery, queues one whose agent turn fails on
-a usage limit, and clears it when the turn finishes. The `retry-failed-webhooks`
-cron job in part 12 reruns the queued deliveries. Install and enable the plugin
-in the root home and never in the worker's home. `check-install` reports an
+gateway. It records each webhook delivery. It queues one that arrives while
+Hermes is paused, one whose agent turn fails on a usage limit, and one that
+never reaches a turn, and it clears a delivery when its turn finishes. While
+Hermes is paused it skips the delivery, so the pause notice does not eat it. The
+`retry-failed-webhooks` cron job in part 12 reruns the queued deliveries.
+Install and enable the plugin in the root home and never in the worker's home. `check-install` reports an
 install in the worker home. It takes effect at the next gateway restart.
 
 ```sh
@@ -1217,7 +1219,11 @@ required check waits, and a `blocked` card is never sent back for a failed
 check, because its worker stopped for a person. The worker merges the base branch and resolves the
 conflicts, or fixes the failing check, and publishes with `push-signed`. A card
 is sent back once per pull request head and reason, so a worker that blocks on
-the same head stays blocked. Create the job when `cron list` has no `reopen-conflicts` job:
+the same head stays blocked. The same job re-requests a reviewer whose changes
+request is on an older head once every required check passes. A changes
+request on the current head, or the reviewer's unresolved review thread, sends
+the card back once per head instead. Create the job when `cron list` has no
+`reopen-conflicts` job:
 
 ```sh
 hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null
@@ -1250,13 +1256,21 @@ sees it reported as a job the runbook does not create. Remove it with
 `hermes cron remove <job id>`, and remove `<root>/scripts/check-install-alert`.
 
 **Webhook retry job.** The `webhook-retry` plugin from part 5 keeps a queue in
-`<root>/webhook-retry/`. A delivery whose triage turn fails on a usage limit
-waits there until the limit resets. This job reruns the due deliveries every 10
-minutes, oldest first and one at a time, and stops at the first usage limit.
-Before it reruns a Linear `Issue` update, it runs the `triage-exit` command of
-the `linear-agent-session` plugin, which applies the dispatch hook's check. When
+`<root>/webhook-retry/`. A delivery waits there for one of three reasons, which
+`--list` and the job's output name: `usage_limit` (its triage turn failed on a
+usage limit), `paused` (it arrived while Hermes was paused), or `unadmitted`
+(a recorded delivery that no `post_gateway_admission` hook marked as started
+within 10 minutes, because a restart, drain, or concurrency cap dropped it). This
+job reruns the due deliveries every 10 minutes, oldest first within each Linear
+issue or pull request and one at a time. A delivery that is not due holds back
+only later deliveries for its own subject. The job starts nothing while Hermes
+is paused, `--now` included, and a usage limit ends the run. Before it reruns a
+Linear `Issue` update, it runs the `triage-exit` command of the
+`linear-agent-session` plugin, which applies the dispatch hook's check. When
 that command archived the triage card or left a running one to its worker, the
-delivery is done without a turn. It prints a line only when something happened,
+delivery is done without a turn. Before it reruns an agent session reply, it
+runs the `teammate-reply` command, and a reply addressed to a teammate is
+dropped without a turn. It prints a line only when something happened,
 so Hermes delivers nothing on a quiet run. It belongs to the root profile,
 unlike the other jobs in this part, because only that profile runs the chat
 platform from part 13 and has its home channel. Hermes drops the output of a

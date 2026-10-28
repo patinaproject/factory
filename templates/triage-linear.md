@@ -246,7 +246,9 @@ from the reply and the issue. Create no card and stop.
    send the reply again, and stop. Do not unblock the card, because the worker
    would block again on the same question.
 2. Comment on the card once with the reply, attributed to Linear, and never
-   correct it afterward. Replace each
+   correct it afterward. Start the comment with `Linear reply:`, because the
+   card's running Claude session recognizes a person's reply by that prefix.
+   Replace each
    `https://github.com/<owner>/<name>/pull/<number>` URL in it with
    `<owner>/<name>#<number>`, so the comment names no pull request URL.
 3. If the card's body names a different `linear_agent_session_id`, update it as
@@ -269,6 +271,8 @@ from the reply and the issue. Create no card and stop.
      until the issue is delegated to the agent again.
    - The card is `done`, or a `triage` resume failed: the card must be reopened
      from the Kanban dashboard.
+   - The card is `running`: the running Claude session reads the reply at its
+     next step and answers in this session.
    - Any other status: the reply is on the card for its worker.
 
 ### `triage_card_reply`

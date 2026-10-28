@@ -19,6 +19,7 @@ render = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(render)
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "profiles" / "claude-worker" / "scripts"))
 import card_transition  # noqa: E402
+import reply_inbox  # noqa: E402
 
 SETTINGS = {
     "app_user_id": "00000000-0000-4000-8000-000000000001",
@@ -292,6 +293,15 @@ class TriageIntentContractTest(unittest.TestCase):
 
         self.assertEqual(missing, [])
         self.assertNotIn("<triage_intent>", render.build_routes(SETTINGS)["github"]["prompt"])
+
+
+class ReplyPrefixContractTest(unittest.TestCase):
+    """The running worker recognizes a person's reply by `reply_inbox.REPLY_PREFIX`, so triage must write it."""
+
+    def test_the_linear_prompt_has_triage_start_a_card_reply_with_the_prefix(self):
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+
+        self.assertIn(f"`{reply_inbox.REPLY_PREFIX}`", prompt)
 
 
 class PromptSubstitutionTest(unittest.TestCase):
