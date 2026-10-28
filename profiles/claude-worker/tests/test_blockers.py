@@ -55,9 +55,10 @@ class WaitingOnTest(unittest.TestCase):
         self.assertEqual((found, sleeps), (["t_a"], []))
 
     def test_a_finished_issue_a_done_card_and_a_card_on_no_blocker_are_not_waited_for(self):
-        issues = [issue("ABC-1", state="completed"), issue("ABC-2", state="canceled"), issue("ABC-3"), issue("ABC-4")]
+        issues = [issue("ABC-1", state="completed"), issue("ABC-2", state="canceled"), issue("ABC-3"), issue("ABC-4"),
+                  issue("ABC-5", state="duplicate")]
         board = [card("t_1", "ABC-1"), card("t_2", "ABC-2", status="review"), card("t_3", "ABC-3", status="done"),
-                 card("t_4", "ABC-4", status="blocked"), card("t_9", "ABC-9")]
+                 card("t_4", "ABC-4", status="blocked"), card("t_5", "ABC-5"), card("t_9", "ABC-9")]
 
         found, sleeps, _ = self.wait(issues, [board])
 

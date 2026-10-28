@@ -1013,11 +1013,13 @@ class LinearClosureReplayTest(HermesFiltersCase):
         kept = [i for i in CARD_ISSUES if self.matches("Issue", linear_closure(i))]
         self.assertEqual(kept, CARD_ISSUES)
         self.assertIs(self.matches("Issue", linear_closure(CARD_ISSUES[0], "canceled")), True)
+        self.assertIs(self.matches("Issue", linear_closure(CARD_ISSUES[0], "duplicate")), True)
 
     def test_closures_of_issues_without_a_card_are_dropped(self):
         dropped = [i for i in CARDLESS_ISSUES if not self.matches("Issue", linear_closure(i))]
         self.assertEqual(dropped, CARDLESS_ISSUES)
         self.assertIs(self.matches("Issue", linear_closure(CARDLESS_ISSUES[0], "canceled")), False)
+        self.assertIs(self.matches("Issue", linear_closure(CARDLESS_ISSUES[0], "duplicate")), False)
 
     def test_session_events_and_delegate_changes_are_kept_without_a_card(self):
         cardless = CARDLESS_ISSUES[0]
