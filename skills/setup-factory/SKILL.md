@@ -701,8 +701,8 @@ gateway. It records each webhook delivery. It queues one that arrives while
 Hermes is paused, one whose agent turn fails on a usage limit, and one that
 never reaches a turn, and it clears a delivery when its turn finishes. While
 Hermes is paused it skips the delivery, so the pause notice does not eat it. The
-`retry-failed-webhooks` cron job in part 12 reruns the queued deliveries. Install and enable the plugin
-in the root home and never in the worker's home. `check-install` reports an
+`retry-failed-webhooks` cron job in part 12 reruns the queued deliveries.
+Install and enable the plugin in the root home and never in the worker's home. `check-install` reports an
 install in the worker home. It takes effect at the next gateway restart.
 
 ```sh

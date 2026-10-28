@@ -114,7 +114,8 @@ class Run:
                 continue
             age = moment - store.parse_stamp(entry["delivered_at"])
             state = entry["state"]
-            if state == "pending" and not entry.get("admitted") and age >= store.UNSTARTED_AGE:
+            # An entry recorded before admission was tracked has no `admitted`, and its turn may have run.
+            if state == "pending" and entry.get("admitted") is False and age >= store.UNSTARTED_AGE:
                 if self.update(key, "unadmitted", reason="unadmitted", next_try_at=entry["delivered_at"]):
                     state = "queued"
             if state == "pending" and age > store.PENDING_AGE:
@@ -179,7 +180,8 @@ class Run:
         answer = self.cli_answer(entry, "triage-exit", TRIAGE_EXIT_TIMEOUT_SECONDS)
         return answer is not None and answer.get("handled") is True
 
-    def teammate_reply(self, entry: dict[str, Any]) -> bool:
+    def addressed_to_teammate(self, entry: dict[str, Any]) -> bool:
+        """Run linear-agent-session's teammate-reply check. Anything but a clean `addressed` answer replays the turn."""
         payload = entry.get("payload")
         if not isinstance(payload, dict) or payload.get("type") != "AgentSessionEvent":
             return False
@@ -255,7 +257,7 @@ class Run:
                 self.update(key, "retry_succeeded")
                 self.say(f"retried {who}: handled the Triage exit without a turn")
                 continue
-            if self.teammate_reply(entry):
+            if self.addressed_to_teammate(entry):
                 retried += 1
                 self.update(key, "retry_succeeded")
                 self.say(f"retried {who}: skipped a reply addressed to a teammate")
@@ -293,7 +295,8 @@ def list_entries(directory: Path) -> int:
         summary = entry["summary"]
         print(" ".join([
             entry["state"], entry["route"], entry["delivery"], summary["event"] or "-", summary["action"] or "-",
-            summary["subject"] or "-", entry["delivered_at"], str(entry["attempts"]), entry["next_try_at"] or "-", store.reason_of(entry),
+            summary["subject"] or "-", entry["delivered_at"], str(entry["attempts"]), entry["next_try_at"] or "-",
+            "-" if entry["state"] == "pending" else store.reason_of(entry),
         ]))
     return 0
 

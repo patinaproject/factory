@@ -78,14 +78,23 @@ def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> O
             "last_error": "",
             "next_try_at": None,
             "reported": False,
+            "admitted": False,
         }
         is_paused = paused()
         if is_paused:
             fields.update(reason="paused", next_try_at=fields["delivered_at"])
         event_name = "paused" if is_paused else "dispatch"
-        queue_store.mutate(
-            queue_store.queue_dir(hermes_home()), lambda entries: queue_store.apply(entries, key, event_name, **fields)
-        )
+
+        def change(entries: dict) -> bool:
+            current = entries.get(key)
+            if current is None:
+                return queue_store.apply(entries, key, event_name, **fields)
+            # A redelivery of a turn that already started must not queue it to run again.
+            if is_paused and current.get("admitted"):
+                return False
+            return queue_store.apply(entries, key, event_name, **{k: v for k, v in fields.items() if k != "admitted"})
+
+        queue_store.mutate(queue_store.queue_dir(hermes_home()), change)
         if is_paused:
             return {"action": "skip", "reason": "Hermes is paused; the delivery is queued for replay after resume"}
     except Exception:

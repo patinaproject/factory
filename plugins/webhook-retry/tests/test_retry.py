@@ -407,8 +407,8 @@ class RetryTest(unittest.TestCase):
 
     def test_a_pending_entry_that_never_reached_a_turn_replays_as_unadmitted(self):
         self.seed(
-            entry("dropped", state="pending", delivered=ago(minutes=11), next_try_at=None),
-            entry("recent", state="pending", delivered=ago(minutes=5), next_try_at=None),
+            entry("dropped", state="pending", delivered=ago(minutes=11), next_try_at=None, admitted=False),
+            entry("recent", state="pending", delivered=ago(minutes=5), next_try_at=None, admitted=False),
         )
 
         result = self.run_retry()
@@ -426,8 +426,16 @@ class RetryTest(unittest.TestCase):
         self.assertEqual((result.stdout, self.chats()), ("", []))
         self.assertEqual(self.entries()[chat_key("running")]["state"], "pending")
 
+    def test_a_pending_entry_recorded_before_admission_was_tracked_stays_pending(self):
+        self.seed(entry("legacy", state="pending", delivered=ago(minutes=30)))
+
+        result = self.run_retry()
+
+        self.assertEqual((result.stdout, self.chats()), ("", []))
+        self.assertEqual(self.entries()[chat_key("legacy")]["state"], "pending")
+
     def test_an_old_unadmitted_entry_is_promoted_before_it_expires(self):
-        self.seed(entry("stale", state="pending", delivered=ago(hours=25)))
+        self.seed(entry("stale", state="pending", delivered=ago(hours=25), admitted=False))
 
         self.run_retry()
 
@@ -440,7 +448,7 @@ class RetryTest(unittest.TestCase):
                 self.setUp()
                 self.install_triage_exit(handled=False, addressed=True)
                 state = "pending" if reason == "unadmitted" else "queued"
-                self.seed(entry("talk", state=state, delivered=ago(minutes=30), reason=reason, payload=reply))
+                self.seed(entry("talk", state=state, delivered=ago(minutes=30), reason=reason, payload=reply, admitted=False))
 
                 result = self.run_retry()
 

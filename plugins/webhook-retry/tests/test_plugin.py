@@ -93,18 +93,19 @@ class PluginTest(unittest.TestCase):
     def test_a_paused_redelivery_keeps_one_entry_in_every_state(self):
         ev = event()
         key = ev.source.chat_id
-        for state, expected_state, expected_reason in (
-            ("pending", "queued", "paused"),
-            ("queued", "queued", "usage_limit"),
-            ("running", "running", "usage_limit"),
-            ("failed", "failed", "usage_limit"),
-            ("given_up", "given_up", "usage_limit"),
+        for state, admitted, expected_state, expected_reason in (
+            ("pending", False, "queued", "paused"),
+            ("pending", True, "pending", "usage_limit"),
+            ("queued", False, "queued", "usage_limit"),
+            ("running", False, "running", "usage_limit"),
+            ("failed", False, "failed", "usage_limit"),
+            ("given_up", False, "given_up", "usage_limit"),
         ):
-            with self.subTest(state):
+            with self.subTest(state, admitted=admitted):
                 path = self.home / "webhook-retry"
                 path.mkdir(exist_ok=True)
                 held = {"key": key, "state": state, "attempts": 3, "next_try_at": "2026-10-20T00:00:00Z",
-                        "reason": "usage_limit", "prompt": "old"}
+                        "reason": "usage_limit", "prompt": "old", "admitted": admitted}
                 (path / "queue.json").write_text(json.dumps({"version": 1, "entries": {key: held}}))
                 self.paused = True
 
@@ -114,7 +115,7 @@ class PluginTest(unittest.TestCase):
                 self.assertEqual(result["action"], "skip")
                 self.assertEqual(list(stored), [key])
                 self.assertEqual((stored[key]["state"], stored[key]["reason"]), (expected_state, expected_reason))
-                if state != "pending":
+                if expected_state != "queued" or state != "pending":
                     self.assertEqual(
                         (stored[key]["attempts"], stored[key]["next_try_at"], stored[key]["prompt"]),
                         (3, "2026-10-20T00:00:00Z", "old"),
