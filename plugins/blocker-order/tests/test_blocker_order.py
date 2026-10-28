@@ -40,6 +40,8 @@ class FakeBoard:
         self.block_kind: dict[str, str] = {}
         self.recurrences: dict[str, int] = {}
         self.rounds: list[dict] = []
+        self.round_outcome: dict = {"outcome": "posted"}
+        self.comments: list[tuple[str, str]] = []
 
     def add(self, task: str, status: str = "ready", title: str = "") -> None:
         self.status[task] = status
@@ -116,7 +118,10 @@ class FakeBoard:
             return json.dumps({"ok": True, "task_id": worker, "status": "scheduled", "reason": args["reason"]})
         if name == order.ROUND_TOOL:
             self.rounds.append({**args, "status": self.status[args["task_id"]]})
-            return json.dumps({"posted": True})
+            return json.dumps(self.round_outcome)
+        if name == "kanban_comment":
+            self.comments.append((args["task_id"], args["body"]))
+            return json.dumps({"ok": True, "task_id": args["task_id"], "comment_id": len(self.comments)})
         raise AssertionError(f"unexpected tool {name}")
 
 
@@ -131,6 +136,7 @@ def waiting(*cards: str) -> str:
 class Hooked(unittest.TestCase):
     def setUp(self) -> None:
         order._handled.clear()
+        order._posted.clear()
         self.board = FakeBoard()
         self.env = mock.patch.dict(os.environ, {"HERMES_KANBAN_TASK": "t_1"})
         self.env.start()
@@ -343,6 +349,17 @@ class ResultLineTest(unittest.TestCase):
         self.assertIsNone(result_line.needs_input(None))
 
 
+    def test_the_comments_seen_marker_reads_back_as_written(self):
+        reason = result_line.mark_comments_seen("Needs input: which one?\n1. a\n2. b\n", 4)
+
+        self.assertEqual(reason, "Needs input: which one?\n1. a\n2. b\n\ncomments_seen: 4")
+        self.assertEqual(result_line.read_comments_seen(reason), ("Needs input: which one?\n1. a\n2. b", 4))
+        self.assertEqual(result_line.read_comments_seen("Needs input: which one?"), ("Needs input: which one?", None))
+        self.assertEqual(result_line.read_comments_seen("comments_seen: 4\nNeeds input: which one?"),
+                         ("comments_seen: 4\nNeeds input: which one?", None))
+        self.assertEqual(result_line.read_comments_seen(None), ("", None))
+
+
 class NeedsInputTest(Hooked):
     def setUp(self) -> None:
         super().setUp()
@@ -392,7 +409,7 @@ class NeedsInputTest(Hooked):
         reason = "Needs input: " + "Which option should the factory take for the retry policy? " * 50
         cut = self.cut(reason)
         self.assertGreater(len(reason), 2000)
-        self.assertIsNone(order.needs_input(json.loads(cut)["output"]))
+        self.assertIsNone(result_line.needs_input(result_line.last(json.loads(cut)["output"])))
 
         rewritten = json.loads(self.call(cut))
 
@@ -432,10 +449,10 @@ class NeedsInputTest(Hooked):
 
 
 class TriageRoundTest(Hooked):
-    PARKED = (
-        "Claude needs input, so the blocker-order hook parked this card in scheduled until a person replies and "
-        "posted its questions on the Linear agent session. Stop now: call no other tool and do not run "
-        "claude-session again."
+    POSTED = (
+        "Claude needs input, so this card waits in scheduled until a person replies, and the blocker-order hook "
+        "posted its questions on the Linear agent session. Stop now: call no other tool, do not post the "
+        "questions yourself, and do not run claude-session again."
     )
 
     def setUp(self) -> None:
@@ -444,25 +461,44 @@ class TriageRoundTest(Hooked):
         self.board.add("t_1", "ready")
         self.board.start("t_1")
         self.reason = "Needs input:\n1. https://linear.app/example/profiles/ted which screen?"
+        self.parked = self.reason + "\n\ncomments_seen: 2"
 
     def round(self, reason: str, tool_name: str = "process_manage") -> dict:
         return json.loads(self.call(process_result(report(reason)), tool_name=tool_name))["triage_round"]
 
-    def test_a_round_parks_the_card_then_posts_it(self):
+    def schedule(self, reason: str, answer: dict | None = None) -> str | None:
+        """The worker's own kanban_schedule call, as the hook sees its result."""
+        result = answer or {"ok": True, "task_id": "t_1", "status": "scheduled", "reason": reason}
+        if answer is None:
+            self.board.status["t_1"] = "scheduled"
+        hooks = []
+
+        class Ctx:
+            dispatch_tool = self.board.dispatch_tool
+
+            def register_hook(_, name, callback):
+                hooks.append(callback)
+
+        order.register(Ctx())
+        return hooks[0](tool_name="kanban_schedule", args={"reason": reason}, result=json.dumps(result))
+
+    def test_a_round_parks_the_card_with_the_comments_it_saw_then_posts_it(self):
         outcome = self.round(self.reason)
 
         self.assertEqual(self.board.calls, [
-            ("kanban_schedule", {"reason": self.reason}),
+            ("kanban_schedule", {"reason": self.parked}),
             ("linear_triage_round", {"task_id": "t_1", "board": "triage", "reason": self.reason}),
         ])
         self.assertEqual(self.board.rounds[0]["status"], "scheduled")
-        self.assertEqual(outcome, {"parked": True, "posted": True, "instruction": self.PARKED})
+        self.assertEqual(outcome, {"parked": True, "post": "posted", "instruction": self.POSTED})
+        self.assertEqual(self.board.comments, [])
         self.assertEqual(os.environ[order.STOP_NUDGE], "off")
 
     def test_two_rounds_leave_the_card_scheduled_and_never_block_it(self):
         self.round(self.reason)
         self.board.unblock("t_1")
         self.board.start("t_1")
+        os.environ["HERMES_KANBAN_RUN_ID"] = "2"
         second = "Needs input: which account showed it?"
 
         self.assertEqual(self.round(second)["parked"], True)
@@ -490,31 +526,69 @@ class TriageRoundTest(Hooked):
         self.assertEqual(self.board.calls, [("kanban_block", {"reason": self.reason, "kind": "needs_input"})])
         self.assertEqual(self.board.rounds, [])
 
-    def test_a_failed_park_posts_nothing_and_never_blocks(self):
+    def test_a_failed_park_posts_nothing_never_blocks_and_gives_the_reason_to_park_with(self):
         self.board.fail["kanban_schedule"] = "could not schedule t_1"
 
         outcome = self.round(self.reason)
 
-        self.assertEqual(outcome, {"parked": False, "posted": False, "instruction": (
+        self.assertEqual(outcome, {"parked": False, "post": None, "instruction": (
             "The blocker-order hook could not park this card: could not schedule t_1. Call kanban_schedule with "
-            "the whole result as the reason, then stop. Do not call kanban_block, and do not run claude-session again."
+            "exactly this reason, then stop: \"Needs input:\\n1. https://linear.app/example/profiles/ted which "
+            "screen?\\n\\ncomments_seen: 2\". Do not call kanban_block, do not post the questions yourself, and do "
+            "not run claude-session again."
         )})
         self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule"])
         self.assertEqual(self.board.status["t_1"], "running")
         self.assertNotIn(order.STOP_NUDGE, os.environ)
 
-    def test_a_failed_post_leaves_the_card_parked_and_hands_the_questions_to_the_worker(self):
-        self.board.fail["linear_triage_round"] = "Linear is unreachable"
+    def test_the_workers_own_park_after_a_failed_one_posts_once(self):
+        self.board.fail["kanban_schedule"] = "could not schedule t_1"
+        self.round(self.reason)
+        del self.board.fail["kanban_schedule"]
 
-        outcome = self.round(self.reason)
+        outcome = json.loads(self.schedule(self.parked))
+        self.assertIsNone(self.schedule(self.parked, {"error": "could not schedule t_1"}))
 
-        self.assertEqual(outcome, {"parked": True, "posted": False, "instruction": (
-            "Claude needs input, so the blocker-order hook parked this card in scheduled until a person replies, "
-            "but it could not post the questions: Linear is unreachable. Post the whole result as one elicitation "
-            "with linear_agent_activity on the card's Linear agent session, then stop. Do not run claude-session again."
-        )})
-        self.assertEqual(self.board.status["t_1"], "scheduled")
-        self.assertEqual(os.environ[order.STOP_NUDGE], "off")
+        self.assertEqual(outcome["triage_round"], {"parked": True, "post": "posted", "instruction": self.POSTED})
+        self.assertEqual(outcome["status"], "scheduled")
+        self.assertEqual(self.board.rounds, [{"task_id": "t_1", "board": "triage", "reason": self.reason, "status": "scheduled"}])
+        json.loads(self.schedule(self.parked))
+        self.assertEqual(len(self.board.rounds), 1)
+
+    def test_a_park_that_is_not_a_triage_round_posts_nothing(self):
+        cases = {
+            "another board": ("default", self.parked, None),
+            "another reason": ("triage", "waits until Monday", None),
+            "a failed park": ("triage", self.parked, {"error": "could not schedule t_1"}),
+        }
+        for name, (board, reason, answer) in cases.items():
+            with self.subTest(name):
+                os.environ["HERMES_KANBAN_BOARD"] = board
+                self.assertIsNone(self.schedule(reason, answer))
+        self.assertEqual((self.board.rounds, self.board.comments), ([], []))
+
+    def test_a_post_that_failed_or_may_have_landed_is_recorded_on_the_card(self):
+        cases = {
+            "failed": ({"outcome": "failed", "error": "RuntimeError"}, "Triage round not posted: failed: RuntimeError",
+                       "could not post its questions, which it recorded on the card"),
+            "unknown": ({"outcome": "unknown"}, "Triage round not posted: unknown",
+                        "may not have posted its questions, which it recorded on the card"),
+            "unregistered": ({"error": "Unknown tool: linear_triage_round"},
+                             "Triage round not posted: failed: Unknown tool: linear_triage_round",
+                             "could not post its questions, which it recorded on the card"),
+        }
+        for run, (answer, comment, told) in enumerate(cases.values()):
+            with self.subTest(comment):
+                os.environ["HERMES_KANBAN_RUN_ID"] = str(run)
+                self.board.start("t_1")
+                self.board.round_outcome = answer
+
+                outcome = self.round(f"{self.reason} ({run})")
+
+                self.assertEqual(outcome["post"], comment.split(": ")[1])
+                self.assertIn(told, outcome["instruction"])
+                self.assertEqual(self.board.comments[-1], ("t_1", comment))
+                self.assertEqual(self.board.status["t_1"], "scheduled")
 
     def test_a_report_read_with_wait_and_then_log_parks_and_posts_once(self):
         first = self.call(process_result(report(self.reason)))
