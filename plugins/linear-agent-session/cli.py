@@ -59,9 +59,32 @@ def main(argv: Optional[list] = None) -> int:
     )
     exit_check.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
 
+    teammate = commands.add_parser(
+        "teammate-reply", help="say whether a Linear webhook payload is a session reply addressed to a teammate"
+    )
+    teammate.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
+
+    reask_exit = commands.add_parser(
+        "reask-exit", help="ask the person again for a reply re-ask whose Hermes exited before its turn-end hook"
+    )
+    reask_exit.add_argument("--agent-session-id", required=True)
+
+    intent = commands.add_parser("triage-intent", help="print the computed triage intent block for a Linear webhook payload")
+    intent.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
+    intent.add_argument("--now", help="the delivery time as ISO 8601, for a replay; default is the payload's timestamp")
+
     args = parser.parse_args(argv)
     if args.command == "triage-exit":
         return _triage_exit(plugin, args.payload_file)
+    if args.command == "teammate-reply":
+        return _teammate_reply(plugin, args.payload_file)
+    if args.command == "reask-exit":
+        replies = plugin.replies
+        log = Path(replies.hermes_home()) / "logs" / replies.EXIT_LOG
+        replies.reask_exit(plugin.linear.client_from_env, args.agent_session_id, log)
+        return 0
+    if args.command == "triage-intent":
+        return _triage_intent(plugin, args.payload_file, args.now)
     if args.command == "activity":
         tool_args = {
             "agent_session_id": args.agent_session_id,
@@ -107,6 +130,32 @@ def _triage_exit(plugin, payload_file: str) -> int:
     except Exception as failure:
         verdict = triage_exit.Verdict("failed", type(failure).__name__)
     print(json.dumps({"handled": verdict.handled, "action": verdict.action, "task_id": verdict.task_id}))
+    return 0
+
+
+def _teammate_reply(plugin, payload_file: str) -> int:
+    with open(payload_file, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    print(json.dumps({"addressed": plugin.addressed_to_teammate(payload)}))
+    return 0
+
+
+def _triage_intent(plugin, payload_file: str, now: Optional[str]) -> int:
+    triage_exit, triage_intent = plugin.triage_exit, plugin.triage_intent
+    try:
+        with open(payload_file, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        moment = triage_intent.parse_time(now) if now else None
+        intent = triage_intent.compute(
+            payload,
+            app_user_id=triage_exit.configured_app_user_id,
+            client=plugin.linear.client_from_env,
+            cards=triage_exit.listed_cards,
+            now=moment,
+        )
+    except Exception as failure:
+        intent = triage_intent.error_intent(type(failure).__name__)
+    print(triage_intent.render(intent), end="")
     return 0
 
 

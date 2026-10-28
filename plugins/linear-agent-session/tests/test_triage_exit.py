@@ -104,6 +104,7 @@ class Harness(unittest.TestCase):
             mock.patch.dict(os.environ, env),
             mock.patch.dict(sys.modules, self.hermes_modules()),
             mock.patch("urllib.request.urlopen", self.linear),
+            mock.patch.object(plugin.triage_intent, "compute", lambda *_, **__: plugin.triage_intent.error_intent("stub")),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -145,7 +146,12 @@ class Harness(unittest.TestCase):
         hook = dict(ctx.hooks)["pre_gateway_dispatch"]
         source = SimpleNamespace(platform=SimpleNamespace(value="webhook"), user_id=f"webhook:{route}", chat_type="webhook")
         evt = SimpleNamespace(source=source, raw_message=payload, text="rendered prompt")
-        return asyncio.run(hook(event=evt, gateway=object(), session_store=None))
+        return self.unskipped(asyncio.run(hook(event=evt, gateway=object(), session_store=None)))
+
+    @staticmethod
+    def unskipped(result):
+        """A turn that goes on to triage gets its intent block, so these tests read a rewrite as no skip."""
+        return None if result is not None and result["action"] == "rewrite" else result
 
     def assert_only_the_plain_exit_is_archived(self):
         """Control: the same board with a plain Triage exit is archived, so the guard is what passed the other through."""
@@ -291,7 +297,8 @@ class TriageExitTest(Harness):
         original = plugin.concurrent.futures.ThreadPoolExecutor.submit
 
         def spy(pool, fn, *args, **kwargs):
-            submitted.append(args)
+            if pool._thread_name_prefix == "triage-exit":
+                submitted.append(args)
             return original(pool, fn, *args, **kwargs)
 
         self.boards["triage"] = [card("t_triage", "todo")]
@@ -310,7 +317,7 @@ class TriageExitTest(Harness):
         hook = dict(ctx.hooks)["pre_gateway_dispatch"]
         source = SimpleNamespace(platform=SimpleNamespace(value="webhook"), user_id="webhook:linear", chat_type="webhook")
         evt = SimpleNamespace(source=source, raw_message=issue_update("backlog"), text="")
-        self.assertIsNone(asyncio.run(hook(event=evt)))
+        self.assertIsNone(self.unskipped(asyncio.run(hook(event=evt))))
         self.assert_only_the_plain_exit_is_archived()
 
 
@@ -362,6 +369,7 @@ class TriageExitCliTest(unittest.TestCase):
             mock.patch.dict(os.environ, env),
             mock.patch.dict(sys.modules, outside_hermes),
             mock.patch("urllib.request.urlopen", self.linear),
+            mock.patch.object(plugin.triage_intent, "compute", lambda *_, **__: plugin.triage_intent.error_intent("stub")),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)

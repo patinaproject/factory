@@ -23,11 +23,12 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import factory_settings
 
 OWNED_REFS = "owned-refs.json"
 TRIAGE_REFS = "triage-refs.json"
@@ -51,20 +52,11 @@ def root_home() -> Path:
     return worker.parent.parent
 
 
-def find_hermes() -> str:
-    # A cron job's PATH can lack the installer's bin directory, so fall back to where it puts hermes.
-    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
-    for candidate in filter(None, candidates):
-        if os.access(candidate, os.X_OK):
-            return candidate
-    raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
-
-
 def list_tasks(tasks_json: str | None, board: str | None = None) -> list:
     if tasks_json:
         return json.loads(Path(tasks_json).read_text(encoding="utf-8"))
     pinned = ["--board", board] if board else []
-    proc = subprocess.run([find_hermes(), "kanban", *pinned, "list", "--json"], capture_output=True, text=True)
+    proc = subprocess.run([factory_settings.find_hermes(), "kanban", *pinned, "list", "--json"], capture_output=True, text=True)
     if proc.returncode != 0:
         raise Refusal(f"hermes kanban {' '.join(pinned + ['list'])} failed: {proc.stderr.strip()}", 1)
     return json.loads(proc.stdout)
@@ -113,6 +105,9 @@ def main() -> int:
     except Refusal as exc:
         print(f"refresh-owned-refs: {exc}", file=sys.stderr)
         return exc.code
+    except factory_settings.SettingsError as exc:
+        print(f"refresh-owned-refs: {exc}", file=sys.stderr)
+        return 2
     write_atomically(triage_target, json.dumps(triage, indent=2) + "\n")
     return 0
 

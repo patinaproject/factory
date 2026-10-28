@@ -7,6 +7,9 @@ the reads that pr-ready-gate and Hermes' Kanban completion contract make: a
 pull request, its base branch rules, its check runs, its commit statuses, and its
 workflow runs, and the repository activity that card_branch reads to tell the App's
 branches from a person's. Actions needs write so a worker can re-run failed jobs.
+The App's settings name the permissions it asks for, but an installation keeps
+the old ones until an org owner accepts the new, so the check also compares the
+permissions of the installation token that the gateway's broker mints.
 
 Silent when every read succeeds. Prints one line per missing permission or
 refused read, naming the permission to grant, and exits 1. Exits 2 when it
@@ -23,7 +26,9 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
-SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
+import factory_settings
+
+HOME = Path(__file__).resolve().parents[1]
 GH_TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN")
 LEVELS = {"read": 1, "write": 2}
 LEVEL_LABELS = {"read": "Read-only", "write": "Read and write"}
@@ -66,14 +71,7 @@ class Refused(Exception):
 
 
 def load_settings(settings_file: str | None) -> dict:
-    if settings_file:
-        text = Path(settings_file).read_text()
-    else:
-        proc = subprocess.run(["hermes", "config", "get", SETTINGS_KEY, "--json", "--raw"], capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise Refusal(f"hermes config get {SETTINGS_KEY} failed: {proc.stderr.strip()}")
-        text = proc.stdout
-    settings = json.loads(text)
+    settings = json.loads(Path(settings_file).read_text()) if settings_file else factory_settings.read(raw=True)
     if not isinstance(settings, dict):
         raise Refusal("settings must be an object")
     return settings
@@ -85,7 +83,7 @@ def explain(stderr: str, permission: Permission, repo: str) -> str:
     if "HTTP 404" in stderr or "Could not resolve to a Repository" in stderr:
         return f"not found (HTTP 404): install the App on {repo}, or grant it {permission.grant()}"
     if "HTTP 401" in stderr:
-        return "unauthorized (HTTP 401): the installation token expired; run the refresh-gh-app-login job"
+        return "unauthorized (HTTP 401): the installation token expired; kickstart the gh-login launchd job"
     detail = stderr.strip().splitlines()[0] if stderr.strip() else "no error output"
     return f"failed: {detail}"
 
@@ -97,13 +95,57 @@ def gh(permission: Permission, repo: str, what: str, *args: str):
     return json.loads(proc.stdout)
 
 
-def check_app(login: str) -> list[str]:
-    slug = login.removesuffix("[bot]")
-    granted = gh(METADATA, slug, "the App", f"apps/{slug}").get("permissions") or {}
+def shortfalls(granted: dict) -> list[tuple[Permission, str]]:
     return [
-        f"App {slug}: grant {permission.grant()}, it has {granted.get(permission.key) or 'no access'}"
+        (permission, granted.get(permission.key) or "no access")
         for permission in REQUIRED
         if LEVELS.get(granted.get(permission.key), 0) < LEVELS[permission.level]
+    ]
+
+
+def check_app(slug: str) -> tuple[list[str], set]:
+    """Report each permission the App's settings lack, and return their keys."""
+    try:
+        granted = gh(METADATA, slug, "the App", f"apps/{slug}").get("permissions") or {}
+    except Refused as refused:
+        return [str(refused)], set()
+    missing = shortfalls(granted)
+    return [f"App {slug}: grant {permission.grant()}, it has {has}" for permission, has in missing], {
+        permission.key for permission, _ in missing
+    }
+
+
+def installation_permissions(slug: str) -> dict:
+    """The permissions the installation accepted, as GitHub reported them when it minted the broker's token."""
+    sys.path.insert(0, str(HOME / "plugins" / "linear-agent-session"))
+    try:
+        import broker_client
+    except ImportError as error:
+        raise Refused(f"Installation of {slug}: cannot read its permissions: {error}")
+
+    try:
+        reply = broker_client.request(broker_client.socket_path({"HERMES_HOME": str(HOME)}), "github_token")
+    except broker_client.BrokerError as error:
+        raise Refused(f"Installation of {slug}: cannot read its permissions: {error}")
+    permissions = reply.get("permissions")
+    if not isinstance(permissions, dict):
+        raise Refused(
+            f"Installation of {slug}: the gateway's broker does not report the installation's permissions; "
+            "deploy the current factory to the broker"
+        )
+    return permissions
+
+
+def check_installation(slug: str, app_missing: set) -> list[str]:
+    """Report each permission the App asks for that the installation has not accepted."""
+    try:
+        granted = installation_permissions(slug)
+    except Refused as refused:
+        return [str(refused)]
+    return [
+        f"Installation of {slug}: accept {permission.grant()} on the installation, it has {has}"
+        for permission, has in shortfalls(granted)
+        if permission.key not in app_missing
     ]
 
 
@@ -163,10 +205,9 @@ def run(settings_file: str | None) -> list[str]:
     repositories = [repo.get("full_name") for repo in settings.get("repositories") or []]
     if not repositories:
         raise Refusal("no repositories are configured")
-    try:
-        problems = check_app(login)
-    except Refused as refused:
-        problems = [str(refused)]
+    slug = login.removesuffix("[bot]")
+    problems, app_missing = check_app(slug)
+    problems.extend(check_installation(slug, app_missing))
     for repo in repositories:
         problems.extend(check_repository(repo))
     return problems
@@ -178,7 +219,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         problems = run(args.settings_json)
-    except (Refusal, OSError, ValueError) as exc:
+    except (Refusal, factory_settings.SettingsError, OSError, ValueError) as exc:
         print(f"check-github-access: {exc}", file=sys.stderr)
         return 2
     for problem in problems:

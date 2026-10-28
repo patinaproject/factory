@@ -48,9 +48,19 @@ FAKE_TRIAGE_EXIT = textwrap.dedent(
     import json, os, sys
     args = sys.argv[1:]
     payload = json.load(open(args[args.index("--payload-file") + 1]))
+    now = args[args.index("--now") + 1] if "--now" in args else None
     with open(os.environ["FAKE_TRIAGE_LOG"], "a") as log:
-        log.write(json.dumps({"argv": args[:2], "payload": payload, "home": os.environ["HERMES_HOME"]}) + "\\n")
+        log.write(json.dumps({"argv": args[:2], "payload": payload, "now": now, "home": os.environ["HERMES_HOME"]}) + "\\n")
     behavior = json.load(open(os.environ["FAKE_TRIAGE_BEHAVIOR"]))
+    if args[0] == "teammate-reply":
+        print(json.dumps({"addressed": behavior.get("addressed", False)}))
+        sys.exit(behavior.get("exit", 0))
+    if args[0] == "triage-intent":
+        if behavior.get("intent_exit"):
+            sys.exit(behavior["intent_exit"])
+        intent = json.dumps({"action": "card_reply", "now": now})
+        print("## Computed triage intent\\n\\n<triage_intent>\\n" + intent + "\\n</triage_intent>\\n")
+        sys.exit(0)
     if behavior.get("garble"):
         print("not json")
     else:
@@ -108,6 +118,19 @@ class RetryTest(unittest.TestCase):
 
     def triage_checks(self):
         log = self.home.parent / "triage.log"
+        return [c for c in self.cli_calls(log) if c["argv"][0] == "triage-exit"]
+
+    def teammate_checks(self):
+        return [c for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "teammate-reply"]
+
+    def engage_pause(self):
+        (self.home / "ESTOP").write_text("")
+
+    def intent_checks(self):
+        return [c for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "triage-intent"]
+
+    @staticmethod
+    def cli_calls(log):
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
     def run_retry(self, *args):
@@ -136,7 +159,6 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(chats[0]["argv"][5:], ["-t", "terminal,linear_agent_session", "--source", "webhook-retry"])
         self.assertEqual(chats[0]["home"], str(self.home))
         self.assertIn(older, chats[0]["query"].split("prompt for")[0])
-        self.assertIn("not `date -u`", chats[0]["query"])
         self.assertEqual(
             result.stdout,
             "retried linear older: succeeded\nretried linear newer: succeeded\nwebhook retry queue drained\n",
@@ -153,7 +175,7 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(self.chats(), [])
         self.assertEqual(
             self.triage_checks(),
-            [{"argv": ["triage-exit", "--payload-file"], "payload": TRIAGE_EXIT_PAYLOAD, "home": str(self.home)}],
+            [{"argv": ["triage-exit", "--payload-file"], "payload": TRIAGE_EXIT_PAYLOAD, "now": None, "home": str(self.home)}],
         )
         self.assertEqual(
             result.stdout, "retried linear exit: handled the Triage exit without a turn\nwebhook retry queue drained\n"
@@ -180,6 +202,51 @@ class RetryTest(unittest.TestCase):
         self.run_retry()
 
         self.assertEqual((len(self.triage_checks()), len(self.chats())), (0, 1))
+
+    def test_a_replayed_linear_turn_starts_with_a_freshly_computed_intent_block(self):
+        self.install_triage_exit(handled=False)
+        delivered = ago(hours=2)
+        session_payload = {"type": "AgentSessionEvent", "action": "prompted"}
+        self.seed(entry("reply", delivered=delivered, payload=session_payload))
+
+        self.run_retry()
+
+        self.assertEqual(
+            [(c["payload"], c["now"]) for c in self.intent_checks()], [(session_payload, delivered)]
+        )
+        self.assertEqual(self.triage_checks(), [], "an agent session event has no Triage exit")
+        query = self.chats()[0]["query"]
+        self.assertTrue(query.startswith("This is a replay of a webhook delivery"))
+        self.assertLess(query.index("## Computed triage intent"), query.index("</triage_intent>"))
+        self.assertLess(query.index("</triage_intent>"), query.index("prompt for reply"))
+        self.assertIn(json.dumps({"action": "card_reply", "now": delivered}), query)
+
+    def test_a_replay_whose_intent_cannot_be_computed_starts_with_the_error_intent(self):
+        self.install_triage_exit(handled=False, intent_exit=1)
+        self.seed(entry("broken", payload=TRIAGE_EXIT_PAYLOAD))
+
+        self.run_retry()
+
+        query = self.chats()[0]["query"]
+        block = query[query.index("<triage_intent>\n") + len("<triage_intent>\n") : query.index("\n</triage_intent>")]
+        self.assertEqual(json.loads(block)["action"], "error")
+        self.assertLess(query.index("</triage_intent>"), query.index("prompt for broken"))
+
+    def test_a_replay_without_the_cli_still_starts_with_the_error_intent(self):
+        self.seed(entry("nocli", payload=TRIAGE_EXIT_PAYLOAD))
+
+        self.run_retry()
+
+        self.assertIn('"action": "error"', self.chats()[0]["query"])
+
+    def test_a_delivery_without_a_linear_payload_replays_its_prompt_alone(self):
+        self.install_triage_exit(handled=False)
+        self.seed(entry("github"))
+
+        self.run_retry()
+
+        self.assertEqual(self.intent_checks(), [])
+        self.assertNotIn("triage_intent", self.chats()[0]["query"])
 
     def test_entries_that_are_not_due_wait_and_now_forces_them(self):
         self.seed(entry("later", next_try=(dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")))
@@ -254,8 +321,8 @@ class RetryTest(unittest.TestCase):
         self.seed(
             entry("old", delivered=ago(hours=49)),
             entry("tired", attempts=8),
-            entry("stale", state="pending", delivered=ago(hours=25)),
-            entry("fresh", state="pending", delivered=ago(hours=1)),
+            entry("stale", state="pending", delivered=ago(hours=25), admitted=True),
+            entry("fresh", state="pending", delivered=ago(hours=1), admitted=True),
         )
 
         first = self.run_retry()
@@ -270,6 +337,200 @@ class RetryTest(unittest.TestCase):
             {"old": "given_up", "tired": "given_up", "fresh": "pending"},
         )
         self.assertEqual(self.chats(), [])
+
+    def test_a_paused_delivery_replays_once_after_resume_in_order_within_its_subject(self):
+        self.seed(
+            entry("second", delivered=ago(hours=1), reason="paused"),
+            entry("first", delivered=ago(hours=2), reason="paused"),
+        )
+        self.engage_pause()
+        held = self.run_retry()
+        (self.home / "ESTOP").unlink()
+
+        result = self.run_retry()
+
+        self.assertEqual((held.stdout, held.returncode), ("Hermes is paused: the queued deliveries wait for hermes resume\n", 0))
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["first", "second"])
+        self.assertEqual(
+            result.stdout,
+            "retried linear first: succeeded\nretried linear second: succeeded\nwebhook retry queue drained\n",
+        )
+        self.assertEqual(self.entries(), {})
+
+    def test_a_pause_engaged_during_a_run_starts_no_further_entry(self):
+        self.install_triage_exit(handled=False)
+        self.seed(
+            entry("first", delivered=ago(hours=3), reason="paused", payload=TRIAGE_EXIT_PAYLOAD),
+            entry("second", delivered=ago(hours=2), reason="paused", payload=TRIAGE_EXIT_PAYLOAD),
+        )
+        pause = self.home / "ESTOP"
+        fake = self.hermes.read_text().replace(
+            "sys.exit(behavior[\"exit\"])", f"open({str(pause)!r}, 'w').close()\nsys.exit(behavior[\"exit\"])"
+        )
+        self.hermes.write_text(fake)
+
+        result = self.run_retry("--now")
+
+        stored = self.entries()
+        self.assertEqual(
+            [c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["first"],
+        )
+        self.assertEqual(len(self.triage_checks()), 1)
+        self.assertEqual((stored[chat_key("second")]["state"], stored[chat_key("second")]["attempts"]), ("queued", 0))
+        self.assertEqual(
+            result.stdout,
+            "retried linear first: succeeded\nHermes is paused: the queued deliveries wait for hermes resume\n",
+        )
+
+    def test_now_does_not_replay_while_paused(self):
+        self.install_triage_exit(handled=True)
+        self.seed(entry("held", reason="paused", payload=TRIAGE_EXIT_PAYLOAD))
+        self.engage_pause()
+
+        result = self.run_retry("--now")
+
+        self.assertEqual((self.chats(), self.triage_checks()), ([], []))
+        self.assertEqual(self.entries()[chat_key("held")]["state"], "queued")
+        self.assertEqual(result.stdout, "Hermes is paused: the queued deliveries wait for hermes resume\n")
+
+    def test_the_fleet_root_pause_holds_a_profile_home(self):
+        fleet = Path(self.tmp.name) / "fleet"
+        self.home = fleet / "profiles" / "worker"
+        self.queue = self.home / "webhook-retry"
+        self.queue.mkdir(parents=True)
+        self.seed(entry("held", reason="paused"))
+        (fleet / "ESTOP").write_text("")
+
+        result = self.run_retry()
+
+        self.assertEqual((self.chats(), result.stdout.splitlines()), ([], ["Hermes is paused: the queued deliveries wait for hermes resume"]))
+
+    def test_a_pending_entry_that_never_reached_a_turn_replays_as_unadmitted(self):
+        self.seed(
+            entry("dropped", state="pending", delivered=ago(minutes=11), next_try_at=None, admitted=False),
+            entry("recent", state="pending", delivered=ago(minutes=5), next_try_at=None, admitted=False),
+        )
+
+        result = self.run_retry()
+
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["dropped"])
+        self.assertIn("because a restart, drain, or concurrency cap dropped it", self.chats()[0]["query"])
+        self.assertEqual(result.stdout, "retried linear dropped: succeeded\nwebhook retry queue drained\n")
+        self.assertEqual([e["delivery"] for e in self.entries().values()], ["recent"])
+
+    def test_an_admitted_pending_entry_stays_pending(self):
+        self.seed(entry("running", state="pending", delivered=ago(minutes=30), admitted=True))
+
+        result = self.run_retry()
+
+        self.assertEqual((result.stdout, self.chats()), ("", []))
+        self.assertEqual(self.entries()[chat_key("running")]["state"], "pending")
+
+    def test_a_pending_entry_recorded_before_admission_was_tracked_stays_pending(self):
+        self.seed(entry("legacy", state="pending", delivered=ago(minutes=30)))
+
+        result = self.run_retry()
+
+        self.assertEqual((result.stdout, self.chats()), ("", []))
+        self.assertEqual(self.entries()[chat_key("legacy")]["state"], "pending")
+
+    def test_an_old_unadmitted_entry_is_promoted_before_it_expires(self):
+        self.seed(entry("stale", state="pending", delivered=ago(hours=25), admitted=False))
+
+        self.run_retry()
+
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["stale"])
+
+    def test_a_reply_addressed_to_a_teammate_is_not_replayed(self):
+        reply = {"type": "AgentSessionEvent", "action": "prompted"}
+        for reason in ("paused", "unadmitted"):
+            with self.subTest(reason):
+                self.setUp()
+                self.install_triage_exit(handled=False, addressed=True)
+                state = "pending" if reason == "unadmitted" else "queued"
+                self.seed(entry("talk", state=state, delivered=ago(minutes=30), reason=reason, payload=reply, admitted=False))
+
+                result = self.run_retry()
+
+                self.assertEqual(self.chats(), [])
+                self.assertEqual([c["payload"] for c in self.teammate_checks()], [reply])
+                self.assertEqual(
+                    result.stdout,
+                    "retried linear talk: skipped a reply addressed to a teammate\nwebhook retry queue drained\n",
+                )
+                self.assertEqual(self.entries(), {})
+
+    def test_a_reply_for_the_agent_is_replayed(self):
+        reply = {"type": "AgentSessionEvent", "action": "prompted"}
+        self.install_triage_exit(handled=False, addressed=False)
+        self.seed(entry("talk", payload=reply))
+
+        self.run_retry()
+
+        self.assertEqual((len(self.teammate_checks()), len(self.chats())), (1, 1))
+
+    def test_a_failed_teammate_check_replays_the_turn(self):
+        reply = {"type": "AgentSessionEvent", "action": "prompted"}
+        self.install_triage_exit(handled=False, addressed=True, exit=1)
+        self.seed(entry("talk", payload=reply))
+
+        self.run_retry()
+
+        self.assertEqual(len(self.chats()), 1)
+
+    def test_two_deliveries_for_one_subject_replay_oldest_first(self):
+        self.seed(entry("newer", delivered=ago(hours=1)), entry("older", delivered=ago(hours=2)))
+
+        self.run_retry()
+
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["older", "newer"])
+
+    def test_a_delivery_that_is_not_due_holds_back_only_its_own_subject(self):
+        later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def subject(name, delivered, next_try=None):
+            key, value = entry(name, delivered=delivered, next_try=next_try)
+            value["summary"] = {"event": "Issue", "action": "update", "subject": name[0].upper()}
+            return key, value
+
+        self.seed(
+            subject("a-waiting", ago(hours=3), later),
+            subject("a-behind", ago(hours=2)),
+            subject("b-due", ago(hours=1)),
+        )
+
+        result = self.run_retry()
+
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["b-due"])
+        self.assertEqual(result.stdout, "retried linear b-due: succeeded\n")
+
+    def test_each_reason_is_named_in_the_replay_the_announcement_and_the_list(self):
+        later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        causes = {
+            "usage_limit": "could not run then because the model's usage limit was reached.",
+            "paused": "could not run then because Hermes was paused.",
+            "unadmitted": "could not run then because it never reached an agent turn, because a restart, drain, or concurrency cap dropped it.",
+        }
+        for reason, cause in causes.items():
+            with self.subTest(reason):
+                self.setUp()
+                self.seed(entry("d1", reason=reason, reported=False, next_try=later))
+                announced = self.run_retry()
+                listed = self.run_retry("--list")
+                self.run_retry("--now")
+
+                self.assertEqual(announced.stdout, f"queued linear d1 Issue update PAT-1: {reason} (next try {later})\n")
+                self.assertTrue(listed.stdout.rstrip().endswith(f" {later} {reason}"))
+                self.assertIn(cause, self.chats()[0]["query"])
+
+    def test_an_entry_stored_before_reasons_reads_as_a_usage_limit(self):
+        key, old = entry("old", reported=False)
+        self.seed((key, old))
+        self.assertNotIn("reason", old)
+
+        result = self.run_retry("--list")
+
+        self.assertTrue(result.stdout.rstrip().endswith(" usage_limit"))
 
     def test_a_route_without_toolsets_fails_without_running(self):
         self.seed(entry("lost", route="unknown"))
@@ -298,7 +559,7 @@ class RetryTest(unittest.TestCase):
         second = self.run_retry()
 
         self.assertEqual(
-            first.stdout, f"queued linear d1 Issue update PAT-1: waiting for usage (next try {later})\n"
+            first.stdout, f"queued linear d1 Issue update PAT-1: usage_limit (next try {later})\n"
         )
         self.assertEqual(second.stdout, "")
 
@@ -322,7 +583,7 @@ class RetryTest(unittest.TestCase):
         stored = self.entries()[chat_key("d1")]
         self.assertEqual(
             result.stdout,
-            f"queued linear d1 Issue update PAT-1 {stored['delivered_at']} 2 {stored['next_try_at']}\n",
+            f"queued linear d1 Issue update PAT-1 {stored['delivered_at']} 2 {stored['next_try_at']} usage_limit\n",
         )
 
     def test_list_when_empty(self):

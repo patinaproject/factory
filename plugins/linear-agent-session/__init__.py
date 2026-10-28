@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, kanban_guard, linear, missing_secret, tools, triage_exit
+from . import blocks, kanban_guard, linear, missing_secret, replies, tools, triage_exit, triage_intent
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ ACK_TIMEOUT_SECONDS = 5.0
 TRIAGE_EXIT_TIMEOUT_SECONDS = 300.0
 # Each archive runs `hermes kanban` three times. Its own pool keeps a bulk move off the acknowledgements' pool.
 TRIAGE_EXIT_WORKERS = 4
+TRIAGE_INTENT_TIMEOUT_SECONDS = 60.0
 # Hermes leaves a secret like this verbatim when its variable is unset, and anyone can sign with that text.
 UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$")
 # Linear writes a mention in an agent activity body as `<user id="<user id>" notify>name</user>`.
@@ -56,11 +57,12 @@ def register(ctx: Any) -> None:
             client = linear.client_from_env()
         return client
 
+    posts = replies.PostRecord()
     ctx.register_tool(
         name="linear_agent_activity",
         toolset=TOOLSET,
         schema=tools.ACTIVITY_SCHEMA,
-        handler=lambda args, **_: tools.run_activity(get_client, args),
+        handler=replies.make_activity_handler(posts, lambda args: tools.run_activity(get_client, args)),
         description=tools.ACTIVITY_SCHEMA["description"],
     )
     ctx.register_tool(
@@ -105,6 +107,27 @@ def register(ctx: Any) -> None:
         handler=lambda args, **_: tools.run_to_todo(get_client, args),
         description=tools.TO_TODO_SCHEMA["description"],
     )
+    ctx.register_tool(
+        name="linear_issue_edit",
+        toolset=TOOLSET,
+        schema=tools.EDIT_SCHEMA,
+        handler=lambda args, **_: tools.run_edit(get_client, args),
+        description=tools.EDIT_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="linear_issue_search",
+        toolset=TOOLSET,
+        schema=tools.SEARCH_SCHEMA,
+        handler=lambda args, **_: tools.run_search(get_client, args),
+        description=tools.SEARCH_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="github_issue_edit",
+        toolset=TOOLSET,
+        schema=tools.GITHUB_EDIT_SCHEMA,
+        handler=lambda args, **_: tools.run_github_edit(args),
+        description=tools.GITHUB_EDIT_SCHEMA["description"],
+    )
     ctx.register_hook(
         "pre_gateway_dispatch",
         make_dispatch_hook(
@@ -117,10 +140,25 @@ def register(ctx: Any) -> None:
                 triage_exit.kanban_cards,
                 triage_exit.gateway_home,
             ),
+            lambda payload: triage_intent.compute(
+                payload,
+                app_user_id=lambda: ctx.get_config("app_user_id", default=""),
+                client=get_client,
+                cards=triage_exit.kanban_cards,
+            ),
         ),
     )
     ctx.register_hook("pre_tool_call", kanban_guard.make_hook(session_platform))
     ctx.register_hook("kanban_task_blocked", blocks.make_blocked_hook(get_client))
+    ctx.register_hook(
+        "post_llm_call",
+        replies.make_turn_hook(
+            posts,
+            get_client,
+            replies.spawn_reask,
+            lambda: replies.route_toolsets(load_config_readonly(), ctx.get_config("webhook_route", default="linear")),
+        ),
+    )
     ctx.register_hook(
         "transform_api_error_classification", missing_secret.make_classification_hook(load_config_readonly, os.environ)
     )
@@ -138,15 +176,26 @@ def unresolved_routes(config: Mapping[str, Any]) -> dict[str, str]:
     return unresolved
 
 
+def paused() -> bool:
+    from agent.estop import paused_reply
+
+    return paused_reply() is not None
+
+
 def make_dispatch_hook(
     get_client: Callable[[], linear.LinearClient],
     webhook_route: Callable[[], str],
     load_config: Callable[[], Mapping[str, Any]],
     handle_triage_exit: Callable[[Any], triage_exit.Verdict],
+    compute_intent: Optional[Callable[[Any], triage_intent.Intent]] = None,
 ) -> Callable[..., Any]:
     pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-exit")
+    # A bulk move can hold every triage-exit worker for minutes, and an intent must not wait behind it.
+    intent_pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-intent")
 
     async def guard_then_acknowledge(event: Any, **_: Any) -> Optional[dict[str, str]]:
+        if paused():
+            return None
         route = _delivery_route(event)
         if route is None:
             return None
@@ -162,7 +211,10 @@ def make_dispatch_hook(
             logger.info("linear-agent-session: %s; no acknowledgement or triage turn", TEAMMATE_REPLY)
             return {"action": "skip", "reason": TEAMMATE_REPLY}
         await acknowledge_best_effort(event, route)
-        return await archive_triage_exit(event, route)
+        skipped = await archive_triage_exit(event, route)
+        if skipped is not None or route != webhook_route() or compute_intent is None:
+            return skipped
+        return await prepend_intent(event)
 
     async def acknowledge_best_effort(event: Any, route: str) -> None:
         try:
@@ -203,6 +255,27 @@ def make_dispatch_hook(
             return None
         logger.info("linear-agent-session: %s; no triage turn", verdict.reason)
         return {"action": "skip", "reason": verdict.reason}
+
+    def compute_twice(payload: Any) -> triage_intent.Intent:
+        """An `error` intent ends the turn, and an `Issue` event has no session to say so on, so one failed read gets a second try."""
+        intent = compute_intent(payload)
+        return compute_intent(payload) if intent.action == "error" else intent
+
+    async def prepend_intent(event: Any) -> dict[str, str]:
+        try:
+            loop = asyncio.get_running_loop()
+            intent = await asyncio.wait_for(
+                loop.run_in_executor(intent_pool, compute_twice, event.raw_message), timeout=TRIAGE_INTENT_TIMEOUT_SECONDS
+            )
+        except Exception as failure:
+            message = (
+                f"the intent took longer than {TRIAGE_INTENT_TIMEOUT_SECONDS:.0f} s"
+                if isinstance(failure, asyncio.TimeoutError)
+                else blocks.hermes_redact(f"{type(failure).__name__}: {failure}")
+            )
+            logger.warning("linear-agent-session: no triage intent: %s", message)
+            intent = triage_intent.error_intent(message)
+        return {"action": "rewrite", "text": triage_intent.render(intent) + event.text}
 
     return guard_then_acknowledge
 

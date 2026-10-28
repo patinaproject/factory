@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-"""Restart the Hermes gateway only when no Kanban card is running.
+"""Restart the Hermes gateway without waiting for Kanban cards that survive it.
 
-`hermes gateway restart` stops the gateway's launchd job, and the Kanban
-workers its dispatcher spawned die with it, because the restart drain waits
-for chat work and cron jobs only. This script waits, up to `--timeout`
-seconds, until no board has a `running` card. It then engages `hermes pause`
-so the dispatcher spawns no new card, confirms the board is still empty,
-restarts the gateway, and lifts the pause it engaged. When the wait expires,
-it names the running cards and exits 1 without restarting.
+Most running cards need not drain. Hermes spawns each Kanban worker in its own
+session (`start_new_session=True`), so a worker outlives `hermes gateway
+restart`. One path still kills workers. At startup a gateway with
+`gateway.multiplex_profiles` replays the worker profile's `processes.json` and
+adopts every live process it lists, and at its next shutdown it kills every
+process it holds, adopted ones included. Hermes does not say which processes
+were adopted, so a card is at risk when its current run's worker has a live
+child that started no later than 300 s after the gateway did.
+
+This script waits, up to `--timeout` seconds, only for at-risk cards. It then
+engages `hermes pause` so the dispatcher spawns no new card, checks once more,
+restarts the gateway, and lifts the pause it engaged. `hermes gateway restart`
+drains the gateway's own turns. When the wait expires, the script names the
+at-risk cards and exits 1 without restarting. A gateway record, process table,
+or card that cannot be read counts as at risk, and no running gateway means
+nothing is at risk.
 """
 from __future__ import annotations
 
@@ -21,9 +30,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-# A dispatcher tick checks the pause before it spawns, so a tick already past
-# that check can still claim a card just after `hermes pause` returns.
-SETTLE_SECONDS = 10.0
+# Children that start this long after the gateway can still come from a
+# processes.json replay that runs while the gateway starts.
+STARTUP_GRACE_SECONDS = 300
 
 Run = Callable[[list[str]], subprocess.CompletedProcess]
 
@@ -33,6 +42,15 @@ class Card:
     board: str
     id: str
     title: str
+
+
+@dataclass(frozen=True)
+class Process:
+    ppid: int
+    start: float
+
+
+ProcessTable = dict[int, Process]
 
 
 def run_hermes(hermes: str) -> Run:
@@ -70,12 +88,94 @@ def describe(cards: list[Card]) -> str:
     return "\n".join(f"  {card.board}/{card.id} {card.title}" for card in cards)
 
 
+def read_processes() -> ProcessTable | None:
+    """The process table, or None when `ps` fails or prints a line this cannot read."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,lstart="],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return parse_processes(proc.stdout)
+    except ValueError:
+        return None
+
+
+def parse_processes(text: str) -> ProcessTable:
+    table = {}
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        started = time.mktime(time.strptime(" ".join(fields[2:]), "%a %b %d %H:%M:%S %Y"))
+        table[int(fields[0])] = Process(int(fields[1]), started)
+    return table
+
+
+def read_gateway_pid(root: Path) -> Callable[[], int | None]:
+    """The gateway's pid from its record. None means no record, ValueError a record that is not one."""
+
+    def read() -> int | None:
+        try:
+            text = (root / "gateway.pid").read_text()
+        except FileNotFoundError:
+            return None
+        try:
+            return int(json.loads(text)["pid"])
+        except (KeyError, TypeError) as exc:
+            raise ValueError("gateway.pid has no pid") from exc
+
+    return read
+
+
+def worker_at_risk(run: Run, card: Card, table: ProcessTable, cutoff: float) -> bool:
+    try:
+        shown = json.loads(checked(run, ["kanban", "--board", card.board, "show", card.id, "--json"]))
+        if shown["task"]["status"] != "running":
+            return False
+        current = [r for r in shown["runs"] if r["ended_at"] is None]
+        pid = current[-1]["worker_pid"]
+        if not isinstance(pid, int):
+            return True
+    except (RuntimeError, ValueError, KeyError, IndexError, TypeError):
+        return True
+    return any(p.ppid == pid and p.start <= cutoff for p in table.values())
+
+
+def at_risk_cards(
+    run: Run,
+    gateway_pid: Callable[[], int | None],
+    processes: Callable[[], ProcessTable | None],
+) -> list[Card]:
+    try:
+        pid = gateway_pid()
+    except (OSError, ValueError):
+        return running_cards(run)
+    if pid is None:
+        return []
+    table = processes()
+    if table is None:
+        return running_cards(run)
+    gateway = table.get(pid)
+    if gateway is None:
+        return []
+    cutoff = gateway.start + STARTUP_GRACE_SECONDS
+    return [card for card in running_cards(run) if worker_at_risk(run, card, table, cutoff)]
+
+
 def restart(
     run: Run,
     paused: Callable[[], bool],
+    gateway_pid: Callable[[], int | None],
+    processes: Callable[[], ProcessTable | None],
     timeout: float,
     poll: float,
-    settle: float = SETTLE_SECONDS,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     out=sys.stdout,
@@ -83,37 +183,37 @@ def restart(
     deadline = clock() + timeout
     last: list[Card] | None = None
     while True:
-        cards = running_cards(run)
+        cards = at_risk_cards(run, gateway_pid, processes)
         if not cards:
             ours = not paused()
             if ours:
                 checked(run, ["pause", "--reason", "restart-gateway: restarting the gateway"])
             try:
-                sleep(settle)
-                cards = running_cards(run)
+                # A dispatcher tick already past the pause check can claim a card just after the pause.
+                cards = at_risk_cards(run, gateway_pid, processes)
                 if not cards:
-                    print("restart-gateway: no Kanban card is running; restarting the gateway", file=out, flush=True)
+                    print("restart-gateway: no Kanban card is at risk; restarting the gateway", file=out, flush=True)
                     return run(["gateway", "restart"]).returncode
             finally:
                 if ours:
                     checked(run, ["resume"])
         if clock() >= deadline:
             print(
-                f"restart-gateway: {len(cards)} Kanban card(s) still running after {timeout:g}s; "
+                f"restart-gateway: {len(cards)} at-risk Kanban card(s) still running after {timeout:g}s; "
                 f"not restarting\n{describe(cards)}",
                 file=out,
                 flush=True,
             )
             return 1
         if cards != last:
-            print(f"restart-gateway: waiting for {len(cards)} running Kanban card(s)\n{describe(cards)}", file=out, flush=True)
+            print(f"restart-gateway: waiting for {len(cards)} at-risk Kanban card(s)\n{describe(cards)}", file=out, flush=True)
             last = cards
         sleep(min(poll, max(deadline - clock(), 0)))
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--timeout", type=float, default=3600, help="seconds to wait for running cards (default 3600)")
+    parser.add_argument("--timeout", type=float, default=3600, help="seconds to wait for at-risk cards (default 3600)")
     parser.add_argument("--poll", type=float, default=30, help="seconds between board checks (default 30)")
     parser.add_argument("--hermes", default="hermes", help="the Hermes CLI to run (default: hermes on PATH)")
     args = parser.parse_args(argv)
@@ -122,7 +222,14 @@ def main(argv: list[str] | None = None) -> int:
     root = Path.home() / ".hermes"
     home = Path(os.environ.get("HERMES_HOME") or root)
     try:
-        return restart(run_hermes(args.hermes), lambda: operator_paused(home, root), args.timeout, args.poll)
+        return restart(
+            run_hermes(args.hermes),
+            lambda: operator_paused(home, root),
+            read_gateway_pid(root),
+            read_processes,
+            args.timeout,
+            args.poll,
+        )
     except (RuntimeError, OSError, json.JSONDecodeError) as exc:
         print(f"restart-gateway: {exc}; not restarting", file=sys.stderr)
         return 1

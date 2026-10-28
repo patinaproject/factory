@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Claude Code PostToolUse and Stop hook for a worker run: hand Claude a person's Linear reply.
+
+`reply-hook post-tool-use --inbox <path>` prints the pending replies as additional context after any
+tool call of the main agent. `reply-hook stop --inbox <path>` blocks the end of the turn while a reply is
+undelivered, and once more while a delivered reply has no answer. Claude Code feeds the event as JSON on
+stdin. A hook that exits 2 would block the run, so any error prints nothing and exits 0.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import reply_inbox
+
+
+def decide(mode: str, event: dict, inbox: Path) -> dict | None:
+    if mode == "post-tool-use":
+        if event.get("agent_id"):
+            return None
+        text = reply_inbox.update(inbox, reply_inbox.deliver)
+        if text is None:
+            return None
+        return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}
+    reason = reply_inbox.update(inbox, reply_inbox.stop_reason)
+    return None if reason is None else {"decision": "block", "reason": reason}
+
+
+def main() -> int:
+    try:
+        mode, flag, inbox = sys.argv[1:4]
+        if flag != "--inbox" or mode not in ("post-tool-use", "stop"):
+            return 0
+        output = decide(mode, json.load(sys.stdin), Path(inbox))
+        if output is not None:
+            print(json.dumps(output))
+    except Exception:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -100,7 +100,9 @@ factory's Linear server and the repository's own servers.
 A repository server that reads its key through a person's secret session,
 such as a `headersHelper` that signs in to Infisical as a person, gets a
 factory token the same way when it is an HTTP server. Give the factory the
-development credential only.
+development credential only, with read access only. For a repository's own
+content-management server, store it as `CMS_MCP_API_KEY`, which the manifest
+already declares.
 
 Disable these servers with `disabled_mcp_servers`, and record why in the
 private record:
@@ -115,6 +117,42 @@ private record:
 
 Revisit a disabled server when its service adds a token or a service account.
 
+## Root agent
+
+The root agent answers in chat and Linear. It does not run `claude-session`,
+so it gets none of the servers above. Give it a static-token HTTP server
+through native Hermes `mcp_servers` in the root home's `config.yaml`:
+
+```yaml
+mcp_servers:
+  sentry:
+    url: https://mcp.sentry.dev/mcp/<org>?skills=inspect
+    headers:
+      Authorization: Sentry-Bearer ${SENTRY_ACCESS_TOKEN}
+    sampling:
+      enabled: false
+```
+
+- Use the `token_env` of the matching `claude_session.mcp_servers` entry, and
+  the same scheme word. The header holds only a `${VAR}` reference. Hermes
+  fills it from the home's secret source, the `factory-secrets` helper, and
+  fails closed when the variable is unset. `config.yaml` never holds a token.
+- Set `sampling.enabled` to `false`, so the server cannot ask the factory's
+  model for inference.
+- The `<org>` in the Sentry URL limits the server to one organization. That URL
+  hides the `whoami` and `find_organizations` tools. This is expected.
+- OAuth servers, and stdio servers that need a secret, are out of scope.
+
+Set and check it from a shell outside Hermes:
+
+```sh
+HERMES_HOME=<home> hermes config set mcp_servers.<server> '<json>' </dev/null
+HERMES_HOME=<home> hermes mcp test <server>
+python3 <repo>/skills/setup-factory/scripts/restart-gateway
+```
+
+`<json>` is the server entry as JSON, with the same keys as the YAML above.
+
 ## Check
 
 - `check-install` prints no `holds no token for the <name> MCP server` line
@@ -128,6 +166,14 @@ Revisit a disabled server when its service adds a token or a service account.
   Code reaches the model. Each server that is not `connected` and not in
   `disabled_mcp_servers` gets an `mcp <server> in <owner>/<name>` line. It
   prints no value.
+
+- `check-install` prints no `root mcp` line. For each root-home `mcp_servers`
+  entry that is not `enabled: false`, it runs `hermes mcp test <server>` with
+  the root home. It reports a server that does not connect, a server whose
+  `sampling.enabled` is not `false`, and a header whose value is anything but
+  one `${VAR}` reference, after at most one scheme word. It reports a
+  `config.yaml` it cannot read as one `root mcp` line. It prints no header
+  value.
 
 `claude mcp list` shows a person's interactive view, not a worker's. To read
 every status a worker run sees for one repository:

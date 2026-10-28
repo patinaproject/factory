@@ -31,29 +31,32 @@ class Failed(Exception):
         self.stderr = stderr
 
 
-def run(*command: str) -> str:
+def run(*command: str, env: dict | None = None) -> str:
     try:
-        proc = subprocess.run(command, capture_output=True, text=True)
+        proc = subprocess.run(command, capture_output=True, text=True, env=env)
     except OSError as failure:
         raise Failed(f"{command[0]} could not run: {failure.strerror or failure}") from failure
     if proc.returncode != 0:
-        detail = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "no error output"
-        raise Failed(f"{' '.join(command[:3])} failed: {detail}", proc.stderr)
+        raise Failed(f"{' '.join(command[:3])} failed: {last_line(proc.stderr)}", proc.stderr)
     return proc.stdout
 
 
-def run_kanban(*command: str) -> str:
+def last_line(stderr: str) -> str:
+    return stderr.strip().splitlines()[-1] if stderr.strip() else "no error output"
+
+
+def run_kanban(*command: str, env: dict | None = None) -> str:
     """Retry once when Hermes' preflight loses a race with another `hermes kanban` process.
 
     That process removes the `-wal` file between the preflight's existence check and its
     permission check, so the call fails with a message about a file that is gone.
     """
     try:
-        return run(*command)
+        return run(*command, env=env)
     except Failed as failure:
         if PREFLIGHT_RACE not in failure.stderr:
             raise
-        return run(*command)
+        return run(*command, env=env)
 
 
 def read_task(kanban: list[str], task_id: str) -> dict:
@@ -76,18 +79,26 @@ def free_worktree(task: dict) -> str | None:
     return str(path)
 
 
+def kanban_command(board: str | None) -> list[str]:
+    return [os.environ.get("HERMES_BIN", "hermes"), "kanban", *(["--board", board] if board else [])]
+
+
+def archive(kanban: list[str], task_id: str) -> str | None:
+    """Archive the card and return the worktree it freed, if any."""
+    task = read_task(kanban, task_id)
+    if task["status"] != "archived":
+        run_kanban(*kanban, "archive", task_id)
+        task = read_task(kanban, task_id)
+    return free_worktree(task)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("task_id")
     parser.add_argument("--board", help="the card's board, when it is not the current one")
     args = parser.parse_args(argv)
-    kanban = [os.environ.get("HERMES_BIN", "hermes"), "kanban", *(["--board", args.board] if args.board else [])]
     try:
-        task = read_task(kanban, args.task_id)
-        if task["status"] != "archived":
-            run_kanban(*kanban, "archive", args.task_id)
-            task = read_task(kanban, args.task_id)
-        freed = free_worktree(task)
+        freed = archive(kanban_command(args.board), args.task_id)
     except (Failed, KeyError, ValueError) as failure:
         print(json.dumps({"error": str(failure)}))
         return 1

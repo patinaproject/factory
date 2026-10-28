@@ -29,6 +29,7 @@ It disables all hooks, so the repository's own hooks never run.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import importlib
 import json
@@ -45,15 +46,17 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import parse_qsl, quote, urlsplit
+from urllib.parse import quote
 
 import blockers
 import card_branch
 import closing
+import factory_settings
 import factory_source
+import gh_login
 import kanban_board
+import reply_inbox
 
-SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_WORKER_ENTRY = (
     "Work Linear issue {issue_identifier} ({issue_url}) in {repo} on branch {branch}. "
     "First start the issue through this repository's own issue-start workflow, which moves it to In Progress. "
@@ -161,6 +164,8 @@ FINISH_RULE = STOP_RULE + (
 )
 CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
 COMMIT_CLOSES_GUARD = Path(__file__).resolve().with_name("guard-commit-closes")
+REPLY_HOOK = Path(__file__).resolve().with_name("reply-hook")
+SESSION_REPLY = Path(__file__).resolve().with_name("session-reply")
 PROXY_TOKEN_HELPER = Path(__file__).resolve().with_name("proxy-token")
 MCP_HEADERS_HELPER = Path(__file__).resolve().with_name("mcp-headers")
 TRIAGE_DOCUMENTS = ("Triage notes", "Agent brief")
@@ -176,7 +181,9 @@ TRIAGE_RULE = (
     "`Triage notes` and `Agent brief`, with no issue identifier before the title, even where the adapter "
     "titles other Documents with one. For a public repository synced to Linear, the Documents stay on the Linear issue and "
     "the roles are written as GitHub labels, because GitHub is canonical.\n\n"
-    "Apply only category and state roles. A role's label may differ in case and punctuation, such as `Ready for agent` "
+    "Apply only category and state roles, plus the priority that the playbook's step 13 sets from the repository "
+    "adapter's `## Priority rubric`. For a public repository, set the priority on the synced Linear issue, never as a "
+    "GitHub label. A role's label may differ in case and punctuation, such as `Ready for agent` "
     "for `ready-for-agent`. In Triage notes, the Agent brief, and every message to people, name a label as Linear shows "
     "it (read it with the Linear MCP, or from `role_labels` of `linear_issue`), never by its role. Never change the issue's status, assignee, or delegate, with one "
     "exception: when the issue is delegated to the factory's agent app and passes as `ready-for-agent`, move "
@@ -189,7 +196,9 @@ TRIAGE_RULE = (
     "else. Do not post the questions yourself: the worker posts them on the issue's agent session with the "
     "disclaimer.\n\n"
     "When triage ends, make the first line of your final message `Triage outcome: <role>`, where <role> is "
-    "`ready-for-agent`, `ready-for-human`, or `wontfix` for a recommendation, and add a short summary."
+    "`ready-for-agent`, `ready-for-human`, or `wontfix` for a recommendation. Make the second line "
+    "`Priority: <value>, set by triage` when you wrote it, `Priority: <value>, kept` when a person's choice "
+    "stands, or `Priority: none` when the issue has none, such as a confident duplicate. Then add a short summary."
 )
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{CLOSING_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 TRIAGE_SYSTEM_PROMPT = f"{TRIAGE_RULE}\n\n{LINEAR_RULE}\n\n{STOP_RULE}"
@@ -200,19 +209,10 @@ LINEAR_MCP_SERVER = {
     "url": "https://mcp.linear.app/mcp",
     "headers": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
 }
-MCP_SERVER_KEYS = frozenset({"url", "token_env", "scheme", "headers"})
 MCP_STATUS_SECONDS = 90.0
 UNREACHABLE_MODEL_URL = "http://127.0.0.1:9"
-# Fixed headers and the URL reach argv in --mcp-config, where ps shows them, so a name or value that could carry a secret is refused.
-CREDENTIAL_NAME = re.compile(r"auth|key|token|secret|cookie|password|cred|session|sig|pass|pwd|jwt|bearer|access", re.IGNORECASE)
-AUTHORIZATION_VALUE = re.compile(r"\s*(?:bearer|basic|token|sentry-bearer)(?:\s|$)", re.IGNORECASE)
-# `sk-` alone is a language tag such as sk-SK, so it counts only with a token's worth of characters after it.
-TOKEN_SHAPE = re.compile(
-    r"\s*(?:(?:ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|sntrys_|sntryu_|lin_api_|phx_|xoxb-|xoxp-)|sk-[A-Za-z0-9_-]{20})"
-)
 COMPLETED_SUBTYPES = frozenset({"success", "error_max_turns"})
 CACHE_TTL_SECONDS = 300
-DEFAULT_FRESH_AFTER_TOKENS = 100_000
 HANDOFF_RESULT_CHARS = 2000
 USAGE_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 MODEL_USAGE_KEYS = (
@@ -226,6 +226,8 @@ GRACE_SECONDS = 10.0
 TOOLCHAIN_CHECK_SECONDS = 120
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
+POLL_ENV = "CLAUDE_SESSION_REPLY_POLL_SECONDS"
+INBOX_NAME = "claude-session.replies.json"
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 GITHUB_ISSUE_LINE = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
@@ -263,6 +265,11 @@ def git(cwd: Path, *args: str) -> str:
     if proc.returncode != 0:
         raise Refusal(f"git {' '.join(args)} failed in {cwd}: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def worktree_state(worktree: Path) -> tuple[str, str]:
+    """The commit and the uncommitted changes, so a run's progress is whether either moved."""
+    return git(worktree, "rev-parse", "HEAD"), git(worktree, "status", "--porcelain")
 
 
 def takeover_pull_ref(takeover_pr: str, repo: str) -> str:
@@ -411,7 +418,7 @@ def link_issues(
     """Give the factory's open pull request for the branch a closing reference to each of the card's issues.
 
     Runs after each Claude turn, like supersede_takeover. A bare Linear identifier after a closing keyword
-    becomes the issue's URL, and one closing line names whatever is still missing, so no issue gets a second
+    becomes a Markdown link to the issue's URL, and one closing line names whatever is still missing, so no issue gets a second
     closing reference. The result goes in the run's report and never changes its status.
     """
     try:
@@ -423,13 +430,13 @@ def link_issues(
             return {"action": "waiting", "reason": f"no open pull request by {login} on {branch}"}
         result = {"pr": pull["html_url"]}
         body = pull.get("body") or ""
-        edited = closing.with_url(body, identifier, linear_url)
+        edited = closing.with_link(body, identifier, linear_url)
         written = {}
         issue = closing.ISSUE_URL.match(github_issue or "")
         if issue:
             ref = closing.github_reference(*issue.groups(), repo)
             written[ref] = ref
-        written[identifier.upper()] = linear_url
+        written[identifier.upper()] = f"[{identifier.upper()}]({linear_url})"
         missing = [written[ref] for ref in closing.missing(edited, repo, written)]
         if missing:
             edited = f"{edited.rstrip()}\n\nCloses {', closes '.join(missing)}".strip()
@@ -444,14 +451,7 @@ def link_issues(
 def load_settings(settings_file: str | None) -> dict:
     if settings_file:
         return json.loads(Path(settings_file).read_text())
-    proc = subprocess.run(
-        ["hermes", "config", "get", SETTINGS_KEY, "--json", "--raw"],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise Refusal(f"hermes config get {SETTINGS_KEY} failed: {proc.stderr.strip()}")
-    return json.loads(proc.stdout)
+    return factory_settings.read(raw=True)
 
 
 def find_repository(settings: dict, full_name: str) -> dict:
@@ -576,13 +576,6 @@ def model_usage(output: dict) -> dict | None:
     }
 
 
-def fresh_after_tokens(transport: dict) -> int:
-    value = transport.get("fresh_after_tokens", DEFAULT_FRESH_AFTER_TOKENS)
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise Refusal(f"claude_session.fresh_after_tokens {value!r} must be a positive integer")
-    return value
-
-
 def plan_session(key: str, worktree: Path, threshold: int, now: float) -> SessionPlan:
     generation, latest = 0, None
     while found := find_transcript(session_id_for(key, generation), worktree):
@@ -629,9 +622,6 @@ def node_bin_for(worktree: Path) -> Path | None:
     return max(matches, key=lambda d: version_key(d.name)) / "bin"
 
 
-MODEL_TIERS = ("sonnet", "haiku", "fable")
-
-
 # What Claude Code and the tools it runs need: a shell, locale, temp dir, the worker's gh login, its
 # own config dir, and where the Java, Android, and Xcode toolchains live. Nothing else from the worker's
 # environment crosses, so no secret can.
@@ -656,11 +646,8 @@ def child_env(worktree: Path) -> dict:
 
 def check_toolchain(repo: dict, worktree: Path) -> None:
     """Run the repository's toolchain checks in the environment Claude Code gets, and refuse on a failure."""
-    checks = repo.get("toolchain_checks") or []
-    if not isinstance(checks, list) or not all(isinstance(check, str) for check in checks):
-        raise Refusal(f"toolchain_checks {checks!r} must be a list of shell commands")
     env = child_env(worktree)
-    for check in checks:
+    for check in factory_settings.toolchain_checks(repo):
         try:
             result = subprocess.run(
                 ["/bin/sh", "-c", check], cwd=worktree, env=env, stdin=subprocess.DEVNULL,
@@ -797,68 +784,16 @@ def triage_activity(client, issue_id: str, result: str | None) -> str | None:
         return "thought"
 
 
-def tier_models(transport: dict) -> dict:
-    value = transport.get("tier_models")
-    if value is None:
-        return {}
-    ok = isinstance(value, dict) and set(value) <= set(MODEL_TIERS) and all(
-        isinstance(model, str) and model for model in value.values()
-    )
-    if not ok:
-        raise Refusal(
-            f"claude_session.tier_models {value!r} must map {', '.join(MODEL_TIERS)} to non-empty model ids"
-        )
-    return value
-
-
 def model_environment(transport: dict, tiers: dict) -> dict:
     # The main loop and every tier without its own model stay on the transport model, because a proxy
     # answers `unknown provider for model ...` for an id it does not serve.
     model = transport["model"]
     env = {"ANTHROPIC_MODEL": model, "ANTHROPIC_DEFAULT_OPUS_MODEL": model}
-    env.update({f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL": tiers.get(tier, model) for tier in MODEL_TIERS})
+    env.update({f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL": tiers.get(tier, model) for tier in factory_settings.MODEL_TIERS})
     # A subagent that names no model takes this alias. CLAUDE_CODE_SUBAGENT_MODEL_FORCE stays unset so
     # an explicit model on the Agent call still wins.
     env["CLAUDE_CODE_SUBAGENT_MODEL"] = "sonnet" if "sonnet" in tiers else model
     return env
-
-
-def factory_mcp_servers(transport: dict) -> dict:
-    if "sentry_token_env" in transport:
-        raise Refusal("claude_session.sentry_token_env is replaced by claude_session.mcp_servers.sentry")
-    servers = transport.get("mcp_servers") or {}
-    if not isinstance(servers, dict):
-        raise Refusal(f"claude_session.mcp_servers {servers!r} must map server names to servers")
-    for name, server in servers.items():
-        where = f"claude_session.mcp_servers.{name}"
-        if name == "linear":
-            raise Refusal(f"{where}: the factory owns the linear server")
-        if not isinstance(server, dict) or not set(server) <= MCP_SERVER_KEYS:
-            raise Refusal(f"{where} must be an object with only {', '.join(sorted(MCP_SERVER_KEYS))}")
-        if not (isinstance(server.get("url"), str) and server["url"].startswith("https://")):
-            raise Refusal(f"{where}.url must be an https URL")
-        if not (isinstance(server.get("token_env"), str) and server["token_env"]):
-            raise Refusal(f"{where}.token_env must name the gateway's variable that holds the token")
-        scheme = server.get("scheme", "Bearer")
-        if not (isinstance(scheme, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", scheme)):
-            raise Refusal(f"{where}.scheme must be one Authorization scheme word, such as Bearer")
-        headers = server.get("headers", {})
-        if not (isinstance(headers, dict) and all(isinstance(v, str) for v in headers.values())):
-            raise Refusal(f"{where}.headers must map header names to fixed strings")
-        if any(CREDENTIAL_NAME.search(header) for header in headers):
-            raise Refusal(f"{where}.headers must hold no credential; mcp-headers sends the token as Authorization")
-        url = urlsplit(server["url"])
-        if "@" in url.netloc:
-            raise Refusal(f"{where}.url must hold no userinfo; mcp-headers sends the token as Authorization")
-        query = parse_qsl(url.query, keep_blank_values=True)
-        if any(CREDENTIAL_NAME.search(key) for key, _ in query):
-            raise Refusal(f"{where}.url must hold no credential in its query string; mcp-headers sends the token as Authorization")
-        values = (*headers.values(), *(value for _, value in query))
-        if any(AUTHORIZATION_VALUE.match(value) for value in values):
-            raise Refusal(f"{where} must hold no Authorization scheme in a header value or URL query value; mcp-headers sends the token")
-        if any(TOKEN_SHAPE.match(value) for value in values):
-            raise Refusal(f"{where} must hold no known token prefix in a header value or URL query value; mcp-headers sends the token")
-    return servers
 
 
 def require_mcp_tokens(servers: dict) -> None:
@@ -891,13 +826,6 @@ def mcp_config(servers: dict) -> str:
     return json.dumps({"mcpServers": config})
 
 
-def disabled_mcp_servers(transport: dict) -> list[str]:
-    value = transport.get("disabled_mcp_servers") or []
-    if not isinstance(value, list) or not all(isinstance(name, str) and name for name in value):
-        raise Refusal(f"claude_session.disabled_mcp_servers {value!r} must be a list of MCP server names")
-    return value
-
-
 def publish_denials() -> list[str]:
     push_signed = Path(__file__).resolve().with_name("push-signed")
     return [
@@ -908,7 +836,7 @@ def publish_denials() -> list[str]:
     ]
 
 
-def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = False) -> dict:
+def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = False, inbox: Path | None = None) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
     # Claude Code sends every MCP schema inline when ANTHROPIC_BASE_URL is not Anthropic's,
@@ -916,7 +844,7 @@ def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = Fa
     env = {"LINEAR_API_KEY": api_key, "ENABLE_TOOL_SEARCH": "true"}
     if transport.get("base_url"):
         env["ANTHROPIC_BASE_URL"] = transport["base_url"]
-    tiers = tier_models(transport)
+    tiers = factory_settings.tier_models(transport)
     if transport.get("model"):
         env.update(model_environment(transport, tiers))
     # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
@@ -931,9 +859,14 @@ def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = Fa
         "SessionStart": [{"hooks": [remove]}],
         "PreToolUse": [{"matcher": "Bash", "hooks": guards}],
     }}
+    if inbox:
+        # Hands Claude a person's Linear reply during the run; see reply_inbox.
+        for event, mode in (("PostToolUse", "post-tool-use"), ("Stop", "stop")):
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(REPLY_HOOK))} {mode} --inbox {shlex.quote(str(inbox))}"
+            settings["hooks"][event] = [{"hooks": [{"type": "command", "command": command}]}]
     if transport.get("auth_token_env"):
         settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)
-    disabled = disabled_mcp_servers(transport)
+    disabled = factory_settings.disabled_mcp_servers(transport)
     if disabled:
         settings["disabledMcpjsonServers"] = disabled
     if triage:
@@ -961,22 +894,8 @@ def write_private(path: Path, settings: dict) -> None:
 
 
 def max_turns_args(transport: dict) -> list[str]:
-    value = transport.get("max_turns")
-    if value is None or value == 0:
-        return []
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise Refusal(f"claude_session.max_turns {value!r} must be a positive integer, or 0 for no limit")
-    return ["--max-turns", str(value)]
-
-
-def worker_entry_prefix(repo: dict) -> str:
-    prefix = repo.get("worker_entry") or ""
-    if "{" in prefix:
-        raise Refusal(
-            f"worker_entry {prefix!r} must be a plain prefix such as /patina-mode; "
-            "claude-session adds the issue, URL, repository, and branch itself"
-        )
-    return prefix
+    turns = factory_settings.max_turns(transport)
+    return [] if turns is None else ["--max-turns", str(turns)]
 
 
 def handoff_text(plan: SessionPlan, branch: str, head: str, triage: bool = False) -> str | None:
@@ -995,7 +914,7 @@ def handoff_text(plan: SessionPlan, branch: str, head: str, triage: bool = False
 def read_card(card_json: str | None, task_id: str) -> dict:
     if card_json:
         return json.loads(Path(card_json).read_text())
-    proc = subprocess.run(["hermes", "kanban", "show", task_id, "--json"], capture_output=True, text=True)
+    proc = subprocess.run([factory_settings.find_hermes(), "kanban", "show", task_id, "--json"], capture_output=True, text=True)
     if proc.returncode != 0:
         raise Refusal(f"hermes kanban show {task_id} failed: {proc.stderr.strip()}")
     return json.loads(proc.stdout)
@@ -1064,6 +983,19 @@ def build_prompt(
         takeover = " ".join(filter(None, [TAKEOVER_INTRO, start, TAKEOVER_RULES]))
         entry = f"{entry}\n\n{takeover.format(url=args.takeover_pr)}"
     return "\n\n".join(filter(None, [entry, handoff, message]))
+
+
+def reply_watch(inbox: Path | None, client, args: argparse.Namespace, comments: list[dict], own: str):
+    """The run's reply watcher, or a no-op for a triage run (no inbox)."""
+    if inbox is None:
+        return contextlib.nullcontext()
+    linear = plugin_module("linear-agent-session", "linear")
+    poll = float(os.environ.get(POLL_ENV, reply_inbox.POLL_SECONDS))
+    return reply_inbox.Watch(
+        inbox, lambda: read_card(args.card_json, args.task_id),
+        lambda session_id, body: reply_inbox.post_thought(linear, client, session_id, body), comment_key,
+        start_keys=[comment_key(c) for c in comments], own=own, poll_seconds=poll,
+    )
 
 
 def run_claude(command: list[str], worktree: Path) -> tuple[dict | None, int, str]:
@@ -1164,20 +1096,41 @@ def end_run(proc: subprocess.Popen) -> set[int]:
     return leftovers
 
 
+def require_fresh_login() -> None:
+    """Refuse before Claude starts when the saved gh login expiry is missing or too near."""
+    config_dir = os.environ.get("GH_CONFIG_DIR")
+    if not config_dir:
+        raise Refusal("GH_CONFIG_DIR is not set, so the worker's gh login cannot be checked", transient=True)
+    try:
+        left = gh_login.seconds_left(Path(config_dir), time.time())
+    except ValueError as error:
+        raise Refusal(f"the worker's gh login: {error}; refresh-gh-app-login has not saved an expiry", transient=True) from None
+    if left < gh_login.MIN_REMAINING_SECONDS:
+        raise Refusal(
+            f"the worker's gh login in {config_dir} has {max(left, 0) // 60:.0f} minutes left, "
+            f"under the {gh_login.MIN_REMAINING_SECONDS // 60} needed; refresh-gh-app-login renews it",
+            transient=True,
+        )
+
+
 def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     import result_line
 
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
         raise Refusal("HERMES_KANBAN_WORKSPACE is not set; claude-session runs only inside a Kanban worker")
+    require_fresh_login()
     triage = os.environ.get("HERMES_KANBAN_BOARD") == TRIAGE_BOARD
     settings = load_settings(args.settings_json)
     repo = find_repository(settings, args.repo)
+    problems = factory_settings.validate(settings).for_repository(args.repo)
+    if problems:
+        raise Refusal("; ".join(problems))
     transport = settings.get("claude_session") or {}
     turn_limit = max_turns_args(transport)
-    servers = factory_mcp_servers(transport)
-    threshold = fresh_after_tokens(transport)
-    prefix = worker_entry_prefix(repo)
+    servers = factory_settings.mcp_servers(transport)
+    threshold = factory_settings.fresh_after_tokens(transport)
+    prefix = factory_settings.worker_entry(repo)
     worktree = resolve_worktree(workspace, repo["path"])
     check_toolchain(repo, worktree)
     lock_path = Path(git(worktree, "rev-parse", "--absolute-git-dir")) / LOCK_NAME
@@ -1226,6 +1179,10 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         comments = card["comments"]
         seen_path = lock_path.with_name(COMMENTS_SEEN_NAME)
         seen = json.loads(seen_path.read_text()) if seen_path.exists() else []
+        inbox = None if triage else lock_path.with_name(INBOX_NAME)
+        if inbox:
+            answer_command = f"{helper_command(SESSION_REPLY)} --inbox {shlex.quote(str(inbox))}"
+            reply_inbox.reset(inbox, answer_command, reply_inbox.session_id_of(card["task"]["body"]))
         own = os.environ.get("HERMES_PROFILE") or Path(os.environ.get("HERMES_HOME", "")).name
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),
@@ -1244,13 +1201,17 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         command += ["--settings", str(settings_path)]
         trust_checkout(Path(repo["path"]).resolve())
         offset = plan.previous.stat().st_size if plan.resumed else 0
+        before = worktree_state(worktree)
         try:
-            write_private(settings_path, claude_settings(transport, api_key, settings_path, triage))
-            output, exit_code, detail = run_claude(command, worktree)
+            write_private(settings_path, claude_settings(transport, api_key, settings_path, triage, inbox))
+            with reply_watch(inbox, client, args, comments, own):
+                output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
+        progress = worktree_state(worktree) != before
         if output is not None:
-            seen_path.write_text(json.dumps([*seen, *map(comment_key, comments)]))
+            delivered = reply_inbox.delivered_keys(inbox) if inbox else []
+            seen_path.write_text(json.dumps([*seen, *map(comment_key, comments), *delivered]))
         superseded = links = None
         if output is not None and not triage:
             superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login)
@@ -1262,7 +1223,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
 
     session = result_line.Session(
         session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
-        adopted=adopted._asdict() if adopted else None, superseded=superseded, issue_links=links,
+        progress=progress, adopted=adopted._asdict() if adopted else None, superseded=superseded, issue_links=links,
         triage_documents=documents,
     )
     if output is None:
@@ -1311,7 +1272,7 @@ def mcp_status(args: argparse.Namespace) -> tuple[int, dict]:
     settings = load_settings(args.settings_json)
     repo = find_repository(settings, args.repo)
     transport = settings.get("claude_session") or {}
-    servers = factory_mcp_servers(transport)
+    servers = factory_settings.mcp_servers(transport)
     main = Path(repo["path"]).resolve()
     _, api_key = linear_access()
     require_mcp_tokens(servers)
@@ -1383,6 +1344,8 @@ def main() -> int:
         raise
     except Refusal as refusal:
         status, report = 2, result_line.Refused(str(refusal), refusal.transient)
+    except factory_settings.SettingsError as error:
+        status, report = 2, result_line.Refused(str(error))
     except Exception as error:
         status, report = 1, result_line.Refused(f"{type(error).__name__}: {error}")
     print(json.dumps(report) if isinstance(report, dict) else result_line.line(report))

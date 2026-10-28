@@ -1,22 +1,45 @@
 #!/usr/bin/env python3
-"""Send a factory pull request that conflicts with its base back to its worker.
+"""Send a factory pull request that cannot merge back to its worker.
 
 GitHub sends no webhook when a pull request starts to conflict because its base
-branch moved, so a card in `review` or `blocked` waits forever. A Hermes cron
-job runs this script every few minutes. It lists the App's open pull requests
-that belong to a `review` or `blocked` card and, for each one GitHub reports as
-`CONFLICTING`, comments on the card and hands it back to its worker. A card is
-sent back once per pull request head: the comment ends with the line
-`conflict_head: <sha>`, and a `blocked` card whose comments already hold that
-line for the current head is skipped. A worker that blocks on the same head is
-not unblocked in a loop, and a worker that pushes a new head that still
-conflicts is told again. A `review` card that holds the line is a handback that
-failed partway, because the ready gate refuses a conflicting head, so the
-review reopen runs again. `UNKNOWN` mergeability changes nothing, because GitHub resolves it on a
-later run. Prints one line per card sent back, `<task id> <pull request url>`.
-A failure for one repository or card goes to stderr and the others still run.
-Exits 1 when any failed, or 2 when HERMES_HOME is not a profile home or the
-factory settings cannot be read.
+branch moved, or when a required check fails after the worker handed the card
+off, so a card in `review` or `blocked` waits forever. A Hermes cron job runs
+this script every few minutes. It lists the App's open pull requests that belong
+to a `review` or `blocked` card and, for each one with a reason below, comments
+on the card and hands it back to its worker. A conflict wins over a failed check.
+
+- GitHub reports the pull request as `CONFLICTING`. `UNKNOWN` mergeability
+  changes nothing, because GitHub resolves it on a later run.
+- The card is in `review`, GitHub reports the pull request as `MERGEABLE`, and
+  the newest run of a check that a rule of the base branch requires finished
+  without passing on the current head. A `blocked` card is left alone, because
+  a worker that cannot fix a failing check blocks for a person with no marker
+  on the card yet. The script reads each pull request's
+  checks on its own, because listing them for every open pull request times
+  out on a large repository, and reads the rules only when some check failed, and does nothing while another required check is pending
+  or has no run, because that head is still running.
+
+A card is sent back once per pull request head: the comment ends with the line
+`conflict_head: <sha>` or `failed_check_head: <sha>`, and a `blocked` card whose
+comments already hold that line for the current head is skipped. A worker that
+blocks on the same head is not unblocked in a loop, and a worker that pushes a
+new head that still fails is told again. A `review` card that holds the line is
+a handback that failed partway, because the ready gate refuses a conflicting
+head and a failing required check, so the review reopen runs again. Prints one
+line per card sent back, `<task id> <pull request url>`. A failure for one
+repository or card goes to stderr and the others still run.
+
+A mergeable pull request whose review decision is `CHANGES_REQUESTED`, and that
+was not sent back for a failed check, gets the review sweep, which
+`stale_reviews.decide` judges. A changes request on the current head, or an
+unresolved review thread from a reviewer who is not requested now, sends the
+card back once per head with the line `review_head: <sha>`. Otherwise, once
+every required check passed, each reviewer whose changes request is on an older
+head and who is not requested now is requested again, and the card's Linear
+agent session gets an activity that names them. That line is `<task id> <pull
+request url> re-requested <login>,<login>`. A review is never dismissed. Exits 1 when any
+failed, or 2 when HERMES_HOME is not a profile home or the factory settings
+cannot be read.
 """
 from __future__ import annotations
 
@@ -24,18 +47,26 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import quote
 
 import card_branch
+import factory_settings
+import merged_checks
+import stale_reviews
 
-SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 REPO_LINE = re.compile(r"^repo:\s*(\S+)\s*$", re.MULTILINE)
-MARKER = "conflict_head: "
-HANDBACK_REASON = "merge conflict with the base branch; see the card comments"
-PR_FIELDS = "number,url,headRefName,headRefOid,baseRefName,author,mergeable"
+SESSION_LINE = re.compile(r"^linear_agent_session_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+CONFLICT_MARKER = "conflict_head: "
+FAILED_CHECK_MARKER = "failed_check_head: "
+REVIEW_MARKER = "review_head: "
+CONFLICT_REASON = "merge conflict with the base branch; see the card comments"
+FAILED_CHECK_REASON = "a required check failed; see the card comments"
+REVIEW_REASON = "changes-requested review still needs work; see the card comments"
+PR_FIELDS = "number,url,headRefName,headRefOid,baseRefName,author,mergeable,reviewDecision"
 
 
 class Refusal(Exception):
@@ -48,13 +79,10 @@ class Failed(Exception):
     pass
 
 
-def find_hermes() -> str:
-    # A cron job's PATH can lack the installer's bin directory, so fall back to where it puts hermes.
-    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
-    for candidate in filter(None, candidates):
-        if os.access(candidate, os.X_OK):
-            return candidate
-    raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
+class Handback(NamedTuple):
+    marker: str
+    text: str
+    reason: str
 
 
 def check_profile_home() -> None:
@@ -76,12 +104,9 @@ def run(*command: str) -> str:
     return proc.stdout
 
 
-def app_login(hermes: str) -> str:
-    proc = subprocess.run([hermes, "config", "get", SETTINGS_KEY, "--json", "--raw"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise Refusal(f"hermes config get {SETTINGS_KEY} failed")
+def app_login() -> str:
     try:
-        login = json.loads(proc.stdout)["github"]["login"]
+        login = factory_settings.read(raw=True)["github"]["login"]
     except (ValueError, KeyError, TypeError):
         login = None
     if not isinstance(login, str) or not login:
@@ -90,7 +115,7 @@ def app_login(hermes: str) -> str:
 
 
 def candidates(tasks: list) -> dict:
-    """Cards that may hold a conflicting pull request, grouped by repository."""
+    """Cards that may hold a pull request to send back, grouped by repository."""
     by_repo: dict = {}
     for task in tasks:
         repo = REPO_LINE.search(task.get("body") or "")
@@ -104,34 +129,128 @@ def open_pulls(repo: str) -> list:
     return json.loads(out)
 
 
-def already_sent(hermes: str, task_id: str, head: str) -> bool:
+def required_contexts(repo: str, base: str, cache: dict) -> set:
+    if (repo, base) not in cache:
+        out = run(os.environ.get("GH_BIN", "gh"), "api", f"repos/{repo}/rules/branches/{quote(base, safe='')}?per_page=100")
+        cache[(repo, base)] = {
+            required["context"]
+            for rule in json.loads(out)
+            if rule.get("type") == "required_status_checks"
+            for required in (rule.get("parameters") or {}).get("required_status_checks") or []
+        }
+    return cache[(repo, base)]
+
+
+def newest_checks(pull: dict) -> dict:
+    view = run(os.environ.get("GH_BIN", "gh"), "pr", "view", pull["url"], "--json", "statusCheckRollup")
+    return merged_checks.newest_runs(json.loads(view).get("statusCheckRollup") or [])
+
+
+def failed_required_checks(pull: dict, newest: dict, repo: str, cache: dict) -> dict:
+    """Maps each required check whose newest run failed to its details URL; empty while any required check is unsettled."""
+    if not any(merged_checks.failed(check) for runs in newest.values() for check in runs):
+        return {}
+    failures = {}
+    for context in required_contexts(repo, pull["baseRefName"], cache):
+        runs = newest.get(context)
+        if not runs or any(not merged_checks.passed(r) and not merged_checks.failed(r) for r in runs):
+            return {}
+        bad = [r for r in runs if merged_checks.failed(r)]
+        if bad:
+            failures[context] = bad[0].get("detailsUrl") or bad[0].get("targetUrl")
+    return failures
+
+
+def already_sent(hermes: str, task_id: str, marker: str) -> bool:
     shown = json.loads(run(hermes, "kanban", "show", task_id, "--json"))
-    marker = f"{MARKER}{head}"
     return any(
         line.strip() == marker for comment in shown.get("comments") or [] for line in (comment.get("body") or "").splitlines()
     )
 
 
-def comment_text(pull: dict) -> str:
+def conflict_handback(pull: dict) -> Handback:
     base = pull["baseRefName"]
-    return (
+    marker = f"{CONFLICT_MARKER}{pull['headRefOid']}"
+    text = (
         f"Pull request {pull['url']} conflicts with {base}. Merge origin/{base} into the branch, resolve the "
         "conflicts, and publish the merge with push-signed. When you cannot resolve a conflict with confidence, "
         "stop and make the first line of your final message `Needs input:` followed by a reason naming each "
         "conflicting file.\n\n"
-        f"{MARKER}{pull['headRefOid']}"
+        f"{marker}"
+    )
+    return Handback(marker, text, CONFLICT_REASON)
+
+
+def failed_check_handback(pull: dict, failures: dict) -> Handback:
+    marker = f"{FAILED_CHECK_MARKER}{pull['headRefOid']}"
+    listed = "\n".join(f"- `{name}`" + (f": {url}" if url else "") for name, url in sorted(failures.items()))
+    text = (
+        f"Pull request {pull['url']} at head {pull['headRefOid']} fails a required check:\n{listed}\n\n"
+        "Read the failing job, fix the cause, and publish the fix with push-signed. When the failure lies in a "
+        "step the pull request does not change, re-run it once with `gh run rerun <run-id> --failed`. When the "
+        "pull request body fails the repository's body check, rewrite the body. When you cannot fix it with "
+        "confidence, stop and make the first line of your final message `Needs input:` followed by the reason.\n\n"
+        f"{marker}"
+    )
+    return Handback(marker, text, FAILED_CHECK_REASON)
+
+
+def review_handback(pull: dict, reason: str) -> Handback:
+    marker = f"{REVIEW_MARKER}{pull['headRefOid']}"
+    text = (
+        f"Pull request {pull['url']} has a changes-requested review and is not ready for another look: {reason}. "
+        "Fix it and publish the fix with push-signed. When you cannot, stop and make the first line of your final "
+        "message `Needs input:` followed by the reason.\n\n"
+        f"{marker}"
+    )
+    return Handback(marker, text, REVIEW_REASON)
+
+
+def re_request(repo: str, task: dict, pull: dict, logins: tuple[str, ...]) -> None:
+    reviewers = [arg for login in logins for arg in ("-f", f"reviewers[]={login}")]
+    run(os.environ.get("GH_BIN", "gh"), "api", "-X", "POST", f"repos/{repo}/pulls/{pull['number']}/requested_reviewers", *reviewers)
+    print(f"{task['id']} {pull['url']} re-requested {','.join(logins)}")
+    session = SESSION_LINE.search(task.get("body") or "")
+    if session is None:
+        raise Failed("the card has no linear_agent_session_id line")
+    cli = Path(os.environ["HERMES_HOME"]) / "plugins" / "linear-agent-session" / "cli.py"
+    run(
+        sys.executable, str(cli), "activity", "--agent-session-id", session.group(1), "--type", "elicitation",
+        "--body", f"Changes are in, re-requested review from {', '.join('@' + login for login in logins)}",
+        "--external-url", f"Pull request={pull['url']}",
     )
 
 
-def send_back(hermes: str, task: dict, pull: dict, sent: bool) -> None:
+def handback_for(pull: dict, task: dict, repo: str, cache: dict) -> Handback | None:
+    """Re-requests stale reviewers as a side effect when the review sweep decides so."""
+    if pull["mergeable"] == "CONFLICTING":
+        return conflict_handback(pull)
+    review = pull.get("reviewDecision") == "CHANGES_REQUESTED"
+    if pull["mergeable"] != "MERGEABLE" or (task["status"] != "review" and not review):
+        return None
+    newest = newest_checks(pull)
+    if task["status"] == "review":
+        failures = failed_required_checks(pull, newest, repo, cache)
+        if failures:
+            return failed_check_handback(pull, failures)
+    if not review:
+        return None
+    reviews, requested, authors = stale_reviews.read_reviews(run, os.environ.get("GH_BIN", "gh"), repo, pull["number"])
+    outcome = stale_reviews.decide(pull, reviews, requested, authors, newest, required_contexts(repo, pull["baseRefName"], cache))
+    if isinstance(outcome, stale_reviews.Request):
+        re_request(repo, task, pull, outcome.logins)
+    return review_handback(pull, outcome.reason) if isinstance(outcome, stale_reviews.Handback) else None
+
+
+def send_back(hermes: str, task: dict, handback: Handback, sent: bool) -> None:
     """Every step either moves the card or leaves it where the next run repeats the step."""
     task_id = task["id"]
     if task["status"] == "blocked":
         run(hermes, "kanban", "unblock", task_id)
         run(hermes, "kanban", "request-review", task_id)
     if not sent:
-        run(hermes, "kanban", "comment", task_id, comment_text(pull))
-    run(hermes, "kanban", "reopen-review", task_id, "--reason", HANDBACK_REASON)
+        run(hermes, "kanban", "comment", task_id, handback.text)
+    run(hermes, "kanban", "reopen-review", task_id, "--reason", handback.reason)
 
 
 def main() -> int:
@@ -139,8 +258,8 @@ def main() -> int:
     failed = False
     try:
         check_profile_home()
-        hermes = find_hermes()
-        login = app_login(hermes)
+        hermes = factory_settings.find_hermes()
+        login = app_login()
         try:
             by_repo = candidates(json.loads(run(hermes, "kanban", "list", "--json")))
         except (Failed, ValueError) as failure:
@@ -148,6 +267,10 @@ def main() -> int:
     except Refusal as exc:
         print(f"reopen-conflicts: {exc}", file=sys.stderr)
         return exc.code
+    except factory_settings.SettingsError as exc:
+        print(f"reopen-conflicts: {exc}", file=sys.stderr)
+        return 2
+    rules: dict = {}
     for repo, tasks in sorted(by_repo.items()):
         try:
             pulls = open_pulls(repo)
@@ -160,13 +283,16 @@ def main() -> int:
                 (p for p in pulls if p["headRefName"] == task["branch_name"] and card_branch.is_app((p.get("author") or {}).get("login", ""), login)),
                 None,
             )
-            if pull is None or pull["mergeable"] != "CONFLICTING":
+            if pull is None:
                 continue
             try:
-                sent = already_sent(hermes, task["id"], pull["headRefOid"])
+                handback = handback_for(pull, task, repo, rules)
+                if handback is None:
+                    continue
+                sent = already_sent(hermes, task["id"], handback.marker)
                 if sent and task["status"] == "blocked":
                     continue
-                send_back(hermes, task, pull, sent)
+                send_back(hermes, task, handback, sent)
             except (Failed, ValueError) as failure:
                 print(f"reopen-conflicts: {task['id']}: {failure}", file=sys.stderr)
                 failed = True

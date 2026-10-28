@@ -20,9 +20,13 @@ the same login.
 
 An installation token expires after one hour. The worker profile's
 `refresh-gh-app-login` script asks the broker for a new token and stores it
-with `gh auth login`. The broker mints the token from the App's private key
-and never hands out the key. A Hermes cron job runs the script every 30
-minutes. When the broker runs as its own macOS user, the key lives in that
+with `gh auth login`, under a lock, and saves the token's expiry in
+`<worker>/gh/token-expiry.json`. The broker mints the token from the App's
+private key and never hands out the key. A launchd job runs the script every
+15 minutes. It runs outside Hermes because `hermes pause` stops Hermes' cron.
+`claude-session` reads the saved expiry and sends a card back to the queue as
+`transient` when the login has less than 15 minutes left, or when the file is
+missing or unreadable, so a run never starts on a login that expires under it. When the broker runs as its own macOS user, the key lives in that
 user's home, and no process that runs as the factory user can read it.
 See [Move the key to the broker user](#move-the-key-to-the-broker-user).
 
@@ -51,8 +55,9 @@ All of these must hold:
   `check-install` prints no `broker user` line about the GitHub App.
 - `grep '^GH_CONFIG_DIR=' <worker>/.env <home>/.env` prints
   `GH_CONFIG_DIR=<worker>/gh` for each file.
-- `hermes -p claude-worker cron list` shows exactly one job named
-  `refresh-gh-app-login`, and its last run shows no error.
+- `launchctl print gui/$(id -u)/ai.patinaproject.factory.gh-login` shows the
+  job, `hermes -p claude-worker cron list` shows no job named
+  `refresh-gh-app-login`, and `<worker>/logs/gh-login.log` shows no error.
 - `GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --paginate --jq '.repositories[].full_name'`
   lists every configured repository.
 - `GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/check-github-access`
@@ -147,7 +152,7 @@ permission.
 > Ask the operator to accept them on the installation's settings page,
 > `.../settings/installations/<installation id>`.
 
-The worker's next token, at most 30 minutes later, carries the new
+The worker's next token, at most 15 minutes later, carries the new
 permission. To use it at once, run the `refresh-gh-app-login` job as in
 [Sign the worker's `gh` in](#sign-the-workers-gh-in).
 
@@ -320,21 +325,26 @@ Part 9 ends here. Continue with part 10.
 
 Run this after part 10 has set the settings in the worker profile.
 
-The script lives in the worker profile's `scripts/` directory, so the job
-belongs to the worker profile. `cron create` does not remove duplicates. If
-`hermes -p claude-worker cron list` shows more than one `refresh-gh-app-login`
-job, show the list to the operator and remove the extras with their approval.
-Create the job only when the list has none:
+The script lives in the worker profile's `scripts/` directory. A launchd user
+agent runs it, because `hermes pause` stops Hermes' cron and a long pause would
+let the login expire. A factory that created a Hermes cron job named
+`refresh-gh-app-login` earlier removes it with
+`hermes -p claude-worker cron remove <job id>`, after `cron list` shows its id.
+The script prints the job's plist, which sets `GH_CONFIG_DIR` and
+`HERMES_HOME` to the worker's directories. This job needs no `sudo`:
 
 ```sh
-hermes -p claude-worker cron create "every 30m" --name refresh-gh-app-login --no-agent --script refresh-gh-app-login </dev/null
+python3 <worker>/scripts/refresh-gh-app-login --print-plist \
+  > ~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist
+install -d <worker>/logs
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist
 ```
 
-Run the job through Hermes once, then check the login:
+The job runs at load, so the login and `<worker>/gh/token-expiry.json` exist
+once the job has run. Read `<worker>/logs/gh-login.log` and check the login:
 
 ```sh
-hermes -p claude-worker cron run <job id>
-hermes -p claude-worker cron list    # Last run shows no error
+launchctl kickstart -k gui/$(id -u)/ai.patinaproject.factory.gh-login
 GH_CONFIG_DIR=<worker>/gh gh api /installation/repositories --jq .total_count
 ```
 
@@ -342,8 +352,8 @@ The count is the number of repositories the installation covers. It is at
 least the number of configured repositories.
 
 The script prints nothing on success. On failure it prints one line that names
-the failed step, such as `ask the broker` or `gh auth login`, and Hermes
-delivers the line. The existing login stays as it was. The broker's log has the
+the failed step, such as `ask the broker` or `gh auth login`, and the job
+writes the line to `<worker>/logs/gh-login.log`. The existing login stays as it was. The broker's log has the
 detail of a failed mint: `<home>/logs/gateway.log` without the broker user, or
 `/Library/Application Support/factory-broker/home/broker.log` with it. `gh api user` fails for an installation token, so do
 not use it as the check.
@@ -378,7 +388,7 @@ no process that Claude Code starts can read it.
    hermes -p claude-worker config set plugins.entries.linear-agent-session.settings.github.private_key_path ""
    ```
 
-4. Run the `refresh-gh-app-login` job and check the login as in
+4. Run the `refresh-gh-app-login` job with `launchctl kickstart` and check the login as in
    [Sign the worker's `gh` in](#sign-the-workers-gh-in).
    `check-install` prints no `broker user` line about the GitHub App and no
    `github_app_ready` line.
@@ -399,7 +409,12 @@ configured repository, along with a read of the head's workflow runs. It also
 compares the App's permissions with the
 [permission table](#use-gh-on-a-factory-machine). Actions must be read and
 write, because a worker re-runs a job that failed outside its change with
-`gh run rerun --failed`:
+`gh run rerun --failed`.
+
+The App's settings say what the App asks for. The installation keeps its old
+permissions until an org owner accepts the new ones, so the check also asks the
+gateway's broker for an installation token and compares the permissions GitHub
+reported when it minted that token:
 
 ```sh
 GH_CONFIG_DIR=<worker>/gh python3 <worker>/scripts/check-github-access
@@ -409,9 +424,14 @@ It prints nothing when every read succeeds. Otherwise it prints one line for
 each problem and exits `1`. A line such as
 `grant the App "Commit statuses: Read-only"` names the permission to add with
 [Upgrade an existing App's permissions](#upgrade-an-existing-apps-permissions).
-A `not found (HTTP 404)` line means the installation does not cover the
+A line such as
+`Installation of <app>: accept "Actions: Read and write" on the installation`
+means the App asks for the permission but the installation has not accepted it:
+an org owner accepts it on the installation's settings page. A
+`not found (HTTP 404)` line means the installation does not cover the
 repository. After the operator accepts a new permission, run the
-`refresh-gh-app-login` job, then run the check again.
+`refresh-gh-app-login` job with `launchctl kickstart`, then run the check
+again.
 
 ## Configure git in each checkout
 
@@ -540,7 +560,7 @@ as set in [Configure git in each checkout](#configure-git-in-each-checkout).
 Follow these rules:
 
 - Do not run `gh auth login`, and do not ask the operator to run it. The
-  `refresh-gh-app-login` job owns the worker's login.
+  `refresh-gh-app-login` launchd job owns the worker's login.
 - Do not set `GH_TOKEN` or `GITHUB_TOKEN`. Either one overrides the login that
   `GH_CONFIG_DIR` selects.
 - Do not fall back to the operator's personal login when a command fails. Only
@@ -566,7 +586,9 @@ When a command fails:
 - `Resource not accessible by integration` (HTTP 403) means the App lacks the
   permission. Report the command and the missing permission to the operator.
 - `Bad credentials` (HTTP 401) means the token expired. Run the
-  `refresh-gh-app-login` job, then retry once.
+  `refresh-gh-app-login` job with
+  `launchctl kickstart -k gui/$(id -u)/ai.patinaproject.factory.gh-login`,
+  then retry once.
 - `gh api user` always fails for an installation token. Do not treat that as a
   broken login.
 

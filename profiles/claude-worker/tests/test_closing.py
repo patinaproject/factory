@@ -81,12 +81,16 @@ class ClosesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             closing.reference("https://github.com/someone/else/issues/12", REPO)
 
-    def test_only_a_rendered_bare_identifier_becomes_its_url(self) -> None:
+    def test_only_a_rendered_bare_identifier_becomes_a_markdown_link(self) -> None:
         body = "Closes PAT-9\n`Closes PAT-9`\nCloses PAT-90, closes https://linear.app/y/issue/PAT-9\nfixes pat-9\nCloses [PAT-9](https://linear.app/y/issue/PAT-9)"
+        link = f"[PAT-9]({LINEAR_URL})"
         self.assertEqual(
-            closing.with_url(body, "PAT-9", LINEAR_URL),
-            f"Closes {LINEAR_URL}\n`Closes PAT-9`\nCloses PAT-90, closes https://linear.app/y/issue/PAT-9\nfixes {LINEAR_URL}\nCloses [PAT-9](https://linear.app/y/issue/PAT-9)",
+            closing.with_link(body, "PAT-9", LINEAR_URL),
+            f"Closes {link}\n`Closes PAT-9`\nCloses PAT-90, closes https://linear.app/y/issue/PAT-9\nfixes {link}\nCloses [PAT-9](https://linear.app/y/issue/PAT-9)",
         )
+
+    def test_a_bare_identifier_with_a_keyword_gets_the_literal_link_the_workflow_check_wants(self) -> None:
+        self.assertEqual(closing.with_link("Fixes PAT-9", "PAT-9", LINEAR_URL), f"Fixes [PAT-9]({LINEAR_URL})")
 
 
 class WorkflowCheckTest(unittest.TestCase):

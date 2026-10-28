@@ -25,10 +25,12 @@ the running gateway the way a stranger would:
   `/Library/Application Support/factory-broker/broker.json` names when the
   broker runs as its own user.
 
-An unresolved route secret runs `restart-gateway`, which waits for running
-Kanban cards. Three restarts in an hour is the budget. A missing broker token
-alone restarts nothing, because the gateway is working and a restart does not
-fix a broker user's token: the heartbeat stays quiet instead. A gateway that is
+An unresolved route secret runs `restart-gateway`, which waits only for
+Kanban cards the restart could kill. Workers run in their own session, but
+the gateway kills the processes it adopted from `processes.json` at startup.
+Three restarts in an hour is the budget. A missing broker token alone
+restarts nothing, because the gateway is working and a restart does not fix a
+broker user's token: the heartbeat stays quiet instead. A gateway that is
 not answering is launchd's to start, so the script restarts nothing then. It
 also restarts nothing while the lock file exists, `<root>/factory-gateway.lock`
 unless `--lock` names another, because a person or an agent is deploying and

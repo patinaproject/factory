@@ -25,13 +25,15 @@ UNSET: Any = _Unset()
 
 @dataclass(frozen=True)
 class Session:
-    """The Claude session a run used, and what `claude-session` did around it."""
+    """The Claude session a run used, and what `claude-session` did around it. `progress` is true when the run
+    changed the worktree's HEAD or its `git status --porcelain`."""
 
     session_id: str
     resumed: bool
     reason: str
     worktree: str
     branch: str
+    progress: bool
     adopted: Optional[dict]
     superseded: Optional[dict]
     issue_links: Optional[dict]

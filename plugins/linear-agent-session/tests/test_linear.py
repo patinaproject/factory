@@ -9,7 +9,17 @@ import unittest
 
 from unittest import mock
 
-from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin, session_update_ok
+from tests import (
+    BUSY,
+    LIVE_SESSION_URL,
+    FakeBroker,
+    FakeLinear,
+    activity_ok,
+    linear_token,
+    load_plugin,
+    session_update_ok,
+    sessions_ok,
+)
 
 plugin = load_plugin()
 linear = plugin.linear
@@ -32,7 +42,8 @@ def make_client(fake, clock=None, token_cache_path=None):
 
 class ActivityTest(unittest.TestCase):
     def post(self, args):
-        fake = FakeLinear([activity_ok("activity-42"), session_update_ok()])
+        updates = [session_update_ok()] if args.get("external_urls") else []
+        fake = FakeLinear([activity_ok("activity-42"), *updates, sessions_ok()])
         output = json.loads(tools.run_activity(lambda: make_client(fake), args))
         return fake, output
 
@@ -40,7 +51,7 @@ class ActivityTest(unittest.TestCase):
         for activity_type in ("thought", "response", "elicitation", "error"):
             with self.subTest(activity_type):
                 fake, output = self.post({"agent_session_id": "session-1", "type": activity_type, "body": "Hello"})
-                self.assertEqual(output, {"ok": True, "agent_activity_id": "activity-42"})
+                self.assertEqual(output, {"ok": True, "agent_activity_id": "activity-42", "closed_sessions": []})
                 self.assertEqual(
                     fake.graphql_requests[0]["variables"],
                     {"input": {"agentSessionId": "session-1", "content": {"type": activity_type, "body": "Hello"}}},
@@ -79,6 +90,58 @@ class ActivityTest(unittest.TestCase):
         update = fake.graphql_requests[1]
         self.assertIn("agentSessionUpdate(id: $id, input: $input)", update["query"])
         self.assertEqual(update["variables"], {"id": "session-1", "input": {"externalUrls": urls}})
+
+    def test_older_open_sessions_of_the_app_are_closed_with_a_link_to_the_live_one(self):
+        old = "2026-10-27T09:00:00.000Z"
+        new = "2026-10-27T11:00:00.000Z"
+        others = [
+            ("old-pending", "pending", old, "app-1"),
+            ("old-active", "active", old, "app-1"),
+            ("old-awaiting", "awaitingInput", old, "app-1"),
+            ("old-stale", "stale", old, "app-1"),
+            ("old-complete", "complete", old, "app-1"),
+            ("old-error", "error", old, "app-1"),
+            ("old-other-app", "active", old, "app-2"),
+            ("newer", "active", new, "app-1"),
+        ]
+        fake = FakeLinear([sessions_ok(others)] + [activity_ok()] * 3)
+        closed = make_client(fake).close_older_sessions("live")
+        self.assertEqual(closed, ["old-pending", "old-active", "old-stale"])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "live"})
+        body = f"Work on this issue continues in [this session]({LIVE_SESSION_URL})."
+        self.assertEqual(
+            [r["variables"]["input"] for r in fake.graphql_requests[1:]],
+            [
+                {"agentSessionId": i, "content": {"type": "response", "body": body}}
+                for i in ("old-pending", "old-active", "old-stale")
+            ],
+        )
+
+    def test_a_session_with_no_older_siblings_posts_nothing(self):
+        fake = FakeLinear([sessions_ok()])
+        self.assertEqual(make_client(fake).close_older_sessions("live"), [])
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_a_posted_activity_reports_the_sessions_it_closed(self):
+        others = [("old", "active", "2026-10-27T09:00:00.000Z", "app-1")]
+        fake = FakeLinear([activity_ok("activity-42"), sessions_ok(others), activity_ok("closing")])
+        output = json.loads(
+            tools.run_activity(lambda: make_client(fake), {"agent_session_id": "live", "type": "thought", "body": "Hi"})
+        )
+        self.assertEqual(output, {"ok": True, "agent_activity_id": "activity-42", "closed_sessions": ["old"]})
+        self.assertEqual(fake.graphql_requests[2]["variables"]["input"]["agentSessionId"], "old")
+
+    def test_an_ephemeral_activity_closes_nothing(self):
+        fake, output = self.post({"agent_session_id": "session-1", "type": "thought", "body": "Hi", "ephemeral": True})
+        self.assertEqual(output, {"ok": True, "agent_activity_id": "activity-42"})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_a_failure_closing_older_sessions_never_fails_the_post(self):
+        fake = FakeLinear([activity_ok("activity-42"), (200, {"errors": [{"message": "boom"}], "data": None})])
+        output = json.loads(
+            tools.run_activity(lambda: make_client(fake), {"agent_session_id": "live", "type": "thought", "body": "Hi"})
+        )
+        self.assertEqual(output, {"ok": True, "agent_activity_id": "activity-42", "close_error": "LinearError"})
 
     def test_reply_in_session_comments_in_the_session_thread(self):
         thread = (200, {"data": {"agentSession": {"comment": {"id": "comment-1"}, "issue": {"id": "issue-1"}}}})
@@ -328,6 +391,18 @@ class BrokerClientTest(unittest.TestCase):
         self.assertEqual(len(fake.token_requests), 1)
 
 
+class TokenClientTest(unittest.TestCase):
+    def test_posts_with_the_given_token_and_never_mints_one(self):
+        fake = FakeLinear([activity_ok("activity-7"), sessions_ok()])
+        client = linear.TokenLinearClient("static-token", urlopen=fake)
+
+        self.assertEqual(client.create_activity("live", {"type": "thought", "body": "x"}), "activity-7")
+        self.assertEqual(client.close_older_sessions("live"), [])
+
+        self.assertEqual(fake.token_requests, [])
+        self.assertEqual({r["authorization"] for r in fake.graphql_requests}, {"Bearer static-token"})
+
+
 class SessionCreateTest(unittest.TestCase):
     def test_creates_a_session_on_the_issue(self):
         fake = FakeLinear(
@@ -352,6 +427,7 @@ class IssueArgumentTest(unittest.TestCase):
         "linear_agent_session_create": lambda fake, args: tools.run_session_create(lambda: make_client(fake), args),
         "linear_issue_undelegate": lambda fake, args: tools.run_undelegate(lambda: make_client(fake), args),
         "linear_issue_to_todo": lambda fake, args: tools.run_to_todo(lambda: make_client(fake), args),
+        "linear_issue_edit": lambda fake, args: tools.run_edit(lambda: make_client(fake), {**args, "state": "Done"}),
     }
 
     def test_issue_tools_take_the_names_models_guess(self):
@@ -372,7 +448,7 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_hermes_lets_every_guessed_name_reach_the_handler(self):
         # Hermes refuses a deferred tool_call that lacks a name in the schema's "required" list.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA):
             for name in ("issue", "id", "issue_id"):
                 with self.subTest(tool=schema["name"], name=name):
                     missing = [r for r in schema["parameters"].get("required", []) if r not in {name: "ABC-9"}]
@@ -380,7 +456,7 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_the_deferred_catalog_line_names_the_argument(self):
         # Hermes lists a deferred tool by the first 60 characters of its description.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA):
             with self.subTest(tool=schema["name"]):
                 self.assertIn("`issue`", schema["description"][:60])
 
@@ -486,6 +562,7 @@ class IssueTest(unittest.TestCase):
                 "id": "2f9a6f0e-0000-4000-8000-000000000001",
                 "identifier": "ABC-123",
                 "title": "Fix checkout",
+                "description": "Checkout fails.",
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "branchName": "abc-123-fix-checkout",
                 "priority": 2.0,
@@ -494,7 +571,8 @@ class IssueTest(unittest.TestCase):
                 "labels": {"nodes": [{"name": "ready-for-agent"}, {"name": "bug"}]},
                 "attachments": {
                     "nodes": [
-                        {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
+                        {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"},
+                        {"url": "https://github.com/example-org/example-repo/pull/10", "sourceType": "github"},
                     ]
                 },
                 "inverseRelations": {
@@ -534,11 +612,14 @@ class IssueTest(unittest.TestCase):
                 "cardPriority": 3,
                 "state": "Todo",
                 "stateType": "unstarted",
+                "description": "Checkout fails.",
+                "githubIssues": ["https://github.com/example-org/example-repo/issues/9"],
                 "delegate": "app-user-1",
                 "labels": ["bug", "ready-for-agent"],
                 "role_labels": {"ready-for-agent": "Ready for agent"},
                 "attachments": [
-                    {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
+                    {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"},
+                    {"url": "https://github.com/example-org/example-repo/pull/10", "sourceType": "github"},
                 ],
                 "blockedBy": [
                     {"id": "uuid-b1", "identifier": "ABC-122", "gitBranchName": "abc-122-first", "stateType": "started",
@@ -709,6 +790,179 @@ class ToTodoTest(unittest.TestCase):
         fake, output = self.run_to_todo([issue_states("triage", [("Triage", "triage", 0)])])
         self.assertEqual(output, {"error": "ABC-1's team has no unstarted status to move it to"})
         self.assertEqual(len(fake.graphql_requests), 1)
+
+
+def label(name, group=None, is_group=False):
+    return {"id": f"label-{name}", "name": name, "isGroup": is_group, "parent": {"id": group} if group else None}
+
+
+TEAM_LABELS = [
+    label("Triage", is_group=True),
+    label("Needs info", "label-Triage"),
+    label("Ready for agent", "label-Triage"),
+    label("Factory"),
+]
+WORKSPACE_LABELS = [label("bug")]
+
+
+def issue_for_edit(labels, state="Triage"):
+    issue = {
+        "id": "issue-uuid",
+        "identifier": "ABC-1",
+        "title": "Old title",
+        "description": "Old text.",
+        "state": {"name": state},
+        "labels": {"nodes": [{k: n[k] for k in ("id", "name", "parent")} for n in labels]},
+        "team": {
+            "states": {"nodes": [{"id": f"state-{n}", "name": n} for n in ("Triage", "Todo", "Done", "Canceled")]},
+            "labels": {"nodes": TEAM_LABELS},
+        },
+    }
+    return 200, {"data": {"issue": issue, "issueLabels": {"nodes": WORKSPACE_LABELS}}}
+
+
+class EditTest(unittest.TestCase):
+    def edit(self, responses, **args):
+        fake = FakeLinear(responses)
+        return fake, json.loads(tools.run_edit(lambda: make_client(fake), {"issue": "ABC-1", **args}))
+
+    def test_sets_labels_and_status_by_any_spelling_of_their_names(self):
+        fake, output = self.edit(
+            [issue_for_edit([TEAM_LABELS[3]]), UPDATE_OK], add_labels=["ready-for-agent", "BUG"], state="canceled"
+        )
+        self.assertEqual(
+            output,
+            {
+                "identifier": "ABC-1",
+                "changed": True,
+                "title": "Old title",
+                "labels": ["Factory", "Ready for agent", "bug"],
+                "state": "Canceled",
+            },
+        )
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"],
+            {
+                "id": "issue-uuid",
+                "input": {"labelIds": ["label-Factory", "label-Ready for agent", "label-bug"], "stateId": "state-Canceled"},
+            },
+        )
+
+    def test_an_added_label_replaces_the_other_label_in_its_group(self):
+        fake, output = self.edit([issue_for_edit(TEAM_LABELS[1:2] + TEAM_LABELS[3:]), UPDATE_OK], add_labels="Ready for agent")
+        self.assertEqual(output["labels"], ["Factory", "Ready for agent"])
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"]["input"], {"labelIds": ["label-Factory", "label-Ready for agent"]}
+        )
+
+    def test_removes_a_label(self):
+        fake, output = self.edit([issue_for_edit(TEAM_LABELS[1:2] + TEAM_LABELS[3:]), UPDATE_OK], remove_labels=["needs-info"])
+        self.assertEqual(output["labels"], ["Factory"])
+        self.assertEqual(fake.graphql_requests[1]["variables"]["input"], {"labelIds": ["label-Factory"]})
+
+    def test_an_issue_that_already_matches_is_not_updated(self):
+        fake, output = self.edit([issue_for_edit([TEAM_LABELS[3]], state="Todo")], add_labels=["factory"], state="todo")
+        self.assertEqual(
+            output, {"identifier": "ABC-1", "changed": False, "title": "Old title", "labels": ["Factory"], "state": "Todo"}
+        )
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_an_unknown_name_changes_nothing_and_lists_the_names(self):
+        fake, output = self.edit([issue_for_edit([])], add_labels=["urgent"])
+        self.assertEqual(
+            output, {"error": "no label named 'urgent'; the issue's team has: Factory, Needs info, Ready for agent, bug"}
+        )
+        fake, output = self.edit([issue_for_edit([])], state="Shipped")
+        self.assertEqual(output, {"error": "no status named 'Shipped'; the issue's team has: Canceled, Done, Todo, Triage"})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_a_label_group_is_refused(self):
+        fake, output = self.edit([issue_for_edit([])], add_labels=["triage"])
+        self.assertEqual(output, {"error": "Triage is a label group; name one of its labels"})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_without_a_change_it_asks_for_one(self):
+        fake, output = self.edit([])
+        self.assertEqual(output, {"error": "pass title, description, add_labels, remove_labels, or state"})
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_edits_the_title_and_description_of_any_named_issue(self):
+        fake = FakeLinear([issue_for_edit([]), UPDATE_OK])
+        output = json.loads(
+            tools.run_edit(lambda: make_client(fake), {"issue": "XYZ-9", "title": "New title", "description": "New text."})
+        )
+        self.assertEqual(
+            output, {"identifier": "ABC-1", "changed": True, "title": "New title", "labels": [], "state": "Triage"}
+        )
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "XYZ-9"})
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"],
+            {"id": "issue-uuid", "input": {"title": "New title", "description": "New text."}},
+        )
+
+    def test_an_unchanged_title_and_description_are_not_written(self):
+        fake, output = self.edit([issue_for_edit([])], title="Old title", description="Old text.")
+        self.assertFalse(output["changed"])
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_an_assignee_or_delegate_argument_is_refused_before_linear_is_asked(self):
+        for key in ("assignee", "assigneeId", "delegate", "delegate_id"):
+            with self.subTest(key=key):
+                fake, output = self.edit([], title="New title", **{key: "user-1"})
+                self.assertEqual(
+                    output, {"error": f"this tool never changes assignee or delegate; drop {key}"}
+                )
+                self.assertEqual(fake.graphql_requests, [])
+
+    def test_a_blank_title_is_refused(self):
+        fake, output = self.edit([], title=" ", description="New text.")
+        self.assertEqual(output, {"error": "a title cannot be blank"})
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_the_schema_requires_no_argument(self):
+        self.assertNotIn("required", tools.EDIT_SCHEMA["parameters"])
+        self.assertNotIn("required", tools.SEARCH_SCHEMA["parameters"])
+        self.assertNotIn("required", tools.GITHUB_EDIT_SCHEMA["parameters"])
+
+
+class SearchTest(unittest.TestCase):
+    def search(self, responses, args):
+        fake = FakeLinear(responses)
+        return fake, json.loads(tools.run_search(lambda: make_client(fake), args))
+
+    def test_returns_up_to_ten_matching_issues(self):
+        node = {
+            "identifier": "ABC-57",
+            "title": "Upgrade to SDK 57",
+            "url": "https://linear.app/example/issue/ABC-57",
+            "team": {"name": "Apps"},
+            "state": {"name": "Todo"},
+        }
+        fake, output = self.search([(200, {"data": {"searchIssues": {"nodes": [node]}}})], {"query": "SDK 57"})
+        self.assertEqual(
+            output,
+            {
+                "issues": [
+                    {
+                        "identifier": "ABC-57",
+                        "title": "Upgrade to SDK 57",
+                        "url": "https://linear.app/example/issue/ABC-57",
+                        "team": "Apps",
+                        "state": "Todo",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"term": "SDK 57", "first": 10})
+
+    def test_takes_the_names_models_guess(self):
+        fake, output = self.search([(200, {"data": {"searchIssues": {"nodes": []}}})], {"term": "SDK"})
+        self.assertEqual(output, {"issues": []})
+
+    def test_without_a_query_it_asks_for_one(self):
+        fake, output = self.search([], {})
+        self.assertEqual(output, {"error": "pass query, the words to search issues for"})
+        self.assertEqual(fake.graphql_requests, [])
 
 
 def issue_node(identifier, attachments=()):

@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin
+from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin, sessions_ok
 
 plugin = load_plugin()
 
@@ -189,6 +189,118 @@ class TeammateReplyTest(unittest.TestCase):
         self.assertEqual(client.calls, [])
 
 
+class PausedHookTest(unittest.TestCase):
+    def test_a_delivery_while_paused_gets_no_acknowledgement_or_intent(self):
+        calls = []
+        cases = {
+            "session created": session_event("created"),
+            "teammate reply": reply_event(f"{LUKE} thoughts?").raw_message,
+            "unresolved secret": session_event("created"),
+            "triage exit": {"type": "Issue", "action": "update", "updatedFrom": {"stateId": "s"}, "data": {"id": "issue-1"}},
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                client = RecordingClient()
+                config = webhook_config({"linear": {"secret": "${LINEAR_WEBHOOK_SECRET}"}}) if name == "unresolved secret" else RESOLVED_CONFIG
+                hook = plugin.make_dispatch_hook(
+                    lambda: client, lambda: "linear", lambda: config,
+                    lambda payload: calls.append(("exit", payload)),
+                    lambda payload: calls.append(("intent", payload)),
+                )
+                with mock.patch.object(plugin, "paused", return_value=True):
+                    self.assertIsNone(asyncio.run(hook(event=event(payload))))
+                self.assertEqual((client.calls, calls), ([], []))
+
+    def test_the_hook_resumes_acknowledging_when_not_paused(self):
+        client = RecordingClient()
+        self.assertIsNone(run_hook(event(session_event("created")), client))
+        self.assertEqual(client.calls, [ACK])
+
+
+class IntentHookTest(unittest.TestCase):
+    """The hook puts the computed intent in front of a Linear turn through Hermes' `rewrite` action."""
+
+    def run_intent_hook(self, evt, compute, route="linear", triage_exit=no_triage_exit):
+        hook = plugin.make_dispatch_hook(
+            lambda: RecordingClient(), lambda: route, lambda: RESOLVED_CONFIG, triage_exit, compute
+        )
+        return asyncio.run(hook(event=evt, gateway=object(), session_store=None))
+
+    def test_a_linear_delivery_gets_the_block_in_front_of_its_prompt(self):
+        seen = []
+
+        def compute(payload):
+            seen.append(payload)
+            return plugin.triage_intent.Intent(action="create_card", reply="yes", reply_source="payload")
+
+        evt = event(session_event("prompted"))
+        result = self.run_intent_hook(evt, compute)
+        self.assertEqual(seen, [evt.raw_message])
+        self.assertEqual(result["action"], "rewrite")
+        self.assertTrue(result["text"].startswith("## Computed triage intent\n\n<triage_intent>\n{"))
+        self.assertTrue(result["text"].endswith("</triage_intent>\n\nrendered prompt"))
+        self.assertIn('"action": "create_card"', result["text"])
+
+    def test_a_skip_stays_a_skip_and_computes_nothing(self):
+        skip = types.SimpleNamespace(handled=True, action="archive", reason="archived triage card t_1")
+        payload = {
+            "type": "Issue", "action": "update", "updatedFrom": {"stateId": "s"},
+            "data": {"id": "i", "identifier": "ABC-1", "state": {"type": "backlog"}},
+        }
+
+        def compute(_):
+            raise AssertionError("a skipped delivery needs no intent")
+
+        result = self.run_intent_hook(event(payload), compute, triage_exit=lambda _: skip)
+        self.assertEqual(result, {"action": "skip", "reason": "archived triage card t_1"})
+
+    def test_another_route_gets_no_rewrite(self):
+        def compute(_):
+            raise AssertionError("only the Linear route gets an intent")
+
+        self.assertIsNone(self.run_intent_hook(event(session_event("created"), route="github"), compute))
+
+    def test_a_teammate_reply_is_skipped_before_any_intent(self):
+        def compute(_):
+            raise AssertionError("a skipped delivery needs no intent")
+
+        self.assertEqual(self.run_intent_hook(reply_event(f"{LUKE} what do you think?"), compute), SKIP_TEAMMATE)
+
+    def test_an_error_intent_is_computed_once_more(self):
+        intents = [plugin.triage_intent.error_intent("URLError: timed out"), plugin.triage_intent.Intent(action="issue_closed")]
+        calls = []
+
+        def compute(payload):
+            calls.append(payload)
+            return intents[len(calls) - 1]
+
+        result = self.run_intent_hook(event(session_event("created")), compute)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('"action": "issue_closed"', result["text"])
+
+    def test_a_slow_intent_becomes_the_error_block_not_a_dropped_turn(self):
+        def compute(_):
+            time.sleep(1.0)
+
+        with mock.patch.object(plugin, "TRIAGE_INTENT_TIMEOUT_SECONDS", 0.1), self.assertLogs("linear_agent_session", "WARNING"):
+            result = self.run_intent_hook(event(session_event("created")), compute)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn('"action": "error"', result["text"])
+        self.assertTrue(result["text"].endswith("rendered prompt"))
+
+    def test_a_failing_intent_becomes_the_error_block_without_a_secret(self):
+        def compute(_):
+            raise RuntimeError("boom lin_api_a1b2c3d4e5")
+
+        fake_redact = types.ModuleType("agent.redact")
+        fake_redact.redact_sensitive_text = lambda text, force=False: text
+        modules = {"agent": types.ModuleType("agent"), "agent.redact": fake_redact}
+        with mock.patch.dict(sys.modules, modules), self.assertLogs("linear_agent_session", "WARNING") as logs:
+            result = self.run_intent_hook(event(session_event("created")), compute)
+        self.assertIn('"action": "error"', result["text"])
+        self.assertNotIn("lin_api_a1b2c3d4e5", result["text"] + "".join(logs.output))
+
+
 class SecretGuardTest(unittest.TestCase):
     def test_unresolved_secret_skips_without_acknowledging(self):
         config = webhook_config(
@@ -312,11 +424,14 @@ class RegisterTest(unittest.TestCase):
         self.assertEqual(
             sorted(ctx.tools),
             [
+                "github_issue_edit",
                 "linear_agent_activity",
                 "linear_agent_activity_read",
                 "linear_agent_session_create",
                 "linear_delegated_issues",
                 "linear_issue",
+                "linear_issue_edit",
+                "linear_issue_search",
                 "linear_issue_to_todo",
                 "linear_issue_undelegate",
             ],
@@ -326,7 +441,7 @@ class RegisterTest(unittest.TestCase):
             self.assertEqual(tool["schema"]["name"], name)
         self.assertEqual(
             [name for name, _ in ctx.hooks],
-            ["pre_gateway_dispatch", "pre_tool_call", "kanban_task_blocked", "transform_api_error_classification"],
+            ["pre_gateway_dispatch", "pre_tool_call", "kanban_task_blocked", "post_llm_call", "transform_api_error_classification"],
         )
 
     def test_the_manifest_lists_every_registered_tool(self):
@@ -371,13 +486,13 @@ class RegisterTest(unittest.TestCase):
             self.assertIsNone(classify(status_code=401))
 
     def test_registered_handlers_call_linear(self):
-        fake = FakeLinear([activity_ok("activity-9")])
+        fake = FakeLinear([activity_ok("activity-9"), sessions_ok()])
         ctx = FakeContext()
         plugin.register(ctx)
         handler = ctx.tools["linear_agent_activity"]["handler"]
         with mock.patch("urllib.request.urlopen", fake):
             output = handler({"agent_session_id": "session-1", "type": "thought", "body": "Working"}, task_id="t")
-        self.assertEqual(json.loads(output), {"ok": True, "agent_activity_id": "activity-9"})
+        self.assertEqual(json.loads(output), {"ok": True, "agent_activity_id": "activity-9", "closed_sessions": []})
 
     def test_registered_handler_without_credentials_reports_the_unreachable_broker(self):
         ctx = FakeContext()
@@ -397,7 +512,9 @@ class RegisterTest(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", fake):
             asyncio.run(hook(event=event(session_event("created"), route="linear")))
             self.assertEqual(fake.graphql_requests, [])
-            self.assertIsNone(asyncio.run(hook(event=event(session_event("created"), route="agent"))))
+            with mock.patch.object(plugin.triage_intent, "compute", lambda *_, **__: plugin.triage_intent.error_intent("stub")):
+                result = asyncio.run(hook(event=event(session_event("created"), route="agent")))
+            self.assertEqual(result["action"], "rewrite")
         self.assertEqual(
             fake.graphql_requests[0]["variables"],
             {
@@ -440,6 +557,57 @@ class CliTest(unittest.TestCase):
                 cli.main(["issue", "ABC-1"])
         self.assertEqual(len(broker.requests), 2)
         self.assertEqual(fake.graphql_requests[0]["authorization"], "Bearer brokered-1")
+
+    def test_triage_intent_command_prints_the_block_for_a_payload(self):
+        cli = _load_cli()
+        calls = []
+        intent = plugin.triage_intent
+
+        class Plugin:
+            linear = types.SimpleNamespace(client_from_env=lambda: "client", ACTIVITY_TYPES=[])
+            triage_exit = types.SimpleNamespace(configured_app_user_id=lambda: "app", listed_cards=lambda board: [])
+            triage_intent = types.SimpleNamespace(
+                parse_time=lambda text: ("parsed", text),
+                compute=lambda payload, **kwargs: calls.append((payload, kwargs)) or intent.Intent(action="open_session"),
+                error_intent=intent.error_intent,
+                render=intent.render,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(cli, "_load_hyphenated_plugin_dir_as_package", lambda: Plugin):
+            path = os.path.join(tmp, "payload.json")
+            with open(path, "w") as handle:
+                json.dump({"type": "Issue"}, handle)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["triage-intent", "--payload-file", path, "--now", "2026-10-27T12:00:00Z"])
+            self.assertEqual(code, 0)
+            self.assertEqual(calls[0][0], {"type": "Issue"})
+            self.assertEqual(calls[0][1]["now"], ("parsed", "2026-10-27T12:00:00Z"))
+            self.assertTrue(out.getvalue().startswith("## Computed triage intent\n\n<triage_intent>\n"))
+            self.assertIn('"action": "open_session"', out.getvalue())
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["triage-intent", "--payload-file", os.path.join(tmp, "missing.json")])
+            self.assertEqual(code, 0)
+            self.assertIn('"action": "error"', out.getvalue())
+
+    def test_teammate_reply_command_reports_whether_the_hook_would_skip_the_payload(self):
+        cli = _load_cli()
+        replies = {
+            "teammate": (reply_event(f"{LUKE} thoughts?").raw_message, True),
+            "agent": (reply_event("please continue").raw_message, False),
+            "issue": ({"type": "Issue", "action": "update"}, False),
+        }
+        for name, (payload, expected) in replies.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "payload.json")
+                with open(path, "w") as handle:
+                    json.dump(payload, handle)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = cli.main(["teammate-reply", "--payload-file", path])
+                self.assertEqual((code, json.loads(out.getvalue())), (0, {"addressed": expected}))
 
     def test_activity_command(self):
         fake = FakeLinear([activity_ok("activity-5"), (200, {"data": {"agentSessionUpdate": {"success": True}}})])

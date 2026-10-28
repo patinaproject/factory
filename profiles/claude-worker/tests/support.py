@@ -52,6 +52,33 @@ if "--settings" in argv:
 with open(options["log"] + ".tmp", "w") as log:
     json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings, "pid": os.getpid()}, log)
 os.rename(options["log"] + ".tmp", options["log"])
+for step in options.get("steps", []):
+    import subprocess, time
+    if "comment" in step:
+        card = json.load(open(step["card"]))
+        card["comments"].append(step["comment"])
+        json.dump(card, open(step["card"] + ".tmp", "w"))
+        os.rename(step["card"] + ".tmp", step["card"])
+    elif "hook" in step:
+        # Like Claude Code, run each command of the event with the event as JSON on stdin; until_output polls for the watcher.
+        deadline = time.time() + 20
+        while True:
+            outputs = [
+                subprocess.run(hook["command"], shell=True, capture_output=True, text=True, input=json.dumps(step.get("event", {})))
+                for group in settings["content"]["hooks"].get(step["hook"], []) for hook in group["hooks"]
+            ]
+            printed = [o.stdout for o in outputs if o.stdout]
+            if printed or not step.get("until_output") or time.time() > deadline:
+                break
+            time.sleep(0.1)
+        with open(options["log"] + ".hooks", "a") as hook_log:
+            hook_log.write(json.dumps({"hook": step["hook"], "stdout": printed, "codes": [o.returncode for o in outputs]}) + "\\n")
+if options.get("work"):
+    import subprocess
+    open("claude-made.txt", "w").write("work\\n")
+    if options["work"] == "commit":
+        subprocess.run(["git", "add", "claude-made.txt"], check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "work"], check=True)
 if options.get("stderr_env"):
     print("token " + settings["content"]["env"][options["stderr_env"]], file=sys.stderr, flush=True)
 if "init" in options:

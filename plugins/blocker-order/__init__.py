@@ -30,7 +30,7 @@ from . import result_line
 
 # Hermes renames the `process` tool to `process_manage` before it runs hooks (`_LEGACY_TOOL_ALIASES` in
 # `model_tools.py`), so a hook sees `process_manage`. Older Hermes passes `process`.
-# `check-install` reads both lists and alerts when Hermes registers none of PROCESS_TOOLS or no REQUIRED_TOOLS.
+# `check-install` reads both lists and reports when Hermes registers none of PROCESS_TOOLS or no REQUIRED_TOOLS.
 PROCESS_TOOLS = ("process_manage", "process")
 REQUIRED_TOOLS = ("terminal",)
 WATCHED_TOOLS = (*PROCESS_TOOLS, *REQUIRED_TOOLS)

@@ -24,8 +24,10 @@ proxy token, and the token of each server in claude_session.mcp_servers
 present. That check sends only {"op": "status"}, never uploads or asks for a
 token, and prints no value. For each configured repository, it runs the
 installed claude-session --mcp-status and reports each MCP server that is not
-connected and not in claude_session.disabled_mcp_servers. It
-also checks that the Triage board exists and anchors its worktrees at the
+connected and not in claude_session.disabled_mcp_servers. For each root-home mcp_servers entry that is
+not enabled: false, it runs hermes mcp test with the root home and reports a server that does not connect,
+one whose sampling.enabled is not false, and one whose header value is anything but one ${VAR} reference
+after at most one scheme word. It prints no header value. It also checks that the Triage board exists and anchors its worktrees at the
 default repository, that the source checkout vendors the triage playbook that
 claude-session gives triage cards, and that the triage refs file is as fresh as
 the owned refs. It checks that the default board cannot take the worker slots triage needs
@@ -51,10 +53,14 @@ and the factory user cannot read it, judged by ownership and mode only, and
 that the gateway runs no broker of its own.
 
 It also checks that Hermes still registers the tools the installed blocker-order plugin watches, so a
-Hermes upgrade that renames one trips the alert. It runs hermes-tool-names with the store Python on the
+Hermes upgrade that renames one is reported. It runs hermes-tool-names with the store Python on the
 checkout and the selected environment's site-packages, with a scratch HERMES_HOME and no bytecode, and
 never through the `hermes` launcher, which can rebuild environments. It prints a row when Hermes cannot be
 imported. HERMES_AGENT_DIR overrides the checkout, which defaults to <root home>/hermes-agent.
+
+It checks that each repository plugin installed in a home is enabled there, from `hermes plugins list
+--user --json`, and imports each installed plugin the way Hermes does with import-plugins, in the same
+store Python, so a plugin Hermes would skip or fail to load is reported. Hermes only logs both.
 
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd and broker user checks at
 another file system root and launchctl, for tests.
@@ -71,7 +77,6 @@ import os
 import plistlib
 import pwd
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -83,8 +88,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+import factory_settings
 import factory_source
+import gh_login
 import kanban_board
+from factory_settings import SETTINGS_KEY, find_hermes
 
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
@@ -103,14 +111,12 @@ HEALTHY_RUNS = (None, "ok", "delivery_queued")
 RUN_ERROR_LIMIT = 200
 SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE)
 TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
-ROOT_ALERT_SCRIPT = "check-install-alert"
-# watch-gateway runs from launchd and restart-gateway is the one it runs, so both live beside the cron wrappers.
-ROOT_WRAPPERS = (ROOT_ALERT_SCRIPT, "retry-failed-webhooks", "watch-gateway", "restart-gateway")
+# watch-gateway runs from launchd and restart-gateway is the one it runs, so both live beside the cron wrapper.
+ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway")
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
-SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 # aiohttp's access line in the gateway log, stamped in local time by Hermes' log format.
 REJECTED = re.compile(r'^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ .*"POST /webhooks/([^ ?"]+)[^"]*" 429 ')
 
@@ -197,6 +203,8 @@ class Service(NamedTuple):
     kind: str
     plist: str
     scheduled: bool = False  # an interval job is loaded but not running between its runs
+    env: tuple = ()  # EnvironmentVariables keys the plist must set
+    interval: int = 0  # the StartInterval the plist must set, in seconds
 
     def domains(self) -> tuple:
         # A user agent loads in gui/<uid> from a login session and in user/<uid> otherwise, such as over SSH.
@@ -250,17 +258,14 @@ BROKER_USER_CONFIG = (
 # whose output must reach the operator's chat, because only the root profile runs the chat platform. A job runs the
 # script of the same name unless `script` names another.
 CRON = (
-    CronJob(10, "refresh-gh-app-login", 30, equal("local")),
     CronJob(12, "refresh-checkouts", 60, equal("local")),
     CronJob(12, "refresh-owned-refs", 1, equal("local")),
     CronJob(12, "reopen-conflicts", 5, equal("local")),
     CronJob(12, "dispatch-triage", 1, equal("local")),
-    CronJob(
-        12, "check-install", 60, declared("the operator's chat platform", besides=("local",)),
-        home=ROOT, script=ROOT_ALERT_SCRIPT,
-    ),
     CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
 )
+# Jobs that moved from Hermes' cron to launchd, because `hermes pause` stops Hermes' cron.
+LAUNCHD_JOBS = ("refresh-gh-app-login",)
 OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
 
 # macOS only. `plist` is a glob; the runbook lets the operator name the cloudflared plist.
@@ -268,6 +273,10 @@ SERVICES = (
     Service(7, "cloudflared tunnel", "daemon", "/Library/LaunchDaemons/*cloudflared*.plist"),
     Service(15, "Hermes gateway", "agent", "~/Library/LaunchAgents/ai.hermes.gateway.plist"),
     Service(12, "gateway watch", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist", scheduled=True),
+    Service(
+        10, "gh login refresh", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist",
+        scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME"), interval=gh_login.REFRESH_INTERVAL_SECONDS,
+    ),
 )
 # watch-gateway's own files in the root home. WATCH_INTERVAL and RESTARTS_PER_HOUR equal the script's.
 HERMES_GATEWAY_LOCK = "gateway.lock"
@@ -553,28 +562,8 @@ SECRET_NAMES = "plugins/factory-secret-names/plugin.yaml"
 DECLARED_NAME = re.compile(r"^\s*-\s*name:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", re.MULTILINE)
 
 
-def claude_session_settings(settings) -> dict:
-    session = settings.get("claude_session") if isinstance(settings, dict) else None
-    return session if isinstance(session, dict) else {}
-
-
-def token_variable(settings) -> str:
-    return claude_session_settings(settings).get("auth_token_env") or ""
-
-
-def mcp_token_variables(settings) -> dict:
-    servers = claude_session_settings(settings).get("mcp_servers")
-    if not isinstance(servers, dict):
-        return {}
-    return {
-        name: server["token_env"] for name, server in servers.items()
-        if isinstance(server, dict) and isinstance(server.get("token_env"), str) and server["token_env"]
-    }
-
-
 def check_worker_secrets(commit: Commit, worker: Path, hermes: str, settings) -> list:
-    token_env = token_variable(settings)
-    mcp_envs = mcp_token_variables(settings)
+    token_env, mcp_envs = factory_settings.token_variables(settings)
     live = config_value(worker, hermes, "secrets.command")
     enabled = isinstance(live, dict) and live.get("enabled") is True
     helper = f"python3 {worker}/scripts/worker-secrets"
@@ -668,10 +657,6 @@ def last_run_failure(job: CronJob, live: dict, secrets: list) -> list:
         return []
     if status == "delivery_failed":
         what, error = "last run's output was not delivered", live.get("last_delivery_error")
-    elif job.runs == ROOT_ALERT_SCRIPT:
-        # The alert job runs this check, so its failure is the previous run's report. Reporting it would fail this
-        # run as well, and one failure would repeat after the machine is clean.
-        return []
     else:
         what, error = "last run failed", live.get("last_error")
     # Redacted before it is clipped, so a clip never leaves part of a secret unmasked.
@@ -738,7 +723,9 @@ def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
         for live in jobs:
             where = f"{live['name']} in {homes[name]}"
             owner = owners.get(live["name"])
-            if owner is None:
+            if live["name"] in LAUNCHD_JOBS:
+                drifts.append(Drift("cron job", where, "is replaced by a launchd job; remove it with hermes cron remove (part 10)"))
+            elif owner is None:
                 drifts.append(Drift("cron job", where, "is not a job the setup runbook creates"))
             elif owner.home != name:
                 drifts.append(Drift("cron job", where, f"belongs to the {owner.home} profile (part {owner.part})"))
@@ -796,10 +783,16 @@ def check_services(launchd_root: Path, launchctl: str) -> list:
         except (OSError, plistlib.InvalidFileException) as exc:
             drifts.append(Drift("service", service.name, f"cannot read {plists[0]}: {exc.__class__.__name__}"))
             continue
-        # The plist's ProgramArguments can hold a token, so only Label and RunAtLoad are read here;
-        # hermes_lock_drifts reads --root and --lock and nothing else.
+        # The plist's ProgramArguments can hold a token, so only Label, RunAtLoad, StartInterval, and the names of
+        # EnvironmentVariables are read here; hermes_lock_drifts reads --root and --lock and nothing else.
         if plist.get("RunAtLoad") is not True:
             drifts.append(Drift("service", service.name, f"does not run at load (part {service.part})"))
+        if service.interval and plist.get("StartInterval") != service.interval:
+            drifts.append(Drift("service", service.name, f"does not run every {service.interval} seconds (part {service.part})"))
+        variables = plist.get("EnvironmentVariables")
+        unset = [name for name in service.env if not isinstance(variables, dict) or not variables.get(name)]
+        if unset:
+            drifts.append(Drift("service", service.name, f"does not set {', '.join(unset)} (part {service.part})"))
         drifts.extend(hermes_lock_drifts(service, plist))
         state = launchd_state(launchctl, service.domains(), plist["Label"])
         if state is None:
@@ -1205,6 +1198,20 @@ def check_model_tiers(settings, worker: Path) -> list:
     )]
 
 
+def check_settings(settings, worker: Path) -> list:
+    """Report each settings value that makes claude-session refuse a run, with the text of its refusal."""
+    if not isinstance(settings, dict):
+        return []
+    problems = factory_settings.validate(settings)
+    return [
+        *(Drift("config", f"claude_session in {worker}", error) for error in problems.global_errors),
+        *(
+            Drift("config", f"{full_name} in {worker}", error)
+            for full_name, found in sorted(problems.repository_errors.items()) for error in found
+        ),
+    ]
+
+
 MCP_STATUS_SECONDS = 120
 
 
@@ -1228,11 +1235,9 @@ def mcp_probe(worker: Path, full_name: str) -> dict | str:
 def check_mcp_servers(settings, worker: Path) -> list:
     if not isinstance(settings, dict) or not (worker / "scripts" / "claude-session").is_file():
         return []
+    if factory_settings.validate(settings).global_errors:
+        return []
     drifts = []
-    if "sentry_token_env" in claude_session_settings(settings):
-        drifts.append(Drift(
-            "config", "claude_session.sentry_token_env", "is replaced by mcp_servers.sentry, so every worker run is refused (part 10)"
-        ))
     repositories = [r for r in settings.get("repositories") or [] if Path(r["path"]).is_dir()]
     # One at a time: each probe rewrites Claude Code's global config to trust its checkout.
     reports = [mcp_probe(worker, r["full_name"]) for r in repositories]
@@ -1249,18 +1254,114 @@ def check_mcp_servers(settings, worker: Path) -> list:
     return drifts
 
 
+ROOT_MCP_SECONDS = 120
+HEADER_REFERENCE = re.compile(r"(?:[A-Za-z][A-Za-z0-9-]* )?\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def root_mcp_connects(root: Path, hermes: str, server: str) -> bool:
+    try:
+        proc = subprocess.run(
+            [hermes, "mcp", "test", server], env={**os.environ, "HERMES_HOME": str(root)},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=ROOT_MCP_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return proc.returncode == 0
+
+
+READ_MCP_SERVERS = (
+    "import json, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "try:\n"
+    "    from ruamel.yaml import YAML\n"
+    "    cfg = YAML(typ='safe', pure=True).load(open(sys.argv[2])) or {}\n"
+    "except Exception as error:\n"
+    "    sys.exit(type(error).__name__)\n"
+    "if not isinstance(cfg, dict):\n"
+    "    sys.exit('config.yaml is not a mapping')\n"
+    "print(json.dumps(cfg.get('mcp_servers')))\n"
+)
+
+
+def root_mcp_servers(root: Path):
+    """The root home's mcp_servers as config.yaml writes it, with no ${VAR} expansion.
+
+    `hermes config get` expands every ${VAR} to its value, so it cannot show whether a header holds a
+    reference or a literal. Parses the file with the Hermes environment's ruamel.yaml, which has no PyYAML.
+    A parse error names only its class, because ruamel quotes the offending line, which can hold a token.
+    A missing file is check_config's to report. Raises Refusal on a failure.
+    """
+    config = root / "config.yaml"
+    if not config.is_file():
+        return None
+    python, site = hermes_python(root)
+    try:
+        proc = subprocess.run(
+            [str(python), "-I", "-B", "-c", READ_MCP_SERVERS, str(site), str(config)],
+            env={"PATH": os.environ.get("PATH", "")}, capture_output=True, text=True, timeout=HERMES_TOOLS_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise Refusal("cannot read config.yaml: timed out") from None
+    if proc.returncode != 0:
+        lines = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
+        raise Refusal(f"cannot read config.yaml: {lines[-1] if lines else proc.returncode}")
+    return json.loads(proc.stdout)
+
+
+def check_root_mcp_servers(root: Path, hermes: str) -> list:
+    """Report each enabled root-home MCP server that does not connect, samples, or holds a literal header.
+
+    Reads mcp_servers from the root home's config.yaml without env expansion, so a ${VAR} reference stays
+    a reference and no secret enters this process. Prints a server and header name, never a header value.
+    A config it cannot read or a shape Hermes would not load is one drift, so the other checks still report.
+    """
+    try:
+        return root_mcp_drifts(root, hermes)
+    except Refusal as error:
+        return [Drift("root mcp", str(root), f"cannot check: {error} (part 10)")]
+
+
+def root_mcp_drifts(root: Path, hermes: str) -> list:
+    servers = root_mcp_servers(root)
+    if servers is None:
+        return []
+    if not isinstance(servers, dict):
+        raise Refusal("mcp_servers is not a mapping")
+    drifts = []
+    for name, server in servers.items():
+        where = f"{name} in {root}"
+        if not isinstance(server, dict):
+            raise Refusal(f"mcp_servers.{name} is not a mapping")
+        if server.get("enabled") is False:
+            continue
+        sampling = server.get("sampling")
+        if sampling is not None and not isinstance(sampling, dict):
+            raise Refusal(f"mcp_servers.{name}.sampling is not a mapping")
+        headers = server.get("headers") or {}
+        if not isinstance(headers, dict):
+            raise Refusal(f"mcp_servers.{name}.headers is not a mapping")
+        for header, value in headers.items():
+            if not isinstance(value, str):
+                raise Refusal(f"mcp_servers.{name}.headers.{header} is not a string")
+            if not HEADER_REFERENCE.fullmatch(value):
+                drifts.append(Drift(
+                    "root mcp", where, f"header {header} holds a literal value, not a ${{VAR}} reference (part 10)"
+                ))
+        if (sampling or {}).get("enabled") is not False:
+            drifts.append(Drift("root mcp", where, "does not set sampling.enabled to false (part 10)"))
+        if not root_mcp_connects(root, hermes, name):
+            drifts.append(Drift("root mcp", where, f"does not connect: run hermes mcp test {name} (part 10)"))
+    return drifts
+
+
 HERMES_TOOLS_SECONDS = 60
 HERMES_TOOL_NAMES = Path(__file__).resolve().parent / "hermes-tool-names"
+IMPORT_PLUGINS = Path(__file__).resolve().parent / "import-plugins"
 BLOCKER_ORDER = "plugins/blocker-order/__init__.py"
 
 
-def hermes_tool_names(root: Path) -> list:
-    """The terminal toolset's registered names, read from the installed Hermes without writing to it.
-
-    Runs the store Python on the checkout and the selected environment's site-packages directly, never
-    through the `hermes` launcher, which leases and can rebuild environments. HERMES_HOME is a scratch
-    directory and bytecode is off. Raises Refusal with the reason when it cannot answer.
-    """
+def hermes_python(root: Path) -> tuple:
+    """The store Python and the selected environment's site-packages directory. Raises Refusal when absent."""
     python_facts = root / "tools" / "facts.json"
     if not python_facts.is_file():
         raise Refusal(f"no Hermes Python in {python_facts}")
@@ -1268,9 +1369,6 @@ def hermes_tool_names(root: Path) -> list:
     python = root / "tools" / str(entry) / "bin" / "python3"
     if not entry or not python.is_file():
         raise Refusal(f"no Hermes Python in {python_facts}")
-    checkout = Path(os.environ.get("HERMES_AGENT_DIR") or root / "hermes-agent")
-    if not (checkout / "tools" / "registry.py").is_file():
-        raise Refusal(f"no Hermes checkout at {checkout}")
     environments = [
         (json_file(facts).get("packages", {}).get("venv") or {}).get("environment")
         for facts in sorted((root / "installs").glob("*/facts.json"))
@@ -1278,10 +1376,24 @@ def hermes_tool_names(root: Path) -> list:
     site = [path for env in environments if env for path in sorted(Path(env).glob("lib/python*/site-packages"))]
     if len(site) != 1:
         raise Refusal(f"no Hermes environment: {len(site)} selected under {root / 'installs'}")
+    return python, site[0]
+
+
+def run_in_hermes(root: Path, script: Path, *args: str):
+    """The JSON that `script` prints when run with the installed Hermes importable, read without writing to Hermes.
+
+    Runs the store Python on the checkout and the selected environment's site-packages directly, never
+    through the `hermes` launcher, which leases and can rebuild environments. HERMES_HOME is a scratch
+    directory and bytecode is off. Raises Refusal with the reason when it cannot answer.
+    """
+    python, site = hermes_python(root)
+    checkout = Path(os.environ.get("HERMES_AGENT_DIR") or root / "hermes-agent")
+    if not (checkout / "tools" / "registry.py").is_file():
+        raise Refusal(f"no Hermes checkout at {checkout}")
     with tempfile.TemporaryDirectory() as scratch:
         try:
             proc = subprocess.run(
-                [str(python), "-I", "-B", str(HERMES_TOOL_NAMES), str(checkout), str(site[0])],
+                [str(python), "-I", "-B", str(script), str(checkout), str(site), *args],
                 env={"PATH": os.environ.get("PATH", ""), "HERMES_HOME": os.path.join(scratch, "home"), "PYTHONDONTWRITEBYTECODE": "1"},
                 cwd=scratch, capture_output=True, text=True, timeout=HERMES_TOOLS_SECONDS,
             )
@@ -1291,11 +1403,15 @@ def hermes_tool_names(root: Path) -> list:
         lines = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
         raise Refusal(lines[-1] if lines else f"exited {proc.returncode}")
     try:
-        names = json.loads(proc.stdout)
+        return json.loads(proc.stdout)
     except ValueError:
-        names = None
+        raise Refusal(f"exited {proc.returncode} without JSON") from None
+
+
+def hermes_tool_names(root: Path) -> list:
+    names = run_in_hermes(root, HERMES_TOOL_NAMES)
     if not isinstance(names, list):
-        raise Refusal(f"exited {proc.returncode} without a list of names")
+        raise Refusal("exited 0 without a list of names")
     return names
 
 
@@ -1345,6 +1461,67 @@ def check_hermes_tools(root: Path, plugin: Path) -> list:
     return drifts
 
 
+def installed_plugins(commit: Commit, homes: list) -> list:
+    """The (home, name) pairs of repository plugins installed where check_plugins wants them."""
+    names = sorted({path.split("/")[1] for path in commit.files("plugins")})
+    return [
+        (home, name) for name in names for home in (homes[:1] if name in ROOT_ONLY_PLUGINS else homes)
+        if (home / "plugins" / name).is_dir()
+    ]
+
+
+def plugin_statuses(home: Path, hermes: str) -> dict:
+    """Plugin name to Hermes' status ("enabled", "disabled", "not enabled") in `home`. Imports no plugin."""
+    proc = subprocess.run(
+        [hermes, "plugins", "list", "--user", "--json"], env={**os.environ, "HERMES_HOME": str(home)},
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise Refusal(proc.stderr.strip() or f"exited {proc.returncode}")
+    try:
+        return {entry["name"]: entry["status"] for entry in json.loads(proc.stdout)}
+    except (ValueError, TypeError, KeyError):
+        raise Refusal("did not print a JSON list of plugins with a name and status") from None
+
+
+def check_plugin_status(commit: Commit, homes: list, hermes: str) -> list:
+    """Alert when a repository plugin is installed in a home but Hermes does not enable it there."""
+    drifts = []
+    pairs = installed_plugins(commit, homes)
+    for home in sorted({home for home, _ in pairs}):
+        try:
+            statuses = plugin_statuses(home, hermes)
+        except Refusal as error:
+            drifts.append(Drift("plugin status", str(home), f"cannot run hermes plugins list: {error}"))
+            continue
+        for name in (name for h, name in pairs if h == home):
+            status = statuses.get(name)
+            if status != "enabled":
+                shown = f"is {status}" if status else "is not in the list"
+                drifts.append(Drift("plugin status", f"{name} in {home}", f"{shown} in hermes plugins list, so its hooks do not run"))
+    return drifts
+
+
+def check_plugin_imports(commit: Commit, homes: list, root: Path) -> list:
+    """Alert when an installed repository plugin fails to import, which Hermes only logs."""
+    drifts = []
+    pairs = installed_plugins(commit, homes)
+    for home in sorted({home for home, _ in pairs}):
+        names = [name for h, name in pairs if h == home and (home / "plugins" / name / "__init__.py").is_file()]
+        try:
+            errors = run_in_hermes(root, IMPORT_PLUGINS, *(str(home / "plugins" / name) for name in names))
+            if not isinstance(errors, dict):
+                raise Refusal("exited 0 without a JSON object")
+        except Refusal as error:
+            drifts.append(Drift("plugin import", str(home), f"cannot import the plugins: {error}"))
+            continue
+        drifts.extend(
+            Drift("plugin import", f"{name} in {home}", f"fails to import: {error}")
+            for name, error in sorted(errors.items()) if error
+        )
+    return drifts
+
+
 def homes() -> tuple:
     if not os.environ.get("HERMES_HOME"):
         raise Refusal("HERMES_HOME is not set; point it at the claude-worker profile home")
@@ -1369,15 +1546,6 @@ def resolve_commit(repo: Path, ref: str | None) -> Commit:
         label = ref
     sha = git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").strip()
     return Commit(repo, sha, label)
-
-
-def find_hermes() -> str:
-    # A cron job's PATH can lack the installer's bin directory, so fall back to where it puts hermes.
-    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
-    for candidate in filter(None, candidates):
-        if os.access(candidate, os.X_OK):
-            return candidate
-    raise Refusal("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
 
 
 def main() -> int:
@@ -1407,7 +1575,7 @@ def main() -> int:
             *check_plugins(commit, [root, worker]),
             *check_config({ROOT: root, WORKER: worker}, hermes, CONFIG if broker is None else BROKER_USER_CONFIG),
             *check_worker_secrets(commit, worker, hermes, settings),
-            *check_upload_broker(root, token_variable(settings), mcp_token_variables(settings)),
+            *check_upload_broker(root, *factory_settings.token_variables(settings)),
             *check_cron(commit, root, worker, hermes),
             *check_routes(commit, root, hermes),
             *check_dashboard(root, hermes),
@@ -1428,9 +1596,13 @@ def main() -> int:
                 config_value(root, hermes, "plugins.entries.work.settings.skills_dir"),
                 config_value(root, hermes, "plugins.entries.work.settings.allow"),
             ),
+            *check_settings(settings, worker),
             *check_model_tiers(settings, worker),
             *check_mcp_servers(settings, worker),
+            *check_root_mcp_servers(root, hermes),
             *check_hermes_tools(root, worker / "plugins" / "blocker-order" / "__init__.py"),
+            *check_plugin_status(commit, [root, worker], hermes),
+            *check_plugin_imports(commit, [root, worker], root),
         ]
         if sys.platform == "darwin":
             drifts.extend(check_services(launchd_root, launchctl))
@@ -1438,7 +1610,7 @@ def main() -> int:
             drifts.extend(check_broker_user(commit, launchd_root, root, launchctl, broker, live_accounts()))
         if drifts and args.ref is None:
             drifts.extend(check_source_checkout(commit))
-    except Refusal as exc:
+    except (Refusal, factory_settings.SettingsError) as exc:
         print(f"check-install: {exc}", file=sys.stderr)
         return 2
     for drift in drifts:

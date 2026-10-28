@@ -22,6 +22,7 @@ INSTALLATION_ID = "67890"
 TOKEN = "ghs_FAKEinstallationtoken"
 EXPIRES = "2030-01-01T00:00:00Z"
 EXPIRES_AT = 1893456000.0
+PERMISSIONS = {"actions": "read", "contents": "write", "metadata": "read"}
 
 
 def b64url_decode(part: str) -> bytes:
@@ -31,7 +32,7 @@ def b64url_decode(part: str) -> bytes:
 class FakeGitHub:
     def __init__(self):
         self.requests = []
-        self.reply = (201, {"token": TOKEN, "expires_at": EXPIRES})
+        self.reply = (201, {"token": TOKEN, "expires_at": EXPIRES, "permissions": PERMISSIONS})
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -99,10 +100,10 @@ class GitHubAppTestCase(unittest.TestCase):
 
 
 class MintTest(GitHubAppTestCase):
-    def test_a_signed_jwt_buys_an_installation_token_with_its_expiry(self):
+    def test_a_signed_jwt_buys_an_installation_token_with_its_expiry_and_permissions(self):
         token = self.app().installation_token()
 
-        self.assertEqual(token, {"access_token": TOKEN, "expires_at": EXPIRES_AT})
+        self.assertEqual(token, {"access_token": TOKEN, "expires_at": EXPIRES_AT, "permissions": PERMISSIONS})
         [request] = self.github.requests
         self.assertEqual(request["path"], f"/app/installations/{INSTALLATION_ID}/access_tokens")
         self.assertEqual((request["accept"], request["api_version"]), ("application/vnd.github+json", "2022-11-28"))
@@ -113,6 +114,12 @@ class MintTest(GitHubAppTestCase):
             json.loads(b64url_decode(claims)),
             {"iat": 1_800_000_000 - 60, "exp": 1_800_000_000 + 540, "iss": APP_ID},
         )
+
+    def test_only_named_permission_levels_are_kept(self):
+        permissions = {"actions": 2, "checks": "read", "nested": {"admin": "write"}}
+        self.github.reply = (201, {"token": TOKEN, "expires_at": EXPIRES, "permissions": permissions})
+
+        self.assertEqual(self.app().installation_token()["permissions"], {"checks": "read"})
 
     def test_integer_ids_are_accepted(self):
         self.app(app_id=int(APP_ID), installation_id=int(INSTALLATION_ID)).installation_token()
@@ -213,7 +220,7 @@ class BrokerContainmentTest(GitHubAppTestCase, unittest.IsolatedAsyncioTestCase)
     async def test_a_granted_token_is_the_only_secret_in_the_reply_and_the_audit_holds_none(self):
         replies = [await self.ask("github_token"), await self.ask("status")]
 
-        self.assertEqual(replies[0], {"ok": True, "token": TOKEN, "expires_at": EXPIRES_AT})
+        self.assertEqual(replies[0], {"ok": True, "token": TOKEN, "expires_at": EXPIRES_AT, "permissions": PERMISSIONS})
         self.assertIs(replies[1]["github_app_ready"], True)
         audit = (self.home / "factory-uploads" / "log.jsonl").read_text()
         self.assertEqual([json.loads(line)["state"] for line in audit.splitlines()], ["ok"])
@@ -233,7 +240,7 @@ class BrokerContainmentTest(GitHubAppTestCase, unittest.IsolatedAsyncioTestCase)
 
     async def test_the_allowlist_neither_blocks_the_github_token_nor_widens_what_a_token_op_serves(self):
         reply = await self.ask("github_token")
-        self.assertEqual(reply, {"ok": True, "token": TOKEN, "expires_at": EXPIRES_AT})
+        self.assertEqual(reply, {"ok": True, "token": TOKEN, "expires_at": EXPIRES_AT, "permissions": PERMISSIONS})
         self.assertEqual(await self.ask("proxy_token"), {"ok": True, "token": "proxy-FAKE", "expires_at": None})
         self.assertEqual(self.asked, ["EXAMPLE_PROXY_TOKEN"])
 

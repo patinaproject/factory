@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Callable, Optional
 
+from . import github_issue
 from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, LinearClient, LinearError, activity_content
+
+logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[], LinearClient]
 
@@ -57,6 +61,7 @@ ISSUE_SCHEMA = {
         "id, identifier, title, cardTitle (the Kanban card title, to use exactly as returned), url, "
         "gitBranchName, priority, priorityName, "
         "cardPriority (the Kanban card priority for this issue), "
+        "description, githubIssues (the URLs of the GitHub issues attached to it), "
         "state, stateType, delegate (the delegate's user ID, or null), labels (names), role_labels (the live label name of each triage role the issue's team and workspace "
         "have, keyed needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix; name a label to people "
         "by it, never by the role), attachments, "
@@ -134,6 +139,63 @@ TO_TODO_SCHEMA = {
 }
 
 
+EDIT_SCHEMA = {
+    "name": "linear_issue_edit",
+    "description": (
+        "Edit `issue` (UUID or ABC-123), any issue the agent app can read: title, description (the full new "
+        "text), add_labels, remove_labels, and state, labels and status by name, matched whatever their case and "
+        "punctuation. An added label replaces the issue's other label in its group. Creates no label or status, "
+        "and never changes assignee or delegate. Returns identifier, changed, title, labels (names), and state."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            **ISSUE_PARAMETERS["properties"],
+            "title": {"type": "string", "description": "The issue's new title."},
+            "description": {"type": "string", "description": "The issue's full new description, in Markdown."},
+            "add_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to add."},
+            "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to remove."},
+            "state": {"type": "string", "description": "Status name to move the issue to, such as Canceled."},
+        },
+    },
+}
+
+GITHUB_EDIT_SCHEMA = {
+    "name": "github_issue_edit",
+    "description": (
+        "Edit the GitHub issue at `url` as the factory's GitHub App, with one PATCH: title, body (the full new "
+        "text), add_labels and remove_labels by name, matched whatever their case and punctuation, and state "
+        "(Done, Canceled, or Todo, Backlog, or Triage to reopen). Adds only labels the repository has. Never "
+        "changes assignees. Returns url, changed, title, labels, state, and state_reason."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Required. https://github.com/<owner>/<repo>/issues/<number>."},
+            "title": {"type": "string", "description": "The issue's new title."},
+            "body": {"type": "string", "description": "The issue's full new body, in Markdown."},
+            "add_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to add."},
+            "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to remove."},
+            "state": {"type": "string", "description": "Done, Canceled, or a status that reopens, such as Todo."},
+        },
+    },
+}
+
+SEARCH_ARGUMENT_NAMES = ("query", "term", "text")
+
+SEARCH_SCHEMA = {
+    "name": "linear_issue_search",
+    "description": (
+        "Search `query` (text) across the Linear issues the agent app can read. Returns issues, up to 10, "
+        "each with identifier, title, url, team, and state."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "Required. Words to search issues for."}},
+    },
+}
+
+
 def run_activity(client_factory: ClientFactory, args: dict) -> str:
     def run() -> dict:
         content = activity_content(
@@ -150,6 +212,12 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
         if args.get("external_urls"):
             client.set_external_urls(session_id, args["external_urls"])
             result["external_urls"] = [u["url"] for u in args["external_urls"]]
+        if not args.get("ephemeral"):
+            try:
+                result["closed_sessions"] = client.close_older_sessions(session_id)
+            except Exception as error:
+                logger.warning("linear-agent-session: closing older sessions failed: %s", type(error).__name__)
+                result["close_error"] = type(error).__name__
         return result
 
     return _tool_result_or_error(run)
@@ -198,6 +266,69 @@ def run_undelegate(client_factory: ClientFactory, args: dict) -> str:
 
 def run_to_todo(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(lambda: client_factory().move_to_todo(_issue_argument(args)))
+
+
+def run_edit(client_factory: ClientFactory, args: dict) -> str:
+    def run() -> dict:
+        _refuse_people(args)
+        issue = _issue_argument(args)
+        add, remove, state = _names(args.get("add_labels")), _names(args.get("remove_labels")), args.get("state")
+        title, description = _title(args), args.get("description")
+        if not (add or remove or state or title or description is not None):
+            raise LinearError("pass title, description, add_labels, remove_labels, or state")
+        return client_factory().edit_issue(
+            issue, add_labels=add, remove_labels=remove, state=state, title=title, description=description
+        )
+
+    return _tool_result_or_error(run)
+
+
+def run_github_edit(args: dict, gh: github_issue.Gh = github_issue.run_gh) -> str:
+    def run() -> dict:
+        _refuse_people(args)
+        url = _first_argument(args, ("url", "issue", "issue_url"))
+        if not url:
+            raise LinearError("pass url, the GitHub issue's URL")
+        add, remove, state = _names(args.get("add_labels")), _names(args.get("remove_labels")), args.get("state")
+        title, body = _title(args), _first_present(args, ("body", "description"))
+        if not (add or remove or state or title or body is not None):
+            raise LinearError("pass title, body, add_labels, remove_labels, or state")
+        return github_issue.edit_issue(
+            url, title=title, body=body, add_labels=add, remove_labels=remove, state=state, gh=gh
+        )
+
+    return _tool_result_or_error(run)
+
+
+def _refuse_people(args: dict) -> None:
+    refused = sorted(k for k in args if "assignee" in k.casefold() or "delegate" in k.casefold())
+    if refused:
+        raise LinearError(f"this tool never changes assignee or delegate; drop {', '.join(refused)}")
+
+
+def _title(args: dict) -> Optional[str]:
+    title = args.get("title")
+    if title is not None and not title.strip():
+        raise LinearError("a title cannot be blank")
+    return title
+
+
+def _first_present(args: dict, names: tuple) -> Optional[str]:
+    return next((args[name] for name in names if args.get(name) is not None), None)
+
+
+def run_search(client_factory: ClientFactory, args: dict) -> str:
+    def run() -> dict:
+        term = _first_argument(args, SEARCH_ARGUMENT_NAMES)
+        if not term:
+            raise LinearError("pass query, the words to search issues for")
+        return {"issues": client_factory().search_issues(term)}
+
+    return _tool_result_or_error(run)
+
+
+def _names(value) -> list:
+    return [value] if isinstance(value, str) else list(value or [])
 
 
 def _issue_argument(args: dict) -> str:

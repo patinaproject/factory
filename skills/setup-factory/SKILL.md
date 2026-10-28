@@ -117,7 +117,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` | `<home>/.env` only. The gateway's broker gives the worker a Linear access token on request, so the worker never holds the app's credentials |
 | `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` | `<home>/.env` and `<worker>/.env` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
-| `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which `refresh-gh-app-login` renews. Hermes' own agent uses it too, such as when it answers in Slack |
+| `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which the `refresh-gh-app-login` launchd job renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository. With the broker user, `/Library/Application Support/factory-broker/home/github-app.pem` instead, and neither home sets `github.private_key_path`. The broker mints the worker's installation tokens from it |
 | `CLAUDE_PROXY_TOKEN`, the proxy's token that `claude_session.auth_token_env` names | `<home>/.env`. The worker's `worker-secrets` asks the gateway's broker for it when a worker process starts, because the worker's own agent loop sends it to the proxy, and Claude Code gets it through `apiKeyHelper`. Never store it in `<worker>/.env`, and never name it `ANTHROPIC_*` |
 | Each MCP server token that `claude_session.mcp_servers.<name>.token_env` names, such as `SENTRY_ACCESS_TOKEN` | `<home>/.env`. The run's server of that name gets it through `mcp-headers`, which asks the gateway's broker. Never store it in `<worker>/.env`. See [MCP server identities](references/mcp-identities.md) |
@@ -445,7 +445,8 @@ HERMES_HOME=<worker> python3 <worker>/scripts/check-install
 Read only its `plugin <name> in <home>` lines here. Parts 10 and 11 handle
 routes. Skip a plugin's install only when it is listed, enabled, and absent
 from those lines. Reinstall a plugin it names with the install command below
-plus `--force`.
+plus `--force`. Its `plugin status` lines name an installed plugin that Hermes
+does not enable, and its `plugin import` lines name one that fails to import.
 
 **Install** each missing plugin into each home:
 
@@ -696,10 +697,12 @@ effect at the next gateway restart. An edit to the content of an existing
 skill is served at once.
 
 **Webhook retry, root home only.** The `webhook-retry` plugin runs inside the
-gateway. It records each webhook delivery, queues one whose agent turn fails on
-a usage limit, and clears it when the turn finishes. The `retry-failed-webhooks`
-cron job in part 12 reruns the queued deliveries. Install and enable the plugin
-in the root home and never in the worker's home. `check-install` reports an
+gateway. It records each webhook delivery. It queues one that arrives while
+Hermes is paused, one whose agent turn fails on a usage limit, and one that
+never reaches a turn, and it clears a delivery when its turn finishes. While
+Hermes is paused it skips the delivery, so the pause notice does not eat it. The
+`retry-failed-webhooks` cron job in part 12 reruns the queued deliveries.
+Install and enable the plugin in the root home and never in the worker's home. `check-install` reports an
 install in the worker home. It takes effect at the next gateway restart.
 
 ```sh
@@ -851,7 +854,11 @@ servers a worker does not load, as [MCP server
 identities](references/mcp-identities.md) describes. Both stay empty until
 the operator creates the first identity. `check-install` reports each
 repository server that a worker run does not see connected and that
-`disabled_mcp_servers` does not list.
+`disabled_mcp_servers` does not list. The root agent gets a static-token
+server through `mcp_servers` in the root home's `config.yaml`, with sampling
+off (see "Root agent" in the same reference). `check-install` reports each
+root server that does not connect, has sampling on, or holds a literal header
+value.
 
 A card that waits in review leaves its Claude session idle past the 5-minute
 prompt cache, and a resumed large session re-writes its whole context at the
@@ -1064,8 +1071,8 @@ the worker needs, so turn the decomposer off. A looping card then waits in
 `triage` for a person, and a reply on its Linear issue, a changes-requested
 review, or an actionable comment on its pull request resumes it.
 
-Leave `kanban.default_assignee` unset. The resume steps in the triage prompt
-unassign a card so the dispatcher skips it while `kanban specify` rewrites it,
+Leave `kanban.default_assignee` unset. `card_transition.py resume`, which the
+triage prompts run, unassigns a card so the dispatcher skips it while `kanban specify` rewrites it,
 and a default assignee would route the unassigned card to a worker first.
 
 **Check.** `hermes config get kanban.review_dispatch` and
@@ -1144,10 +1151,9 @@ belongs to the worker profile.
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
 jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`, and
-`refresh-gh-app-login`, and `dispatch-triage`.
+`dispatch-triage`.
 A copy there runs without the worker's scripts and settings, so remove it the
-same way. The default home holds two jobs, `check-install` and
-`retry-failed-webhooks`, described below. A second setup session runs this check before it
+same way. The default home holds one job, `retry-failed-webhooks`, described below. A second setup session runs this check before it
 creates anything.
 
 **Create** the job only when the list has none:
@@ -1202,19 +1208,28 @@ hermes -p claude-worker cron create "every 1m" --name dispatch-triage --no-agent
 ```
 
 **Conflict job.** GitHub sends no webhook when a pull request starts to
-conflict because its base branch moved. `reopen-conflicts` lists the App's
-open pull requests for every `review` or `blocked` card every 5 minutes. For
-each one GitHub reports as `CONFLICTING`, it comments on the card and hands
-the card back to its worker. The worker merges the base branch, resolves the
-conflicts, and publishes the merge with `push-signed`. A card is sent back
-once per pull request head, so a worker that blocks on the same head stays
-blocked. Create the job when `cron list` has no `reopen-conflicts` job:
+conflict because its base branch moved, or when a required check fails after
+the worker handed the card off. `reopen-conflicts` lists the App's open pull
+requests for every `review` or `blocked` card every 5 minutes. For each one
+GitHub reports as `CONFLICTING`, it comments on the card and hands the card
+back to its worker. It does the same for a `review` card whose pull request is
+`MERGEABLE` and whose newest run of a check that a rule of the base branch
+requires failed on the current head. A pull request with a pending or missing
+required check waits, and a `blocked` card is never sent back for a failed
+check, because its worker stopped for a person. The worker merges the base branch and resolves the
+conflicts, or fixes the failing check, and publishes with `push-signed`. A card
+is sent back once per pull request head and reason, so a worker that blocks on
+the same head stays blocked. The same job re-requests a reviewer whose changes
+request is on an older head once every required check passes. A changes
+request on the current head, or the reviewer's unresolved review thread, sends
+the card back once per head instead. Create the job when `cron list` has no
+`reopen-conflicts` job:
 
 ```sh
 hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null
 ```
 
-**Install drift job.** `check-install` compares the live worker profile, the
+**Install drift check.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
 `origin/HEAD` of the checkout the profile was installed from. It also checks
 that the dashboard's OIDC sign-in can keep a user signed in. It also reports
@@ -1223,61 +1238,50 @@ machine changes this runbook cannot reproduce: a `config.yaml` key from parts
 missing, duplicated, changed, not created by the runbook, or in the wrong
 profile, a cron job that delivers to a platform with no home channel in its
 profile, a cron job whose last run failed or was not delivered, with the first
-line of its error and secrets masked (a failed run of the `check-install` job
-itself is not reported, because that failure is the previous run's report), the
-root home's `scripts/check-install-alert`, `scripts/retry-failed-webhooks`,
-`scripts/watch-gateway`, and `scripts/restart-gateway`
-when one is missing or differs from the repository, that `watch-gateway` has run in the last 15 minutes
+line of its error and secrets masked, the root home's
+`scripts/retry-failed-webhooks`, `scripts/watch-gateway`, and
+`scripts/restart-gateway` when one is missing or differs from the repository,
+that `watch-gateway` has run in the last 15 minutes
 without spending its restart budget, that `<root>/gateway-heartbeat-url` exists with mode `600`, and, on macOS, a
-launchd service from part 7, 12, or 15
-that is not installed, does not run at load, or is not running (the `watch-gateway` job runs
-only every 5 minutes, so it need only be loaded), and
+launchd service from part 7, 10, 12, or 15
+that is not installed, does not run at load, does not set its `EnvironmentVariables` or `StartInterval`, or is not running (the `watch-gateway`
+and `refresh-gh-app-login` jobs run on an interval, so they need only be loaded), and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never
 prints a config value. It prints one line per difference and nothing when the
-install is current. It fetches first, so a merge shows up within the hour.
+install is current. It fetches first, so it compares with the newest merge.
 
-Deliver it where the operator reads it: the home channel of the platform from
-part 13, such as `slack`. Only the default (root) profile runs that platform
-and has its home channel. The gateway refuses the platform's credential in a
-second profile, and Hermes drops the output of a job whose profile has no home
-channel for its `--deliver` platform, logging `no delivery target resolved`.
-So this job belongs to the root profile, unlike the other jobs in this part.
-Hermes runs a cron script from the owning profile's own `scripts/` directory,
-so install the wrapper there. It runs the worker's current `check-install` with
-the worker home, so the job never runs a stale copy. On a first install, do
-this after part 13. A root home that has never run a script job has no
-`scripts/` directory, so create it first. Run it from the factory checkout:
-
-```sh
-install -d <root>/scripts
-install -m 0644 skills/setup-factory/scripts/check-install-alert <root>/scripts/check-install-alert
-```
-
-Then create the job when `hermes cron list` for the root profile has no
-`check-install` job:
-
-```sh
-hermes cron create "every 1h" --name check-install --no-agent --script check-install-alert --deliver <platform> </dev/null
-```
-
-The job exits non-zero while drift exists, so its failure notice goes to the
-same platform. A factory that created this job in the worker profile earlier
-removes that copy with `hermes -p claude-worker cron remove <job id>`, with the
-operator's approval, after the root job exists.
+It runs in part 5 and in every "Deploy a merged factory change", not on a
+schedule. A factory that created an hourly `check-install` cron job earlier
+sees it reported as a job the runbook does not create. Remove it with
+`hermes cron remove <job id>`, and remove `<root>/scripts/check-install-alert`.
 
 **Webhook retry job.** The `webhook-retry` plugin from part 5 keeps a queue in
-`<root>/webhook-retry/`. A delivery whose triage turn fails on a usage limit
-waits there until the limit resets. This job reruns the due deliveries every 10
-minutes, oldest first and one at a time, and stops at the first usage limit.
-Before it reruns a Linear `Issue` update, it runs the `triage-exit` command of
-the `linear-agent-session` plugin, which applies the dispatch hook's check. When
+`<root>/webhook-retry/`. A delivery waits there for one of three reasons, which
+`--list` and the job's output name: `usage_limit` (its triage turn failed on a
+usage limit), `paused` (it arrived while Hermes was paused), or `unadmitted`
+(a recorded delivery that no `post_gateway_admission` hook marked as started
+within 10 minutes, because a restart, drain, or concurrency cap dropped it). This
+job reruns the due deliveries every 10 minutes, oldest first within each Linear
+issue or pull request and one at a time. A delivery that is not due holds back
+only later deliveries for its own subject. The job starts nothing while Hermes
+is paused, `--now` included, and a usage limit ends the run. Before it reruns a
+Linear `Issue` update, it runs the `triage-exit` command of the
+`linear-agent-session` plugin, which applies the dispatch hook's check. When
 that command archived the triage card or left a running one to its worker, the
-delivery is done without a turn. It prints a line only when something happened,
-so Hermes delivers nothing on a quiet run. It belongs to the root profile for the same reason as
-`check-install`. Install the wrapper and create the job when `hermes cron list`
+delivery is done without a turn. Before it reruns an agent session reply, it
+runs the `teammate-reply` command, and a reply addressed to a teammate is
+dropped without a turn. It prints a line only when something happened,
+so Hermes delivers nothing on a quiet run. It belongs to the root profile,
+unlike the other jobs in this part, because only that profile runs the chat
+platform from part 13 and has its home channel. Hermes drops the output of a
+job whose profile has no home channel for its `--deliver` platform, and runs a
+cron script from the owning profile's own `scripts/` directory. A root home
+that has never run a script job has no `scripts/` directory, so create it
+first. Install the wrapper and create the job when `hermes cron list`
 for the root profile has no `retry-failed-webhooks` job:
 
 ```sh
+install -d <root>/scripts
 install -m 0644 skills/setup-factory/scripts/retry-failed-webhooks <root>/scripts/retry-failed-webhooks
 hermes cron create "every 10m" --name retry-failed-webhooks --no-agent --script retry-failed-webhooks --deliver <platform> </dev/null
 ```
@@ -1293,9 +1297,9 @@ never run again, because its turn may already have changed a card.
 **Gateway watch.** Hermes reads the factory's secrets only when the gateway
 starts. When the secret source fails then, for example while the network is
 not up after a reboot, the gateway still serves, but every webhook route signs
-with its literal `${NAME}` reference and the upload broker holds no token. The
-`check-install` alert cannot report it, because the chat platform's token comes
-from the same failed source. `watch-gateway` is a launchd job outside the
+with its literal `${NAME}` reference and the upload broker holds no token. A chat
+alert cannot report it, because the chat platform's token comes from the same
+failed source. `watch-gateway` is a launchd job outside the
 gateway. It runs every 5 minutes, never calls the secret source, and reads no
 secret. It reads one non-secret value, the Linear route's `webhook_route` name,
 from `<root>/config.yaml`. It sends each route a delivery signed with the
@@ -1308,7 +1312,7 @@ It also asks the broker for `token_present`. The broker's socket is
 `<root>/factory-uploads.sock`, or the `socket` that
 `/Library/Application Support/factory-broker/broker.json` names once the
 broker runs as its own user. An unresolved route secret runs
-`restart-gateway`, which waits for running cards, and the watcher gives up
+`restart-gateway`, which waits only for at-risk cards, and the watcher gives up
 after 3 restarts in an hour. A missing broker token alone restarts nothing:
 the gateway works, and a restart does not fix a broker user's token. The
 heartbeat stays quiet instead, and `check-install` reports the broker. A
@@ -1410,13 +1414,17 @@ factory, do these before the restart:
   `claude-worker` cards.
 - `hermes gateway restart` waits for chat work and in-process cron jobs, and
   the gateway refuses webhooks while it waits. It does not wait for Kanban
-  workers. They run inside the gateway's launchd job, so a bare restart kills
-  every running card. Restart only with `restart-gateway`, which waits until
-  no board has a `running` card, then holds new cards with `hermes pause`
-  while it restarts, and lifts the pause afterwards. When the wait expires, it
-  names the running cards, exits 1, and does not restart. `--timeout` sets
-  the wait in seconds, 3600 by default. An operator's own `hermes pause` stays
-  in place. Restart when no long cron job is running.
+  workers. Most survive a restart, because Hermes starts each in its own
+  session. The exception is a worker child that the gateway adopted at startup
+  from the worker profile's `processes.json`, which the gateway kills at its
+  next shutdown. Restart only with `restart-gateway`. It waits until no
+  running card's worker has a child that started no later than 300 s after
+  the gateway, then holds new cards with `hermes pause` while it restarts, and
+  lifts the pause afterwards. Other running cards never delay it. When the
+  wait expires, it names the at-risk cards, exits 1, and does not restart. A
+  gateway record, process table, or card it cannot read counts as at risk.
+  `--timeout` sets the wait in seconds, 3600 by default. An operator's own
+  `hermes pause` stays in place. Restart when no long cron job is running.
 
 > **HUMAN CHECKPOINT.** Ask the operator to run
 > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, not from a Hermes session or tool.
@@ -1891,6 +1899,16 @@ Hermes process starts. The new helper also writes
    - A `config plugins.entries.linear-agent-session.settings.triage.max_running`
      line: add `"triage": {"max_running": <n>}` to the factory settings and set
      them in both homes as in part 10, before the profile update.
+   - A `service gh login refresh` line: install or fix the job as in
+     [Sign the worker's `gh` in](references/github.md#sign-the-workers-gh-in),
+     after the profile update installs `refresh-gh-app-login` and `gh_login.py`.
+     `claude-session` refuses every run until the job has saved
+     `<worker>/gh/token-expiry.json`, so install it right after the profile
+     update.
+   - A `cron job refresh-gh-app-login` line: a launchd job replaced it, because
+     `hermes pause` stops Hermes' cron. Once the launchd job has run, run
+     `hermes -p claude-worker cron remove <job id>` with the id from
+     `cron list`.
    - A `profile claude-worker` line: `hermes profile update claude-worker -y </dev/null`.
    - A `plugin <name> in <home>` line: run the part 5 install command for that
      home with `--force`.
@@ -1939,8 +1957,7 @@ Hermes process starts. The new helper also writes
      [`references/cloudflare-sst.md`](references/cloudflare-sst.md#6-configure-the-dashboard-sign-in),
      or allow the `refresh_tokens` grant on the `saas` Access application when
      the line names the issuer. Then restart the dashboard service.
-   - A `script <root>/scripts/check-install-alert` or
-     `<root>/scripts/retry-failed-webhooks` line: install the wrapper again
+   - A `script <root>/scripts/retry-failed-webhooks` line: install the wrapper again
      with the part 12 `install` commands, which create `<root>/scripts` first.
    - A `script <root>/scripts/watch-gateway` or
      `<root>/scripts/restart-gateway` line, a `service gateway watch` line, or
@@ -1953,10 +1970,8 @@ Hermes process starts. The new helper also writes
      profile as in part 12.
    - A `cron job dispatch-triage` line: after the profile update, create the
      job with the part 12 `cron create` command.
-   - A `cron job check-install` line: the job is missing, in the wrong
-     profile, or delivers to a platform with no home channel. Create it in the
-     root profile as in part 12, and remove a leftover copy in the worker
-     profile. Set the platform's home channel in the root home as in part 13.
+   - A `cron job check-install` line that says the job is not one the setup
+     runbook creates: remove it as in part 12's "Install drift check".
    - A `config`, `cron job`, or `service` line: the machine differs from what
      the named part produces. If the runbook is right, run that part again.
      If the machine is right, change the part and its row in `check-install`

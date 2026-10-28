@@ -29,6 +29,8 @@ class RecordingClient:
     def __init__(self, error=None, delay=0.0):
         self.calls = []
         self.replies = []
+        self.closed_for = []
+        self.close_error = None
         self.error = error
         self.delay = delay
 
@@ -38,6 +40,12 @@ class RecordingClient:
             raise self.error
         self.calls.append((agent_session_id, content))
         return "activity-1"
+
+    def close_older_sessions(self, agent_session_id):
+        if self.close_error:
+            raise self.close_error
+        self.closed_for.append(agent_session_id)
+        return []
 
     def reply_in_session(self, agent_session_id, body):
         self.replies.append((agent_session_id, body))
@@ -64,6 +72,16 @@ class ReportedBlockTest(unittest.TestCase):
                 "so Hermes stopped retrying it.\n\nReason: which branch should I use\n\nReply here to resume it.",
             },
         )
+
+    def test_a_reported_block_closes_the_sessions_older_than_its_own(self):
+        client, _ = fire("blocked", "needs_input")
+        self.assertEqual(client.closed_for, ["session-1"])
+
+    def test_a_failure_closing_older_sessions_does_not_lose_the_report(self):
+        client = RecordingClient()
+        client.close_error = RuntimeError("boom")
+        client, _ = fire("blocked", "needs_input", client=client)
+        self.assertEqual(len(client.calls), 1)
 
     def test_a_transient_card_parked_in_triage_still_posts(self):
         client, _ = fire("triage", "transient")
@@ -268,18 +286,30 @@ class SafetyTest(unittest.TestCase):
         self.assertIn("token [redacted] for the repo", content["body"])
 
     def test_secret_at_the_truncation_point_is_redacted_whole(self):
-        reason = "x" * (blocks.REASON_LIMIT - 6) + f" {SECRET}"
+        reason = "x" * (blocks.TEXT_LIMIT - 6) + f" {SECRET}"
         client, _ = fire("blocked", "capability", reason=reason)
         ((_, content),) = client.calls
         self.assertNotIn("sk-", content["body"])
 
     def test_long_reason_is_truncated(self):
-        client, _ = fire("blocked", "needs_input", reason="word " * 400)
+        client, _ = fire("blocked", "needs_input", reason="word " * 1000)
         ((_, content),) = client.calls
         reason = content["body"].split("Reason: ")[1].split("\n\n")[0]
-        self.assertLessEqual(len(reason), blocks.REASON_LIMIT + 3)
-        self.assertGreater(len(reason), blocks.REASON_LIMIT - 2)
+        self.assertLessEqual(len(reason), blocks.TEXT_LIMIT + 3)
+        self.assertGreater(len(reason), blocks.TEXT_LIMIT - 2)
         self.assertTrue(reason.endswith("..."))
+
+    def test_long_multiline_reason_is_posted_whole_with_its_line_breaks(self):
+        reason = "Needs a decision on three points:\n- first: which branch\n- second: which name\n- third: " + "y" * 1500
+        client, _ = fire("blocked", "needs_input", reason=reason)
+        ((_, content),) = client.calls
+        self.assertIn(
+            "Reason: Needs a decision on three points:\n- first: which branch\n- second: which name\n- third: "
+            + "y" * 1500
+            + "\n\n",
+            content["body"],
+        )
+        self.assertNotIn("...", content["body"])
 
     def test_missing_reason_is_said_plainly(self):
         client, _ = fire("triage", "needs_input", reason=None)

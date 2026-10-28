@@ -39,6 +39,14 @@ if sys.argv[1:4] == ["kanban", "boards", "list"]:
     boards = os.path.join(os.environ["HERMES_HOME"], "installed-boards.json")
     print(open(boards).read() if os.path.exists(boards) else "[]")
     sys.exit()
+if sys.argv[1:3] == ["plugins", "list"]:
+    listed = os.path.join(os.environ["HERMES_HOME"], "installed-plugins.json")
+    if os.path.exists(listed):
+        print(open(listed).read())
+    else:
+        plugins = os.path.join(os.environ["HERMES_HOME"], "plugins")
+        print(json.dumps([{"name": n, "status": "enabled"} for n in sorted(os.listdir(plugins))] if os.path.isdir(plugins) else []))
+    sys.exit()
 key = sys.argv[3]
 config = os.path.join(os.environ["HERMES_HOME"], "installed-config.json")
 if os.path.exists(config) and key in json.load(open(config)):
@@ -107,16 +115,13 @@ def cron_job(name: str, minutes: int, deliver: str = "local", **fields) -> dict:
 
 
 WORKER_JOBS = [
-    cron_job("refresh-gh-app-login", 30),
     cron_job("refresh-checkouts", 60),
     cron_job("refresh-owned-refs", 1),
     cron_job("reopen-conflicts", 5),
     cron_job("dispatch-triage", 1),
 ]
-ALERT_SCRIPT = "check-install-alert"
 RETRY_SCRIPT = "retry-failed-webhooks"
-ROOT_JOBS = [{**cron_job("check-install", 60, "slack"), "script": ALERT_SCRIPT}, cron_job(RETRY_SCRIPT, 10, "slack")]
-ALERT_SOURCE = f"skills/setup-factory/scripts/{ALERT_SCRIPT}"
+ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack")]
 RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
@@ -135,13 +140,12 @@ REPO_FILES = {
     "profiles/claude-worker/SOUL.md": "soul\n",
     "profiles/claude-worker/config.yaml": "model: repo\n",
     "profiles/claude-worker/scripts/x": "#!/bin/sh\n",
-    "plugins/p1/__init__.py": "plugin\n",
+    "plugins/p1/__init__.py": "# plugin\n",
     "plugins/p1/tests/test_a.py": "test\n",
-    "plugins/factory-uploads/__init__.py": "uploads\n",
-    "plugins/work/__init__.py": "work\n",
-    "plugins/webhook-retry/__init__.py": "retry\n",
+    "plugins/factory-uploads/__init__.py": "# uploads\n",
+    "plugins/work/__init__.py": "# work\n",
+    "plugins/webhook-retry/__init__.py": "# retry\n",
     "templates/render.py": RENDER,
-    ALERT_SOURCE: "#!/usr/bin/env python3\nalert\n",
     RETRY_SOURCE: "#!/usr/bin/env python3\nretry\n",
 }
 
@@ -175,15 +179,15 @@ class CheckInstallTest(unittest.TestCase):
         self.root = self.tmp / "hermes"
         self.worker = self.root / "profiles" / "claude-worker"
         for home in (self.root, self.worker):
-            self.install(home, "plugins/p1/__init__.py", "plugin\n")
+            self.install(home, "plugins/p1/__init__.py", "# plugin\n")
             self.install(home, f"plugins/factory-secret-names/{SECRET_NAMES}", SECRET_NAMES_MANIFEST)
-        self.install(self.root, "plugins/factory-uploads/__init__.py", "uploads\n")
+        self.install(self.root, "plugins/factory-uploads/__init__.py", "# uploads\n")
         (self.root / "plugins" / "linear-agent-session").mkdir(parents=True)
         (self.root / "plugins" / "linear-agent-session" / "broker_client.py").symlink_to(
             REPO / "plugins" / "linear-agent-session" / "broker_client.py"
         )
-        self.install(self.root, "plugins/work/__init__.py", "work\n")
-        self.install(self.root, "plugins/webhook-retry/__init__.py", "retry\n")
+        self.install(self.root, "plugins/work/__init__.py", "# work\n")
+        self.install(self.root, "plugins/webhook-retry/__init__.py", "# retry\n")
         self.install(self.worker, "SOUL.md", "soul\n")
         self.install(self.worker, "scripts/x", "#!/bin/sh\n")
         self.install(self.worker, "config.yaml", "model: local\n")
@@ -193,7 +197,6 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps({**ROUTE, "secret": "abc...1234"}))
         self.install(self.root, f"installed-config/{RATE_LIMIT_KEY}.json", "600")
         self.install(self.root, "logs/agent.log", "")
-        self.install(self.root, f"scripts/{ALERT_SCRIPT}", REPO_FILES[ALERT_SOURCE])
         self.install(self.root, f"scripts/{RETRY_SCRIPT}", REPO_FILES[RETRY_SOURCE])
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C0123\n")
         self.owned_refs = self.root / "owned-refs.json"
@@ -208,6 +211,7 @@ class CheckInstallTest(unittest.TestCase):
         self.discovery(["authorization_code_with_pkce", "refresh_tokens"])
         self.dashboard(scopes="openid profile email offline_access")
 
+        install_fake_hermes(self.root)
         self.hermes = self.tmp / "bin" / "fake-hermes"
         self.install(self.tmp, "bin/fake-hermes", with_interpreter(FAKE_HERMES))
         os.chmod(self.hermes, 0o755)
@@ -330,11 +334,11 @@ class CheckInstallTest(unittest.TestCase):
             (check_install.WATCH_STATE, check_install.HEARTBEAT_FILE, check_install.WATCH_INTERVAL, check_install.RESTARTS_PER_HOUR),
             (watch.STATE_FILE, watch.HEARTBEAT_FILE, watch.INTERVAL_SECONDS, watch.RESTARTS_PER_HOUR),
         )
-        launchd_name = Path(check_install.SERVICES[-1].plist).name
+        launchd_name = Path(next(s.plist for s in check_install.SERVICES if s.name == "gateway watch")).name
         self.assertEqual(launchd_name, f"{watch.LABEL}.plist")
 
     def test_plugin_difference_names_the_home(self) -> None:
-        self.install(self.worker, "plugins/p1/__init__.py", "old\n")
+        self.install(self.worker, "plugins/p1/__init__.py", "# old\n")
 
         self.assertEqual(
             self.check(),
@@ -351,7 +355,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (0, ""))
 
     def test_a_root_only_plugin_is_required_in_the_root_home_and_compared_there(self) -> None:
-        self.install(self.root, "plugins/factory-uploads/__init__.py", "old\n")
+        self.install(self.root, "plugins/factory-uploads/__init__.py", "# old\n")
         self.assertEqual(
             self.check(),
             (1, f"plugin factory-uploads in {self.root}: __init__.py differs from main at {self.sha}\n"),
@@ -363,14 +367,14 @@ class CheckInstallTest(unittest.TestCase):
         shutil.rmtree(self.root / "plugins" / "work")
         self.assertEqual(self.check(), (1, f"plugin work in {self.root}: not installed\n"))
 
-        self.install(self.root, "plugins/work/__init__.py", "work\n")
-        self.install(self.worker, "plugins/work/__init__.py", "work\n")
+        self.install(self.root, "plugins/work/__init__.py", "# work\n")
+        self.install(self.worker, "plugins/work/__init__.py", "# work\n")
         self.assertEqual(
             self.check(), (1, f"plugin work in {self.worker}: installed, but it runs only in the root home\n")
         )
 
     def test_a_root_only_plugin_installed_in_the_worker_home_is_reported(self) -> None:
-        self.install(self.worker, "plugins/factory-uploads/__init__.py", "uploads\n")
+        self.install(self.worker, "plugins/factory-uploads/__init__.py", "# uploads\n")
 
         self.assertEqual(
             self.check(),
@@ -380,6 +384,69 @@ class CheckInstallTest(unittest.TestCase):
     def test_plugin_tests_are_ignored(self) -> None:
         self.install(self.worker, "plugins/p1/tests/test_a.py", "different\n")
 
+        self.assertEqual(self.check(), (0, ""))
+
+    # The fixture's fake Hermes lists every installed plugin as enabled unless installed-plugins.json says otherwise.
+    def listing(self, home: Path, **statuses: str) -> None:
+        names = sorted(path.name for path in (home / "plugins").iterdir())
+        entries = [{"name": name, "status": statuses.get(name, "enabled")} for name in names if statuses.get(name) != "absent"]
+        self.install(home, "installed-plugins.json", json.dumps(entries))
+
+    def test_a_plugin_that_is_installed_but_not_enabled_is_reported_by_name(self) -> None:
+        self.listing(self.worker, p1="not enabled")
+
+        self.assertEqual(self.check(), (1, (
+            f"plugin status p1 in {self.worker}: is not enabled in hermes plugins list, so its hooks do not run\n"
+        )))
+
+    def test_a_disabled_plugin_is_reported_by_name(self) -> None:
+        self.listing(self.root, p1="disabled")
+
+        self.assertEqual(self.check(), (1, (
+            f"plugin status p1 in {self.root}: is disabled in hermes plugins list, so its hooks do not run\n"
+        )))
+
+    def test_enabled_plugins_are_silent(self) -> None:
+        self.listing(self.root)
+        self.listing(self.worker)
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_plugin_missing_from_the_list_is_reported(self) -> None:
+        self.listing(self.worker, p1="absent")
+
+        self.assertEqual(self.check(), (1, (
+            f"plugin status p1 in {self.worker}: is not in the list in hermes plugins list, so its hooks do not run\n"
+        )))
+
+    def test_a_list_that_is_not_json_gives_one_row_for_the_home(self) -> None:
+        self.install(self.worker, "installed-plugins.json", "no list here")
+
+        self.assertEqual(self.check(), (1, (
+            f"plugin status {self.worker}: cannot run hermes plugins list: "
+            "did not print a JSON list of plugins with a name and status\n"
+        )))
+
+    def test_a_plugin_that_fails_to_import_is_reported_by_name(self) -> None:
+        self.install(self.worker, "plugins/p1/__init__.py", "raise RuntimeError('boom\\nhere')\n")
+
+        code, out = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertIn(f"plugin import p1 in {self.worker}: fails to import: RuntimeError: boom here\n", out)
+        self.assertEqual(out.count("plugin import"), 1)
+
+    def test_homes_that_cannot_import_give_one_row_each(self) -> None:
+        (self.root / "tools" / "facts.json").unlink()
+
+        reason = f"no Hermes Python in {self.root / 'tools' / 'facts.json'}"
+        self.assertEqual(self.check(), (1, (
+            f"plugin import {self.root}: cannot import the plugins: {reason}\n"
+            f"plugin import {self.worker}: cannot import the plugins: {reason}\n"
+        )))
+
+    def test_a_plugin_with_no_code_is_not_imported(self) -> None:
+        self.assertFalse((self.worker / "plugins" / "factory-secret-names" / "__init__.py").exists())
         self.assertEqual(self.check(), (0, ""))
 
     def test_profile_differences(self) -> None:
@@ -837,28 +904,35 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job refresh-checkouts in {self.worker}: is missing (part 12)\n"
-                f"cron job check-install in {self.root}: exists 2 times (part 12)\n"
                 f"cron job {RETRY_SCRIPT} in {self.root}: exists 2 times (part 12)\n"),
         )
 
     def test_cron_job_changed_by_hand(self) -> None:
         self.cron(self.worker, [
-            cron_job("refresh-gh-app-login", 30, enabled=False),
-            cron_job("refresh-checkouts", 15, no_agent=False),
+            cron_job("refresh-checkouts", 15, enabled=False, no_agent=False),
             cron_job("refresh-owned-refs", 1),
             cron_job("reopen-conflicts", 5),
             cron_job("dispatch-triage", 1),
         ])
-        self.cron(self.root, [{**cron_job("check-install", 60, "local"), "script": ALERT_SCRIPT}, ROOT_JOBS[1]])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local")])
 
         self.assertEqual(
             self.check(),
-            (1, f"cron job refresh-gh-app-login in {self.worker}: is disabled (part 10)\n"
+            (1, f"cron job refresh-checkouts in {self.worker}: is disabled (part 12)\n"
                 f"cron job refresh-checkouts in {self.worker}: runs every 15m, not every 60m (part 12)\n"
                 f"cron job refresh-checkouts in {self.worker}: is not a script-only job that runs refresh-checkouts "
                 "(part 12)\n"
-                f'cron job check-install in {self.root}: delivers to "local", not the operator\'s chat platform '
+                f'cron job {RETRY_SCRIPT} in {self.root}: delivers to "local", not the operator\'s chat platform '
                 "(part 12)\n"),
+        )
+
+    def test_the_login_refresh_cron_job_that_launchd_replaced_is_reported(self) -> None:
+        self.cron(self.worker, [*WORKER_JOBS, cron_job("refresh-gh-app-login", 30)])
+
+        self.assertEqual(
+            self.check(),
+            (1, f"cron job refresh-gh-app-login in {self.worker}: is replaced by a launchd job; "
+                "remove it with hermes cron remove (part 10)\n"),
         )
 
     def test_cron_jobs_the_runbook_does_not_create(self) -> None:
@@ -906,24 +980,6 @@ class CheckInstallTest(unittest.TestCase):
                 "rejected [redacted] and [redacted] (part 12)\n"),
         )
 
-    def test_failed_check_install_run_does_not_fail_a_clean_machine(self) -> None:
-        error = (
-            "Script exited with code 1\nstderr:\nprofile claude-worker: scripts/claude-session differs from main "
-            "at c02dda9 (part 12)"
-        )
-        self.cron(self.root, [{**ROOT_JOBS[0], "last_status": "error", "last_error": error}, *ROOT_JOBS[1:]])
-
-        self.assertEqual(self.check(), (0, ""))
-
-        failed = cron_job("refresh-checkouts", 60, last_status="error", last_error="Script exited with code 1")
-        self.cron(self.worker, [failed if job["name"] == failed["name"] else job for job in WORKER_JOBS])
-
-        self.assertEqual(
-            self.check(),
-            (1, f"cron job refresh-checkouts in {self.worker}: last run failed: Script exited with code 1 "
-                "(part 12)\n"),
-        )
-
     def test_undelivered_last_run_names_its_delivery_error(self) -> None:
         undelivered = {**ROOT_JOBS[0], "last_status": "delivery_failed", "last_error": None,
                        "last_delivery_error": "slack: channel_not_found\nmore"}
@@ -931,16 +987,18 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(
             self.check(),
-            (1, f"cron job check-install in {self.root}: last run's output was not delivered: "
+            (1, f"cron job {RETRY_SCRIPT} in {self.root}: last run's output was not delivered: "
                 "slack: channel_not_found (part 12)\n"),
         )
 
-    def test_check_install_job_left_in_the_worker_profile(self) -> None:
+    def test_check_install_job_left_from_an_earlier_setup(self) -> None:
+        self.cron(self.root, [*ROOT_JOBS, {**cron_job("check-install", 60, "slack"), "script": "check-install-alert"}])
         self.cron(self.worker, [*WORKER_JOBS, cron_job("check-install", 60, "slack")])
 
         self.assertEqual(
             self.check(),
-            (1, f"cron job check-install in {self.worker}: belongs to the root profile (part 12)\n"),
+            (1, f"cron job check-install in {self.root}: is not a job the setup runbook creates\n"
+                f"cron job check-install in {self.worker}: is not a job the setup runbook creates\n"),
         )
 
     def test_delivery_without_a_home_channel_is_reported(self) -> None:
@@ -948,9 +1006,7 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(
             self.check(),
-            (1, f"cron job check-install in {self.root}: delivers to slack, which has no home channel in "
-                f"{self.root}, so Hermes drops its output (part 12)\n"
-                f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
+            (1, f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -959,9 +1015,7 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(
             self.check(),
-            (1, f"cron job check-install in {self.root}: delivers to slack, which has no home channel in "
-                f"{self.root}, so Hermes drops its output (part 12)\n"
-                f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
+            (1, f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -973,27 +1027,14 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_explicit_and_local_delivery_targets_need_no_home_channel(self) -> None:
         (self.root / ".env").unlink()
-        self.cron(self.root, [{**cron_job("check-install", 60, "slack:C0123"), "script": ALERT_SCRIPT}, cron_job(RETRY_SCRIPT, 10, "slack:C0123")])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "slack:C0123")])
 
         self.assertEqual(self.check(), (0, ""))
 
-    def test_root_alert_script_missing_or_changed(self) -> None:
-        script = self.root / "scripts" / ALERT_SCRIPT
-        script.write_text("old\n")
-        changed = self.check()
-        script.unlink()
-        missing = self.check()
-
-        self.assertEqual(
-            (changed, missing),
-            ((1, f"script {script}: differs from main at {self.sha} (part 12)\n"),
-             (1, f"script {script}: is missing; install it from {ALERT_SOURCE} (part 12)\n")),
-        )
-
     def test_retry_cron_job_missing_or_changed(self) -> None:
-        self.cron(self.root, ROOT_JOBS[:1])
+        self.cron(self.root, [])
         missing = self.check()
-        self.cron(self.root, [ROOT_JOBS[0], cron_job(RETRY_SCRIPT, 30, "slack", enabled=False)])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 30, "slack", enabled=False)])
         changed = self.check()
 
         self.assertEqual(
@@ -1017,7 +1058,7 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_webhook_retry_installed_in_the_worker_home_is_reported(self) -> None:
-        self.install(self.worker, "plugins/webhook-retry/__init__.py", "retry\n")
+        self.install(self.worker, "plugins/webhook-retry/__init__.py", "# retry\n")
 
         self.assertEqual(
             self.check(),
@@ -1219,6 +1260,30 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (0, ""))
 
+    def test_a_setting_that_refuses_a_worker_run_is_reported_with_the_refusal_text(self) -> None:
+        self.claude_session(fresh_after_tokens=-1)
+
+        self.assertEqual(self.check(), (
+            1, f"config claude_session in {self.worker}: claude_session.fresh_after_tokens -1 must be a positive integer\n",
+        ))
+
+    def test_a_leftover_sentry_token_env_is_reported(self) -> None:
+        self.claude_session(sentry_token_env="SENTRY_ACCESS_TOKEN")
+
+        self.assertEqual(self.check(), (1, (
+            f"config claude_session in {self.worker}: "
+            "claude_session.sentry_token_env is replaced by claude_session.mcp_servers.sentry\n"
+        )))
+
+    def test_a_repository_setting_that_refuses_its_run_is_reported_though_its_checkout_is_missing(self) -> None:
+        settings = {**SETTINGS, "repositories": [{"full_name": "org/gone", "path": str(self.tmp / "gone"), "worker_entry": "{x}"}]}
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+
+        status, output = self.check()
+
+        self.assertEqual(status, 1)
+        self.assertIn(f"config org/gone in {self.worker}: worker_entry '{{x}}' must be a plain prefix", output)
+
     def checkout(self) -> Path:
         path = self.tmp / "checkout"
         git(self.tmp, "clone", "-q", str(self.tmp / "seed"), str(path))
@@ -1412,6 +1477,7 @@ class CheckInstallTest(unittest.TestCase):
         self.launchd.plist(
             f"{agents}/ai.patinaproject.factory.gateway-watch.plist", "ai.patinaproject.factory.gateway-watch"
         )
+        self.launchd.plist(f"{agents}/ai.patinaproject.factory.gh-login.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS)
         env = {"PATH": "/usr/bin:/bin", **self.launchd.env, "HOME": str(home), "HERMES_HOME": str(self.worker)}
         proc = subprocess.run(
             ["/usr/bin/env", "python3", str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True
@@ -1553,6 +1619,12 @@ class CheckStrandedTriageTest(unittest.TestCase):
         self.assertTrue(rows[0].startswith(f"stranded triage card check {self.path}: cannot be read: "))
 
 
+GH_LOGIN_LABEL = "ai.patinaproject.factory.gh-login"
+GH_LOGIN_FIELDS = {
+    "StartInterval": 900, "EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/w"},
+}
+
+
 class Launchd:
     """A file system root with the runbook's two plists and a fake launchctl that reports their state."""
 
@@ -1572,10 +1644,14 @@ class Launchd:
             f"{str(self.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist",
             "ai.patinaproject.factory.gateway-watch",
         )
+        self.gh_login = self.plist(
+            f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{GH_LOGIN_LABEL}.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS,
+        )
         uid = os.getuid()
         self.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
             f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+            f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
         })
         self.env = {
             "LAUNCHD_ROOT": str(self.root), "LAUNCHCTL_BIN": str(self.launchctl),
@@ -1650,13 +1726,11 @@ class CheckMcpServersTest(unittest.TestCase):
             "mcp example-org/site: cannot read the MCP server status: exited 0 without a report (part 10)",
         ])
 
-    def test_a_leftover_sentry_token_env_is_reported(self) -> None:
+    def test_a_setting_that_refuses_every_run_skips_the_probes(self) -> None:
         self.settings["claude_session"] = {"sentry_token_env": "SENTRY_ACCESS_TOKEN"}
-        report = {"servers": [], "disabled": []}
+        report = {"servers": [{"name": "sentry", "status": "failed"}], "disabled": []}
 
-        self.assertEqual(self.check({"example-org/app": [0, report], "example-org/site": [0, report]}), [
-            "config claude_session.sentry_token_env: is replaced by mcp_servers.sentry, so every worker run is refused (part 10)",
-        ])
+        self.assertEqual(self.check({"example-org/app": [0, report], "example-org/site": [0, report]}), [])
 
     def test_a_report_that_is_not_an_object_is_named(self) -> None:
         self.assertEqual(self.check({"example-org/app": [2, ["no"]], "example-org/site": [0, "no"]}), [
@@ -1669,6 +1743,134 @@ class CheckMcpServersTest(unittest.TestCase):
 
         self.assertEqual(self.check({}), [])
         self.assertEqual([str(d) for d in check_install.check_mcp_servers(None, self.worker)], [])
+
+
+FAKE_ROOT_MCP_HERMES = """#!/usr/bin/env python3
+import json, os, sys
+home = os.environ["HERMES_HOME"]
+if sys.argv[1:3] == ["mcp", "test"]:
+    sys.exit(0 if sys.argv[3] in json.load(open(os.path.join(home, "connects.json"))) else 1)
+sys.exit("check-install must read mcp_servers from config.yaml, not from hermes: " + " ".join(sys.argv[1:]))
+"""
+
+FAKE_RUAMEL = """import json
+
+
+class YAML:
+    def __init__(self, typ="rt", pure=False):
+        assert typ == "safe" and pure is True
+    def load(self, stream):
+        text = stream.read()
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise ValueError("while parsing a flow sequence: " + text) from None
+"""
+
+SECRET = "sntryu_0123456789abcdef"
+ROOT_SERVER = {
+    "url": "https://mcp.example/mcp/<org>",
+    "headers": {"Authorization": "Sentry-Bearer ${SENTRY_ACCESS_TOKEN}"},
+    "sampling": {"enabled": False},
+}
+
+
+class CheckRootMcpServersTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "root"
+        self.root.mkdir()
+        self.hermes = self.tmp / "hermes"
+        self.hermes.write_text(with_interpreter(FAKE_ROOT_MCP_HERMES))
+        self.hermes.chmod(0o755)
+        (self.root / "tools" / "py").mkdir(parents=True)
+        (self.root / "tools" / "py" / "bin").mkdir()
+        (self.root / "tools" / "py" / "bin" / "python3").symlink_to(sys.executable)
+        (self.root / "tools" / "facts.json").write_text(json.dumps({"packages": {"python": {"entry": "py"}}}))
+        env = self.tmp / "env"
+        site = env / "lib" / "python3" / "site-packages"
+        (site / "ruamel" / "yaml").mkdir(parents=True)
+        (site / "ruamel" / "yaml" / "__init__.py").write_text(FAKE_RUAMEL)
+        (self.root / "installs" / "one").mkdir(parents=True)
+        (self.root / "installs" / "one" / "facts.json").write_text(
+            json.dumps({"packages": {"venv": {"environment": str(env)}}})
+        )
+
+    def check(self, servers, connects=("sentry",)) -> list:
+        (self.root / "config.yaml").write_text(json.dumps({"model": "x", "mcp_servers": servers}))
+        (self.root / "connects.json").write_text(json.dumps(list(connects)))
+        return [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+
+    def test_a_connected_server_with_sampling_off_and_a_reference_is_silent(self) -> None:
+        self.assertEqual(self.check({"sentry": ROOT_SERVER}), [])
+
+    def test_a_server_that_does_not_connect_is_reported(self) -> None:
+        self.assertEqual(self.check({"sentry": ROOT_SERVER}, connects=()), [
+            f"root mcp sentry in {self.root}: does not connect: run hermes mcp test sentry (part 10)",
+        ])
+
+    def test_sampling_on_or_missing_is_reported(self) -> None:
+        for sampling in ({"enabled": True}, {}, None):
+            with self.subTest(sampling=sampling):
+                server = {k: v for k, v in {**ROOT_SERVER, "sampling": sampling}.items() if v is not None}
+                self.assertEqual(self.check({"sentry": server}), [
+                    f"root mcp sentry in {self.root}: does not set sampling.enabled to false (part 10)",
+                ])
+
+    def test_a_literal_header_is_reported_without_its_value(self) -> None:
+        for value in (f"Sentry-Bearer {SECRET}", f"Bearer {SECRET} ${{SENTRY_ACCESS_TOKEN}}", f"{SECRET}${{X}}"):
+            with self.subTest(value=value):
+                lines = self.check({"sentry": {**ROOT_SERVER, "headers": {"Authorization": value}}})
+
+                self.assertEqual(lines, [
+                    f"root mcp sentry in {self.root}: header Authorization holds a literal value, not a ${{VAR}} reference (part 10)",
+                ])
+                self.assertNotIn(SECRET, "".join(lines))
+
+    def test_a_bare_reference_is_a_reference(self) -> None:
+        self.assertEqual(self.check({"sentry": {**ROOT_SERVER, "headers": {"X-Token": "${SENTRY_ACCESS_TOKEN}"}}}), [])
+
+    def test_a_disabled_server_is_skipped(self) -> None:
+        self.assertEqual(self.check({"sentry": {**ROOT_SERVER, "sampling": {}, "enabled": False}}, connects=()), [])
+
+    def test_no_servers_is_silent(self) -> None:
+        (self.root / "config.yaml").write_text('{"model": "x"}')
+        self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
+
+    def test_a_missing_config_is_check_configs_to_report(self) -> None:
+        self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
+
+    def test_a_reference_is_never_expanded_and_never_reported(self) -> None:
+        (self.root / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
+        (self.root / "connects.json").write_text('["sentry"]')
+        with mock.patch.dict(os.environ, {"SENTRY_ACCESS_TOKEN": SECRET}):
+            self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
+
+    def test_a_config_that_does_not_parse_is_one_drift_that_quotes_none_of_it(self) -> None:
+        (self.root / "config.yaml").write_text(f"mcp_servers: [unclosed Sentry-Bearer {SECRET}\n")
+
+        lines = [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+
+        self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: ValueError (part 10)"])
+
+    def test_a_config_read_that_times_out_is_one_drift(self) -> None:
+        (self.root / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
+        with mock.patch.object(check_install.subprocess, "run", side_effect=subprocess.TimeoutExpired("python3", 60)):
+            lines = [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+
+        self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: timed out (part 10)"])
+
+    def test_a_malformed_config_is_one_drift(self) -> None:
+        for servers, problem in (
+            (["sentry"], "mcp_servers is not a mapping"),
+            ({"sentry": "url"}, "mcp_servers.sentry is not a mapping"),
+            ({"sentry": {**ROOT_SERVER, "headers": {"Authorization": 5}}}, "mcp_servers.sentry.headers.Authorization is not a string"),
+            ({"sentry": {**ROOT_SERVER, "headers": ["x"]}}, "mcp_servers.sentry.headers is not a mapping"),
+            ({"sentry": {**ROOT_SERVER, "sampling": True}}, "mcp_servers.sentry.sampling is not a mapping"),
+        ):
+            with self.subTest(servers=servers):
+                self.assertEqual(self.check(servers), [f"root mcp {self.root}: cannot check: {problem} (part 10)"])
 
 
 FAKE_REGISTRY = """import json
@@ -1697,27 +1899,34 @@ import fake_dependency
 PLUGIN = REPO / "plugins" / "blocker-order" / "__init__.py"
 
 
+def install_fake_hermes(root: Path) -> Path:
+    """A Hermes checkout, store Python, and environment under `root`. Returns the checkout."""
+    tree = root / "hermes-agent"
+    tools = tree / "tools"
+    tools.mkdir(parents=True)
+    for name, source in (("__init__", ""), ("registry", FAKE_REGISTRY), ("process_registry", ""),
+                         ("terminal_tool", FAKE_TERMINAL_TOOL)):
+        (tools / f"{name}.py").write_text(source)
+    (tools / "registered.json").write_text(json.dumps({"terminal": "terminal", "process_manage": "terminal"}))
+    python = root / "tools" / "python-9" / "bin"
+    python.mkdir(parents=True)
+    (python / "python3").symlink_to(sys.executable)
+    (root / "tools" / "facts.json").write_text(json.dumps({"packages": {"python": {"entry": "python-9"}}}))
+    site = root / "installs" / "key" / "environments" / "env" / "venv" / "lib" / "python9.9" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "fake_dependency.py").write_text("")
+    (root / "installs" / "key" / "facts.json").write_text(
+        json.dumps({"packages": {"venv": {"environment": str(site.parents[2])}}}))
+    return tree
+
+
 class CheckHermesToolsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         self.root = self.tmp / "root"
-        self.tree = self.root / "hermes-agent"
-        tools = self.tree / "tools"
-        tools.mkdir(parents=True)
-        for name, source in (("__init__", ""), ("registry", FAKE_REGISTRY), ("process_registry", ""),
-                             ("terminal_tool", FAKE_TERMINAL_TOOL)):
-            (tools / f"{name}.py").write_text(source)
+        self.tree = install_fake_hermes(self.root)
         self.register({"terminal": "terminal", "process_manage": "terminal", "read_file": "file"})
-        python = self.root / "tools" / "python-9" / "bin"
-        python.mkdir(parents=True)
-        (python / "python3").symlink_to(sys.executable)
-        (self.root / "tools" / "facts.json").write_text(json.dumps({"packages": {"python": {"entry": "python-9"}}}))
-        site = self.root / "installs" / "key" / "environments" / "env" / "venv" / "lib" / "python9.9" / "site-packages"
-        site.mkdir(parents=True)
-        (site / "fake_dependency.py").write_text("")
-        (self.root / "installs" / "key" / "facts.json").write_text(
-            json.dumps({"packages": {"venv": {"environment": str(site.parents[2])}}}))
         self.plugin = self.tmp / "worker" / "plugins" / "blocker-order" / "__init__.py"
         shutil.copytree(PLUGIN.parent, self.plugin.parent, ignore=shutil.ignore_patterns("tests", "__pycache__"))
 
@@ -1790,6 +1999,51 @@ class CheckHermesToolsTest(unittest.TestCase):
         self.assertEqual(self.check(), [])
 
 
+class ImportPluginsTest(unittest.TestCase):
+    def run_helper(self, plugins: dict) -> dict:
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, tmp)
+        dirs = []
+        for name, files in plugins.items():
+            for path, text in files.items():
+                (tmp / "plugins" / name / path).parent.mkdir(parents=True, exist_ok=True)
+                (tmp / "plugins" / name / path).write_text(text)
+            dirs.append(str(tmp / "plugins" / name))
+        (tmp / "checkout").mkdir()
+        (tmp / "site").mkdir()
+        (tmp / "site" / "dependency.py").write_text("VALUE = 1\n")
+        proc = subprocess.run(
+            [sys.executable, "-I", "-B", str(SCRIPTS / "import-plugins"), str(tmp / "checkout"), str(tmp / "site"), *dirs],
+            cwd=tmp, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_each_plugin_maps_to_null_or_its_error(self) -> None:
+        result = self.run_helper({
+            "fine": {"__init__.py": "import dependency\n"},
+            "relative": {"__init__.py": "from . import helper\nfrom .helper import VALUE\n", "helper.py": "VALUE = 2\n"},
+            "broken": {"__init__.py": "raise ValueError('no good')\n"},
+            "missing-import": {"__init__.py": "import nothing_here\n"},
+            "broken-submodule": {"__init__.py": "from . import helper\n", "helper.py": "1 / 0\n"},
+            "exits": {"__init__.py": "raise SystemExit(3)\n"},
+        })
+
+        self.assertEqual(result, {
+            "fine": None,
+            "relative": None,
+            "broken": "ValueError: no good",
+            "missing-import": "ModuleNotFoundError: No module named 'nothing_here'",
+            "broken-submodule": "ZeroDivisionError: division by zero",
+            "exits": "SystemExit: 3",
+        })
+
+    def test_register_is_never_called(self) -> None:
+        result = self.run_helper({"p": {"__init__.py": "def register(ctx):\n    raise RuntimeError('called')\n"}})
+
+        self.assertEqual(result, {"p": None})
+
+
 class CheckServicesTest(unittest.TestCase):
     def setUp(self) -> None:
         tmp = Path(tempfile.mkdtemp()).resolve()
@@ -1810,6 +2064,7 @@ class CheckServicesTest(unittest.TestCase):
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
             f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+            f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
         })
 
         self.assertEqual(self.check(), [])
@@ -1833,6 +2088,7 @@ class CheckServicesTest(unittest.TestCase):
             "service cloudflared tunnel: is waiting, not running (part 7)",
             "service Hermes gateway: is not loaded in launchd (part 15)",
             "service gateway watch: is not loaded in launchd (part 12)",
+            "service gh login refresh: is not loaded in launchd (part 10)",
         ])
 
     def test_a_missing_watch_job_is_reported(self) -> None:
@@ -1841,6 +2097,38 @@ class CheckServicesTest(unittest.TestCase):
         self.assertEqual(self.check(), [
             "service gateway watch: no plist matches ~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist (part 12)",
         ])
+
+    def test_a_missing_login_refresh_job_is_reported(self) -> None:
+        self.launchd.gh_login.unlink()
+
+        self.assertEqual(self.check(), [
+            "service gh login refresh: no plist matches "
+            "~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist (part 10)",
+        ])
+
+    def login_refresh_with(self, **fields) -> None:
+        self.launchd.plist(
+            f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/{GH_LOGIN_LABEL}.plist", GH_LOGIN_LABEL, **fields
+        )
+        uid = os.getuid()
+        self.launchd.states({
+            "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "waiting",
+        })
+
+    def test_a_login_refresh_job_without_its_environment_is_reported_by_name_only(self) -> None:
+        self.login_refresh_with(StartInterval=900, EnvironmentVariables={"GH_CONFIG_DIR": "/w/gh", "TOKEN": "s3cr3t"})
+
+        self.assertEqual(self.check(), ["service gh login refresh: does not set HERMES_HOME (part 10)"])
+
+        self.login_refresh_with(StartInterval=900)
+
+        self.assertEqual(self.check(), ["service gh login refresh: does not set GH_CONFIG_DIR, HERMES_HOME (part 10)"])
+
+    def test_a_login_refresh_job_that_runs_at_another_interval_is_reported(self) -> None:
+        self.login_refresh_with(**{**GH_LOGIN_FIELDS, "StartInterval": 1800})
+
+        self.assertEqual(self.check(), ["service gh login refresh: does not run every 900 seconds (part 10)"])
 
     def watch_with(self, *lock: str, root: tuple = ("--root", "/h")) -> None:
         self.launchd.plist(
@@ -1852,6 +2140,7 @@ class CheckServicesTest(unittest.TestCase):
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
             f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+            f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
         })
 
     def test_a_watcher_whose_lock_is_hermes_own_gateway_lock_is_reported(self) -> None:

@@ -40,6 +40,16 @@ SESSION_THREAD_QUERY = """query AgentSessionThread($id: String!) {
   agentSession(id: $id) { comment { id } issue { id } }
 }"""
 
+ISSUE_SESSIONS_QUERY = """query AgentSessionSiblings($id: String!) {
+  agentSession(id: $id) {
+    url createdAt appUser { id }
+    issue { agentSessions(first: 50) { nodes { id status createdAt appUser { id } } } }
+  }
+}"""
+
+# An awaitingInput session never goes stale and may hold questions a person has yet to answer.
+OPEN_SESSION_STATUSES = ("pending", "active", "stale")
+
 ACTIVITY_FIELDS = "id createdAt signal content { __typename ... on AgentActivityPromptContent { body } }"
 
 ACTIVITY_QUERY = f"""query AgentActivity($id: String!) {{
@@ -63,7 +73,7 @@ PRIORITIES = {0: ("No priority", 0), 1: ("Urgent", 4), 2: ("High", 3), 3: ("Medi
 
 ISSUE_QUERY = """query Issue($id: String!) {
   issue(id: $id) {
-    id identifier title url branchName priority
+    id identifier title description url branchName priority
     state { name type }
     delegate { id }
     labels { nodes { name } }
@@ -132,6 +142,22 @@ ISSUE_STATES_QUERY = """query IssueStates($id: String!) {
     team { states { nodes { id name type position } } }
   }
 }"""
+
+ISSUE_EDIT_QUERY = """query IssueEdit($id: String!) {
+  issue(id: $id) {
+    id identifier title description
+    state { name }
+    labels { nodes { id name parent { id } } }
+    team { states { nodes { id name } } labels(first: 250) { nodes { id name isGroup parent { id } } } }
+  }
+  issueLabels(first: 250, filter: { team: { null: true } }) { nodes { id name isGroup parent { id } } }
+}"""
+
+ISSUE_SEARCH_QUERY = """query IssueSearch($term: String!, $first: Int!) {
+  searchIssues(term: $term, first: $first) { nodes { identifier title url team { name } state { name } } }
+}"""
+
+GITHUB_ISSUE_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+")
 
 ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
@@ -207,6 +233,25 @@ class LinearClient:
             raise LinearError("agentActivityCreate reported success: false")
         return payload["agentActivity"]["id"]
 
+    def close_older_sessions(self, agent_session_id: str) -> list:
+        """Ends this app's older open sessions on the issue, which Linear would otherwise mark stale."""
+        session = self._graphql(ISSUE_SESSIONS_QUERY, {"id": agent_session_id})["agentSession"]
+        if session is None or session["issue"] is None:
+            return []
+        closed = []
+        for other in session["issue"]["agentSessions"]["nodes"]:
+            if (
+                other["id"] != agent_session_id
+                and other["appUser"] is not None
+                and other["appUser"]["id"] == session["appUser"]["id"]
+                and other["createdAt"] < session["createdAt"]
+                and other["status"] in OPEN_SESSION_STATUSES
+            ):
+                body = f"Work on this issue continues in [this session]({session['url']})."
+                self.create_activity(other["id"], activity_content("response", body))
+                closed.append(other["id"])
+        return closed
+
     def set_external_urls(self, agent_session_id: str, urls: list) -> None:
         external_urls = [{"label": u["label"], "url": u["url"]} for u in urls]
         payload = self._graphql(
@@ -263,6 +308,8 @@ class LinearClient:
             "priority": priority,
             "priorityName": priority_name,
             "cardPriority": card_priority,
+            "description": issue["description"] or "",
+            "githubIssues": [a["url"] for a in issue["attachments"]["nodes"] if GITHUB_ISSUE_URL.fullmatch(a["url"])],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
             "labels": _label_names(issue),
             "blockedBy": _blocking_issues(issue["inverseRelations"]),
@@ -364,6 +411,64 @@ class LinearClient:
         if not payload["issueUpdate"]["success"]:
             raise LinearError("issueUpdate reported success: false")
         return {**result, "moved": True, "state": target["name"]}
+
+    def edit_issue(
+        self,
+        id_or_identifier: str,
+        *,
+        add_labels: list = (),
+        remove_labels: list = (),
+        state: Optional[str] = None,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> dict:
+        """An added label replaces the issue's other labels in its group, because Linear allows one per group."""
+        data = self._graphql(ISSUE_EDIT_QUERY, {"id": id_or_identifier})
+        issue = data["issue"]
+        if issue is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        known = {n["id"]: n for n in issue["team"]["labels"]["nodes"] + data["issueLabels"]["nodes"]}
+        current = {n["id"]: n for n in issue["labels"]["nodes"]}
+        labels = dict(current)
+        for name in remove_labels:
+            for label_id in [i for i, n in labels.items() if role_key(n["name"]) == role_key(name)]:
+                del labels[label_id]
+        for name in add_labels:
+            label = _by_name(known.values(), name, "label")
+            if label["isGroup"]:
+                raise LinearError(f"{label['name']} is a label group; name one of its labels")
+            group = (label["parent"] or {}).get("id")
+            if group:
+                labels = {i: n for i, n in labels.items() if (n["parent"] or {}).get("id") != group}
+            labels[label["id"]] = label
+        update: dict = {}
+        if title is not None and title != issue["title"]:
+            update["title"] = title
+        if description is not None and description != (issue["description"] or ""):
+            update["description"] = description
+        if labels.keys() != current.keys():
+            update["labelIds"] = sorted(labels)
+        target = _by_name(issue["team"]["states"]["nodes"], state, "status") if state else None
+        if target and target["name"] != issue["state"]["name"]:
+            update["stateId"] = target["id"]
+        if update:
+            payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": update})
+            if not payload["issueUpdate"]["success"]:
+                raise LinearError("issueUpdate reported success: false")
+        return {
+            "identifier": issue["identifier"],
+            "changed": bool(update),
+            "title": update.get("title", issue["title"]),
+            "labels": sorted(n["name"] for n in labels.values()),
+            "state": target["name"] if target else issue["state"]["name"],
+        }
+
+    def search_issues(self, term: str) -> list:
+        nodes = self._graphql(ISSUE_SEARCH_QUERY, {"term": term, "first": 10})["searchIssues"]["nodes"]
+        return [
+            {"identifier": n["identifier"], "title": n["title"], "url": n["url"], "team": n["team"]["name"], "state": n["state"]["name"]}
+            for n in nodes
+        ]
 
     def list_delegated_issues(self, *, include_closed: bool = False) -> list:
         issue_filter: dict = {"delegate": {"isMe": {"eq": True}}}
@@ -517,6 +622,17 @@ class BrokerLinearClient(LinearClient):
         return {"client_id": "", "access_token": reply["token"], "expires_at": float(reply["expires_at"])}
 
 
+class TokenLinearClient(LinearClient):
+    """A client for a process that already holds an access token, such as Claude's `LINEAR_API_KEY`."""
+
+    def __init__(self, token: str, **kwargs: Any) -> None:
+        super().__init__("", "", **kwargs)
+        self._static_token = token
+
+    def _mint_token(self) -> dict:
+        return {"client_id": "", "access_token": self._static_token, "expires_at": float("inf")}
+
+
 class _Unauthorized(Exception):
     pass
 
@@ -552,6 +668,17 @@ def _blocking_issues(relations: dict) -> list:
 def role_key(name: str) -> str:
     """A role name or a label name without its case and punctuation, so `Won't fix` is `wontfix`."""
     return re.sub(r"[^a-z0-9]", "", name.casefold())
+
+
+def _by_name(nodes, name: str, kind: str) -> dict:
+    matches = [n for n in nodes if role_key(n["name"]) == role_key(name)]
+    exact = [n for n in matches if n["name"] == name]
+    if len(exact) == 1 or len(matches) == 1:
+        return (exact or matches)[0]
+    if matches:
+        raise LinearError(f"more than one {kind} matches {name!r}: " + ", ".join(sorted(n["name"] for n in matches)))
+    names = ", ".join(sorted({n["name"] for n in nodes if not n.get("isGroup")}))
+    raise LinearError(f"no {kind} named {name!r}; the issue's team has: {names}")
 
 
 def _label_names(issue: dict) -> list:

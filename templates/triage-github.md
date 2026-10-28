@@ -7,7 +7,9 @@ issue it belongs to, as a card comment. Do not do the work it describes.
 - Stay read-only on GitHub. You may read with `gh` (for example
   `gh pr view`), but never comment, review, push, merge, label, or close.
 - Never create a card, and never change Linear status, assignee, or
-  delegate. Move, archive, or block a card only as "Record the event" says.
+  delegate. Move, archive, or block a card only as "Record the event" says,
+  through `<<card_transition>>`, never with another `hermes kanban` command.
+  It prints one JSON line.
 - Find cards with `hermes kanban list --json`. Add comments with the
   `kanban_comment` tool, not the shell.
 - In a card comment, name a GitHub page by repository, number, and anchor,
@@ -75,7 +77,7 @@ If no card matches, stop. The event belongs to work the factory does not own.
 3. For `pull_request_review` action `submitted` with review state
    `changes_requested`, act on the card's status:
    - `review`: run
-     `hermes kanban reopen-review <task id> --reason 'changes requested on GitHub; see the card comments'`.
+     `<<card_transition>> reopen <task id> --reason 'changes requested on GitHub; see the card comments'`.
      Hermes returns the card to its worker, which reads the comments and
      addresses them.
    - `triage`: resume it as "Resume a parked card" says, after step 1 has
