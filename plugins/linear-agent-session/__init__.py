@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, kanban_guard, linear, missing_secret, replies, tools, triage_exit, triage_intent
+from . import blocks, kanban_guard, linear, missing_secret, replies, tools, triage_exit, triage_intent, triage_round
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,14 @@ def register(ctx: Any) -> None:
         schema=tools.GITHUB_EDIT_SCHEMA,
         handler=lambda args, **_: tools.run_github_edit(args),
         description=tools.GITHUB_EDIT_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name=triage_round.NAME,
+        toolset=TOOLSET,
+        schema=triage_round.SCHEMA,
+        handler=triage_round.make_handler(get_client),
+        check_fn=lambda: False,
+        description=triage_round.SCHEMA["description"],
     )
     ctx.register_hook(
         "pre_gateway_dispatch",
