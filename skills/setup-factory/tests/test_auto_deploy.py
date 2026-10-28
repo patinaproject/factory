@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib.machinery
 import importlib.util
 import json
@@ -13,6 +14,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPTS = REPO / "skills" / "setup-factory" / "scripts"
@@ -500,6 +502,25 @@ class AutoDeployTest(unittest.TestCase):
         lock.write_text(f"{dead_pid()}\n")
         self.deploy()
         self.assertEqual(self.m.state()["deployed"], self.m.head)
+        self.assertFalse(lock.exists())
+
+    def test_a_run_lock_another_process_removed_first_is_not_an_error(self) -> None:
+        deploy = auto_deploy.Deploy(argparse.Namespace(root=str(self.m.root), worker=str(self.m.worker)), str(self.m.hermes), auto_deploy.Redactor({}))
+        lock = self.m.root / "auto-deploy.lock"
+
+        def removed_by_another(read):
+            def read_then_remove(path):
+                pid = read(path)
+                path.unlink()
+                return pid
+            return read_then_remove
+
+        lock.write_text(f"{dead_pid()}\n")
+        with mock.patch.object(auto_deploy, "read_pid", removed_by_another(auto_deploy.read_pid)):
+            taken = deploy.take_run_lock(continuing=False)
+        self.assertTrue(taken)
+        with mock.patch.object(auto_deploy, "read_pid", removed_by_another(auto_deploy.read_pid)):
+            deploy.drop_run_lock()
         self.assertFalse(lock.exists())
 
     def test_a_change_to_auto_deploy_runs_the_source_checkouts_copy(self) -> None:
