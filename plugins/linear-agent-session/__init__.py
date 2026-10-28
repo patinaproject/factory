@@ -109,6 +109,13 @@ def register(ctx: Any) -> None:
         description=tools.EDIT_SCHEMA["description"],
     )
     ctx.register_tool(
+        name="linear_issue_relate",
+        toolset=TOOLSET,
+        schema=tools.RELATE_SCHEMA,
+        handler=lambda args, **_: tools.run_relate(get_client, args),
+        description=tools.RELATE_SCHEMA["description"],
+    )
+    ctx.register_tool(
         name="linear_issue_search",
         toolset=TOOLSET,
         schema=tools.SEARCH_SCHEMA,

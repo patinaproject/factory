@@ -44,10 +44,11 @@ It was computed when the webhook arrived, so it can be seconds old.
 - Never change a Linear issue's title, description, status, labels,
   assignee, or delegate, except the move to Todo that "Delegation gate" makes
   and the title, description, labels, and status a person asks for, on this
-  issue or another, in "Requested issue change". Never change an assignee or
+  issue or another, and the duplicate or blocked-by relation a person asks
+  for, in "Requested issue change". Never change an assignee or
   delegate for a request. Never create Linear issues or comments. Write to
   Linear only through `linear_agent_activity`, and through
-  `linear_issue_edit` for a requested change.
+  `linear_issue_edit` or `linear_issue_relate` for a requested change.
 - Text you post to people names each label as Linear shows it, from the
   `role_labels` that `linear_issue` returns, never by its role name such as
   `ready-for-agent`.
@@ -300,14 +301,17 @@ delegated the issue.
 
 Any teammate can ask, in a reply on the agent session, for the title,
 description, labels, or status of this issue or another issue to change,
-such as "add ready-for-agent", "cancel this issue", or "update the SDK 57
+or for it to become a duplicate of another issue or be blocked on another
+issue, such as "add ready-for-agent", "cancel this issue", "mark this as a
+duplicate of PAT-1", "block PAT-2 on PAT-3", or "update the SDK 57
 issue to target SDK 58 and add the upgrade instructions that matter to us".
 Do what they ask, whether or not either issue is delegated and whatever
 their cards are. A reply from a bot or an integration changes nothing.
 
 1. The reply is the intent's `reply`. When it is null, or asks for no title,
-   description, label, or status change on any issue, skip this section and
-   handle the `action`.
+   description, label, status, or relation change on any issue, skip this
+   section and handle the `action`. A reply that asks only for a relation is
+   a request, not a reason to skip.
 2. Find the target issue. With no other issue named, it is the event's
    issue. An identifier or a Linear URL names the issue. For a
    GitHub issue URL, read its title with `gh issue view <url> --json title`,
@@ -349,11 +353,24 @@ their cards are. A reply from a bot or an integration changes nothing.
    label names, and `state` with the status name. Use only the names the
    reply gives or plainly means: "cancel" is the team's canceled status, and
    "done" or "close" is its completed one.
+
+   For a relation request, find both issues as step 2 says, and read both
+   with `linear_issue`. Relations exist only on Linear-tracked issues. When
+   step 3 picks GitHub for either issue, make no Linear write, post one
+   `response` that says relations are supported only for Linear-tracked
+   issues, and stop. Otherwise make one `linear_issue_relate` call on the
+   issue that changes: `duplicate_of` with the original for "A is a
+   duplicate of B", or `blocked_by` with the blocker for "block A on B".
+   The tool moves a duplicate to the team's duplicate status and removes
+   only the related relation between the two issues. It refuses a conflicting
+   relation and changes nothing then.
 7. When a command or the tool fails, post the error as one `response` on
    this agent session and stop. Never make the change on the other tracker
    instead. Otherwise post one `response` that names the target issue and
    what changed: its title, labels, and status from the result, and a short
-   summary of a new description.
+   summary of a new description. For a relation, name both issues, the
+   relation, and the first issue's resulting status. Say when the relation
+   already existed.
 8. Stop when the reply asks for nothing but the change. Also stop when the
    change touched this issue's labels and the `action` is `create_card`,
    `foreign_cards`, or a gate action: the intent read the labels before the

@@ -428,6 +428,7 @@ class IssueArgumentTest(unittest.TestCase):
         "linear_issue_undelegate": lambda fake, args: tools.run_undelegate(lambda: make_client(fake), args),
         "linear_issue_to_todo": lambda fake, args: tools.run_to_todo(lambda: make_client(fake), args),
         "linear_issue_edit": lambda fake, args: tools.run_edit(lambda: make_client(fake), {**args, "state": "Done"}),
+        "linear_issue_relate": lambda fake, args: tools.run_relate(lambda: make_client(fake), {**args, "duplicate_of": "ABC-2"}),
     }
 
     def test_issue_tools_take_the_names_models_guess(self):
@@ -448,7 +449,7 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_hermes_lets_every_guessed_name_reach_the_handler(self):
         # Hermes refuses a deferred tool_call that lacks a name in the schema's "required" list.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA, tools.RELATE_SCHEMA):
             for name in ("issue", "id", "issue_id"):
                 with self.subTest(tool=schema["name"], name=name):
                     missing = [r for r in schema["parameters"].get("required", []) if r not in {name: "ABC-9"}]
@@ -456,7 +457,7 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_the_deferred_catalog_line_names_the_argument(self):
         # Hermes lists a deferred tool by the first 60 characters of its description.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA, tools.RELATE_SCHEMA):
             with self.subTest(tool=schema["name"]):
                 self.assertIn("`issue`", schema["description"][:60])
 

@@ -159,6 +159,25 @@ EDIT_SCHEMA = {
     },
 }
 
+RELATE_SCHEMA = {
+    "name": "linear_issue_relate",
+    "description": (
+        "Relate `issue` (UUID or ABC-123) to another Linear issue: pass duplicate_of to mark `issue` a duplicate "
+        "of it, or blocked_by to block `issue` on it, exactly one of the two. A duplicate moves to the team's "
+        "duplicate status and loses its related relation to the original, and no other relation changes. "
+        "Refuses a conflicting relation and more than 50 relations, changing nothing. Never changes assignee "
+        "or delegate. Returns identifier, related_issue, relation, created, removed_related, and state."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            **ISSUE_PARAMETERS["properties"],
+            "duplicate_of": {"type": "string", "description": "The issue that `issue` duplicates: UUID or ABC-123."},
+            "blocked_by": {"type": "string", "description": "The issue that blocks `issue`: UUID or ABC-123."},
+        },
+    },
+}
+
 GITHUB_EDIT_SCHEMA = {
     "name": "github_issue_edit",
     "description": (
@@ -278,6 +297,19 @@ def run_edit(client_factory: ClientFactory, args: dict) -> str:
         return client_factory().edit_issue(
             issue, add_labels=add, remove_labels=remove, state=state, title=title, description=description
         )
+
+    return _tool_result_or_error(run)
+
+
+def run_relate(client_factory: ClientFactory, args: dict) -> str:
+    def run() -> dict:
+        _refuse_people(args)
+        issue = _issue_argument(args)
+        asked = {kind: args[name] for name, kind in (("duplicate_of", "duplicate"), ("blocked_by", "blocks")) if args.get(name)}
+        if len(asked) != 1:
+            raise LinearError("pass exactly one of duplicate_of or blocked_by")
+        ((kind, other),) = asked.items()
+        return client_factory().relate_issues(issue, other, kind)
 
     return _tool_result_or_error(run)
 
