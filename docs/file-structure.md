@@ -3,12 +3,14 @@
 ```text
 /
 ├── .agents/skills/            # Vendored skills, plus a setup-factory symlink
+├── .agents/skills-sync.json   # Which skills the sync vendors, and the release vendored now
 ├── .claude/
 │   ├── settings.json          # Claude Code project settings and SessionStart hook
 │   └── skills/                # Skill symlinks for Claude Code, including setup-factory
 ├── .codex/                    # Codex configuration and environment setup
 ├── .github/
 │   └── workflows/
+│       ├── skills-sync.yml    # Opens or refreshes the bot/bump-skills pull request
 │       └── test.yml           # Runs scripts/test.sh on pull requests
 ├── .husky/                    # commit-msg and pre-commit hooks
 ├── docs/
@@ -34,6 +36,8 @@
 │       └── scripts/           # claude-session, card_branch.py, factory_source.py, archive_card.py, blockers.py, kanban_board.py, github-upload-image, guard-ci-wait, guard-commit-closes, wait-for-checks, push-signed, worker-secrets, proxy-token, mcp-headers, check-install, and the refresh cron scripts
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
+│   ├── skills-sync            # Syncs the vendored skills and agents from the latest stable skills release
+│   ├── skills_sync.py         # The sync's logic, with its tests in scripts/tests/
 │   └── ...                    # Repository maintenance scripts
 ├── skills/
 │   └── setup-factory/         # Agent runbook that sets up a factory on a machine
