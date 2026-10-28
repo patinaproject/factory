@@ -332,12 +332,13 @@ their cards are. A reply from a bot or an integration changes nothing.
 1. The reply is the intent's `reply`, read in the context of `thread`. A
    phrase such as "the resolution" or "all of them" means what the thread's
    latest matching activity says: after a triage outcome such as `wontfix`,
-   "the resolution" is that outcome, so apply its status and label change.
+   "the resolution" is that outcome, so apply the outcome's status and role
+   label, such as the canceled status and the `Won't fix` label for `wontfix`.
    When `thread_source` is `missing` and the reply refers to something you
    cannot see, change nothing and say you could not read the earlier thread.
    When `reply` is null, or asks for no title, description, label, status, or
-   relation change on any issue, skip this section and handle the `action`. A reply that asks only for a relation is
-   a request, not a reason to skip.
+   relation change on any issue, skip this section and handle the `action`.
+   A reply that asks only for a relation is a request, not a reason to skip.
 2. Find the target issue. With no other issue named, it is the event's
    issue. An identifier or a Linear URL names the issue. For a
    GitHub issue URL, read its title with `gh issue view <url> --json title`,

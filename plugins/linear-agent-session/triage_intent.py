@@ -175,7 +175,7 @@ def decide(
     app_user_id: str,
     now: dt.datetime,
     reply: Reply,
-    thread: Thread = NO_THREAD,
+    thread: Thread,
 ) -> Intent:
     found = triage_exit.find_card(work_cards, issue["id"], issue["identifier"], issue["gitBranchName"])
     triage_card = find_triage_card(triage_cards, issue["id"])

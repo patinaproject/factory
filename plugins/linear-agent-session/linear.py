@@ -75,7 +75,7 @@ THREAD_TYPES = {
     "AgentActivityErrorContent": "error",
 }
 
-SESSION_THREAD_ACTIVITIES_QUERY = f"""query AgentSessionThreadActivities($id: String!) {{
+SESSION_HISTORY_QUERY = f"""query AgentSessionHistory($id: String!) {{
   agentSession(id: $id) {{
     activities(first: {THREAD_LIMIT}, orderBy: createdAt) {{
       nodes {{
@@ -351,7 +351,7 @@ class LinearClient:
         return {"found": False}
 
     def session_thread(self, agent_session_id: str) -> list:
-        session = self._graphql(SESSION_THREAD_ACTIVITIES_QUERY, {"id": agent_session_id})["agentSession"]
+        session = self._graphql(SESSION_HISTORY_QUERY, {"id": agent_session_id})["agentSession"]
         if session is None:
             raise LinearError(f"Linear has no agent session {agent_session_id} that the agent app can read")
         nodes = sorted(
