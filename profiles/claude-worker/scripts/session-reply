@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Post Claude's answer to a person's reply in the card's Linear agent session.
+
+`HERMES_HOME=<worker home> python3 session-reply --inbox <path>` reads the answer on stdin and posts it as one
+non-ephemeral `thought` to the agent session that the inbox records, with the run's LINEAR_API_KEY. A
+`response` would complete the session while the run is still working. Every delivered reply is then marked
+answered. Exit 1 prints the reason on stderr, which Claude sees.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import os
+import sys
+import time
+from pathlib import Path
+
+import reply_inbox
+
+
+def linear_module():
+    home = os.environ.get("HERMES_HOME")
+    if not home:
+        raise SystemExit("session-reply: HERMES_HOME is not set")
+    plugin = Path(home) / "plugins" / "linear-agent-session"
+    if not (plugin / "linear.py").is_file():
+        raise SystemExit(f"session-reply: the linear-agent-session plugin is not installed in {home}")
+    sys.path.insert(0, str(plugin))
+    return importlib.import_module("linear")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--inbox", required=True, type=Path)
+    args = parser.parse_args()
+    text = sys.stdin.read().strip()
+    if not text:
+        print("session-reply: the answer on stdin is empty", file=sys.stderr)
+        return 1
+    token = os.environ.get("LINEAR_API_KEY")
+    if not token:
+        print("session-reply: LINEAR_API_KEY is not set", file=sys.stderr)
+        return 1
+    session_id = reply_inbox.load(args.inbox)["session_id"]
+    if not session_id:
+        print("session-reply: the card body names no linear_agent_session_id", file=sys.stderr)
+        return 1
+    linear = linear_module()
+    try:
+        reply_inbox.post_thought(linear, linear.TokenLinearClient(token), session_id, text)
+    except linear.CLIENT_ERRORS as error:
+        print(f"session-reply: posting to Linear failed: {error}", file=sys.stderr)
+        return 1
+    now = time.time()
+    reply_inbox.update(args.inbox, lambda inbox: reply_inbox.answered(inbox, now))
+    print("Posted to the Linear agent session.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

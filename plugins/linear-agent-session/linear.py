@@ -616,6 +616,17 @@ class BrokerLinearClient(LinearClient):
         return {"client_id": "", "access_token": reply["token"], "expires_at": float(reply["expires_at"])}
 
 
+class TokenLinearClient(LinearClient):
+    """A client for a process that already holds an access token, such as Claude's `LINEAR_API_KEY`."""
+
+    def __init__(self, token: str, **kwargs: Any) -> None:
+        super().__init__("", "", **kwargs)
+        self._static_token = token
+
+    def _mint_token(self) -> dict:
+        return {"client_id": "", "access_token": self._static_token, "expires_at": float("inf")}
+
+
 class _Unauthorized(Exception):
     pass
 
