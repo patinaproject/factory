@@ -62,6 +62,38 @@ SESSION_ACTIVITIES_QUERY = f"""query AgentSessionActivities($id: String!) {{
   agentSession(id: $id) {{ activities(first: 50, orderBy: createdAt) {{ nodes {{ {ACTIVITY_FIELDS} }} }} }}
 }}"""
 
+# Linear returns the newest activities first with `first` and `orderBy: createdAt`, so the limit keeps the newest.
+THREAD_LIMIT = 30
+THREAD_BODY_LIMIT = 2000
+THREAD_TRUNCATED = "... [truncated]"
+THREAD_TYPES = {
+    "AgentActivityPromptContent": "prompt",
+    "AgentActivityResponseContent": "response",
+    "AgentActivityElicitationContent": "elicitation",
+    "AgentActivityThoughtContent": "thought",
+    "AgentActivityActionContent": "action",
+    "AgentActivityErrorContent": "error",
+}
+
+SESSION_HISTORY_QUERY = f"""query AgentSessionHistory($id: String!) {{
+  agentSession(id: $id) {{
+    activities(first: {THREAD_LIMIT}, orderBy: createdAt) {{
+      nodes {{
+        id createdAt ephemeral user {{ name }}
+        content {{
+          __typename
+          ... on AgentActivityPromptContent {{ body }}
+          ... on AgentActivityResponseContent {{ body }}
+          ... on AgentActivityElicitationContent {{ body }}
+          ... on AgentActivityThoughtContent {{ body }}
+          ... on AgentActivityErrorContent {{ body }}
+          ... on AgentActivityActionContent {{ action parameter result }}
+        }}
+      }}
+    }}
+  }}
+}}"""
+
 COMMENT_CREATE_MUTATION = """mutation CommentCreate($input: CommentCreateInput!) {
   commentCreate(input: $input) { success }
 }"""
@@ -317,6 +349,24 @@ class LinearClient:
                     "body": node["content"]["body"],
                 }
         return {"found": False}
+
+    def session_thread(self, agent_session_id: str) -> list:
+        session = self._graphql(SESSION_HISTORY_QUERY, {"id": agent_session_id})["agentSession"]
+        if session is None:
+            raise LinearError(f"Linear has no agent session {agent_session_id} that the agent app can read")
+        nodes = sorted(
+            (n for n in session["activities"]["nodes"] if not n["ephemeral"]), key=lambda n: n["createdAt"]
+        )
+        return [
+            {
+                "id": n["id"],
+                "type": THREAD_TYPES[n["content"]["__typename"]],
+                "author": n["user"]["name"] if n["user"] else None,
+                "created_at": n["createdAt"],
+                "body": _bounded(_activity_text(n["content"])),
+            }
+            for n in nodes
+        ]
 
     def create_session_on_issue(self, id_or_identifier: str) -> str:
         payload = self._graphql(SESSION_CREATE_MUTATION, {"input": {"issueId": id_or_identifier}})[
@@ -745,6 +795,17 @@ class _Unauthorized(Exception):
 def _session_summary(title: str) -> str:
     """Linear accepts a session summary of 1 to 255 characters with no line breaks."""
     return " ".join(title.split())[:255].strip()
+
+
+def _activity_text(content: dict) -> str:
+    if "action" not in content:
+        return content["body"]
+    text = f"{content['action']} {content['parameter']}".strip()
+    return f"{text} -> {content['result']}" if content.get("result") else text
+
+
+def _bounded(text: str) -> str:
+    return text if len(text) <= THREAD_BODY_LIMIT else text[:THREAD_BODY_LIMIT] + THREAD_TRUNCATED
 
 
 def _issue_summary(issue: dict) -> dict:

@@ -53,6 +53,14 @@ class Reply(NamedTuple):
 NO_REPLY = Reply(None, None)
 
 
+class Thread(NamedTuple):
+    items: Optional[list]
+    source: Optional[str]
+
+
+NO_THREAD = Thread(None, None)
+
+
 @dataclass(frozen=True)
 class Intent:
     action: str
@@ -67,6 +75,8 @@ class Intent:
     then: Optional[str] = None
     reply: Optional[str] = None
     reply_source: Optional[str] = None
+    thread: Optional[list] = None
+    thread_source: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -165,6 +175,7 @@ def decide(
     app_user_id: str,
     now: dt.datetime,
     reply: Reply,
+    thread: Thread,
 ) -> Intent:
     found = triage_exit.find_card(work_cards, issue["id"], issue["identifier"], issue["gitBranchName"])
     triage_card = find_triage_card(triage_cards, issue["id"])
@@ -180,6 +191,8 @@ def decide(
         session_duplicate=_recent_person_session(issue, app_user_id, now),
         reply=reply.text,
         reply_source=reply.source,
+        thread=thread.items,
+        thread_source=thread.source,
     )
     if payload["type"] == "Issue":
         action = _issue_update(facts, "labelIds" in (payload.get("updatedFrom") or {}))
@@ -195,12 +208,18 @@ def decide(
     return replace(facts, action=action, agent_session_id=session)
 
 
+def carries_no_reply(payload: Mapping[str, Any]) -> bool:
+    return (
+        payload["type"] != "AgentSessionEvent"
+        or payload["action"] != "prompted"
+        or (payload.get("agentActivity") or {}).get("signal") == "stop"
+    )
+
+
 def resolve_reply(payload: Mapping[str, Any], client: Any) -> Reply:
-    if payload["type"] != "AgentSessionEvent" or payload["action"] != "prompted":
+    if carries_no_reply(payload):
         return NO_REPLY
     activity = payload.get("agentActivity") or {}
-    if activity.get("signal") == "stop":
-        return NO_REPLY
     body = (activity.get("content") or {}).get("body")
     if isinstance(body, str):
         return Reply(body, "payload")
@@ -212,6 +231,17 @@ def resolve_reply(payload: Mapping[str, Any], client: Any) -> Reply:
     except Exception:
         return Reply(None, "missing")
     return Reply(found["body"], "linear") if found.get("found") else Reply(None, "missing")
+
+
+def resolve_thread(payload: Mapping[str, Any], client: Any) -> Thread:
+    if carries_no_reply(payload):
+        return NO_THREAD
+    reply_id = (payload.get("agentActivity") or {}).get("id")
+    try:
+        items = client.session_thread(payload["agentSession"]["id"])
+    except Exception:
+        return Thread(None, "missing")
+    return Thread([item for item in items if item["id"] != reply_id], "linear")
 
 
 def delivery_time(payload: Mapping[str, Any]) -> dt.datetime:
@@ -250,6 +280,7 @@ def compute(
             app_user_id(),
             now or delivery_time(payload),
             resolve_reply(payload, linear_client),
+            resolve_thread(payload, linear_client),
         )
     except Exception as failure:
         return error_intent(redact(f"{type(failure).__name__}: {failure}"))
