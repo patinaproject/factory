@@ -1975,7 +1975,7 @@ Hermes process starts. The new helper also writes
    - A `config`, `cron job`, or `service` line: the machine differs from what
      the named part produces. If the runbook is right, run that part again.
      If the machine is right, change the part and its row in `check-install`
-     in one pull request, as the replicability rule in `AGENTS.md` requires.
+     in one pull request, as the replicability rule in `docs/rules.md` requires.
 4. Run `check-install` again. It prints nothing.
 5. Check that the worker home's factory settings match the root home's:
 

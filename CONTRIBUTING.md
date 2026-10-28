@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for contributing to `patinaproject/factory`. Start here for repo rules; everything else lives in [`AGENTS.md`](./AGENTS.md).
+Thanks for contributing to `patinaproject/factory`. Start here for repo rules; everything else lives in [`AGENTS.md`](./AGENTS.md), and the rules that code enforces, with their enforcers, live in [`docs/rules.md`](./docs/rules.md).
 
 ## Setup
 
