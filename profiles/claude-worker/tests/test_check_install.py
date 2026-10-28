@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 import importlib.machinery
 import importlib.util
 import atexit
 import json
 import os
 import plistlib
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -131,6 +133,71 @@ loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
 check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(check_install)
 
+# The remedy class of each line check-install prints, as the auto-deploy design sorts them: a value the repository
+# holds is installed, an operator's value, a secret, or root-owned code is manual, and runtime health is advisory.
+# The first row whose kind and pattern match a line names its class.
+REMEDY_CLASSES = (
+    ("profile", "", "install"),
+    ("plugin", "", "install"),
+    ("plugin status", "cannot run hermes plugins list", "advisory"),
+    ("plugin status", "", "install"),
+    ("plugin import", "cannot import the plugins", "advisory"),
+    ("plugin import", "", "manual"),
+    ("config", r"^config (platforms\.webhook\.(enabled|extra\.host)|kanban\.(review_dispatch|auto_decompose|default_assignee)"
+     r"|terminal\.(timeout|env_passthrough)|platforms\.factory_uploads\.enabled|streaming\.enabled"
+     r"|platforms\.slack\.extra\.native_task_cards|\S+\.github\.private_key_path) in ", "install"),
+    ("config", "", "manual"),
+    ("cron job", r"^cron job retry-failed-webhooks in .*: (is missing|delivers to \S+, not )", "manual"),
+    ("cron job", r": (is missing|is disabled|runs .*, not every|is not a script-only job|delivers to \S+, not |belongs to)", "install"),
+    ("cron job", ": last run", "advisory"),
+    ("cron job", "", "manual"),
+    ("script", "", "install"),
+    ("service", "", "manual"),
+    ("gateway watch", "gateway-heartbeat-url: ", "manual"),
+    ("gateway watch", "", "advisory"),
+    ("upload broker", "", "advisory"),
+    ("broker user", "", "manual"),
+    ("secret", "", "manual"),
+    ("dashboard sign-in", "", "manual"),
+    ("webhook config", "render.py failed", "manual"),
+    ("webhook config", "", "install"),
+    ("webhook deliveries", "", "advisory"),
+    ("webhook route", "", "advisory"),
+    ("owned refs", "", "install"),
+    ("kanban board", "", "install"),
+    ("kanban board database", "cannot be read", "advisory"),
+    ("kanban board database", "", "manual"),
+    ("kanban capacity", "", "manual"),
+    ("stranded triage card", "", "advisory"),
+    ("stranded triage card check", "", "advisory"),
+    ("triage playbook", "", "manual"),
+    ("source checkout", "", "install"),
+    ("checkout", "does not exist", "manual"),
+    ("checkout", "", "install"),
+    ("work skills", "", "manual"),
+    ("model tier", "", "manual"),
+    ("mcp", "", "advisory"),
+    ("root mcp", "cannot check|does not connect", "advisory"),
+    ("root mcp", "", "manual"),
+    ("hermes tool", "cannot read", "advisory"),
+    ("hermes tool", "", "manual"),
+)
+
+
+def remedy_class(record: dict) -> str | None:
+    for kind, pattern, remedy in REMEDY_CLASSES:
+        if record["kind"] == kind and re.search(pattern, record["line"]):
+            return remedy
+    return None
+
+
+def classified(case: unittest.TestCase, drifts) -> list:
+    """Assert that each drift's remedy has its line's class, and return the lines."""
+    records = [d if isinstance(d, dict) else d.to_json() for d in drifts]
+    for record in records:
+        case.assertEqual(record["remedy"]["type"], remedy_class(record), record["line"])
+    return [record["line"] for record in records]
+
 SECRET_NAMES = "plugin.yaml"
 SECRET_NAMES_MANIFEST = "kind: platform\noptional_env:\n  - name: LINEAR_CLIENT_SECRET\n  - name: CLAUDE_PROXY_TOKEN\n  - name: SENTRY_ACCESS_TOKEN\n"
 TRIAGE_PLAYBOOK = ".agents/skills/patina-mode/playbooks/triage.md"
@@ -249,15 +316,122 @@ class CheckInstallTest(unittest.TestCase):
         config = {"public_url": public_url, "oauth": {"client_id": "", "self_hosted": self_hosted}}
         self.install(self.root, "installed-dashboard.json", json.dumps(config))
 
-    def check(self, *args: str) -> tuple:
+    def run_check(self, *args: str) -> subprocess.CompletedProcess:
         env = {**os.environ, **self.launchd.env, "HERMES_HOME": str(self.worker), "HERMES_BIN": str(self.hermes)}
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPTS / "check-install"), *args], env=env, capture_output=True, text=True
-        )
-        return proc.returncode, proc.stdout
+        return subprocess.run([sys.executable, str(SCRIPTS / "check-install"), *args], env=env, capture_output=True, text=True)
+
+    def check(self, *args: str) -> tuple:
+        """Run check-install --json and return its exit code and the lines its records hold, as the text output prints
+        them. `self.raw` keeps the whole JSON document, so a test that a value is never printed reads both forms."""
+        if "--print-source" in args:
+            proc = self.run_check(*args)
+            return proc.returncode, proc.stdout
+        proc = self.run_check("--json", *args)
+        self.raw = proc.stdout
+        if not proc.stdout:
+            return proc.returncode, ""
+        lines = classified(self, json.loads(proc.stdout))
+        return proc.returncode, "".join(f"{line}\n" for line in lines)
 
     def test_matching_install_is_silent(self) -> None:
         self.assertEqual(self.check(), (0, ""))
+        self.assertEqual(json.loads(self.raw), [])
+
+    def test_the_text_output_is_the_lines_of_the_json_records(self) -> None:
+        self.install(self.worker, "SOUL.md", "stale\n")
+        shutil.rmtree(self.root / "plugins" / "p1")
+        self.config(self.root, {**ROOT_CONFIG, "kanban.review_dispatch": True, "kanban.max_spawn": 0})
+        self.cron(self.worker, [job for job in WORKER_JOBS if job["name"] != "dispatch-triage"])
+        os.chmod(self.root / "gateway-heartbeat-url", 0o644)
+        self.boards([BOARDS[0]])
+
+        text, records = self.run_check(), self.run_check("--json")
+
+        self.assertEqual((text.returncode, records.returncode), (1, 1))
+        self.assertEqual(text.stdout, "".join(f"{record['line']}\n" for record in json.loads(records.stdout)))
+        self.assertEqual(len(text.stdout.splitlines()), 7)
+
+    def test_each_record_names_its_remedy(self) -> None:
+        self.install(self.worker, "SOUL.md", "stale\n")
+        self.config(self.root, {**ROOT_CONFIG, "kanban.review_dispatch": True})
+        self.cron(self.worker, [job for job in WORKER_JOBS if job["name"] != "dispatch-triage"])
+        os.chmod(self.root / "gateway-heartbeat-url", 0o644)
+
+        self.check()
+
+        hermes, beat = str(self.hermes), self.root / "gateway-heartbeat-url"
+        self.assertEqual(json.loads(self.raw), [
+            {
+                "kind": "profile", "where": "claude-worker", "detail": f"SOUL.md differs from main at {self.sha}",
+                "line": f"profile claude-worker: SOUL.md differs from main at {self.sha}",
+                "remedy": {
+                    "type": "install", "step": "PROFILE", "argv": [hermes, "profile", "update", "claude-worker", "-y"],
+                    "restarts_gateway": False,
+                },
+            },
+            {
+                "kind": "config", "where": f"kanban.review_dispatch in {self.root}", "detail": "is not false (part 10)",
+                "line": f"config kanban.review_dispatch in {self.root}: is not false (part 10)",
+                "remedy": {
+                    "type": "install", "step": "CONFIG", "argv": [hermes, "config", "set", "kanban.review_dispatch", "false"],
+                    "restarts_gateway": True,
+                },
+            },
+            {
+                "kind": "cron job", "where": f"dispatch-triage in {self.worker}", "detail": "is missing (part 12)",
+                "line": f"cron job dispatch-triage in {self.worker}: is missing (part 12)",
+                "remedy": {
+                    "type": "install", "step": "CRON",
+                    "argv": [
+                        hermes, "-p", "claude-worker", "cron", "create", "every 1m", "--name", "dispatch-triage",
+                        "--no-agent", "--script", "dispatch-triage", "--deliver", "local",
+                    ],
+                    "restarts_gateway": False,
+                },
+            },
+            {
+                "kind": "gateway watch", "where": str(beat), "detail": "has mode 644; it holds a URL, so use 600 (part 12)",
+                "line": f"gateway watch {beat}: has mode 644; it holds a URL, so use 600 (part 12)",
+                "remedy": {
+                    "type": "manual",
+                    "action": "ask the operator to store the heartbeat URL, mode 600, as part 12's checkpoint describes",
+                },
+            },
+        ])
+
+    def test_a_differing_cron_job_is_edited_in_place(self) -> None:
+        self.cron(self.worker, [
+            cron_job("dispatch-triage", 5, enabled=False) if job["name"] == "dispatch-triage" else job for job in WORKER_JOBS
+        ])
+
+        self.check()
+
+        cron = [str(self.hermes), "-p", "claude-worker", "cron"]
+        self.assertEqual([record["remedy"]["argv"] for record in json.loads(self.raw)], [
+            [*cron, "resume", "dispatch-triage"],
+            [*cron, "edit", "dispatch-triage", "--schedule", "every 1m"],
+        ])
+
+    def test_a_render_that_fails_needs_the_operator(self) -> None:
+        git(self.repo, "checkout", "-q", "-b", "broken-render")
+        self.install(self.repo, "templates/render.py", "import sys\nsys.exit('no factory settings')\n")
+        git(self.repo, "commit", "-q", "-am", "break render")
+        sha = git(self.repo, "rev-parse", "--short=7", "HEAD")
+
+        self.assertEqual(self.check("--ref", "broken-render", "--no-fetch"), (1, (
+            f"webhook config {self.root}: render.py failed at {sha}: no factory settings\n"
+        )))
+        self.assertEqual(json.loads(self.raw)[0]["remedy"]["type"], "manual")
+
+    def test_every_drift_kind_check_install_builds_has_a_remedy_class(self) -> None:
+        tree = ast.parse(SCRIPT.read_text())
+        kinds = {
+            node.args[0].value for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Drift"
+        }
+
+        self.assertEqual(kinds - {kind for kind, _, _ in REMEDY_CLASSES}, set())
+        self.assertIn("source checkout", kinds)
 
     def test_a_stale_or_missing_watch_state_is_reported(self) -> None:
         self.watch_state({"checked_at": time.time() - 3600, "state": "healthy", "restarts": []})
@@ -293,7 +467,7 @@ class CheckInstallTest(unittest.TestCase):
         os.chmod(beat, 0o644)
         code, out = self.check()
         self.assertEqual((code, out), (1, f"gateway watch {beat}: has mode 644; it holds a URL, so use 600 (part 12)\n"))
-        self.assertNotIn("monitor.example", out)
+        self.assertNotIn("monitor.example", self.raw)
 
         beat.unlink()
         self.assertEqual(self.check(), (1, (
@@ -740,7 +914,7 @@ class CheckInstallTest(unittest.TestCase):
         code, out = self.check()
 
         self.assertEqual(code, 1)
-        self.assertNotIn("s3cr3t-value", out)
+        self.assertNotIn("s3cr3t-value", self.raw)
 
     def test_declared_input_that_is_not_set(self) -> None:
         config = dict(ROOT_CONFIG)
@@ -817,7 +991,7 @@ class CheckInstallTest(unittest.TestCase):
                 code, out = self.check()
 
                 self.assertEqual((code, out), (1, drift))
-                self.assertNotIn("s3cr3t-value", out)
+                self.assertNotIn("s3cr3t-value", self.raw)
 
     def test_worker_without_a_proxy_token_loads_no_secret(self) -> None:
         self.config(self.worker, {**WORKER_CONFIG, "secrets.command": {"enabled": True, "command": "s3cr3t-value"}})
@@ -828,7 +1002,7 @@ class CheckInstallTest(unittest.TestCase):
             (code, out),
             (1, f"config secrets.command in {self.worker}: is set, but a worker without a proxy token loads no secret (part 5)\n"),
         )
-        self.assertNotIn("s3cr3t-value", out)
+        self.assertNotIn("s3cr3t-value", self.raw)
 
     def test_worker_secret_source_disabled_without_a_proxy_token_is_silent(self) -> None:
         self.config(self.worker, {**WORKER_CONFIG, "secrets.command": {"enabled": False, "command": "y"}})
@@ -853,7 +1027,7 @@ class CheckInstallTest(unittest.TestCase):
             f"secret FACTORY_INFISICAL_CLIENT_SECRET in {self.worker}/.env: {held} (part 14)\n",
             f"secret CLAUDE_PROXY_TOKEN in {self.worker}/.env: {held} (part 3)\n",
         ])))
-        self.assertNotIn("s3cr3t", out)
+        self.assertNotIn("s3cr3t", self.raw)
 
     def test_an_mcp_token_in_the_worker_env_is_reported_by_name_only(self) -> None:
         self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
@@ -867,7 +1041,7 @@ class CheckInstallTest(unittest.TestCase):
             f"secret SENTRY_ACCESS_TOKEN in {self.worker}/.env: is set, but the worker holds no factory secret; "
             "remove it (part 3)\n",
         ))
-        self.assertNotIn("s3cr3t", out)
+        self.assertNotIn("s3cr3t", self.raw)
 
     def test_an_mcp_token_variable_hermes_would_pass_to_every_process(self) -> None:
         self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
@@ -1494,7 +1668,7 @@ class CheckInstallTest(unittest.TestCase):
 
 class CheckTriageCapacityTest(unittest.TestCase):
     def rows(self, max_spawn, max_in_progress, max_running) -> list:
-        return [str(d) for d in check_install.check_triage_capacity(max_spawn, max_in_progress, max_running)]
+        return classified(self, check_install.check_triage_capacity(max_spawn, max_in_progress, max_running))
 
     def test_limits_that_fit_report_nothing(self) -> None:
         self.assertEqual(self.rows(2, 4, 2), [])
@@ -1546,7 +1720,7 @@ class CheckStrandedTriageTest(unittest.TestCase):
         self.db.commit()
 
     def rows(self) -> list:
-        return [str(d) for d in check_install.check_stranded_triage(self.root, self.NOW)]
+        return classified(self, check_install.check_stranded_triage(self.root, self.NOW))
 
     def test_an_assigned_ready_card_with_no_claim_past_the_threshold(self) -> None:
         self.card("t_stuck", age=95)
@@ -1695,7 +1869,7 @@ class CheckMcpServersTest(unittest.TestCase):
 
     def check(self, reports: dict) -> list:
         (self.worker / "scripts" / "reports.json").write_text(json.dumps(reports))
-        return [str(d) for d in check_install.check_mcp_servers(self.settings, self.worker)]
+        return classified(self, check_install.check_mcp_servers(self.settings, self.worker))
 
     def test_reports_each_server_neither_connected_nor_disabled(self) -> None:
         app = {"servers": [
@@ -1742,7 +1916,7 @@ class CheckMcpServersTest(unittest.TestCase):
         (self.worker / "scripts" / "claude-session").unlink()
 
         self.assertEqual(self.check({}), [])
-        self.assertEqual([str(d) for d in check_install.check_mcp_servers(None, self.worker)], [])
+        self.assertEqual(classified(self, check_install.check_mcp_servers(None, self.worker)), [])
 
 
 FAKE_ROOT_MCP_HERMES = """#!/usr/bin/env python3
@@ -1800,7 +1974,7 @@ class CheckRootMcpServersTest(unittest.TestCase):
     def check(self, servers, connects=("sentry",)) -> list:
         (self.root / "config.yaml").write_text(json.dumps({"model": "x", "mcp_servers": servers}))
         (self.root / "connects.json").write_text(json.dumps(list(connects)))
-        return [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+        return classified(self, check_install.check_root_mcp_servers(self.root, str(self.hermes)))
 
     def test_a_connected_server_with_sampling_off_and_a_reference_is_silent(self) -> None:
         self.assertEqual(self.check({"sentry": ROOT_SERVER}), [])
@@ -1850,14 +2024,14 @@ class CheckRootMcpServersTest(unittest.TestCase):
     def test_a_config_that_does_not_parse_is_one_drift_that_quotes_none_of_it(self) -> None:
         (self.root / "config.yaml").write_text(f"mcp_servers: [unclosed Sentry-Bearer {SECRET}\n")
 
-        lines = [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+        lines = classified(self, check_install.check_root_mcp_servers(self.root, str(self.hermes)))
 
         self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: ValueError (part 10)"])
 
     def test_a_config_read_that_times_out_is_one_drift(self) -> None:
         (self.root / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
         with mock.patch.object(check_install.subprocess, "run", side_effect=subprocess.TimeoutExpired("python3", 60)):
-            lines = [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+            lines = classified(self, check_install.check_root_mcp_servers(self.root, str(self.hermes)))
 
         self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: timed out (part 10)"])
 
@@ -1934,7 +2108,7 @@ class CheckHermesToolsTest(unittest.TestCase):
         (self.tree / "tools" / "registered.json").write_text(json.dumps(tools))
 
     def check(self) -> list:
-        return [str(d) for d in check_install.check_hermes_tools(self.root, self.plugin)]
+        return classified(self, check_install.check_hermes_tools(self.root, self.plugin))
 
     def test_a_hermes_that_registers_the_watched_tools_is_silent(self) -> None:
         self.assertEqual(self.check(), [])
@@ -2054,7 +2228,7 @@ class CheckServicesTest(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def check(self) -> list:
-        return [str(d) for d in check_install.check_services(self.launchd.root, str(self.launchd.launchctl))]
+        return classified(self, check_install.check_services(self.launchd.root, str(self.launchd.launchctl)))
 
     def test_installed_running_services_are_silent(self) -> None:
         self.assertEqual(self.check(), [])
