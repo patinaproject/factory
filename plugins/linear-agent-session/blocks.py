@@ -118,7 +118,7 @@ def _triage_questions(reason: Optional[str], redact: Callable[[str], str]) -> st
     # The reply mentions each person; a URL left in the elicitation renders as a second, non-notifying @name.
     lines = []
     for line in _questions(reason, redact).splitlines():
-        kept = PROFILE_URL_AND_SPACE.sub("", NEEDS_INPUT_MARKER.sub("", line)).strip()
+        kept = PROFILE_URL_AND_SPACE.sub("", NEEDS_INPUT_MARKER.sub("", line)).rstrip()
         if kept or not line.strip():
             lines.append(kept)
     return "\n".join(lines).strip()
