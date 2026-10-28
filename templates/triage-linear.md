@@ -33,7 +33,8 @@ the gate, or read the reply yourself. Its fields:
 - `thread` and `thread_source`: on a `prompted` event, the session's earlier
   activities, oldest first, without the reply itself. Each has `id`, `type`
   (`prompt`, `response`, `elicitation`, `thought`, `action`, or `error`),
-  `author` (a person's name, or null for the agent), `created_at`, and `body`.
+  `author` (the name of the person or agent app that wrote it, or null),
+  `created_at`, and `body`.
   A long thread holds only its newest activities, and a long body ends with
   `... [truncated]`. `thread_source` is `linear` when the thread was read, so an
   empty `thread` then means the session has no earlier activity, and `missing`
@@ -328,15 +329,14 @@ issue to target SDK 58 and add the upgrade instructions that matter to us".
 Do what they ask, whether or not either issue is delegated and whatever
 their cards are. A reply from a bot or an integration changes nothing.
 
-1. The reply is the intent's `reply`, read in the context of `thread`. A phrase
-   such as "the resolution" or "all of them" means what the thread's latest
-   matching activity says: after a triage outcome such as `wontfix`, "the
-   resolution" is that outcome, so apply its status and label change. When
-   `thread_source` is `missing` and the reply refers to something you cannot
-   see, change nothing and say you could not read the earlier thread. When
-   `reply` is null, or asks for no title,
-   description, label, status, or relation change on any issue, skip this
-   section and handle the `action`. A reply that asks only for a relation is
+1. The reply is the intent's `reply`, read in the context of `thread`. A
+   phrase such as "the resolution" or "all of them" means what the thread's
+   latest matching activity says: after a triage outcome such as `wontfix`,
+   "the resolution" is that outcome, so apply its status and label change.
+   When `thread_source` is `missing` and the reply refers to something you
+   cannot see, change nothing and say you could not read the earlier thread.
+   When `reply` is null, or asks for no title, description, label, status, or
+   relation change on any issue, skip this section and handle the `action`. A reply that asks only for a relation is
    a request, not a reason to skip.
 2. Find the target issue. With no other issue named, it is the event's
    issue. An identifier or a Linear URL names the issue. For a
@@ -396,7 +396,8 @@ their cards are. A reply from a bot or an integration changes nothing.
    what changed: its title, labels, and status from the result, and a short
    summary of a new description. For a relation, name both issues, the
    relation, and the first issue's resulting status. Say when the relation
-   already existed.
+   already existed. When the reply also asks for an issue comment, say
+   that you cannot post comments.
 8. Stop when the reply asks for nothing but the change. Also stop when the
    change touched this issue's labels and the `action` is `create_card`,
    `foreign_cards`, or a gate action: the intent read the labels before the
