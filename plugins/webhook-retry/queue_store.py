@@ -18,9 +18,12 @@ MIN_DELAY_SECONDS = 30 * 60
 BACKOFF_CAP_SECONDS = 4 * 60 * 60
 GIVE_UP_AGE = dt.timedelta(hours=48)
 PENDING_AGE = dt.timedelta(hours=24)
+UNSTARTED_AGE = dt.timedelta(minutes=10)
 MAX_ATTEMPTS = 8
 # Hermes stops a cron script after an hour, so a run starts no retry after this much time.
 RUN_BUDGET = dt.timedelta(minutes=40)
+DEFAULT_REASON = "usage_limit"
+SENTINEL_NAME = "ESTOP"
 KEY_PREFIX = "webhook:v2:"
 ERROR_LIMIT = 300
 REPORT_VARIABLE = "WEBHOOK_RETRY_REPORT"
@@ -29,6 +32,10 @@ REMOVED = "removed"
 TRANSITIONS: dict[tuple[Optional[str], str], str] = {
     (None, "dispatch"): "pending",
     ("pending", "dispatch"): "pending",
+    (None, "paused"): "queued",
+    ("pending", "paused"): "queued",
+    ("pending", "admitted"): "pending",
+    ("pending", "unadmitted"): "queued",
     ("pending", "usage_limit"): "queued",
     ("queued", "usage_limit"): "queued",
     ("pending", "turn_ended"): REMOVED,
@@ -63,6 +70,27 @@ def parse_stamp(text: Optional[str]) -> Optional[dt.datetime]:
 
 def truncate(text: Any, limit: int) -> str:
     return str(text)[:limit]
+
+
+def reason_of(entry: dict[str, Any]) -> str:
+    return entry.get("reason", DEFAULT_REASON)
+
+
+def fleet_root(home: Path) -> Path:
+    """Hermes' `get_default_hermes_root` for a home, which this script cannot import."""
+    home = Path(home)
+    return home.parent.parent if home.parent.name == "profiles" else home
+
+
+def paused(home: Path) -> bool:
+    """Hermes' `agent.estop.is_engaged`: either sentinel exists, and a stat error counts as engaged."""
+    engaged = False
+    for sentinel in {Path(home) / SENTINEL_NAME, fleet_root(home) / SENTINEL_NAME}:
+        try:
+            engaged = engaged or sentinel.exists()
+        except OSError:
+            return True
+    return engaged
 
 
 def queue_dir(home: Path) -> Path:

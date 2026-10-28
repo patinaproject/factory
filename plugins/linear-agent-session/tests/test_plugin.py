@@ -189,6 +189,34 @@ class TeammateReplyTest(unittest.TestCase):
         self.assertEqual(client.calls, [])
 
 
+class PausedHookTest(unittest.TestCase):
+    def test_a_delivery_while_paused_gets_no_acknowledgement_or_intent(self):
+        calls = []
+        cases = {
+            "session created": session_event("created"),
+            "teammate reply": reply_event(f"{LUKE} thoughts?").raw_message,
+            "unresolved secret": session_event("created"),
+            "triage exit": {"type": "Issue", "action": "update", "updatedFrom": {"stateId": "s"}, "data": {"id": "issue-1"}},
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                client = RecordingClient()
+                config = webhook_config({"linear": {"secret": "${LINEAR_WEBHOOK_SECRET}"}}) if name == "unresolved secret" else RESOLVED_CONFIG
+                hook = plugin.make_dispatch_hook(
+                    lambda: client, lambda: "linear", lambda: config,
+                    lambda payload: calls.append(("exit", payload)),
+                    lambda payload: calls.append(("intent", payload)),
+                )
+                with mock.patch.object(plugin, "paused", return_value=True):
+                    self.assertIsNone(asyncio.run(hook(event=event(payload))))
+                self.assertEqual((client.calls, calls), ([], []))
+
+    def test_the_hook_resumes_acknowledging_when_not_paused(self):
+        client = RecordingClient()
+        self.assertIsNone(run_hook(event(session_event("created")), client))
+        self.assertEqual(client.calls, [ACK])
+
+
 class IntentHookTest(unittest.TestCase):
     """The hook puts the computed intent in front of a Linear turn through Hermes' `rewrite` action."""
 
@@ -563,6 +591,23 @@ class CliTest(unittest.TestCase):
                 code = cli.main(["triage-intent", "--payload-file", os.path.join(tmp, "missing.json")])
             self.assertEqual(code, 0)
             self.assertIn('"action": "error"', out.getvalue())
+
+    def test_teammate_reply_command_reports_whether_the_hook_would_skip_the_payload(self):
+        cli = _load_cli()
+        replies = {
+            "teammate": (reply_event(f"{LUKE} thoughts?").raw_message, True),
+            "agent": (reply_event("please continue").raw_message, False),
+            "issue": ({"type": "Issue", "action": "update"}, False),
+        }
+        for name, (payload, expected) in replies.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "payload.json")
+                with open(path, "w") as handle:
+                    json.dump(payload, handle)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = cli.main(["teammate-reply", "--payload-file", path])
+                self.assertEqual((code, json.loads(out.getvalue())), (0, {"addressed": expected}))
 
     def test_activity_command(self):
         fake = FakeLinear([activity_ok("activity-5"), (200, {"data": {"agentSessionUpdate": {"success": True}}})])

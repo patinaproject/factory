@@ -28,6 +28,7 @@ _session_store: Any = None
 
 def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", record_delivery)
+    ctx.register_hook("post_gateway_admission", mark_admitted)
     ctx.register_hook("api_request_error", note_request_error)
     ctx.register_hook("on_session_end", clear_finished_turn)
 
@@ -44,7 +45,13 @@ def load_config() -> Mapping[str, Any]:
     return load_config_readonly()
 
 
-def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> None:
+def paused() -> bool:
+    from agent.estop import paused_reply
+
+    return paused_reply() is not None
+
+
+def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> Optional[dict[str, str]]:
     global _session_store
     try:
         if session_store is not None:
@@ -72,11 +79,30 @@ def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> N
             "next_try_at": None,
             "reported": False,
         }
+        is_paused = paused()
+        if is_paused:
+            fields.update(reason="paused", next_try_at=fields["delivered_at"])
+        event_name = "paused" if is_paused else "dispatch"
         queue_store.mutate(
-            queue_store.queue_dir(hermes_home()), lambda entries: queue_store.apply(entries, key, "dispatch", **fields)
+            queue_store.queue_dir(hermes_home()), lambda entries: queue_store.apply(entries, key, event_name, **fields)
         )
+        if is_paused:
+            return {"action": "skip", "reason": "Hermes is paused; the delivery is queued for replay after resume"}
     except Exception:
         logger.exception("webhook-retry: could not record a delivery")
+    return None
+
+
+def mark_admitted(source: Any = None, **_: Any) -> None:
+    try:
+        key = source["chat_id"]
+        if queue_store.decode_key(key) is None:
+            return None
+        queue_store.mutate(
+            queue_store.queue_dir(hermes_home()), lambda entries: queue_store.apply(entries, key, "admitted", admitted=True)
+        )
+    except Exception:
+        logger.exception("webhook-retry: could not mark a delivery admitted")
     return None
 
 
@@ -100,7 +126,7 @@ def note_request_error(
         queue_store.mutate(
             queue_store.queue_dir(hermes_home()),
             lambda entries: queue_store.apply(
-                entries, key, "usage_limit", last_error=message, next_try_at=queue_store.stamp(next_try)
+                entries, key, "usage_limit", reason="usage_limit", last_error=message, next_try_at=queue_store.stamp(next_try)
             ),
         )
     except Exception:

@@ -52,6 +52,9 @@ FAKE_TRIAGE_EXIT = textwrap.dedent(
     with open(os.environ["FAKE_TRIAGE_LOG"], "a") as log:
         log.write(json.dumps({"argv": args[:2], "payload": payload, "now": now, "home": os.environ["HERMES_HOME"]}) + "\\n")
     behavior = json.load(open(os.environ["FAKE_TRIAGE_BEHAVIOR"]))
+    if args[0] == "teammate-reply":
+        print(json.dumps({"addressed": behavior.get("addressed", False)}))
+        sys.exit(behavior.get("exit", 0))
     if args[0] == "triage-intent":
         if behavior.get("intent_exit"):
             sys.exit(behavior["intent_exit"])
@@ -116,6 +119,12 @@ class RetryTest(unittest.TestCase):
     def triage_checks(self):
         log = self.home.parent / "triage.log"
         return [c for c in self.cli_calls(log) if c["argv"][0] == "triage-exit"]
+
+    def teammate_checks(self):
+        return [c for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "teammate-reply"]
+
+    def engage_pause(self):
+        (self.home / "ESTOP").write_text("")
 
     def intent_checks(self):
         return [c for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "triage-intent"]
@@ -312,8 +321,8 @@ class RetryTest(unittest.TestCase):
         self.seed(
             entry("old", delivered=ago(hours=49)),
             entry("tired", attempts=8),
-            entry("stale", state="pending", delivered=ago(hours=25)),
-            entry("fresh", state="pending", delivered=ago(hours=1)),
+            entry("stale", state="pending", delivered=ago(hours=25), admitted=True),
+            entry("fresh", state="pending", delivered=ago(hours=1), admitted=True),
         )
 
         first = self.run_retry()
@@ -328,6 +337,192 @@ class RetryTest(unittest.TestCase):
             {"old": "given_up", "tired": "given_up", "fresh": "pending"},
         )
         self.assertEqual(self.chats(), [])
+
+    def test_a_paused_delivery_replays_once_after_resume_in_order_within_its_subject(self):
+        self.seed(
+            entry("second", delivered=ago(hours=1), reason="paused"),
+            entry("first", delivered=ago(hours=2), reason="paused"),
+        )
+        self.engage_pause()
+        held = self.run_retry()
+        (self.home / "ESTOP").unlink()
+
+        result = self.run_retry()
+
+        self.assertEqual((held.stdout, held.returncode), ("Hermes is paused: the queued deliveries wait for hermes resume\n", 0))
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["first", "second"])
+        self.assertEqual(
+            result.stdout,
+            "retried linear first: succeeded\nretried linear second: succeeded\nwebhook retry queue drained\n",
+        )
+        self.assertEqual(self.entries(), {})
+
+    def test_a_pause_engaged_during_a_run_starts_no_further_entry(self):
+        self.install_triage_exit(handled=False)
+        self.seed(
+            entry("first", delivered=ago(hours=3), reason="paused", payload=TRIAGE_EXIT_PAYLOAD),
+            entry("second", delivered=ago(hours=2), reason="paused", payload=TRIAGE_EXIT_PAYLOAD),
+        )
+        pause = self.home / "ESTOP"
+        fake = self.hermes.read_text().replace(
+            "sys.exit(behavior[\"exit\"])", f"open({str(pause)!r}, 'w').close()\nsys.exit(behavior[\"exit\"])"
+        )
+        self.hermes.write_text(fake)
+
+        result = self.run_retry("--now")
+
+        stored = self.entries()
+        self.assertEqual(
+            [c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["first"],
+        )
+        self.assertEqual(len(self.triage_checks()), 1)
+        self.assertEqual((stored[chat_key("second")]["state"], stored[chat_key("second")]["attempts"]), ("queued", 0))
+        self.assertEqual(
+            result.stdout,
+            "retried linear first: succeeded\nHermes is paused: the queued deliveries wait for hermes resume\n",
+        )
+
+    def test_now_does_not_replay_while_paused(self):
+        self.install_triage_exit(handled=True)
+        self.seed(entry("held", reason="paused", payload=TRIAGE_EXIT_PAYLOAD))
+        self.engage_pause()
+
+        result = self.run_retry("--now")
+
+        self.assertEqual((self.chats(), self.triage_checks()), ([], []))
+        self.assertEqual(self.entries()[chat_key("held")]["state"], "queued")
+        self.assertEqual(result.stdout, "Hermes is paused: the queued deliveries wait for hermes resume\n")
+
+    def test_the_fleet_root_pause_holds_a_profile_home(self):
+        fleet = Path(self.tmp.name) / "fleet"
+        self.home = fleet / "profiles" / "worker"
+        self.queue = self.home / "webhook-retry"
+        self.queue.mkdir(parents=True)
+        self.seed(entry("held", reason="paused"))
+        (fleet / "ESTOP").write_text("")
+
+        result = self.run_retry()
+
+        self.assertEqual((self.chats(), result.stdout.splitlines()), ([], ["Hermes is paused: the queued deliveries wait for hermes resume"]))
+
+    def test_a_pending_entry_that_never_reached_a_turn_replays_as_unadmitted(self):
+        self.seed(
+            entry("dropped", state="pending", delivered=ago(minutes=11), next_try_at=None),
+            entry("recent", state="pending", delivered=ago(minutes=5), next_try_at=None),
+        )
+
+        result = self.run_retry()
+
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["dropped"])
+        self.assertIn("because a restart, drain, or concurrency cap dropped it", self.chats()[0]["query"])
+        self.assertEqual(result.stdout, "retried linear dropped: succeeded\nwebhook retry queue drained\n")
+        self.assertEqual([e["delivery"] for e in self.entries().values()], ["recent"])
+
+    def test_an_admitted_pending_entry_stays_pending(self):
+        self.seed(entry("running", state="pending", delivered=ago(minutes=30), admitted=True))
+
+        result = self.run_retry()
+
+        self.assertEqual((result.stdout, self.chats()), ("", []))
+        self.assertEqual(self.entries()[chat_key("running")]["state"], "pending")
+
+    def test_an_old_unadmitted_entry_is_promoted_before_it_expires(self):
+        self.seed(entry("stale", state="pending", delivered=ago(hours=25)))
+
+        self.run_retry()
+
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["stale"])
+
+    def test_a_reply_addressed_to_a_teammate_is_not_replayed(self):
+        reply = {"type": "AgentSessionEvent", "action": "prompted"}
+        for reason in ("paused", "unadmitted"):
+            with self.subTest(reason):
+                self.setUp()
+                self.install_triage_exit(handled=False, addressed=True)
+                state = "pending" if reason == "unadmitted" else "queued"
+                self.seed(entry("talk", state=state, delivered=ago(minutes=30), reason=reason, payload=reply))
+
+                result = self.run_retry()
+
+                self.assertEqual(self.chats(), [])
+                self.assertEqual([c["payload"] for c in self.teammate_checks()], [reply])
+                self.assertEqual(
+                    result.stdout,
+                    "retried linear talk: skipped a reply addressed to a teammate\nwebhook retry queue drained\n",
+                )
+                self.assertEqual(self.entries(), {})
+
+    def test_a_reply_for_the_agent_is_replayed(self):
+        reply = {"type": "AgentSessionEvent", "action": "prompted"}
+        self.install_triage_exit(handled=False, addressed=False)
+        self.seed(entry("talk", payload=reply))
+
+        self.run_retry()
+
+        self.assertEqual((len(self.teammate_checks()), len(self.chats())), (1, 1))
+
+    def test_a_failed_teammate_check_replays_the_turn(self):
+        reply = {"type": "AgentSessionEvent", "action": "prompted"}
+        self.install_triage_exit(handled=False, addressed=True, exit=1)
+        self.seed(entry("talk", payload=reply))
+
+        self.run_retry()
+
+        self.assertEqual(len(self.chats()), 1)
+
+    def test_two_deliveries_for_one_subject_replay_oldest_first(self):
+        self.seed(entry("newer", delivered=ago(hours=1)), entry("older", delivered=ago(hours=2)))
+
+        self.run_retry()
+
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["older", "newer"])
+
+    def test_a_delivery_that_is_not_due_holds_back_only_its_own_subject(self):
+        later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def subject(name, delivered, next_try=None):
+            key, value = entry(name, delivered=delivered, next_try=next_try)
+            value["summary"] = {"event": "Issue", "action": "update", "subject": name[0].upper()}
+            return key, value
+
+        self.seed(
+            subject("a-waiting", ago(hours=3), later),
+            subject("a-behind", ago(hours=2)),
+            subject("b-due", ago(hours=1)),
+        )
+
+        result = self.run_retry()
+
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["b-due"])
+        self.assertEqual(result.stdout, "retried linear b-due: succeeded\n")
+
+    def test_each_reason_is_named_in_the_replay_the_announcement_and_the_list(self):
+        later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        causes = {
+            "usage_limit": "could not run then because the model's usage limit was reached.",
+            "paused": "could not run then because Hermes was paused.",
+            "unadmitted": "could not run then because it never reached an agent turn, because a restart, drain, or concurrency cap dropped it.",
+        }
+        for reason, cause in causes.items():
+            with self.subTest(reason):
+                self.setUp()
+                self.seed(entry("d1", reason=reason, reported=False, next_try=later))
+                announced = self.run_retry()
+                listed = self.run_retry("--list")
+                self.run_retry("--now")
+
+                self.assertEqual(announced.stdout, f"queued linear d1 Issue update PAT-1: {reason} (next try {later})\n")
+                self.assertTrue(listed.stdout.rstrip().endswith(f" {later} {reason}"))
+                self.assertIn(cause, self.chats()[0]["query"])
+
+    def test_an_entry_stored_before_reasons_reads_as_a_usage_limit(self):
+        key, old = entry("old", reported=False)
+        self.seed((key, old))
+        self.assertNotIn("reason", old)
+
+        result = self.run_retry("--list")
+
+        self.assertTrue(result.stdout.rstrip().endswith(" usage_limit"))
 
     def test_a_route_without_toolsets_fails_without_running(self):
         self.seed(entry("lost", route="unknown"))
@@ -356,7 +551,7 @@ class RetryTest(unittest.TestCase):
         second = self.run_retry()
 
         self.assertEqual(
-            first.stdout, f"queued linear d1 Issue update PAT-1: waiting for usage (next try {later})\n"
+            first.stdout, f"queued linear d1 Issue update PAT-1: usage_limit (next try {later})\n"
         )
         self.assertEqual(second.stdout, "")
 
@@ -380,7 +575,7 @@ class RetryTest(unittest.TestCase):
         stored = self.entries()[chat_key("d1")]
         self.assertEqual(
             result.stdout,
-            f"queued linear d1 Issue update PAT-1 {stored['delivered_at']} 2 {stored['next_try_at']}\n",
+            f"queued linear d1 Issue update PAT-1 {stored['delivered_at']} 2 {stored['next_try_at']} usage_limit\n",
         )
 
     def test_list_when_empty(self):

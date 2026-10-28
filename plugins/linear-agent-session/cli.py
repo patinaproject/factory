@@ -59,6 +59,11 @@ def main(argv: Optional[list] = None) -> int:
     )
     exit_check.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
 
+    teammate = commands.add_parser(
+        "teammate-reply", help="say whether a Linear webhook payload is a session reply addressed to a teammate"
+    )
+    teammate.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
+
     reask_exit = commands.add_parser(
         "reask-exit", help="ask the person again for a reply re-ask whose Hermes exited before its turn-end hook"
     )
@@ -71,6 +76,8 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "triage-exit":
         return _triage_exit(plugin, args.payload_file)
+    if args.command == "teammate-reply":
+        return _teammate_reply(plugin, args.payload_file)
     if args.command == "reask-exit":
         replies = plugin.replies
         log = Path(replies.hermes_home()) / "logs" / replies.EXIT_LOG
@@ -123,6 +130,13 @@ def _triage_exit(plugin, payload_file: str) -> int:
     except Exception as failure:
         verdict = triage_exit.Verdict("failed", type(failure).__name__)
     print(json.dumps({"handled": verdict.handled, "action": verdict.action, "task_id": verdict.task_id}))
+    return 0
+
+
+def _teammate_reply(plugin, payload_file: str) -> int:
+    with open(payload_file, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    print(json.dumps({"addressed": plugin.addressed_to_teammate(payload)}))
     return 0
 
 

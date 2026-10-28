@@ -169,6 +169,12 @@ def unresolved_routes(config: Mapping[str, Any]) -> dict[str, str]:
     return unresolved
 
 
+def paused() -> bool:
+    from agent.estop import paused_reply
+
+    return paused_reply() is not None
+
+
 def make_dispatch_hook(
     get_client: Callable[[], linear.LinearClient],
     webhook_route: Callable[[], str],
@@ -181,6 +187,8 @@ def make_dispatch_hook(
     intent_pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-intent")
 
     async def guard_then_acknowledge(event: Any, **_: Any) -> Optional[dict[str, str]]:
+        if paused():
+            return None
         route = _delivery_route(event)
         if route is None:
             return None
