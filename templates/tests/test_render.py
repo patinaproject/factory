@@ -229,7 +229,6 @@ class RouteStructureTest(unittest.TestCase):
         for match in re.finditer(r"^- `([a-z_]+)` with action ((?:`[a-z_]+`(?:, |, or | or )?)+), only when ", prompt, re.M):
             listed.update((match.group(1), action) for action in re.findall(r"`([a-z_]+)`", match.group(2)))
         filtered = set()
-        # The push branch, filters[0]["any"][0], keeps a delivery that starts auto-deploy and never reaches the prompt.
         push, table = self.routes["github"]["filters"][0]["any"]
         self.assertEqual(push, PUSH_FILTER)
         for clause in table["all"][1]["any"]:

@@ -1,26 +1,6 @@
 #!/usr/bin/env python3
-"""Deploy the factory repository's default branch to this machine without a person.
-
-launchd starts this job on demand when the default branch moves. One run holds new Kanban cards by
-setting `kanban.dispatch_profiles` to an empty list in the root home, whose gateway runs the dispatcher,
-and waits up to --timeout seconds for no running card. It then takes `<root>/factory-gateway.lock`,
-resets the source checkout that `check-install --print-source` names to origin/<default>, and runs that
-checkout's own copy of this script. It applies every Install that the checkout's `check-install --json`
-names, in Step order, under one short `hermes pause`, restarts the gateway through restart-gateway when
-an install needs it, at most once per commit, and checks that no Install drift remains and that
-check-settings passes. Every run records DEPLOYED, FAILED, WAITING, or BLOCKED in
-`<root>/auto-deploy.json`, mode 600, and releases what it engaged. It deploys again while
-origin/<default> moved during the run.
-
-The state file records each hold before the run engages it. A later run lifts a pause, removes the key,
-and removes the gateway lock only when the state file records that a run that is no longer alive set
-them, and changes nothing while an operator's `hermes pause` is engaged.
-
---status prints the state file. --dry-run prints the plan for the source checkout as it is and changes
-nothing. --retry deploys a commit that failed before, which a run otherwise leaves until origin/<default>
-moves. --print-plist prints the launchd job, which runs at load, so a reboot releases a hold that a run
-left and deploys a push that arrived while the machine was down. Runs on the macOS system Python 3.9.
-"""
+"""Deploy the factory repository's default branch to this machine without a person."""
+# Runs on the macOS system Python 3.9.
 from __future__ import annotations
 
 import argparse
@@ -40,7 +20,7 @@ from typing import Callable, List, Optional
 DEPLOYED, FAILED, WAITING, BLOCKED = "DEPLOYED", "FAILED", "WAITING", "BLOCKED"
 HOLD_KEY = "kanban.dispatch_profiles"
 # Present and empty, Hermes' dispatcher claims no card on any board, ready or review, and reads the
-# change on its next tick. Chat, webhook, and cron turns keep running.
+# change on its next tick.
 HOLD = ("config", "set", HOLD_KEY, "[]")
 RELEASE = ("config", "unset", HOLD_KEY)
 WORKER = "claude-worker"
@@ -59,7 +39,6 @@ class DeployError(Exception):
 
 
 class Redactor:
-    """Removes the value of every secret-named environment variable and every known token shape."""
 
     def __init__(self, environ) -> None:
         values = {value for name, value in environ.items() if SECRET_NAME.search(name) and len(value) >= 8}
@@ -87,7 +66,6 @@ def read_pid(path: Path) -> Optional[int]:
 
 
 def live_deploy(pid: Optional[int]) -> bool:
-    """True when `pid` is a running auto-deploy, so a reused pid never keeps a dead run's lock."""
     if not pid or pid <= 0:
         return False
     try:
@@ -195,7 +173,6 @@ class Deploy:
             self.state["deployed"] = commit
             self.state["failed"] = None
         elif outcome == FAILED and commit:
-            # Kept apart from `outcome`, which a later BLOCKED or WAITING record replaces.
             self.state["failed"] = commit
         if manual is not None:
             self.state["manual"] = [{"line": self.redact(m.line), "action": self.redact(m.action)} for m in manual]
@@ -308,7 +285,6 @@ class Deploy:
         return install_plan.plan(drifts)
 
     def release(self) -> None:
-        """Lifts what the recorded hold engaged, each part only while it is still the run's own."""
         hold = self.state.get("hold")
         if not hold:
             return
@@ -436,8 +412,6 @@ class Deploy:
             self.sleep(min(self.args.poll, max(deadline - self.clock(), 0)))
 
     def run_source_copy(self, target: str, deadline: float, continued: Optional[str]) -> None:
-        """Replaces this process with the source checkout's copy, so a change to this script deploys
-        itself. The pid stays, so the run lock, the gateway lock, and the recorded hold stay this run's."""
         script = self.source / "skills" / "setup-factory" / "scripts" / "auto-deploy"
         if continued == target or not script.is_file() or script.read_bytes() == RUNNING:
             return
@@ -526,8 +500,6 @@ class Deploy:
 
 
 def plist(root: Path, worker: Path) -> bytes:
-    """The launchd job. Its environment names no secret: auto-deploy reads none, and every command it runs
-    that needs one gets it the way that command does outside this job."""
     log = str(root / "logs" / "auto-deploy.log")
     return plistlib.dumps({
         "Label": LABEL,

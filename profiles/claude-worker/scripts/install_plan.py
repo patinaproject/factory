@@ -1,16 +1,4 @@
-"""What fixes each line check-install reports, and the order a deploy applies the fixes in.
-
-Every `Drift` carries a remedy. An `Install` is a command that brings the machine to the
-repository's version, run in `Step` order, even over a person's local edit. A `Manual` line
-needs a value or a privilege that the repository must not hold, such as a secret, an
-operator's setting, or the broker user's root-owned code. An `Advisory` line reports runtime
-health, which no install changes. `plan` is pure: it orders the installs and lists the
-`Manual` lines, and a `Manual` line never removes an install.
-
-Each fix in step 3 of "Deploy a merged factory change" in `skills/setup-factory/SKILL.md` is
-built by exactly one function here, and check-install calls it where it finds the drift.
-Runs on the macOS system Python 3.9, because auto-deploy's launchd job does.
-"""
+# Runs on the macOS system Python 3.9, because auto-deploy's launchd job does.
 from __future__ import annotations
 
 import json
@@ -20,10 +8,6 @@ from typing import NamedTuple, Tuple, Union
 
 
 class Step(IntEnum):
-    """Install order. The source checkout comes first because every later command reads it. Boards and
-    config precede the profile, whose cron jobs read them on their first run. Cron jobs follow the
-    profile that holds their scripts. The owned refs precede the routes that filter on them."""
-
     SOURCE = 0
     BOARDS = 1
     CONFIG = 2
@@ -78,7 +62,6 @@ def remedy_json(remedy: Remedy) -> dict:
 
 
 def drift_from_json(record: dict) -> Drift:
-    """Parse one record of `check-install --json`. Raises ValueError on any other shape."""
     try:
         remedy = record["remedy"]
         kind = remedy["type"]
@@ -119,9 +102,6 @@ def plan(drifts) -> Plan:
 
 
 class Homes(NamedTuple):
-    """What every install command names. Commands for the worker home select it with `-p`, because a
-    deploy runs them all with HERMES_HOME set to the root home."""
-
     hermes: str
     python: str
     root: Path
@@ -137,12 +117,10 @@ class Homes(NamedTuple):
 
 
 def source_reset(repo: Path, branch: str, sha: str) -> Install:
-    # Untracked files, such as the agents' .worktrees directory, are left alone.
     return Install(Step.SOURCE, ("git", "-C", str(repo), "checkout", "--quiet", "--force", "-B", branch, sha), False)
 
 
 def board_create(homes: Homes, slug: str, name: str, workdir: str | None) -> Install:
-    # Without a default repository the board gets no workdir; check-install reports the workdir once one is set.
     where = ("--default-workdir", workdir) if workdir else ()
     return Install(Step.BOARDS, (homes.hermes, "kanban", "boards", "create", slug, "--name", name, *where), False)
 

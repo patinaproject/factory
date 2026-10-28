@@ -121,7 +121,6 @@ HEALTHY_RUNS = (None, "ok", "delivery_queued")
 RUN_ERROR_LIMIT = 200
 SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE)
 TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
-# The root home's cron scripts, and the launchd jobs' scripts beside restart-gateway, which both jobs run.
 ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway", "auto-deploy", "report-deploy")
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
@@ -135,7 +134,6 @@ class Refusal(Exception):
     pass
 
 
-# A Want whose `target` is MANUAL names a value the repository must not hold, so only a person sets it.
 MANUAL, UNSET = object(), object()
 
 
@@ -154,7 +152,6 @@ def prefixed(prefix: str, what: str) -> Want:
 
 
 def one_of(*wants: Want) -> Want:
-    # A deploy installs the first choice, unless any choice is the operator's.
     target = MANUAL if any(want.target is MANUAL for want in wants) else wants[0].target
     return Want(lambda live: any(want.ok(live) for want in wants), " or ".join(want.text for want in wants), target)
 
@@ -210,7 +207,6 @@ class Service(NamedTuple):
     name: str
     kind: str
     plist: str
-    # A job that runs on a schedule or when something starts it is loaded but not running between its runs.
     scheduled: bool = False
     env: tuple = ()  # EnvironmentVariables keys the plist must set
     interval: int = 0  # the StartInterval the plist must set, in seconds
@@ -287,7 +283,6 @@ SERVICES = (
         10, "gh login refresh", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist",
         scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME"), interval=gh_login.REFRESH_INTERVAL_SECONDS,
     ),
-    # Runs at load and whenever the factory-deploy plugin starts it for a push.
     Service(
         12, "auto deploy", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
         scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME", "PATH"),
@@ -651,7 +646,6 @@ def cron_jobs(home: Path) -> list:
 
 
 def cron_differences(job: CronJob, live: dict) -> list:
-    """Each way the live job differs from the runbook's, with the `hermes cron` arguments that fix it, or None."""
     job_id = live["id"]
     details = []
     if not live["enabled"]:
@@ -808,8 +802,6 @@ def check_cron(commit: Commit, homes: Homes) -> list:
                 remove = " ".join(install_plan.cron_command(homes, paths[name], "remove", live["id"]).argv)
                 drifts.append(Drift(
                     "cron job", where, "is replaced by a launchd job; remove it with hermes cron remove (part 10)",
-                    # Not an install: removed before the launchd job runs, which only a person installs, the worker's
-                    # gh login would expire within the hour.
                     Manual(f"once the part 10 launchd job has run, run {remove}"),
                 ))
             elif owner is None:
@@ -946,7 +938,6 @@ def check_gateway_watch(root: Path, now: float | None = None) -> list:
     return drifts
 
 
-# auto-deploy's own files in the root home and its hold key in the root home's config.
 AUTO_DEPLOY_STATE = "auto-deploy.json"
 AUTO_DEPLOY_LOCK = "auto-deploy.lock"
 FACTORY_GATEWAY_LOCK = "factory-gateway.lock"
@@ -966,7 +957,6 @@ def read_pid(path: Path) -> int | None:
 
 
 def live_deploy(pid) -> bool:
-    """True when `pid` is a running auto-deploy, as auto-deploy itself judges it, so a reused pid is not one."""
     if not isinstance(pid, int) or pid <= 0:
         return False
     try:
@@ -994,9 +984,6 @@ def check_auto_deploy(
     root: Path, dispatch_profiles, commit: Commit | None, committed_at: float | None, now: float,
     alive: Callable[[object], bool] = live_deploy,
 ) -> list:
-    """Report what auto-deploy left behind when no run of it is alive, and a default-branch commit it has not
-    deployed a day after it was committed. A live run owns every file and key named here, so it is never reported.
-    `commit` is None when check-install compares with --ref, which is not the branch auto-deploy deploys."""
     state_path, run_lock, gateway_lock = root / AUTO_DEPLOY_STATE, root / AUTO_DEPLOY_LOCK, root / FACTORY_GATEWAY_LOCK
     holder = read_pid(run_lock)
     if alive(holder):
@@ -1278,8 +1265,6 @@ def triage_max_running(settings):
 
 
 def check_stranded_triage(root: Path, now: float) -> list:
-    """A triage card that Hermes' dispatcher has left assigned in `ready`, which a starved board looks like.
-    Silent while auto-deploy holds every card, which check_auto_deploy reports when no run is alive."""
     path = root / "kanban" / "boards" / TRIAGE_BOARD / "kanban.db"
     if not path.is_file() or hold_engaged(root):
         return []
@@ -1361,7 +1346,6 @@ def check_source_checkout(commit: Commit) -> list:
     if not is_ancestor(head, commit.sha):
         ahead = is_ancestor(commit.sha, head)
         blockers.append(f"is ahead of {commit.label}" if ahead else f"has diverged from {commit.label}")
-    # A deploy overwrites a person's edit, so even a checkout the text says to fix by hand gets the reset.
     fix = install_plan.source_reset(repo, commit.label, commit.sha)
     if blockers:
         return [Drift(

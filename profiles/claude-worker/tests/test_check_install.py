@@ -133,9 +133,6 @@ loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
 check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(check_install)
 
-# The remedy class of each line check-install prints, as the auto-deploy design sorts them: a value the repository
-# holds is installed, an operator's value, a secret, or root-owned code is manual, and runtime health is advisory.
-# The first row whose kind and pattern match a line names its class.
 REMEDY_CLASSES = (
     ("profile", "", "install"),
     ("plugin", "", "install"),
@@ -195,7 +192,6 @@ def remedy_class(record: dict) -> str | None:
 
 
 def classified(case: unittest.TestCase, drifts) -> list:
-    """Assert that each drift's remedy has its line's class, and return the lines."""
     records = [d if isinstance(d, dict) else d.to_json() for d in drifts]
     for record in records:
         case.assertEqual(record["remedy"]["type"], remedy_class(record), record["line"])
@@ -325,8 +321,6 @@ class CheckInstallTest(unittest.TestCase):
         return subprocess.run([sys.executable, str(SCRIPTS / "check-install"), *args], env=env, capture_output=True, text=True)
 
     def check(self, *args: str) -> tuple:
-        """Run check-install --json and return its exit code and the lines its records hold, as the text output prints
-        them. `self.raw` keeps the whole JSON document, so a test that a value is never printed reads both forms."""
         if "--print-source" in args:
             proc = self.run_check(*args)
             return proc.returncode, proc.stdout
@@ -1987,7 +1981,6 @@ class CheckAutoDeployTest(unittest.TestCase):
 
 
 class Launchd:
-    """A file system root with the runbook's plists and a fake launchctl that reports their state."""
 
     def __init__(self, tmp: Path) -> None:
         self.root = tmp / "launchd"

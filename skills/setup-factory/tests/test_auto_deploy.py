@@ -50,7 +50,6 @@ def tool(path: Path) -> Path:
 
 
 class Machine:
-    """A root home, a worker home, a fake Hermes, and a source checkout cloned from a local origin."""
 
     def __init__(self, tmp: str) -> None:
         self.tmp = Path(tmp)
@@ -90,7 +89,6 @@ class Machine:
         (self.upstream / "README.md").write_text("factory\n")
 
     def push(self, message: str, auto_deploy_text: str | None = None) -> str:
-        """Commits in upstream and moves origin's main to it, as a merge on GitHub does."""
         if auto_deploy_text is not None:
             self.write_tree(auto_deploy_text)
         git("add", "-A", cwd=self.upstream)
@@ -159,7 +157,6 @@ class Machine:
         return [call["argv"] for call in self.calls("hermes")]
 
     def changes(self) -> list:
-        """Every Hermes call that is not a read."""
         return [argv for argv in self.hermes_argv() if argv[0] != "kanban"]
 
     def state(self) -> dict:
@@ -527,7 +524,6 @@ class AutoDeployTest(unittest.TestCase):
 
 
 def hermes_python() -> tuple | None:
-    """The store Python, the selected environment's site-packages, and the checkout, as check-install finds them."""
     root = Path.home() / ".hermes"
     try:
         entry = json.loads((root / "tools" / "facts.json").read_text())["packages"]["python"]["entry"]

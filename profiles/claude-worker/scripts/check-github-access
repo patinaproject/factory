@@ -53,7 +53,6 @@ STATUSES = Permission("statuses", "Commit statuses", "read")
 ACTIONS = Permission("actions", "Actions", "write")
 METADATA = Permission("metadata", "Metadata", "read")
 REQUIRED = (CONTENTS, PULL_REQUESTS, ISSUES, CHECKS, STATUSES, ACTIONS, METADATA)
-# Webhook event name to the label of its box under "Subscribe to events".
 REQUIRED_EVENTS = {"push": "Push"}
 
 PULL_REQUEST_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
@@ -108,7 +107,6 @@ def shortfalls(granted: dict) -> list[tuple[Permission, str]]:
 
 
 def check_app(slug: str) -> tuple[list[str], set]:
-    """Report each permission and event the App's settings lack, and return the permissions' keys."""
     try:
         app = gh(METADATA, slug, "the App", f"apps/{slug}")
     except Refused as refused:

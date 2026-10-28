@@ -17,9 +17,7 @@ ROUTES_KEY = "platforms.webhook.extra.routes"
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
 # Deliveries per route per minute. Hermes counts every signed delivery before its event and filter
 # checks, so GitHub's check events use the budget, and it answers 429 to the rest, which GitHub never
-# redelivers. The github route peaked at 136 a minute before it took `push`, and Hermes' default of 30
-# dropped review events. A push arrives for every ref update in every installed repository, and push-signed
-# updates the ref once per commit it publishes, so a busy minute of workers can add hundreds more.
+# redelivers.
 RATE_LIMIT = 1200
 TEMPLATE_DIR = Path(__file__).resolve().parent
 GITHUB_ROUTE = "github"
@@ -393,8 +391,6 @@ def _exclude_events_sent_by(login: str) -> dict:
 
 
 def factory_push_filter(full_name: str, ref: str) -> dict:
-    # A push has no action, and the App's own merges are the pushes that matter, so this branch keeps them whoever
-    # sent them. factory-deploy's pre_gateway_dispatch hook starts auto-deploy and runs no turn for it.
     return {
         "all": [
             {"field": "event", "equals": PUSH_EVENT},

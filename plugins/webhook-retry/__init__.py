@@ -22,7 +22,6 @@ UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?[A-Za-z_][A-Za-z0-9_]*\}$")
 GITHUB_EVENT_LINE = re.compile(r"^- Event: (\S+), action (\S+)$", re.MULTILINE)
 SUMMARY_LIMIT = 120
 LINEAR_PAYLOAD_TYPES = ("Issue", "AgentSessionEvent")
-# factory-deploy's `PUSH_KEYS`. A plugin cannot import another plugin, so a test keeps the two `is_push` the same.
 PUSH_KEYS = ("ref", "before", "after", "pusher")
 
 _session_store: Any = None
@@ -64,7 +63,6 @@ def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> O
         route = source.user_id.removeprefix("webhook:")
         key = source.chat_id
         decoded = queue_store.decode_key(key)
-        # factory-deploy starts auto-deploy for a push and skips its turn, so a replay would be a turn no one wants.
         if decoded is None or is_push(event.raw_message) or secret_is_unresolved(route):
             return None
         profile, route, delivery = decoded

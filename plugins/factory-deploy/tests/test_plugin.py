@@ -33,7 +33,6 @@ def event(payload, platform=Platform.WEBHOOK):
 
 
 class Inline(concurrent.futures.Executor):
-    """Runs each submitted call at once, so a test sees what the pool thread would do."""
 
     def __init__(self):
         self.calls = 0

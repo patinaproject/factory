@@ -1,10 +1,3 @@
-"""Run Hermes' own dispatcher tick on two scratch boards, with auto-deploy's hold engaged and then released.
-
-Run with Hermes' store Python: `python3 -I -B dispatch_tick.py <checkout> <site-packages> <hold argv JSON> <release argv JSON>`,
-with HERMES_HOME naming a scratch directory. It applies each argv the way `hermes config set` and
-`hermes config unset` do, through Hermes' own set_config_value and unset_config_value, never through the
-launcher, which can rebuild environments. Prints one JSON object.
-"""
 import json
 import sys
 

@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""Stand-ins for the commands auto-deploy runs, chosen by the name the test copies this file to.
-
-`hermes` keeps its config key, running cards, and pause in `$FAKE_DEPLOY/hermes.json` and
-`$HERMES_HOME/ESTOP`. `check-install` prints `$FAKE_DEPLOY/check_install.json`'s drift, less each
-Install drift whose command already ran, unless the drift is `sticky`. `restart-gateway` and
-`check-settings` exit as `$FAKE_DEPLOY/tools.json` says. Every call is appended to
-`$FAKE_DEPLOY/calls.jsonl` with the pause, the hold, and the source checkout's state at that moment.
-"""
 import json
 import os
 import subprocess
