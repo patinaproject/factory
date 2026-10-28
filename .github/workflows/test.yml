@@ -16,5 +16,11 @@ jobs:
         # actions/checkout@v4.3.1
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
+      - name: Setup Node.js
+        # actions/setup-node@v4.4.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+
       - name: Run component tests
         run: bash scripts/test.sh

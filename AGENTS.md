@@ -102,12 +102,15 @@ refuses a break of the last one only when you publish:
 - `pnpm install` (or `pnpm env:setup`): install dev tooling and register Husky.
 - `pnpm skills:install`: re-vendor locked project-local skills from
   `skills-lock.json`, then commit the refreshed `.agents/skills/**` and
-  `.claude/skills/**` overlays.
+  `.claude/skills/**` overlays. The `Skills Sync` workflow does this for each
+  stable `patinaproject/skills` release and also refreshes `.claude/agents/`
+  (see `CONTRIBUTING.md`), so run `pnpm skills:install` by hand only for a
+  one-off change.
 - `pnpm clean`: remove generated dependencies and temporary install files
   (`node_modules`, `.skills-install.lock*`); never prunes committed skill overlays.
 - `pnpm test`: run every component's Python tests from the repository root.
   `scripts/test.sh` runs `python3 -m unittest discover` in each `tests`
-  directory under `plugins/`, `profiles/`, `skills/`, and `templates/`, with
+  directory under `plugins/`, `profiles/`, `scripts/`, `skills/`, and `templates/`, with
   the component as the top-level directory.
 - `pnpm lint:md`: lint all Markdown.
 - `pnpm exec commitlint --edit <file>`: check a commit message.

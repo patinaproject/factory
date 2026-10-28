@@ -1193,10 +1193,10 @@ Hermes' `in_file` operator. `refresh-owned-refs` rewrites that file
 every minute from `hermes kanban list --json` with the `branch_name` and
 `github_issue_url` of every card not archived, in one atomic step. It also
 writes each card's `linear_issue_id`, a `done` card included. The `linear`
-route keeps a completed or canceled `Issue` update only when its issue id is
+route keeps a completed, canceled, or duplicate `Issue` update only when its issue id is
 listed, so triage never starts for a closed issue that has no card. Without the
 file the route drops every GitHub event except an `issue_comment` on the
-App's pull request, and every completed or canceled `Issue` update. `check-install` reports the file when it
+App's pull request, and every completed, canceled, or duplicate `Issue` update. `check-install` reports the file when it
 is missing or older than 5 minutes. Create the job when `cron list` has no
 `refresh-owned-refs` job:
 

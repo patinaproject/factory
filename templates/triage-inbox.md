@@ -34,8 +34,7 @@ right after `kanban`, and pass `board: triage` to `kanban_comment`.
 
    <<triage_card_flags>>
 
-   The title is the identifier, a colon, and the issue title with every
-   character except letters, digits, spaces, `.` and `-` removed:
+   The title is the issue's `cardTitle` exactly as `linear_issue` returns it:
 
    ````sh
    hermes kanban --board triage create '<title>' \

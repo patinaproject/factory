@@ -58,7 +58,8 @@ ISSUE_SCHEMA = {
     "name": "linear_issue",
     "description": (
         "Read the Linear issue named by `issue` (UUID or ABC-123). Reads as the agent app and returns "
-        "id, identifier, title, url, gitBranchName, priority, priorityName, "
+        "id, identifier, title, cardTitle (the Kanban card title, to use exactly as returned), url, "
+        "gitBranchName, priority, priorityName, "
         "cardPriority (the Kanban card priority for this issue), "
         "description, githubIssues (the URLs of the GitHub issues attached to it), "
         "state, stateType, delegate (the delegate's user ID, or null), labels (names), role_labels (the live label name of each triage role the issue's team and workspace "
@@ -124,7 +125,7 @@ DELEGATED_ISSUES_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "include_closed": {"type": "boolean", "description": "Also list completed and canceled issues."}
+            "include_closed": {"type": "boolean", "description": "Also list completed, canceled, and duplicate issues."}
         },
     },
 }
