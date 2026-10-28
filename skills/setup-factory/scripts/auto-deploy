@@ -165,8 +165,6 @@ class Deploy:
         self.source: Optional[Path] = None
         self.branch = ""
 
-    # Output and state
-
     def log(self, message: str) -> None:
         print(f"auto-deploy: {self.redact(message)}", flush=True)
 
@@ -210,8 +208,6 @@ class Deploy:
         self.state["hold"] = {**self.state["hold"], **changes}
         self.save()
 
-    # Commands
-
     def run(self, argv, env: dict, timeout: float = COMMAND_SECONDS) -> subprocess.CompletedProcess:
         try:
             return subprocess.run(list(argv), env=env, capture_output=True, text=True, timeout=timeout)
@@ -233,8 +229,6 @@ class Deploy:
 
     def git(self, *args: str) -> str:
         return self.checked(["git", "-C", str(self.source), *args], dict(os.environ)).strip()
-
-    # Facts
 
     def hold_key_present(self) -> bool:
         """Whether config.yaml sets kanban.dispatch_profiles at all. `config get` merges Hermes' default
@@ -313,8 +307,6 @@ class Deploy:
             raise DeployError(f"check-install --json printed no drift records: {error}") from None
         return install_plan.plan(drifts)
 
-    # Holds
-
     def release(self) -> None:
         """Lifts what the recorded hold engaged, each part only while it is still the run's own."""
         hold = self.state.get("hold")
@@ -357,8 +349,6 @@ class Deploy:
     def drop_run_lock(self) -> None:
         if read_pid(self.run_lock) == self.pid:
             self.run_lock.unlink()
-
-    # The run
 
     def deploy(self, continued: Optional[str], remaining: float) -> int:
         self.load_state()
@@ -504,8 +494,6 @@ class Deploy:
             self.log(line)
         if proc.returncode != 0:
             raise DeployError(f"restart-gateway exited {proc.returncode}")
-
-    # Read-only modes
 
     def status(self) -> int:
         self.load_state()
