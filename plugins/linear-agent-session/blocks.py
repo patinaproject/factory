@@ -24,6 +24,7 @@ PROFILE_MENTION = re.compile(r"@+(?=https://linear\.app/[^/\s]+/profiles/)")
 PROFILE_URL = re.compile(r"https://linear\.app/[^/\s]+/profiles/[\w-]+(?:\.[\w-]+)*")
 MENTION_REPLY = "Triage needs your answer to the questions above."
 SESSION_LINE = re.compile(r"^linear_agent_session_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+ISSUE_LINE = re.compile(r"^linear_issue_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,11 @@ def hermes_redact(text: str) -> str:
 
 def session_id(body: Optional[str]) -> Optional[str]:
     match = SESSION_LINE.search(body or "")
+    return match.group(1) if match else None
+
+
+def issue_id(body: Optional[str]) -> Optional[str]:
+    match = ISSUE_LINE.search(body or "")
     return match.group(1) if match else None
 
 

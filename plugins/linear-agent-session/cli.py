@@ -74,6 +74,9 @@ def main(argv: Optional[list] = None) -> int:
     intent.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
     intent.add_argument("--now", help="the delivery time as ISO 8601, for a replay; default is the payload's timestamp")
 
+    owner = commands.add_parser("review-owner", help="name who reviews a card's pull request and their GitHub user id")
+    owner.add_argument("--task", required=True, help="the Kanban card, read from HERMES_KANBAN_BOARD")
+
     args = parser.parse_args(argv)
     if args.command == "triage-exit":
         return _triage_exit(plugin, args.payload_file)
@@ -106,6 +109,8 @@ def main(argv: Optional[list] = None) -> int:
         output = plugin.tools.run_delegated_issues(
             plugin.linear.client_from_env, {"include_closed": args.include_closed}
         )
+    elif args.command == "review-owner":
+        output = _review_owner(plugin, args.task)
     elif args.command == "undelegate":
         output = plugin.tools.run_undelegate(plugin.linear.client_from_env, {"issue": args.issue})
     else:
@@ -160,6 +165,14 @@ def _triage_intent(plugin, payload_file: str, now: Optional[str]) -> int:
         intent = triage_intent.error_intent(type(failure).__name__)
     print(triage_intent.render(intent), end="")
     return 0
+
+
+def _review_owner(plugin, task_id: str) -> str:
+    card = plugin.blocks.load_card(task_id, os.environ.get("HERMES_KANBAN_BOARD"))
+    issue = plugin.blocks.issue_id(card.body)
+    if issue is None:
+        return json.dumps({"error": f"card {task_id} names no linear_issue_id"})
+    return plugin.tools.run_review_owner(plugin.linear.client_from_env, {"issue": issue})
 
 
 def _external_url(value: str) -> dict:

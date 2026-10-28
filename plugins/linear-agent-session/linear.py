@@ -133,6 +133,13 @@ TRIAGE_PEOPLE_QUERY = """query TriagePeople($id: String!) {
   }
 }"""
 
+REVIEW_OWNER_QUERY = """query ReviewOwner($id: String!) {
+  issue(id: $id) {
+    assignee { name gitHubUserId }
+    team { triageResponsibility { currentUser { name gitHubUserId } } }
+  }
+}"""
+
 DOCUMENT_UPDATE_MUTATION = """mutation DocumentUpdate($id: String!, $input: DocumentUpdateInput!) {
   documentUpdate(id: $id, input: $input) { success }
 }"""
@@ -416,6 +423,14 @@ class LinearClient:
             "creator": creator["url"] if creator and not creator["app"] else None,
             "triage": on_triage["url"] if on_triage else None,
         }
+
+    def review_owner(self, id_or_identifier: str) -> Optional[dict]:
+        """The `name` and `gitHubUserId` of the issue's assignee, else of the person on triage now, or None."""
+        issue = self._graphql(REVIEW_OWNER_QUERY, {"id": id_or_identifier})["issue"]
+        if issue is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        responsibility = issue["team"]["triageResponsibility"]
+        return issue["assignee"] or (responsibility and responsibility["currentUser"]) or None
 
     def rename_document(self, document_id: str, title: str) -> None:
         payload = self._graphql(DOCUMENT_UPDATE_MUTATION, {"id": document_id, "input": {"title": title}})

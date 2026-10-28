@@ -4,15 +4,19 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 DEFAULT_GATED_PROFILES = ["claude-worker"]
 TRIAGE_BOARD = "triage"
 # Hermes runs its completion contract inside complete_task only, so a review handoff needs this gate too.
 GATED_TOOLS = ("kanban_complete", "kanban_request_review")
-PR_FIELDS = "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"
+PR_FIELDS = (
+    "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews"
+)
 PASSING_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
 # gh reports a run that has not started with Go's zero time, so it sorts as the newest run of its check.
 UNSTARTED = "0001-01-01T00:00:00Z"
@@ -24,6 +28,9 @@ GIT_TIMEOUT_SECONDS = 3
 GH_TIMEOUT_SECONDS = 15
 GH_EXTRA_TIMEOUT_SECONDS = 6
 MIN_CALL_SECONDS = 1
+# The CLI mints a Linear token through the broker, then makes one 10s-bounded Linear request.
+LINEAR_TIMEOUT_SECONDS = 12
+LINEAR_CLI = Path("plugins") / "linear-agent-session" / "cli.py"
 # Rules whose only effect on a pull request is a merge-time or review-time requirement the gate checks or does not need.
 REVIEW_HANDOFF_RULES = frozenset(
     {
@@ -242,7 +249,7 @@ def _run(cmd: list[str], cwd: str, cap: float, deadline: float) -> str:
     except OSError as exc:
         raise GateError(f"`{shown}` could not run: {exc}")
     if proc.returncode != 0:
-        raise GateError(f"`{shown}` exited {proc.returncode}: {proc.stderr.strip()}")
+        raise GateError(f"`{shown}` exited {proc.returncode}: {proc.stderr.strip() or proc.stdout.strip()}")
     return proc.stdout.strip()
 
 
@@ -278,6 +285,54 @@ def re_request_reviews(pr: dict, workspace: str, deadline: float) -> tuple[list[
         except GateError as exc:
             failed.append(f"{login}: {exc}")
     return asked, failed
+
+
+def linear_owner(task_id: str, workspace: str, deadline: float) -> Optional[dict]:
+    """The `name` and `gitHubUserId` of the person who owns the card's Linear issue, from linear-agent-session's CLI."""
+    cli = Path(os.environ.get("HERMES_HOME", "")) / LINEAR_CLI
+    out = _run([sys.executable, str(cli), "review-owner", "--task", task_id], workspace, LINEAR_TIMEOUT_SECONDS, deadline)
+    try:
+        return json.loads(out)["owner"]
+    except (ValueError, KeyError, TypeError):
+        raise GateError(f"`review-owner` returned unexpected output: {out[:200]!r}")
+
+
+def request_owner_review(
+    pr: dict, workspace: str, deadline: float, owner_lookup: Callable[[str, str, float], Optional[dict]], asked: list[str]
+) -> dict:
+    """Asks the Linear issue's owner to review on GitHub as the App, and returns the result fields that say what happened.
+
+    Linear requests a review only through the acting user's personal GitHub connection, which an agent app cannot have,
+    so the owner's login comes from the `gitHubUserId` that Linear keeps for a person who connected GitHub.
+    """
+    match = PR_URL.match(str(pr.get("url")))
+    task_id = os.environ.get("HERMES_KANBAN_TASK")
+    if pr.get("state") != "OPEN" or not match or not task_id:
+        return {}
+    try:
+        owner = owner_lookup(task_id, workspace, deadline)
+        if owner is None:
+            return {"owner_review_not_requested": "the Linear issue has no assignee and no one is on triage"}
+        if not owner.get("gitHubUserId"):
+            return {"owner_review_not_requested": f"{owner.get('name')} has not connected GitHub in Linear"}
+        login = _run(["gh", "api", f"user/{owner['gitHubUserId']}", "--jq", ".login"], workspace, GH_EXTRA_TIMEOUT_SECONDS, deadline)
+        if login in asked or login in _reviewers(pr):
+            return {}
+        _gh_json(
+            ["api", "-X", "POST", f"repos/{match.group(1)}/pulls/{_pr_number(pr)}/requested_reviewers", "-f", f"reviewers[]={login}"],
+            workspace,
+            deadline,
+        )
+        return {"owner_review_requested": login}
+    except GateError as exc:
+        return {"owner_review_not_requested": str(exc)}
+
+
+def _reviewers(pr: dict) -> set[str]:
+    """Logins already asked to review the pull request or that have reviewed it."""
+    requested = {r.get("login") for r in pr.get("reviewRequests") or [] if isinstance(r, dict)}
+    reviewed = {(r.get("author") or {}).get("login") for r in pr.get("latestReviews") or [] if isinstance(r, dict)}
+    return {login for login in requested | reviewed if login}
 
 
 def _load_pr(args: Any, env: dict, deadline: float) -> tuple[str, str, dict]:
@@ -400,10 +455,11 @@ def make_hook(ctx: Any):
     return on_pre_tool_call
 
 
-def make_review_hook(ctx: Any):
+def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optional[dict]] = linear_owner):
     """After a card lands in review, asks stale changes-requested reviewers to look again and names them in the tool result.
 
-    It also names each failed check, which the gate let through only because no branch rule requires it.
+    It also asks the Linear issue's owner to review, and names each failed check, which the gate let through only because
+    no branch rule requires it. Hermes keeps only the first transform_tool_result string, so one hook does all of it.
 
     transform_tool_result is the one hook that can change what the worker reads, and Hermes bounds it at 30s and fails open.
     """
@@ -418,15 +474,18 @@ def make_review_hook(ctx: Any):
         if not isinstance(landed, dict) or landed.get("status") != "review":
             return None
         unrequired: list[str] = []
+        owner: dict = {}
         try:
             deadline = time.monotonic() + HOOK_BUDGET_SECONDS
             workspace, _, pr = _load_pr(args, dict(os.environ), deadline)
             unrequired = _failed_checks(pr)
             asked, failed = re_request_reviews(pr, workspace, deadline)
+            owner = request_owner_review(pr, workspace, deadline, owner_lookup, asked)
         except GateError as exc:
             asked, failed = [], [str(exc)]
-        if not asked and not failed and not unrequired:
+        if not asked and not failed and not unrequired and not owner:
             return None
+        landed.update(owner)
         if asked:
             landed["re_requested_reviewers"] = asked
         if failed:
