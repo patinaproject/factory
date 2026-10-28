@@ -13,6 +13,7 @@ DocumentUpdate rewrites the title there, `documents_error` fails the read, and
 Its assignee and the team's current triage person are the profile URLs in `assignee` and `on_triage`, and
 its creator is `creator`, an app when `creator_app` is set; each is no one when unset, `people_error`
 fails the read, and `people_timeout` times it out.
+A posted activity is logged as `activity`, with the session's issue holding no other session.
 Its blockers come from its `blocked_by` list of {id, identifier, gitBranchName, stateType, delegate}, none
 when unset, and `blockers_error` fails the read.
 The app's own user id is app-user.
@@ -76,6 +77,13 @@ def _fake_urlopen(request, timeout=None):
                 for b in state.get("blocked_by", [])
             ]
             response = _Response(200, {"data": {"viewer": {"id": "app-user"}, "issue": {"inverseRelations": {"nodes": nodes}}}})
+        elif "AgentActivityCreate" in query:
+            entry["activity"] = body["variables"]["input"]
+            response = _Response(200, {"data": {"agentActivityCreate": {"success": True, "agentActivity": {"id": "activity-1"}}}})
+        elif "AgentSessionSiblings" in query:
+            session = {"url": "https://linear.app/example/agent-session/live", "createdAt": "2026-10-27T10:00:00.000Z",
+                       "appUser": {"id": "app-user"}, "issue": {"agentSessions": {"nodes": []}}}
+            response = _Response(200, {"data": {"agentSession": session}})
         elif "TriagePeople" in query and state.get("people_timeout"):
             raise TimeoutError("The read operation timed out")
         elif "TriagePeople" in query and state.get("people_error"):

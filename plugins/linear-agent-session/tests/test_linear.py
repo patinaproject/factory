@@ -391,6 +391,18 @@ class BrokerClientTest(unittest.TestCase):
         self.assertEqual(len(fake.token_requests), 1)
 
 
+class TokenClientTest(unittest.TestCase):
+    def test_posts_with_the_given_token_and_never_mints_one(self):
+        fake = FakeLinear([activity_ok("activity-7"), sessions_ok()])
+        client = linear.TokenLinearClient("static-token", urlopen=fake)
+
+        self.assertEqual(client.create_activity("live", {"type": "thought", "body": "x"}), "activity-7")
+        self.assertEqual(client.close_older_sessions("live"), [])
+
+        self.assertEqual(fake.token_requests, [])
+        self.assertEqual({r["authorization"] for r in fake.graphql_requests}, {"Bearer static-token"})
+
+
 class SessionCreateTest(unittest.TestCase):
     def test_creates_a_session_on_the_issue(self):
         fake = FakeLinear(

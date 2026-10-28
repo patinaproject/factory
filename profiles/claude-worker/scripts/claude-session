@@ -29,6 +29,7 @@ It disables all hooks, so the repository's own hooks never run.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import importlib
 import json
@@ -53,6 +54,7 @@ import closing
 import factory_settings
 import factory_source
 import kanban_board
+import reply_inbox
 
 DEFAULT_WORKER_ENTRY = (
     "Work Linear issue {issue_identifier} ({issue_url}) in {repo} on branch {branch}. "
@@ -161,6 +163,8 @@ FINISH_RULE = STOP_RULE + (
 )
 CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
 COMMIT_CLOSES_GUARD = Path(__file__).resolve().with_name("guard-commit-closes")
+REPLY_HOOK = Path(__file__).resolve().with_name("reply-hook")
+SESSION_REPLY = Path(__file__).resolve().with_name("session-reply")
 PROXY_TOKEN_HELPER = Path(__file__).resolve().with_name("proxy-token")
 MCP_HEADERS_HELPER = Path(__file__).resolve().with_name("mcp-headers")
 TRIAGE_DOCUMENTS = ("Triage notes", "Agent brief")
@@ -217,6 +221,8 @@ GRACE_SECONDS = 10.0
 TOOLCHAIN_CHECK_SECONDS = 120
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
+POLL_ENV = "CLAUDE_SESSION_REPLY_POLL_SECONDS"
+INBOX_NAME = "claude-session.replies.json"
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 GITHUB_ISSUE_LINE = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
@@ -825,7 +831,7 @@ def publish_denials() -> list[str]:
     ]
 
 
-def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = False) -> dict:
+def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = False, inbox: Path | None = None) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
     # Claude Code sends every MCP schema inline when ANTHROPIC_BASE_URL is not Anthropic's,
@@ -848,6 +854,11 @@ def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = Fa
         "SessionStart": [{"hooks": [remove]}],
         "PreToolUse": [{"matcher": "Bash", "hooks": guards}],
     }}
+    if inbox:
+        # Hands Claude a person's Linear reply during the run; see reply_inbox.
+        for event, mode in (("PostToolUse", "post-tool-use"), ("Stop", "stop")):
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(REPLY_HOOK))} {mode} --inbox {shlex.quote(str(inbox))}"
+            settings["hooks"][event] = [{"hooks": [{"type": "command", "command": command}]}]
     if transport.get("auth_token_env"):
         settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)
     disabled = factory_settings.disabled_mcp_servers(transport)
@@ -967,6 +978,19 @@ def build_prompt(
         takeover = " ".join(filter(None, [TAKEOVER_INTRO, start, TAKEOVER_RULES]))
         entry = f"{entry}\n\n{takeover.format(url=args.takeover_pr)}"
     return "\n\n".join(filter(None, [entry, handoff, message]))
+
+
+def reply_watch(inbox: Path | None, client, args: argparse.Namespace, comments: list[dict], own: str):
+    """The run's reply watcher, or a no-op for a triage run (no inbox)."""
+    if inbox is None:
+        return contextlib.nullcontext()
+    linear = plugin_module("linear-agent-session", "linear")
+    poll = float(os.environ.get(POLL_ENV, reply_inbox.POLL_SECONDS))
+    return reply_inbox.Watch(
+        inbox, lambda: read_card(args.card_json, args.task_id),
+        lambda session_id, body: reply_inbox.post_thought(linear, client, session_id, body), comment_key,
+        start_keys=[comment_key(c) for c in comments], own=own, poll_seconds=poll,
+    )
 
 
 def run_claude(command: list[str], worktree: Path) -> tuple[dict | None, int, str]:
@@ -1132,6 +1156,10 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         comments = card["comments"]
         seen_path = lock_path.with_name(COMMENTS_SEEN_NAME)
         seen = json.loads(seen_path.read_text()) if seen_path.exists() else []
+        inbox = None if triage else lock_path.with_name(INBOX_NAME)
+        if inbox:
+            answer_command = f"{helper_command(SESSION_REPLY)} --inbox {shlex.quote(str(inbox))}"
+            reply_inbox.reset(inbox, answer_command, reply_inbox.session_id_of(card["task"]["body"]))
         own = os.environ.get("HERMES_PROFILE") or Path(os.environ.get("HERMES_HOME", "")).name
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),
@@ -1152,13 +1180,15 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         offset = plan.previous.stat().st_size if plan.resumed else 0
         before = worktree_state(worktree)
         try:
-            write_private(settings_path, claude_settings(transport, api_key, settings_path, triage))
-            output, exit_code, detail = run_claude(command, worktree)
+            write_private(settings_path, claude_settings(transport, api_key, settings_path, triage, inbox))
+            with reply_watch(inbox, client, args, comments, own):
+                output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
         progress = worktree_state(worktree) != before
         if output is not None:
-            seen_path.write_text(json.dumps([*seen, *map(comment_key, comments)]))
+            delivered = reply_inbox.delivered_keys(inbox) if inbox else []
+            seen_path.write_text(json.dumps([*seen, *map(comment_key, comments), *delivered]))
         superseded = links = None
         if output is not None and not triage:
             superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login)
