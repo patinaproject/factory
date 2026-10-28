@@ -260,8 +260,8 @@ class LinearClient:
         self._update_session(agent_session_id, {"summary": summary})
         return summary
 
-    def _update_session(self, agent_session_id: str, input: dict) -> None:
-        payload = self._graphql(SESSION_UPDATE_MUTATION, {"id": agent_session_id, "input": input})[
+    def _update_session(self, agent_session_id: str, fields: dict) -> None:
+        payload = self._graphql(SESSION_UPDATE_MUTATION, {"id": agent_session_id, "input": fields})[
             "agentSessionUpdate"
         ]
         if not payload["success"]:
