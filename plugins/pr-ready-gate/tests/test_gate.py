@@ -591,7 +591,6 @@ P2896_RULES = [{"type": "pull_request", "parameters": {"required_approving_revie
 
 
 def call_review_hook(shell, result=LANDED_IN_REVIEW, ctx=None, tool_name="kanban_request_review", args=HANDOFF_ARGS, owner_lookup=None):
-    """Without an owner_lookup the card has no task id, so the hook asks no issue owner."""
     hook = gate.make_review_hook(ctx or FakeCtx(), owner_lookup or gate.linear_owner)
     env = WORKER_ENV if owner_lookup else {k: v for k, v in WORKER_ENV.items() if k != "HERMES_KANBAN_TASK"}
     with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(gate.subprocess, "run", shell):

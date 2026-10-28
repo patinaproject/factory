@@ -28,7 +28,6 @@ GIT_TIMEOUT_SECONDS = 3
 GH_TIMEOUT_SECONDS = 15
 GH_EXTRA_TIMEOUT_SECONDS = 6
 MIN_CALL_SECONDS = 1
-# The CLI mints a Linear token through the broker, then makes one 10s-bounded Linear request.
 LINEAR_TIMEOUT_SECONDS = 12
 LINEAR_CLI = Path("plugins") / "linear-agent-session" / "cli.py"
 # Rules whose only effect on a pull request is a merge-time or review-time requirement the gate checks or does not need.
@@ -288,7 +287,6 @@ def re_request_reviews(pr: dict, workspace: str, deadline: float) -> tuple[list[
 
 
 def linear_owner(task_id: str, workspace: str, deadline: float) -> Optional[dict]:
-    """The `name` and `gitHubUserId` of the person who owns the card's Linear issue, from linear-agent-session's CLI."""
     cli = Path(os.environ.get("HERMES_HOME", "")) / LINEAR_CLI
     out = _run([sys.executable, str(cli), "review-owner", "--task", task_id], workspace, LINEAR_TIMEOUT_SECONDS, deadline)
     try:
@@ -300,11 +298,6 @@ def linear_owner(task_id: str, workspace: str, deadline: float) -> Optional[dict
 def request_owner_review(
     pr: dict, workspace: str, deadline: float, owner_lookup: Callable[[str, str, float], Optional[dict]], asked: list[str]
 ) -> dict:
-    """Asks the Linear issue's owner to review on GitHub as the App, and returns the result fields that say what happened.
-
-    Linear requests a review only through the acting user's personal GitHub connection, which an agent app cannot have,
-    so the owner's login comes from the `gitHubUserId` that Linear keeps for a person who connected GitHub.
-    """
     match = PR_URL.match(str(pr.get("url")))
     task_id = os.environ.get("HERMES_KANBAN_TASK")
     if pr.get("state") != "OPEN" or not match or not task_id:
@@ -329,7 +322,6 @@ def request_owner_review(
 
 
 def _reviewers(pr: dict) -> set[str]:
-    """Logins already asked to review the pull request or that have reviewed it."""
     requested = {r.get("login") for r in pr.get("reviewRequests") or [] if isinstance(r, dict)}
     reviewed = {(r.get("author") or {}).get("login") for r in pr.get("latestReviews") or [] if isinstance(r, dict)}
     return {login for login in requested | reviewed if login}
