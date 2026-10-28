@@ -22,10 +22,13 @@ native sync still propagates updates to synced properties in both directions.
 Do not edit or close the Linear copy; close public work on GitHub, and treat any
 disagreement in favor of GitHub.
 
-The one sanctioned Linear write on a public issue is its delegate. Setting the
-Linear copy's delegate to the factory's agent is how the factory starts a card
-for the issue, and removing it archives that card. Change no other Linear field
-of a public issue: not its title, body, state, labels, assignee, or priority.
+Two Linear writes on a public issue are sanctioned. The first is its
+delegate. Setting the Linear copy's delegate to the factory's agent is how the
+factory starts a card for the issue, and removing it archives that card. The
+second is its priority, a Linear-only field that GitHub cannot represent:
+triage sets it on the Linear copy as **Priority rubric** describes. Change no
+other Linear field of a public issue: not its title, body, state, labels, or
+assignee.
 
 The sync creates a comment thread whose replies publish to GitHub. Comments
 outside the synced thread remain private.
@@ -184,14 +187,46 @@ readiness, use the adapter to:
 3. set the planning fields together when the work belongs to a named effort —
    a GitHub milestone, or a Linear project and project milestone.
 
-Triage sets the highest priority only when the evidence shows a live,
-user-impacting fault. In every other case the priority stays unset until a
-person chooses it. Record priority in the provider's priority field where it has
-one, such as Linear's; never encode it as a label.
+Triage sets priority from the **Priority rubric** below.
 
 Releases describe what shipped, so the release pipeline owns them and readiness
 leaves them alone. A blocked issue may still become ready — record its
 dependency with the native blocked-by relationship.
+
+## Priority rubric
+
+Triage gives every triaged issue exactly one priority: the highest lane whose
+condition holds. Judge only evidence in the issue: its body, comments, and
+linked reports. Evidence you cannot read does not count; name it as unread.
+Labels, the reporter, and effort never count. See
+[ADR-692](https://github.com/patinaproject/skills/blob/main/docs/adr/ADR-692-triage-assigns-priority.md)
+in `patinaproject/skills`.
+
+- **Urgent:** work to triage and ship before all other open work. At least one
+  trigger holds, and the triage notes name it and cite its evidence:
+  1. A fault harms users now with no workaround: data loss, an outage, a
+     security exposure, or a broken core flow.
+  2. A legal or regulatory deadline applies.
+  3. A release gate is blocked.
+  4. Someone should stop work in progress for this. The notes say what would
+     be interrupted and why waiting costs more.
+
+  An issue where a trigger holds is never High.
+- **High:** no Urgent trigger holds, and either the issue links a customer's
+  own report (a Featurebase post or a support conversation), or a linked
+  Sentry issue shows many affected users or events. None of these is a label.
+- **Medium:** a confirmed bug or a valuable enhancement with limited reach.
+- **Low:** waiting costs users nothing visible, such as maintenance-only work,
+  dependency bumps, cosmetic polish, and routine follow-ups.
+
+A confident duplicate gets no priority. Write priority to Linear's priority
+field with `save_issue`: `1` Urgent, `2` High, `3` Medium, `4` Low. Never encode
+it as a label. For a public repository, write it on the synced Linear issue: the Linear
+issue whose GitHub attachment URL equals the GitHub issue URL. `list_issues`
+returns no attachments, so confirm each candidate with `get_issue` and
+`fields: ["attachments", "priority"]`. A title match alone is not a match. When no synced Linear
+issue exists, or it is archived, write no priority and name the gap in the
+reply.
 
 ## Tracker-agnostic operations
 

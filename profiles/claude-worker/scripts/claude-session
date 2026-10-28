@@ -52,6 +52,7 @@ import card_branch
 import closing
 import factory_settings
 import factory_source
+import gh_login
 import install_drift
 import kanban_board
 
@@ -177,7 +178,9 @@ TRIAGE_RULE = (
     "`Triage notes` and `Agent brief`, with no issue identifier before the title, even where the adapter "
     "titles other Documents with one. For a public repository synced to Linear, the Documents stay on the Linear issue and "
     "the roles are written as GitHub labels, because GitHub is canonical.\n\n"
-    "Apply only category and state roles. A role's label may differ in case and punctuation, such as `Ready for agent` "
+    "Apply only category and state roles, plus the priority that the playbook's step 13 sets from the repository "
+    "adapter's `## Priority rubric`. For a public repository, set the priority on the synced Linear issue, never as a "
+    "GitHub label. A role's label may differ in case and punctuation, such as `Ready for agent` "
     "for `ready-for-agent`. In Triage notes, the Agent brief, and every message to people, name a label as Linear shows "
     "it (read it with the Linear MCP, or from `role_labels` of `linear_issue`), never by its role. Never change the issue's status, assignee, or delegate, with one "
     "exception: when the issue is delegated to the factory's agent app and passes as `ready-for-agent`, move "
@@ -190,7 +193,9 @@ TRIAGE_RULE = (
     "else. Do not post the questions yourself: the worker posts them on the issue's agent session with the "
     "disclaimer.\n\n"
     "When triage ends, make the first line of your final message `Triage outcome: <role>`, where <role> is "
-    "`ready-for-agent`, `ready-for-human`, or `wontfix` for a recommendation, and add a short summary."
+    "`ready-for-agent`, `ready-for-human`, or `wontfix` for a recommendation. Make the second line "
+    "`Priority: <value>, set by triage` when you wrote it, `Priority: <value>, kept` when a person's choice "
+    "stands, or `Priority: none` when the issue has none, such as a confident duplicate. Then add a short summary."
 )
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{CLOSING_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 TRIAGE_SYSTEM_PROMPT = f"{TRIAGE_RULE}\n\n{LINEAR_RULE}\n\n{STOP_RULE}"
@@ -1095,12 +1100,30 @@ def end_run(proc: subprocess.Popen) -> set[int]:
     return leftovers
 
 
+def require_fresh_login() -> None:
+    """Refuse before Claude starts when the saved gh login expiry is missing or too near."""
+    config_dir = os.environ.get("GH_CONFIG_DIR")
+    if not config_dir:
+        raise Refusal("GH_CONFIG_DIR is not set, so the worker's gh login cannot be checked", transient=True)
+    try:
+        left = gh_login.seconds_left(Path(config_dir), time.time())
+    except ValueError as error:
+        raise Refusal(f"the worker's gh login: {error}; refresh-gh-app-login has not saved an expiry", transient=True) from None
+    if left < gh_login.MIN_REMAINING_SECONDS:
+        raise Refusal(
+            f"the worker's gh login in {config_dir} has {max(left, 0) // 60:.0f} minutes left, "
+            f"under the {gh_login.MIN_REMAINING_SECONDS // 60} needed; refresh-gh-app-login renews it",
+            transient=True,
+        )
+
+
 def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     import result_line
 
     workspace = os.environ.get("HERMES_KANBAN_WORKSPACE")
     if not workspace:
         raise Refusal("HERMES_KANBAN_WORKSPACE is not set; claude-session runs only inside a Kanban worker")
+    require_fresh_login()
     triage = os.environ.get("HERMES_KANBAN_BOARD") == TRIAGE_BOARD
     settings = load_settings(args.settings_json)
     repo = find_repository(settings, args.repo)

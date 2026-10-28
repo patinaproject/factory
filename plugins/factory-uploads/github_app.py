@@ -23,7 +23,7 @@ API_URL = "https://api.github.com"
 OPENSSL = "/usr/bin/openssl"
 JWT_BACKDATE_SECONDS = 60
 JWT_LIFETIME_SECONDS = 540
-# The worker's refresh-gh-app-login job runs every 30 minutes, so a token handed out must outlive the next run.
+# The worker's refresh-gh-app-login job runs every 15 minutes and claude-session wants 15 more, so a token handed out must outlive both.
 REFRESH_MARGIN = 35 * 60
 TIMEOUT = 30
 

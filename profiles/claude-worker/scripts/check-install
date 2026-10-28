@@ -90,6 +90,7 @@ from typing import Callable, NamedTuple
 
 import factory_settings
 import factory_source
+import gh_login
 import kanban_board
 from factory_settings import SETTINGS_KEY, find_hermes
 from install_drift import PROFILE, Commit, GitError, compare_files
@@ -202,6 +203,8 @@ class Service(NamedTuple):
     kind: str
     plist: str
     scheduled: bool = False  # an interval job is loaded but not running between its runs
+    env: tuple = ()  # EnvironmentVariables keys the plist must set
+    interval: int = 0  # the StartInterval the plist must set, in seconds
 
     def domains(self) -> tuple:
         # A user agent loads in gui/<uid> from a login session and in user/<uid> otherwise, such as over SSH.
@@ -255,13 +258,14 @@ BROKER_USER_CONFIG = (
 # whose output must reach the operator's chat, because only the root profile runs the chat platform. A job runs the
 # script of the same name unless `script` names another.
 CRON = (
-    CronJob(10, "refresh-gh-app-login", 30, equal("local")),
     CronJob(12, "refresh-checkouts", 60, equal("local")),
     CronJob(12, "refresh-owned-refs", 1, equal("local")),
     CronJob(12, "reopen-conflicts", 5, equal("local")),
     CronJob(12, "dispatch-triage", 1, equal("local")),
     CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
 )
+# Jobs that moved from Hermes' cron to launchd, because `hermes pause` stops Hermes' cron.
+LAUNCHD_JOBS = ("refresh-gh-app-login",)
 OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
 
 # macOS only. `plist` is a glob; the runbook lets the operator name the cloudflared plist.
@@ -269,6 +273,10 @@ SERVICES = (
     Service(7, "cloudflared tunnel", "daemon", "/Library/LaunchDaemons/*cloudflared*.plist"),
     Service(15, "Hermes gateway", "agent", "~/Library/LaunchAgents/ai.hermes.gateway.plist"),
     Service(12, "gateway watch", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist", scheduled=True),
+    Service(
+        10, "gh login refresh", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist",
+        scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME"), interval=gh_login.REFRESH_INTERVAL_SECONDS,
+    ),
 )
 # watch-gateway's own files in the root home. WATCH_INTERVAL and RESTARTS_PER_HOUR equal the script's.
 HERMES_GATEWAY_LOCK = "gateway.lock"
@@ -678,7 +686,9 @@ def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
         for live in jobs:
             where = f"{live['name']} in {homes[name]}"
             owner = owners.get(live["name"])
-            if owner is None:
+            if live["name"] in LAUNCHD_JOBS:
+                drifts.append(Drift("cron job", where, "is replaced by a launchd job; remove it with hermes cron remove (part 10)"))
+            elif owner is None:
                 drifts.append(Drift("cron job", where, "is not a job the setup runbook creates"))
             elif owner.home != name:
                 drifts.append(Drift("cron job", where, f"belongs to the {owner.home} profile (part {owner.part})"))
@@ -736,10 +746,16 @@ def check_services(launchd_root: Path, launchctl: str) -> list:
         except (OSError, plistlib.InvalidFileException) as exc:
             drifts.append(Drift("service", service.name, f"cannot read {plists[0]}: {exc.__class__.__name__}"))
             continue
-        # The plist's ProgramArguments can hold a token, so only Label and RunAtLoad are read here;
-        # hermes_lock_drifts reads --root and --lock and nothing else.
+        # The plist's ProgramArguments can hold a token, so only Label, RunAtLoad, StartInterval, and the names of
+        # EnvironmentVariables are read here; hermes_lock_drifts reads --root and --lock and nothing else.
         if plist.get("RunAtLoad") is not True:
             drifts.append(Drift("service", service.name, f"does not run at load (part {service.part})"))
+        if service.interval and plist.get("StartInterval") != service.interval:
+            drifts.append(Drift("service", service.name, f"does not run every {service.interval} seconds (part {service.part})"))
+        variables = plist.get("EnvironmentVariables")
+        unset = [name for name in service.env if not isinstance(variables, dict) or not variables.get(name)]
+        if unset:
+            drifts.append(Drift("service", service.name, f"does not set {', '.join(unset)} (part {service.part})"))
         drifts.extend(hermes_lock_drifts(service, plist))
         state = launchd_state(launchctl, service.domains(), plist["Label"])
         if state is None:
