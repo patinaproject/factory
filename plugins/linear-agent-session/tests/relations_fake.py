@@ -40,6 +40,7 @@ class RelationsLinear(FakeLinear):
         self.create_removes_related = create_removes_related
         self.page_size = page_size
         self.mutations = []
+        self.created = 0
 
     def stored(self):
         """Every relation as (type, issue identifier, related identifier), in creation order."""
@@ -92,8 +93,9 @@ class RelationsLinear(FakeLinear):
     def _IssueRelationCreate(self, variables):
         spec = variables["input"]
         self.mutations.append(("create", spec))
+        self.created += 1
         self.relations.append(
-            {"id": f"rel-new-{len(self.relations)}", "type": spec["type"], "issue": spec["issueId"], "relatedIssue": spec["relatedIssueId"]}
+            {"id": f"rel-new-{self.created}", "type": spec["type"], "issue": spec["issueId"], "relatedIssue": spec["relatedIssueId"]}
         )
         if spec["type"] == "duplicate":
             if self.create_moves_to_duplicate:
