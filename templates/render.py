@@ -17,8 +17,10 @@ ROUTES_KEY = "platforms.webhook.extra.routes"
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
 # Deliveries per route per minute. Hermes counts every signed delivery before its event and filter
 # checks, so GitHub's check events use the budget, and it answers 429 to the rest, which GitHub never
-# redelivers. The github route peaks near 110 a minute; Hermes' default of 30 dropped review events.
-RATE_LIMIT = 600
+# redelivers. The github route peaked at 136 a minute before it took `push`, and Hermes' default of 30
+# dropped review events. A push arrives for every ref update in every installed repository, and push-signed
+# updates the ref once per commit it publishes, so a busy minute of workers can add hundreds more.
+RATE_LIMIT = 1200
 TEMPLATE_DIR = Path(__file__).resolve().parent
 GITHUB_ROUTE = "github"
 ROUTINGS = ("default", "synced_github")
@@ -39,6 +41,7 @@ LINEAR_SECRET = "${LINEAR_WEBHOOK_SECRET}"
 GITHUB_SECRET = "${GITHUB_WEBHOOK_SECRET}"
 
 FULL_NAME = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
+BRANCH_NAME = re.compile(r"^(?!.*\.\.)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 ROUTE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 MARKER = re.compile(r"<<([a-z_]+)>>")
 REFERENCE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -175,6 +178,7 @@ GITHUB_EVENT_TABLE = (
 )
 GITHUB_EVENTS = [event.name for event in GITHUB_EVENT_TABLE]
 GITHUB_CHECK_EVENTS = ["check_run", "workflow_run"]
+PUSH_EVENT = "push"
 
 
 class SettingsError(Exception):
@@ -244,6 +248,19 @@ def validate(settings: Any) -> dict:
             "the github route keeps only the App's own events"
         )
 
+    factory = settings.get("factory_repository")
+    if not isinstance(factory, dict):
+        raise SettingsError(
+            "factory_repository must be an object with the full_name and default_branch of the factory's own repository; "
+            "a push to that branch starts auto-deploy"
+        )
+    factory_name = factory.get("full_name")
+    if not isinstance(factory_name, str) or not FULL_NAME.match(factory_name):
+        raise SettingsError(f"factory_repository.full_name {factory_name!r} must look like owner/name")
+    default_branch = factory.get("default_branch")
+    if not isinstance(default_branch, str) or not BRANCH_NAME.match(default_branch):
+        raise SettingsError(f"factory_repository.default_branch {default_branch!r} must be a branch name, such as main")
+
     kanban_url = settings.get("kanban_url", "")
     if not isinstance(kanban_url, str):
         raise SettingsError(f"kanban_url {kanban_url!r} must be a string")
@@ -253,6 +270,8 @@ def validate(settings: Any) -> dict:
         "webhook_route": route,
         "repositories": repositories,
         "github_login": login.strip(),
+        "factory_repository": factory_name,
+        "factory_ref": f"refs/heads/{default_branch}",
         "kanban_url": kanban_url or None,
     }
 
@@ -373,6 +392,18 @@ def _exclude_events_sent_by(login: str) -> dict:
     }
 
 
+def factory_push_filter(full_name: str, ref: str) -> dict:
+    # A push has no action, and the App's own merges are the pushes that matter, so this branch keeps them whoever
+    # sent them. factory-deploy's pre_gateway_dispatch hook starts auto-deploy and runs no turn for it.
+    return {
+        "all": [
+            {"field": "event", "equals": PUSH_EVENT},
+            {"field": "repository.full_name", "equals": full_name},
+            {"field": "ref", "equals": ref},
+        ]
+    }
+
+
 def event_filter(event: GithubEvent, login: str) -> dict:
     return {
         "all": [
@@ -390,9 +421,18 @@ def build_routes(settings: Any) -> dict:
     login = config["github_login"]
 
     github_filters = [
-        {"field": "repository.full_name", "in": full_names},
-        {"any": [event_filter(event, login) for event in GITHUB_EVENT_TABLE]},
-        _exclude_events_sent_by(login),
+        {
+            "any": [
+                factory_push_filter(config["factory_repository"], config["factory_ref"]),
+                {
+                    "all": [
+                        {"field": "repository.full_name", "in": full_names},
+                        {"any": [event_filter(event, login) for event in GITHUB_EVENT_TABLE]},
+                        _exclude_events_sent_by(login),
+                    ]
+                },
+            ]
+        }
     ]
 
     return {
@@ -418,7 +458,7 @@ def build_routes(settings: Any) -> dict:
             ),
         },
         GITHUB_ROUTE: {
-            "events": GITHUB_EVENTS,
+            "events": [*GITHUB_EVENTS, PUSH_EVENT],
             "secret": GITHUB_SECRET,
             "filters": github_filters,
             "toolsets": TOOLSETS,

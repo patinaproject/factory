@@ -9,8 +9,9 @@ whose values are what `hermes config set` installs at them:
 - `platforms.webhook.extra.rate_limit`: the deliveries each route accepts per
   minute. Hermes counts every signed delivery before it applies the route's
   events and filters, and answers `429` past the limit. GitHub does not
-  redeliver a rejected event. The default of 30 dropped review events, so the
-  factory sets 600.
+  redeliver a rejected event. The default of 30 dropped review events, and the
+  `github` route also gets a `push` for every ref update in every installed
+  repository, so the factory sets 1200.
 
 The `linear` route keeps every `AgentSessionEvent` and every `Issue` update that
 changes `delegateId`. It keeps a completed or canceled `Issue` update only when
@@ -52,6 +53,12 @@ linkback comment and the deploy and CI bots' notices (Cloudflare, Vercel, GitHub
 and GitHub issue URL of every card not archived, and the route reads it on every
 delivery through Hermes' `in_file` operator. The route also drops events the
 App itself sends, except failed checks and its own merges.
+
+The `github` route also keeps a `push` to the factory's own repository and
+branch, `factory_repository.full_name` and `factory_repository.default_branch`
+in the settings, from any sender, the App included. The `factory-deploy`
+plugin starts the auto-deploy job for that push and runs no triage turn, so the
+prompt's "events that matter" list leaves it out.
 
 Each route reads its secret from `.env` through a `${LINEAR_WEBHOOK_SECRET}` or
 `${GITHUB_WEBHOOK_SECRET}` reference, which Hermes expands when it loads

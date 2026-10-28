@@ -1,0 +1,9 @@
+manifest_version: 2
+name: factory-deploy
+version: "0.1.0"
+description: >-
+  Starts the auto-deploy launchd job for each push that the github route keeps,
+  which is only a push to the factory repository's default branch, and runs no
+  agent turn for it, even when the job does not start. Runs in the root home
+  only.
+provides_hooks: [pre_gateway_dispatch]
