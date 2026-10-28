@@ -209,7 +209,6 @@ def decide(
 
 
 def carries_no_reply(payload: Mapping[str, Any]) -> bool:
-    """True for every event that carries no reply: not a prompted session event, or a stop."""
     return (
         payload["type"] != "AgentSessionEvent"
         or payload["action"] != "prompted"
@@ -235,7 +234,6 @@ def resolve_reply(payload: Mapping[str, Any], client: Any) -> Reply:
 
 
 def resolve_thread(payload: Mapping[str, Any], client: Any) -> Thread:
-    """The session's earlier activities, without the reply itself, for a reply the agent has to read in context."""
     if carries_no_reply(payload):
         return NO_THREAD
     reply_id = (payload.get("agentActivity") or {}).get("id")

@@ -351,7 +351,6 @@ class LinearClient:
         return {"found": False}
 
     def session_thread(self, agent_session_id: str) -> list:
-        """The session's newest activities, oldest first, each with an id, type, author, created_at, and bounded body."""
         session = self._graphql(SESSION_THREAD_ACTIVITIES_QUERY, {"id": agent_session_id})["agentSession"]
         if session is None:
             raise LinearError(f"Linear has no agent session {agent_session_id} that the agent app can read")
