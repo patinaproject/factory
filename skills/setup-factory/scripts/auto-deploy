@@ -1,0 +1,566 @@
+#!/usr/bin/env python3
+"""Deploy the factory repository's default branch to this machine without a person.
+
+launchd starts this job on demand when the default branch moves. One run holds new Kanban cards by
+setting `kanban.dispatch_profiles` to an empty list in the root home, whose gateway runs the dispatcher,
+and waits up to --timeout seconds for no running card. It then takes `<root>/factory-gateway.lock`,
+resets the source checkout that `check-install --print-source` names to origin/<default>, and runs that
+checkout's own copy of this script. It applies every Install that the checkout's `check-install --json`
+names, in Step order, under one short `hermes pause`, restarts the gateway through restart-gateway when
+an install needs it, at most once per commit, and checks that no Install drift remains and that
+check-settings passes. Every run records DEPLOYED, FAILED, WAITING, or BLOCKED in
+`<root>/auto-deploy.json`, mode 600, and releases what it engaged. It deploys again while
+origin/<default> moved during the run.
+
+The state file records each hold before the run engages it. A later run lifts a pause, removes the key,
+and removes the gateway lock only when the state file records that a run that is no longer alive set
+them, and changes nothing while an operator's `hermes pause` is engaged.
+
+--status prints the state file. --dry-run prints the plan for the source checkout as it is and changes
+nothing. Runs on the macOS system Python 3.9.
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, List, Optional
+
+DEPLOYED, FAILED, WAITING, BLOCKED = "DEPLOYED", "FAILED", "WAITING", "BLOCKED"
+HOLD_KEY = "kanban.dispatch_profiles"
+# Present and empty, Hermes' dispatcher claims no card on any board, ready or review, and reads the
+# change on its next tick. Chat, webhook, and cron turns keep running.
+HOLD = ("config", "set", HOLD_KEY, "[]")
+RELEASE = ("config", "unset", HOLD_KEY)
+WORKER = "claude-worker"
+MAX_POLL_SECONDS = 60.0  # the dispatcher's default tick
+COMMAND_SECONDS = 900
+EVENTS_KEPT = 20
+RUNNING = Path(__file__).read_bytes()
+
+SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSPHRASE|CREDENTIAL|PRIVATE|AUTH|(^|_)KEY$|_KEY_", re.I)
+TOKEN_SHAPE = re.compile(r"(?<![A-Za-z0-9])(?:gh[pousr]_|github_pat_|glpat-|sntry[su]_|lin_api_|phx_|xox[bp]-|sk-)[A-Za-z0-9_\-]{20,}")
+
+
+class DeployError(Exception):
+    pass
+
+
+class Redactor:
+    """Removes the value of every secret-named environment variable and every known token shape."""
+
+    def __init__(self, environ) -> None:
+        values = {value for name, value in environ.items() if SECRET_NAME.search(name) and len(value) >= 8}
+        self.values = sorted(values, key=len, reverse=True)
+
+    def __call__(self, text: str) -> str:
+        for value in self.values:
+            text = text.replace(value, "[redacted]")
+        return TOKEN_SHAPE.sub("[redacted]", text)
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def short(commit: Optional[str]) -> str:
+    return commit[:12] if commit else "unknown commit"
+
+
+def read_pid(path: Path) -> Optional[int]:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def live_deploy(pid: Optional[int]) -> bool:
+    """True when `pid` is a running auto-deploy, so a reused pid never keeps a dead run's lock."""
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    proc = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
+    return proc.returncode == 0 and "auto-deploy" in proc.stdout
+
+
+def create_exclusive(path: Path, text: str) -> bool:
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    return True
+
+
+def write_private(path: Path, data: dict) -> None:
+    temp = path.with_name(path.name + ".tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        json.dump(data, handle, indent=2)
+        handle.write("\n")
+    os.chmod(temp, 0o600)
+    os.replace(temp, path)
+
+
+def fresh_state() -> dict:
+    return {
+        "deployed": None, "attempted": None, "outcome": None, "detail": "", "manual": [],
+        "restarted": None, "hold": None, "events": [], "updated_at": None,
+    }
+
+
+def load_module(path: Path):
+    spec = importlib.util.spec_from_file_location("install_plan", path)
+    if spec is None or spec.loader is None:
+        raise DeployError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, SyntaxError, ImportError) as error:
+        raise DeployError(f"cannot load {path}: {error}") from None
+    return module
+
+
+def find_hermes() -> str:
+    candidates = [os.environ.get("HERMES_BIN"), shutil.which("hermes"), str(Path.home() / ".local" / "bin" / "hermes")]
+    for candidate in filter(None, candidates):
+        if os.access(candidate, os.X_OK):
+            return os.path.abspath(candidate)
+    raise DeployError("hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
+
+
+class Deploy:
+    def __init__(self, args, hermes: str, redact: Redactor, clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
+        self.args = args
+        self.root = Path(args.root)
+        self.worker = Path(args.worker)
+        self.hermes = hermes
+        self.redact = redact
+        self.clock = clock
+        self.sleep = sleep
+        self.pid = os.getpid()
+        self.state_path = self.root / "auto-deploy.json"
+        self.run_lock = self.root / "auto-deploy.lock"
+        self.gateway_lock = self.root / "factory-gateway.lock"
+        self.root_env = {**os.environ, "HERMES_HOME": str(self.root)}
+        self.worker_env = {**os.environ, "HERMES_HOME": str(self.worker)}
+        self.state = fresh_state()
+        self.source: Optional[Path] = None
+        self.branch = ""
+
+    # Output and state
+
+    def log(self, message: str) -> None:
+        print(f"auto-deploy: {self.redact(message)}", flush=True)
+
+    def load_state(self) -> None:
+        if not self.state_path.exists():
+            self.state = fresh_state()
+            return
+        try:
+            data = json.loads(self.state_path.read_text())
+        except (OSError, ValueError) as error:
+            raise DeployError(f"cannot read {self.state_path}: {error}") from None
+        if not isinstance(data, dict):
+            raise DeployError(f"{self.state_path} does not hold a JSON object")
+        self.state = {**fresh_state(), **data}
+
+    def save(self) -> None:
+        self.state["updated_at"] = now()
+        write_private(self.state_path, self.state)
+
+    def record(self, outcome: str, commit: Optional[str], detail: str, manual=None) -> str:
+        detail = self.redact(detail)
+        events = self.state["events"]
+        seq = (events[-1]["seq"] if events else 0) + 1
+        self.state["outcome"] = outcome
+        self.state["detail"] = detail
+        self.state["attempted"] = commit
+        if outcome == DEPLOYED:
+            self.state["deployed"] = commit
+        if manual is not None:
+            self.state["manual"] = [{"line": self.redact(m.line), "action": self.redact(m.action)} for m in manual]
+        self.state["events"] = (events + [{"seq": seq, "outcome": outcome, "commit": commit, "detail": detail, "at": now()}])[-EVENTS_KEPT:]
+        self.save()
+        self.log(f"{outcome} {short(commit)}: {detail}" if detail else f"{outcome} {short(commit)}")
+        return outcome
+
+    def set_hold(self, **changes) -> None:
+        self.state["hold"] = {**self.state["hold"], **changes}
+        self.save()
+
+    # Commands
+
+    def run(self, argv, env: dict, timeout: float = COMMAND_SECONDS) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(list(argv), env=env, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise DeployError(f"{Path(argv[0]).name} {' '.join(argv[1:3])} did not finish within {timeout:g}s") from None
+        except OSError as error:
+            raise DeployError(f"cannot run {argv[0]}: {error}") from None
+
+    def checked(self, argv, env: dict, timeout: float = COMMAND_SECONDS) -> str:
+        proc = self.run(argv, env, timeout)
+        if proc.returncode != 0:
+            lines = [line.strip() for line in (proc.stderr or proc.stdout).splitlines() if line.strip()]
+            name = " ".join([Path(argv[0]).name, *argv[1:3]])
+            raise DeployError(f"{name} exited {proc.returncode}" + (f": {lines[-1]}" if lines else ""))
+        return proc.stdout
+
+    def hermes_cli(self, *args: str) -> str:
+        return self.checked([self.hermes, *args], self.root_env)
+
+    def git(self, *args: str) -> str:
+        return self.checked(["git", "-C", str(self.source), *args], dict(os.environ)).strip()
+
+    # Facts
+
+    def hold_key_present(self) -> bool:
+        """Whether config.yaml sets kanban.dispatch_profiles at all. `config get` merges Hermes' default
+        of null, so only the dispatcher's own summary tells an absent key from a null one."""
+        try:
+            rows = json.loads(self.hermes_cli("kanban", "diagnostics", "--json"))
+        except ValueError:
+            raise DeployError("hermes kanban diagnostics --json did not print JSON") from None
+        scopes = [row["dispatch_profiles"] for row in rows if isinstance(row, dict) and "dispatch_profiles" in row]
+        if not scopes:
+            raise DeployError("hermes kanban diagnostics --json names no dispatch_profiles")
+        return scopes[-1] != "any"
+
+    def running_cards(self) -> List[str]:
+        try:
+            boards = json.loads(self.hermes_cli("kanban", "boards", "list", "--json"))
+            cards = []
+            for board in boards:
+                if board.get("archived"):
+                    continue
+                slug = board["slug"]
+                tasks = json.loads(self.hermes_cli("kanban", "--board", slug, "list", "--status", "running", "--json"))
+                cards.extend(f"{slug}/{task['id']} {task.get('title', '')}" for task in tasks)
+            return cards
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
+            raise DeployError(f"cannot read the running cards: {error}") from None
+
+    def pauses(self) -> List[Optional[str]]:
+        """The reason of each engaged pause. Hermes honours the sentinel in the process home and the root."""
+        reasons = []
+        for home in (self.root, self.worker):
+            sentinel = home / "ESTOP"
+            if not os.path.lexists(sentinel):
+                continue
+            try:
+                body = json.loads(sentinel.read_text())
+                reasons.append(body.get("reason") if isinstance(body, dict) else None)
+            except (OSError, ValueError):
+                reasons.append(None)
+        return reasons
+
+    def operator_paused(self) -> bool:
+        ours = (self.state.get("hold") or {}).get("pause")
+        return any(reason is None or reason != ours for reason in self.pauses())
+
+    def find_source(self) -> None:
+        printed = self.checked(
+            [sys.executable, str(self.worker / "scripts" / "check-install"), "--print-source"], self.worker_env,
+        ).strip()
+        self.source = Path(printed)
+        if not (self.source / ".git").exists():
+            raise DeployError(f"the source checkout {self.source} is not a git checkout")
+        self.branch = self.git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").split("/", 1)[1]
+
+    def origin_commit(self, fetch: bool) -> str:
+        if fetch:
+            self.git("fetch", "--quiet", "origin")
+        return self.git("rev-parse", "--verify", "--quiet", f"origin/{self.branch}^{{commit}}")
+
+    def plan(self):
+        install_plan = load_module(self.source / "profiles" / "claude-worker" / "scripts" / "install_plan.py")
+        proc = self.run(
+            [sys.executable, str(self.source / "profiles" / "claude-worker" / "scripts" / "check-install"),
+             "--json", "--no-fetch", "--repo", str(self.source)],
+            self.worker_env,
+        )
+        if proc.returncode not in (0, 1):
+            lines = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
+            raise DeployError(f"check-install exited {proc.returncode}" + (f": {lines[-1]}" if lines else ""))
+        try:
+            records = json.loads(proc.stdout)
+            if not isinstance(records, list):
+                raise ValueError("not a list")
+            drifts = [install_plan.drift_from_json(record) for record in records]
+        except ValueError as error:
+            raise DeployError(f"check-install --json printed no drift records: {error}") from None
+        return install_plan.plan(drifts)
+
+    # Holds
+
+    def release(self) -> None:
+        """Lifts what the recorded hold engaged, each part only while it is still the run's own."""
+        hold = self.state.get("hold")
+        if not hold:
+            return
+        if hold.get("pause"):
+            if hold["pause"] in self.pauses():
+                self.hermes_cli("resume")
+            self.set_hold(pause=None)
+        if hold.get("gateway_lock"):
+            if read_pid(self.gateway_lock) == hold.get("pid"):
+                self.gateway_lock.unlink()
+            self.set_hold(gateway_lock=False)
+        if hold.get("dispatch_profiles"):
+            proc = self.run([self.hermes, *RELEASE], self.root_env)
+            if proc.returncode != 0 and "not set" not in proc.stdout + proc.stderr:
+                raise DeployError(f"hermes config unset {HOLD_KEY} exited {proc.returncode}")
+            self.set_hold(dispatch_profiles=False)
+        self.state["hold"] = None
+        self.save()
+
+    def release_logged(self) -> None:
+        try:
+            self.release()
+        except DeployError as error:
+            self.log(f"could not release the hold, so the next run releases it: {error}")
+
+    def take_run_lock(self, continuing: bool) -> bool:
+        for _ in range(2):
+            if create_exclusive(self.run_lock, f"{self.pid}\n"):
+                return True
+            holder = read_pid(self.run_lock)
+            if holder == self.pid and continuing:
+                return True
+            if live_deploy(holder):
+                return False
+            self.run_lock.unlink()
+        return False
+
+    def drop_run_lock(self) -> None:
+        if read_pid(self.run_lock) == self.pid:
+            self.run_lock.unlink()
+
+    # The run
+
+    def deploy(self, continued: Optional[str], remaining: float) -> int:
+        self.load_state()
+        if continued is not None:
+            hold = self.state.get("hold") or {}
+            if hold.get("pid") != self.pid or not hold.get("gateway_lock"):
+                raise DeployError("--continue needs the hold this process engaged")
+            self.find_source()
+            self.attempt(continued, lambda: self.install(continued, self.clock() + remaining))
+        else:
+            if self.operator_paused():
+                self.record(BLOCKED, None, "an operator's hermes pause is engaged; nothing changed")
+                return 0
+            hold = self.state.get("hold")
+            if hold and hold.get("pid") != self.pid:
+                if live_deploy(hold.get("pid")):
+                    self.log(f"run {hold.get('pid')} still holds the cards; nothing changed")
+                    return 0
+                self.log(f"releasing the hold that run {hold.get('pid')} left")
+                self.release()
+        while True:
+            try:
+                self.find_source()
+                target = self.origin_commit(fetch=True)
+            except DeployError as error:
+                self.record(FAILED, None, f"cannot read origin: {error}")
+                return 0
+            if target == self.state["deployed"]:
+                self.log(f"{short(target)} is already deployed")
+                return 0
+            if target == self.state["attempted"] and self.state["outcome"] == FAILED:
+                self.log(f"{short(target)} failed; waiting for origin/{self.branch} to move")
+                return 0
+            if self.hold_key_present():
+                self.record(BLOCKED, target, f"{HOLD_KEY} is already set in the root home; a person set it, so the run holds no card")
+                return 0
+            outcome = self.attempt(target, lambda: self.drain_and_install(target, continued))
+            if outcome not in (DEPLOYED, FAILED):
+                return 0
+
+    def attempt(self, target: str, body: Callable[[], str]) -> str:
+        try:
+            return body()
+        except DeployError as error:
+            return self.record(FAILED, target, str(error))
+        finally:
+            self.release_logged()
+
+    def drain_and_install(self, target: str, continued: Optional[str]) -> str:
+        self.state["hold"] = {"pid": self.pid, "commit": target, "dispatch_profiles": True, "pause": None, "gateway_lock": False}
+        self.save()
+        self.hermes_cli(*HOLD)
+        deadline = self.clock() + self.args.timeout
+        cards = self.drain(deadline)
+        if cards:
+            return self.record(WAITING, target, f"{len(cards)} card(s) still running after {self.args.timeout:g}s: " + "; ".join(cards))
+        if self.operator_paused():
+            return self.record(BLOCKED, target, "an operator's hermes pause is engaged; nothing installed")
+        self.set_hold(gateway_lock=True)
+        if not create_exclusive(self.gateway_lock, f"{self.pid}\n"):
+            self.set_hold(gateway_lock=False)
+            return self.record(BLOCKED, target, f"{self.gateway_lock} exists and is not this run's; a person is deploying")
+        self.git("checkout", "--quiet", "--force", "-B", self.branch, target)
+        self.run_source_copy(target, deadline, continued)
+        return self.install(target, deadline)
+
+    def drain(self, deadline: float) -> List[str]:
+        last = None
+        while True:
+            cards = self.running_cards()
+            if not cards or self.clock() >= deadline:
+                return cards
+            if cards != last:
+                self.log(f"holding new cards; waiting for {len(cards)} running card(s): " + "; ".join(cards))
+                last = cards
+            self.sleep(min(self.args.poll, max(deadline - self.clock(), 0)))
+
+    def run_source_copy(self, target: str, deadline: float, continued: Optional[str]) -> None:
+        """Replaces this process with the source checkout's copy, so a change to this script deploys
+        itself. The pid stays, so the run lock, the gateway lock, and the recorded hold stay this run's."""
+        script = self.source / "skills" / "setup-factory" / "scripts" / "auto-deploy"
+        if continued == target or not script.is_file() or script.read_bytes() == RUNNING:
+            return
+        self.log(f"running the source checkout's copy at {short(target)}")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, [
+            sys.executable, str(script), "--root", str(self.root), "--worker", str(self.worker), "--hermes", self.hermes,
+            "--timeout", repr(self.args.timeout), "--poll", repr(self.args.poll),
+            "--continue", target, "--remaining", repr(max(deadline - self.clock(), 0.0)),
+        ])
+
+    def install(self, target: str, deadline: float) -> str:
+        plan = self.plan()
+        self.log(f"{len(plan.installs)} install(s) and {len(plan.manual)} manual line(s) for {short(target)}")
+        if plan.installs:
+            reason = f"auto-deploy {self.pid}: installing {short(target)}"
+            self.set_hold(pause=reason)
+            self.hermes_cli("pause", "--reason", reason)
+            try:
+                (self.root / "scripts").mkdir(exist_ok=True)
+                for install in plan.installs:
+                    self.log(f"{install.step.name}: {' '.join(install.argv)}")
+                    self.checked(install.argv, self.root_env)
+                if plan.restarts_gateway:
+                    self.restart(target, deadline)
+            finally:
+                if reason in self.pauses():
+                    self.hermes_cli("resume")
+                self.set_hold(pause=None)
+        after = self.plan()
+        if after.installs:
+            return self.record(FAILED, target, f"check-install still reports {len(after.installs)} install(s): "
+                               + "; ".join(" ".join(i.argv) for i in after.installs), after.manual)
+        settings = self.run([sys.executable, str(self.source / "skills" / "setup-factory" / "scripts" / "check-settings")], self.root_env)
+        if settings.returncode != 0:
+            lines = [line.strip() for line in settings.stdout.splitlines() if line.strip()]
+            return self.record(FAILED, target, f"check-settings exited {settings.returncode}: " + "; ".join(lines), after.manual)
+        return self.record(DEPLOYED, target, "", after.manual)
+
+    def restart(self, target: str, deadline: float) -> None:
+        if self.state["restarted"] == target:
+            self.log(f"the gateway already restarted once for {short(target)}; not restarting again")
+            return
+        self.state["restarted"] = target
+        self.save()
+        script = self.source / "skills" / "setup-factory" / "scripts" / "restart-gateway"
+        left = max(deadline - self.clock(), 0.0)
+        proc = self.run(
+            [sys.executable, str(script), "--timeout", f"{left:.1f}", "--poll", repr(self.args.poll), "--hermes", self.hermes],
+            self.root_env, timeout=left + COMMAND_SECONDS,
+        )
+        for line in proc.stdout.splitlines():
+            self.log(line)
+        if proc.returncode != 0:
+            raise DeployError(f"restart-gateway exited {proc.returncode}")
+
+    # Read-only modes
+
+    def status(self) -> int:
+        self.load_state()
+        holder = read_pid(self.run_lock)
+        print(json.dumps({**self.state, "run": holder if live_deploy(holder) else None}, indent=2))
+        return 0
+
+    def dry_run(self) -> int:
+        self.load_state()
+        self.find_source()
+        target = self.origin_commit(fetch=False)
+        print(f"origin/{self.branch} is {target}; deployed is {self.state['deployed'] or 'nothing'}")
+        if target == self.state["deployed"]:
+            print("already deployed; a run changes nothing")
+        elif target == self.state["attempted"] and self.state["outcome"] == FAILED:
+            print("failed before; a run waits for the branch to move")
+        if self.hold_key_present():
+            print(f"{HOLD_KEY} is set in the root home; a run would record BLOCKED")
+        plan = self.plan()
+        print(f"plan from {self.source} as it is now:")
+        for install in plan.installs:
+            print(self.redact(f"  install {install.step.name}: {' '.join(install.argv)}"))
+        if plan.restarts_gateway:
+            print("  then restart the gateway through restart-gateway")
+        for line in plan.manual:
+            print(self.redact(f"  manual {line.line}: {line.action}"))
+        if not plan.installs and not plan.manual:
+            print("  nothing to install")
+        return 0
+
+
+def positive_poll(text: str) -> float:
+    value = float(text)
+    if not 0 < value <= MAX_POLL_SECONDS:
+        raise argparse.ArgumentTypeError(f"must be above 0 and at most {MAX_POLL_SECONDS:g}")
+    return value
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--status", action="store_true", help="print the state file and exit")
+    parser.add_argument("--dry-run", action="store_true", help="print the plan and change nothing")
+    parser.add_argument("--root", help="root Hermes home (default: HERMES_HOME, else ~/.hermes)")
+    parser.add_argument("--worker", help=f"worker home (default: <root>/profiles/{WORKER})")
+    parser.add_argument("--hermes", help="the Hermes CLI (default: HERMES_BIN, hermes on PATH, or ~/.local/bin/hermes)")
+    parser.add_argument("--timeout", type=float, default=3600, help="seconds to wait for running cards, restart included (default 3600)")
+    parser.add_argument("--poll", type=positive_poll, default=MAX_POLL_SECONDS, help="seconds between board checks (default 60)")
+    parser.add_argument("--continue", dest="continued", help=argparse.SUPPRESS)
+    parser.add_argument("--remaining", type=float, default=0.0, help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if args.timeout < 0:
+        parser.error("--timeout must be at least 0")
+    args.root = args.root or os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+    args.worker = args.worker or str(Path(args.root) / "profiles" / WORKER)
+    redact = Redactor(os.environ)
+    try:
+        deploy = Deploy(args, args.hermes or find_hermes(), redact)
+        if args.status:
+            return deploy.status()
+        if args.dry_run:
+            return deploy.dry_run()
+        if not deploy.take_run_lock(continuing=args.continued is not None):
+            deploy.log("another run holds the run lock; nothing changed")
+            return 0
+        try:
+            return deploy.deploy(args.continued, args.remaining)
+        finally:
+            deploy.drop_run_lock()
+    except DeployError as error:
+        print(f"auto-deploy: {redact(str(error))}", file=sys.stderr, flush=True)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
