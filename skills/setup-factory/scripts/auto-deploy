@@ -17,7 +17,9 @@ and removes the gateway lock only when the state file records that a run that is
 them, and changes nothing while an operator's `hermes pause` is engaged.
 
 --status prints the state file. --dry-run prints the plan for the source checkout as it is and changes
-nothing. Runs on the macOS system Python 3.9.
+nothing. --retry deploys a commit that failed before, which a run otherwise leaves until origin/<default>
+moves. --print-plist prints the launchd job, which runs at load, so a reboot releases a hold that a run
+left and deploys a push that arrived while the machine was down. Runs on the macOS system Python 3.9.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ import argparse
 import importlib.util
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -41,6 +44,7 @@ HOLD_KEY = "kanban.dispatch_profiles"
 HOLD = ("config", "set", HOLD_KEY, "[]")
 RELEASE = ("config", "unset", HOLD_KEY)
 WORKER = "claude-worker"
+LABEL = "ai.patinaproject.factory.auto-deploy"
 MAX_POLL_SECONDS = 60.0  # the dispatcher's default tick
 COMMAND_SECONDS = 900
 EVENTS_KEPT = 20
@@ -365,6 +369,10 @@ class Deploy:
             self.find_source()
             self.attempt(continued, lambda: self.install(continued, self.clock() + remaining))
         else:
+            if self.args.retry and self.state["failed"]:
+                self.log(f"retrying {short(self.state['failed'])}, which failed before")
+                self.state["failed"] = None
+                self.save()
             if self.operator_paused():
                 self.record(BLOCKED, None, "an operator's hermes pause is engaged; nothing changed")
                 return 0
@@ -529,6 +537,24 @@ class Deploy:
         return 0
 
 
+def plist(root: Path, worker: Path) -> bytes:
+    """The launchd job. Its environment names no secret: auto-deploy reads none, and every command it runs
+    that needs one gets it the way that command does outside this job."""
+    log = str(root / "logs" / "auto-deploy.log")
+    return plistlib.dumps({
+        "Label": LABEL,
+        "ProgramArguments": ["/usr/bin/python3", str(root / "scripts" / "auto-deploy"), "--root", str(root)],
+        "RunAtLoad": True,
+        "EnvironmentVariables": {
+            "HERMES_HOME": str(root),
+            "PATH": f"{Path.home() / '.local' / 'bin'}:/usr/local/bin:/usr/bin:/bin",
+            "GH_CONFIG_DIR": str(worker / "gh"),
+        },
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+    })
+
+
 def positive_poll(text: str) -> float:
     value = float(text)
     if not 0 < value <= MAX_POLL_SECONDS:
@@ -540,6 +566,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--status", action="store_true", help="print the state file and exit")
     parser.add_argument("--dry-run", action="store_true", help="print the plan and change nothing")
+    parser.add_argument("--retry", action="store_true", help="deploy origin/<default> even when it failed before")
+    parser.add_argument("--print-plist", action="store_true", help="print the launchd job that runs this script")
     parser.add_argument("--root", help="root Hermes home (default: HERMES_HOME, else ~/.hermes)")
     parser.add_argument("--worker", help=f"worker home (default: <root>/profiles/{WORKER})")
     parser.add_argument("--hermes", help="the Hermes CLI (default: HERMES_BIN, hermes on PATH, or ~/.local/bin/hermes)")
@@ -552,6 +580,9 @@ def main(argv=None) -> int:
         parser.error("--timeout must be at least 0")
     args.root = args.root or os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
     args.worker = args.worker or str(Path(args.root) / "profiles" / WORKER)
+    if args.print_plist:
+        sys.stdout.buffer.write(plist(Path(args.root), Path(args.worker)))
+        return 0
     redact = Redactor(os.environ)
     try:
         deploy = Deploy(args, args.hermes or find_hermes(), redact)

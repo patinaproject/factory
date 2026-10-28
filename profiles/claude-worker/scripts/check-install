@@ -62,6 +62,11 @@ It checks that each repository plugin installed in a home is enabled there, from
 --user --json`, and imports each installed plugin the way Hermes does with import-plugins, in the same
 store Python, so a plugin Hermes would skip or fail to load is reported. Hermes only logs both.
 
+On macOS, while no auto-deploy run is alive, it reports a missing or unreadable <root>/auto-deploy.json, a
+stale run lock, kanban.dispatch_profiles set in the root home, a hermes pause and a factory-gateway.lock that a
+dead run left, and a default-branch commit that auto-deploy has not deployed a day after it was committed. The
+stranded triage check is silent while auto-deploy holds the cards.
+
 --json prints the same drift as a JSON list of records, each with the remedy that install_plan.py names:
 an install command and its step, a manual action, or advisory. The text output is the records' lines.
 
@@ -116,8 +121,8 @@ HEALTHY_RUNS = (None, "ok", "delivery_queued")
 RUN_ERROR_LIMIT = 200
 SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE)
 TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
-# watch-gateway runs from launchd and restart-gateway is the one it runs, so both live beside the cron wrapper.
-ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway")
+# The root home's cron scripts, and the launchd jobs' scripts beside restart-gateway, which both jobs run.
+ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway", "auto-deploy", "report-deploy")
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -205,7 +210,8 @@ class Service(NamedTuple):
     name: str
     kind: str
     plist: str
-    scheduled: bool = False  # an interval job is loaded but not running between its runs
+    # A job that runs on a schedule or when something starts it is loaded but not running between its runs.
+    scheduled: bool = False
     env: tuple = ()  # EnvironmentVariables keys the plist must set
     interval: int = 0  # the StartInterval the plist must set, in seconds
 
@@ -266,6 +272,7 @@ CRON = (
     CronJob(12, "reopen-conflicts", 5, equal("local")),
     CronJob(12, "dispatch-triage", 1, equal("local")),
     CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
+    CronJob(12, "report-deploy", 5, declared("the operator's chat platform", besides=("local",)), home=ROOT),
 )
 # Jobs that moved from Hermes' cron to launchd, because `hermes pause` stops Hermes' cron.
 LAUNCHD_JOBS = ("refresh-gh-app-login",)
@@ -280,6 +287,8 @@ SERVICES = (
         10, "gh login refresh", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist",
         scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME"), interval=gh_login.REFRESH_INTERVAL_SECONDS,
     ),
+    # Runs at load and whenever the factory-deploy plugin starts it for a push.
+    Service(12, "auto deploy", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist", scheduled=True),
 )
 # watch-gateway's own files in the root home. WATCH_INTERVAL and RESTARTS_PER_HOUR equal the script's.
 HERMES_GATEWAY_LOCK = "gateway.lock"
@@ -342,7 +351,7 @@ def check_profile(commit: Commit, homes: Homes) -> list:
 
 
 # Plugins that run in the gateway only. Their code lives in the root home and never in the worker's.
-ROOT_ONLY_PLUGINS = frozenset({"factory-uploads", "work", "webhook-retry"})
+ROOT_ONLY_PLUGINS = frozenset({"factory-uploads", "work", "webhook-retry", "factory-deploy"})
 
 
 def check_plugins(commit: Commit, homes: Homes) -> list:
@@ -931,6 +940,118 @@ def check_gateway_watch(root: Path, now: float | None = None) -> list:
     return drifts
 
 
+# auto-deploy's own files in the root home and its hold key in the root home's config.
+AUTO_DEPLOY_STATE = "auto-deploy.json"
+AUTO_DEPLOY_LOCK = "auto-deploy.lock"
+FACTORY_GATEWAY_LOCK = "factory-gateway.lock"
+HOLD_KEY = "kanban.dispatch_profiles"
+UNDEPLOYED_SECONDS = 24 * 3600
+START_DEPLOY = Manual(
+    "start auto-deploy once with launchctl kickstart gui/$(id -u)/ai.patinaproject.factory.auto-deploy "
+    "(user/$(id -u) over SSH), which releases what a dead run engaged, as Deploy a merged factory change describes"
+)
+
+
+def read_pid(path: Path) -> int | None:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def live_deploy(pid) -> bool:
+    """True when `pid` is a running auto-deploy, as auto-deploy itself judges it, so a reused pid is not one."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    proc = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
+    return proc.returncode == 0 and "auto-deploy" in proc.stdout
+
+
+def auto_deploy_state(root: Path) -> dict | None:
+    try:
+        state = json.loads((root / AUTO_DEPLOY_STATE).read_text())
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def hold_engaged(root: Path) -> bool:
+    state = auto_deploy_state(root)
+    return bool(state and state.get("hold"))
+
+
+def check_auto_deploy(
+    root: Path, dispatch_profiles, commit: Commit | None, committed_at: float | None, now: float,
+    alive: Callable[[object], bool] = live_deploy,
+) -> list:
+    """Report what auto-deploy left behind when no run of it is alive, and a default-branch commit it has not
+    deployed a day after it was committed. A live run owns every file and key named here, so it is never reported.
+    `commit` is None when check-install compares with --ref, which is not the branch auto-deploy deploys."""
+    state_path, run_lock, gateway_lock = root / AUTO_DEPLOY_STATE, root / AUTO_DEPLOY_LOCK, root / FACTORY_GATEWAY_LOCK
+    holder = read_pid(run_lock)
+    if alive(holder):
+        return []
+    drifts = []
+    if run_lock.exists():
+        drifts.append(Drift(
+            "auto deploy", str(run_lock), f"names pid {holder}, which is not a running auto-deploy; the next run reclaims it",
+            ADVISORY,
+        ))
+    if not state_path.exists():
+        return [*drifts, Drift("auto deploy", str(state_path), "is missing, so auto-deploy has never run (part 12)", START_DEPLOY)]
+    state = auto_deploy_state(root)
+    if state is None:
+        return [*drifts, Drift(
+            "auto deploy", str(state_path), "is unreadable, so every auto-deploy run stops before it deploys",
+            Manual("move the state file aside and start auto-deploy once, as Deploy a merged factory change describes"),
+        )]
+    hold = state.get("hold") if isinstance(state.get("hold"), dict) else {}
+    pid = hold.get("pid")
+    if hold and alive(pid):
+        return drifts
+    if hold.get("dispatch_profiles"):
+        drifts.append(Drift(
+            "auto deploy", f"{HOLD_KEY} in {root}",
+            f"was set by auto-deploy run {pid}, which is not running, so Hermes claims no card", START_DEPLOY,
+        ))
+    elif dispatch_profiles is not None:
+        drifts.append(Drift(
+            "auto deploy", f"{HOLD_KEY} in {root}",
+            "is set, and no auto-deploy run set it, so Hermes claims no card for a profile outside it and auto-deploy "
+            "deploys nothing",
+            Manual(f"ask whoever set it whether the hold is still wanted, and if not run hermes config unset {HOLD_KEY} in the root home"),
+        ))
+    if hold.get("pause"):
+        drifts.append(Drift(
+            "auto deploy", str(state_path),
+            f"records a hermes pause of auto-deploy run {pid}, which is not running, so no turn may run", START_DEPLOY,
+        ))
+    if hold.get("gateway_lock") and read_pid(gateway_lock) == pid:
+        drifts.append(Drift(
+            "auto deploy", str(gateway_lock),
+            f"holds auto-deploy run {pid}, which is not running, so watch-gateway restarts nothing", START_DEPLOY,
+        ))
+    if commit is not None and committed_at is not None and state.get("deployed") != commit.sha and now - committed_at >= UNDEPLOYED_SECONDS:
+        outcome = state.get("outcome") if state.get("attempted") == commit.sha else None
+        if outcome in ("FAILED", "WAITING", "BLOCKED"):
+            detail = str(state.get("detail") or "")
+            if len(detail) > RUN_ERROR_LIMIT:
+                detail = detail[:RUN_ERROR_LIMIT - 3] + "..."
+            why = f"auto-deploy recorded {outcome}" + (f": {detail}" if detail else "")
+        else:
+            why = "auto-deploy recorded no outcome for it, so its push did not start a run"
+        drifts.append(Drift(
+            "auto deploy", f"origin/{commit.label} at {commit.short}",
+            f"is not deployed {int((now - committed_at) // 3600)} hours after it was committed; {why}",
+            Manual("fix what the outcome names, then run auto-deploy --retry as Deploy a merged factory change describes"),
+        ))
+    return drifts
+
+
 BROKER_CONFIG = "Library/Application Support/factory-broker/broker.json"
 BROKER_FILES = {
     "factory_uploads/__init__.py": "plugins/factory-uploads/__init__.py",
@@ -1151,9 +1272,10 @@ def triage_max_running(settings):
 
 
 def check_stranded_triage(root: Path, now: float) -> list:
-    """A triage card that Hermes' dispatcher has left assigned in `ready`, which a starved board looks like."""
+    """A triage card that Hermes' dispatcher has left assigned in `ready`, which a starved board looks like.
+    Silent while auto-deploy holds every card, which check_auto_deploy reports when no run is alive."""
     path = root / "kanban" / "boards" / TRIAGE_BOARD / "kanban.db"
-    if not path.is_file():
+    if not path.is_file() or hold_engaged(root):
         return []
     events = ", ".join(f"'{kind}'" for kind in WAIT_EVENTS)
     sql = (
@@ -1739,6 +1861,10 @@ def main() -> int:
         ]
         if sys.platform == "darwin":
             drifts.extend(check_services(launchd_root, launchctl))
+            drifts.extend(check_auto_deploy(
+                root, config_value(root, hermes, HOLD_KEY), None if args.ref else commit,
+                float(git(repo, "show", "-s", "--format=%ct", commit.sha)), time.time(),
+            ))
         if broker is not None:
             drifts.extend(check_broker_user(commit, launchd_root, root, launchctl, broker, live_accounts()))
         if drifts and args.ref is None:

@@ -123,7 +123,7 @@ WORKER_JOBS = [
     cron_job("dispatch-triage", 1),
 ]
 RETRY_SCRIPT = "retry-failed-webhooks"
-ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack")]
+ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack"), cron_job("report-deploy", 5, "slack")]
 RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
@@ -147,7 +147,7 @@ REMEDY_CLASSES = (
      r"|terminal\.(timeout|env_passthrough)|platforms\.factory_uploads\.enabled|streaming\.enabled"
      r"|platforms\.slack\.extra\.native_task_cards|\S+\.github\.private_key_path) in ", "install"),
     ("config", "", "manual"),
-    ("cron job", r"^cron job retry-failed-webhooks in .*: (is missing|delivers to \S+, not )", "manual"),
+    ("cron job", r"^cron job (retry-failed-webhooks|report-deploy) in .*: (is missing|delivers to \S+, not )", "manual"),
     ("cron job", r": (is missing|is disabled|runs .*, not every|is not a script-only job|delivers to \S+, not |belongs to)", "install"),
     ("cron job", ": last run", "advisory"),
     ("cron job", "", "manual"),
@@ -155,6 +155,8 @@ REMEDY_CLASSES = (
     ("service", "", "manual"),
     ("gateway watch", "gateway-heartbeat-url: ", "manual"),
     ("gateway watch", "", "advisory"),
+    ("auto deploy", "auto-deploy.lock: ", "advisory"),
+    ("auto deploy", "", "manual"),
     ("upload broker", "", "advisory"),
     ("broker user", "", "manual"),
     ("secret", "", "manual"),
@@ -271,6 +273,7 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, "triage-refs.json", "[]\n")
         self.watch_state({"checked_at": time.time(), "state": "healthy", "restarts": []})
         self.install(self.root, "gateway-heartbeat-url", "https://monitor.example/ping/id\n")
+        self.install(self.root, "auto-deploy.json", json.dumps({"deployed": git(self.repo, "rev-parse", "HEAD"), "hold": None}))
         os.chmod(self.root / "gateway-heartbeat-url", 0o600)
         self.boards(BOARDS)
 
@@ -495,6 +498,38 @@ class CheckInstallTest(unittest.TestCase):
             f"script {self.root}/scripts/watch-gateway: is missing; install it from "
             "skills/setup-factory/scripts/watch-gateway (part 12)\n"
             f"script {self.root}/scripts/restart-gateway: differs from both at {sha} (part 12)\n"
+        )))
+
+    def test_auto_deploy_is_checked_on_macos(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("auto-deploy is a launchd job")
+        state = self.root / "auto-deploy.json"
+        deployed = state.read_text()
+        state.unlink()
+        missing = self.check()
+        state.write_text(deployed)
+        self.config(self.root, {**ROOT_CONFIG, "kanban.dispatch_profiles": []})
+        held = self.check()
+
+        self.assertEqual((missing, held), (
+            (1, f"auto deploy {state}: is missing, so auto-deploy has never run (part 12)\n"),
+            (1, f"auto deploy kanban.dispatch_profiles in {self.root}: is set, and no auto-deploy run set it, so Hermes "
+                "claims no card for a profile outside it and auto-deploy deploys nothing\n"),
+        ))
+
+    def test_the_auto_deploy_wrappers_are_compared_with_the_repository(self) -> None:
+        for name in ("auto-deploy", "report-deploy"):
+            self.install(self.repo, f"skills/setup-factory/scripts/{name}", f"#!/usr/bin/env python3\n{name}\n")
+        git(self.repo, "checkout", "-q", "-b", "deploy")
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-q", "-m", "deploy")
+        self.install(self.root, "scripts/report-deploy", "stale\n")
+        sha = git(self.repo, "rev-parse", "--short=7", "HEAD")
+
+        self.assertEqual(self.check("--ref", "deploy", "--no-fetch"), (1, (
+            f"script {self.root}/scripts/auto-deploy: is missing; install it from "
+            "skills/setup-factory/scripts/auto-deploy (part 12)\n"
+            f"script {self.root}/scripts/report-deploy: differs from deploy at {sha} (part 12)\n"
         )))
 
     def test_the_constants_equal_the_watch_script(self) -> None:
@@ -1078,7 +1113,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job refresh-checkouts in {self.worker}: is missing (part 12)\n"
-                f"cron job {RETRY_SCRIPT} in {self.root}: exists 2 times (part 12)\n"),
+                f"cron job {RETRY_SCRIPT} in {self.root}: exists 2 times (part 12)\n"
+                f"cron job report-deploy in {self.root}: exists 2 times (part 12)\n"),
         )
 
     def test_cron_job_changed_by_hand(self) -> None:
@@ -1088,7 +1124,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("reopen-conflicts", 5),
             cron_job("dispatch-triage", 1),
         ])
-        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local")])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local"), ROOT_JOBS[1]])
 
         self.assertEqual(
             self.check(),
@@ -1181,6 +1217,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"
+                f"cron job report-deploy in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -1190,6 +1228,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"
+                f"cron job report-deploy in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -1201,19 +1241,20 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_explicit_and_local_delivery_targets_need_no_home_channel(self) -> None:
         (self.root / ".env").unlink()
-        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "slack:C0123")])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "slack:C0123"), cron_job("report-deploy", 5, "slack:C0123")])
 
         self.assertEqual(self.check(), (0, ""))
 
     def test_retry_cron_job_missing_or_changed(self) -> None:
         self.cron(self.root, [])
         missing = self.check()
-        self.cron(self.root, [cron_job(RETRY_SCRIPT, 30, "slack", enabled=False)])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 30, "slack", enabled=False), ROOT_JOBS[1]])
         changed = self.check()
 
         self.assertEqual(
             (missing, changed),
-            ((1, f"cron job {RETRY_SCRIPT} in {self.root}: is missing (part 12)\n"),
+            ((1, f"cron job {RETRY_SCRIPT} in {self.root}: is missing (part 12)\n"
+                 f"cron job report-deploy in {self.root}: is missing (part 12)\n"),
              (1, f"cron job {RETRY_SCRIPT} in {self.root}: is disabled (part 12)\n"
                  f"cron job {RETRY_SCRIPT} in {self.root}: runs every 30m, not every 10m (part 12)\n")),
         )
@@ -1652,6 +1693,7 @@ class CheckInstallTest(unittest.TestCase):
             f"{agents}/ai.patinaproject.factory.gateway-watch.plist", "ai.patinaproject.factory.gateway-watch"
         )
         self.launchd.plist(f"{agents}/ai.patinaproject.factory.gh-login.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS)
+        self.launchd.plist(f"{agents}/ai.patinaproject.factory.auto-deploy.plist", "ai.patinaproject.factory.auto-deploy")
         env = {"PATH": "/usr/bin:/bin", **self.launchd.env, "HOME": str(home), "HERMES_HOME": str(self.worker)}
         proc = subprocess.run(
             ["/usr/bin/env", "python3", str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True
@@ -1778,6 +1820,14 @@ class CheckStrandedTriageTest(unittest.TestCase):
             "the default board is probably holding every worker slot (part 10)"
         ])
 
+    def test_a_card_held_by_auto_deploy_is_not_stranded(self) -> None:
+        self.card("t_held", age=95)
+        (self.root / "auto-deploy.json").write_text(json.dumps({"hold": {"pid": 4242, "dispatch_profiles": True}}))
+        held = self.rows()
+        (self.root / "auto-deploy.json").write_text(json.dumps({"hold": None}))
+
+        self.assertEqual((held, len(self.rows())), ([], 1))
+
     def test_a_missing_database_is_silent(self) -> None:
         self.path.unlink()
 
@@ -1797,10 +1847,142 @@ GH_LOGIN_LABEL = "ai.patinaproject.factory.gh-login"
 GH_LOGIN_FIELDS = {
     "StartInterval": 900, "EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/w"},
 }
+class CheckAutoDeployTest(unittest.TestCase):
+    NOW = 2_000_000.0
+    SHA = "c" * 40
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.alive: set = set()
+        self.commit = check_install.Commit(self.root, self.SHA, "main")
+
+    def state(self, **fields) -> None:
+        (self.root / "auto-deploy.json").write_text(json.dumps({"deployed": self.SHA, "hold": None, **fields}))
+
+    def check(self, dispatch_profiles=None, *, age_hours: float = 1, commit="default") -> list:
+        commit = self.commit if commit == "default" else commit
+        return classified(self, check_install.check_auto_deploy(
+            self.root, dispatch_profiles, commit, self.NOW - age_hours * 3600, self.NOW, self.alive.__contains__,
+        ))
+
+    def hold(self, pid: int = 4242, **parts) -> dict:
+        return {"pid": pid, "commit": "d" * 40, "dispatch_profiles": False, "pause": None, "gateway_lock": False, **parts}
+
+    def test_a_deployed_commit_with_no_hold_is_silent(self) -> None:
+        self.state()
+
+        self.assertEqual(self.check(), [])
+
+    def test_a_missing_or_unreadable_state_file_is_reported(self) -> None:
+        missing = self.check()
+        (self.root / "auto-deploy.json").write_text("{not json")
+        unreadable = self.check()
+
+        self.assertEqual((missing, unreadable), (
+            [f"auto deploy {self.root}/auto-deploy.json: is missing, so auto-deploy has never run (part 12)"],
+            [f"auto deploy {self.root}/auto-deploy.json: is unreadable, so every auto-deploy run stops before it deploys"],
+        ))
+
+    def test_a_stale_run_lock_is_reported_and_a_live_ones_silences_everything(self) -> None:
+        self.state(hold=self.hold(dispatch_profiles=True))
+        (self.root / "auto-deploy.lock").write_text("4242\n")
+
+        stale = self.check()
+        self.alive.add(4242)
+        live = self.check([])
+
+        self.assertEqual(stale, [
+            f"auto deploy {self.root}/auto-deploy.lock: names pid 4242, which is not a running auto-deploy; the next run reclaims it",
+            f"auto deploy kanban.dispatch_profiles in {self.root}: was set by auto-deploy run 4242, which is not running, "
+            "so Hermes claims no card",
+        ])
+        self.assertEqual(live, [])
+
+    def test_a_dead_runs_hold_pause_and_gateway_lock_are_reported(self) -> None:
+        self.state(hold=self.hold(dispatch_profiles=True, pause="auto-deploy 4242: installing", gateway_lock=True))
+        (self.root / "factory-gateway.lock").write_text("4242\n")
+
+        self.assertEqual(self.check([]), [
+            f"auto deploy kanban.dispatch_profiles in {self.root}: was set by auto-deploy run 4242, which is not running, "
+            "so Hermes claims no card",
+            f"auto deploy {self.root}/auto-deploy.json: records a hermes pause of auto-deploy run 4242, which is not "
+            "running, so no turn may run",
+            f"auto deploy {self.root}/factory-gateway.lock: holds auto-deploy run 4242, which is not running, so "
+            "watch-gateway restarts nothing",
+        ])
+
+    def test_a_hold_whose_run_is_alive_is_silent(self) -> None:
+        self.state(hold=self.hold(dispatch_profiles=True, gateway_lock=True))
+        (self.root / "factory-gateway.lock").write_text("4242\n")
+        self.alive.add(4242)
+
+        self.assertEqual(self.check([]), [])
+
+    def test_a_gateway_lock_a_person_holds_is_not_reported(self) -> None:
+        self.state(hold=self.hold(gateway_lock=True))
+        (self.root / "factory-gateway.lock").write_text("deploying by hand since 10:00\n")
+
+        self.assertEqual(self.check(), [])
+
+    def test_a_dispatch_profiles_key_no_run_set_is_reported(self) -> None:
+        self.state()
+
+        self.assertEqual(self.check([]), [
+            f"auto deploy kanban.dispatch_profiles in {self.root}: is set, and no auto-deploy run set it, so Hermes "
+            "claims no card for a profile outside it and auto-deploy deploys nothing",
+        ])
+        self.assertEqual(self.check(["claude-worker"])[0], self.check([])[0])
+
+    def test_an_undeployed_commit_a_day_old_is_reported_with_its_outcome(self) -> None:
+        self.state(deployed="b" * 40, attempted=self.SHA, outcome="FAILED", detail="check-settings exited 1: model differs")
+        failed = self.check(age_hours=30)
+        self.state(deployed="b" * 40, attempted="b" * 40, outcome="DEPLOYED")
+        lost = self.check(age_hours=24)
+
+        self.assertEqual(failed, [
+            f"auto deploy origin/main at ccccccc: is not deployed 30 hours after it was committed; auto-deploy "
+            "recorded FAILED: check-settings exited 1: model differs",
+        ])
+        self.assertEqual(lost, [
+            "auto deploy origin/main at ccccccc: is not deployed 24 hours after it was committed; auto-deploy "
+            "recorded no outcome for it, so its push did not start a run",
+        ])
+
+    def test_an_undeployed_commit_under_a_day_or_a_ref_is_silent(self) -> None:
+        self.state(deployed="b" * 40, attempted=self.SHA, outcome="WAITING")
+
+        self.assertEqual((self.check(age_hours=23.9), self.check(age_hours=48, commit=None)), ([], []))
+
+    def test_live_deploy_needs_a_running_auto_deploy(self) -> None:
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "auto-deploy"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        done = subprocess.Popen([sys.executable, "-c", "pass", "auto-deploy"])
+        done.wait()
+
+        self.assertEqual(
+            [check_install.live_deploy(pid) for pid in (proc.pid, os.getpid(), done.pid, None, "4242")],
+            [True, False, False, False, False],
+        )
+
+    def test_the_names_equal_auto_deploy_and_the_push_hook(self) -> None:
+        scripts = SCRIPTS.parents[2] / "skills" / "setup-factory" / "scripts"
+        loader = importlib.machinery.SourceFileLoader("auto_deploy", str(scripts / "auto-deploy"))
+        deploy = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(deploy)
+        hook_spec = importlib.util.spec_from_file_location("factory_deploy", SCRIPTS.parents[2] / "plugins" / "factory-deploy" / "__init__.py")
+        hook = importlib.util.module_from_spec(hook_spec)
+        hook_spec.loader.exec_module(hook)
+        service = next(s for s in check_install.SERVICES if s.name == "auto deploy")
+
+        self.assertEqual((Path(service.plist).name, check_install.HOLD_KEY), (f"{deploy.LABEL}.plist", deploy.HOLD_KEY))
+        self.assertEqual(hook.LABEL, deploy.LABEL)
+        self.assertIn("factory-deploy", check_install.ROOT_ONLY_PLUGINS)
 
 
 class Launchd:
-    """A file system root with the runbook's two plists and a fake launchctl that reports their state."""
+    """A file system root with the runbook's plists and a fake launchctl that reports their state."""
 
     def __init__(self, tmp: Path) -> None:
         self.root = tmp / "launchd"
@@ -1821,11 +2003,16 @@ class Launchd:
         self.gh_login = self.plist(
             f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{GH_LOGIN_LABEL}.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS,
         )
+        self.deploy = self.plist(
+            f"{str(self.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
+            "ai.patinaproject.factory.auto-deploy",
+        )
         uid = os.getuid()
         self.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
             f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
             f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
         })
         self.env = {
             "LAUNCHD_ROOT": str(self.root), "LAUNCHCTL_BIN": str(self.launchctl),
@@ -2239,6 +2426,7 @@ class CheckServicesTest(unittest.TestCase):
             "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
             f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
             f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"gui/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
         })
 
         self.assertEqual(self.check(), [])
@@ -2263,6 +2451,7 @@ class CheckServicesTest(unittest.TestCase):
             "service Hermes gateway: is not loaded in launchd (part 15)",
             "service gateway watch: is not loaded in launchd (part 12)",
             "service gh login refresh: is not loaded in launchd (part 10)",
+            "service auto deploy: is not loaded in launchd (part 12)",
         ])
 
     def test_a_missing_watch_job_is_reported(self) -> None:
@@ -2288,6 +2477,7 @@ class CheckServicesTest(unittest.TestCase):
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
             f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "waiting",
+            f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
         })
 
     def test_a_login_refresh_job_without_its_environment_is_reported_by_name_only(self) -> None:
@@ -2304,6 +2494,31 @@ class CheckServicesTest(unittest.TestCase):
 
         self.assertEqual(self.check(), ["service gh login refresh: does not run every 900 seconds (part 10)"])
 
+    def test_the_auto_deploy_job_is_loaded_between_runs_and_runs_at_load(self) -> None:
+        uid = os.getuid()
+        states = {
+            "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
+        }
+        self.launchd.states({**states, f"user/{uid}/ai.patinaproject.factory.auto-deploy": "running"})
+        running = self.check()
+        self.launchd.states(states)
+        unloaded = self.check()
+        self.launchd.plist(
+            f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
+            "ai.patinaproject.factory.auto-deploy", RunAtLoad=False,
+        )
+        self.launchd.states({**states, f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running"})
+        not_at_load = self.check()
+        self.launchd.deploy.unlink()
+
+        self.assertEqual((running, unloaded, not_at_load, self.check()), (
+            [],
+            ["service auto deploy: is not loaded in launchd (part 12)"],
+            ["service auto deploy: does not run at load (part 12)"],
+            ["service auto deploy: no plist matches ~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist (part 12)"],
+        ))
+
     def watch_with(self, *lock: str, root: tuple = ("--root", "/h")) -> None:
         self.launchd.plist(
             f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist",
@@ -2315,6 +2530,7 @@ class CheckServicesTest(unittest.TestCase):
             "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
             f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
             f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"gui/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
         })
 
     def test_a_watcher_whose_lock_is_hermes_own_gateway_lock_is_reported(self) -> None:

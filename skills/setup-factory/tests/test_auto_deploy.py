@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import plistlib
 import shutil
 import stat
 import subprocess
@@ -337,6 +338,37 @@ class AutoDeployTest(unittest.TestCase):
         self.m.push("B")
         self.deploy()
         self.assertEqual(self.m.state()["deployed"], self.m.head)
+
+    def test_retry_deploys_a_commit_that_failed_before(self) -> None:
+        self.m.drifts([], exit=2, stderr="boom")
+        self.deploy()
+        self.m.drifts([])
+        self.deploy()
+        self.assertEqual(self.m.outcomes(), [("FAILED", self.m.head)])
+
+        self.deploy("--retry")
+
+        self.assertEqual(self.m.outcomes(), [("FAILED", self.m.head), ("DEPLOYED", self.m.head)])
+        self.assertEqual((self.m.state()["deployed"], self.m.state()["failed"]), (self.m.head, None))
+
+    def test_the_plist_runs_the_installed_script_at_load_and_on_demand_with_no_secret(self) -> None:
+        proc = subprocess.run(
+            [PYTHON, str(AUTO_DEPLOY), "--print-plist", "--root", "/h"],
+            env={**self.m.env(), "HOME": "/home/op", "GITHUB_TOKEN": SECRET}, capture_output=True, timeout=60,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(plistlib.loads(proc.stdout), {
+            "Label": "ai.patinaproject.factory.auto-deploy",
+            "ProgramArguments": ["/usr/bin/python3", "/h/scripts/auto-deploy", "--root", "/h"],
+            "RunAtLoad": True,
+            "EnvironmentVariables": {
+                "HERMES_HOME": "/h", "PATH": "/home/op/.local/bin:/usr/local/bin:/usr/bin:/bin",
+                "GH_CONFIG_DIR": "/h/profiles/claude-worker/gh",
+            },
+            "StandardOutPath": "/h/logs/auto-deploy.log",
+            "StandardErrorPath": "/h/logs/auto-deploy.log",
+        })
 
     def test_an_unreadable_hold_key_holds_nothing_and_the_next_delivery_retries(self) -> None:
         self.m.update_hermes(fail=[{"argv": ["kanban", "diagnostics", "--json"], "stderr": "config unreadable"}])
