@@ -2609,19 +2609,23 @@ class FencedPromptTest(unittest.TestCase):
     )
 
     @staticmethod
-    def conflict_comment() -> str:
+    def handback_comments() -> dict[str, str]:
         loader = importlib.machinery.SourceFileLoader("reopen_conflicts_under_test", str(SCRIPTS / "reopen-conflicts"))
         module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(module)
         pull = {"url": "https://github.com/o/r/pull/7", "baseRefName": "main", "headRefOid": "a" * 40}
-        return module.comment_text(pull)
+        failures = {"lint": "https://github.com/o/r/actions/runs/1", "test": None}
+        return {
+            "reopen-conflicts comment": module.conflict_handback(pull).text,
+            "reopen-conflicts failed check comment": module.failed_check_handback(pull, failures).text,
+        }
 
     def texts(self) -> dict[str, str]:
         module = ClaudeSessionTest.session_module()
         return {
             "SYSTEM_PROMPT": module.SYSTEM_PROMPT,
             "TRIAGE_SYSTEM_PROMPT": module.TRIAGE_SYSTEM_PROMPT,
-            "reopen-conflicts comment": self.conflict_comment(),
+            **self.handback_comments(),
         }
 
     def test_no_text_tells_claude_to_change_the_board(self) -> None:
@@ -2632,4 +2636,5 @@ class FencedPromptTest(unittest.TestCase):
 
     def test_the_conflict_comment_and_rule_ask_for_a_needs_input_message(self) -> None:
         self.assertIn("`Needs input:`", self.texts()["reopen-conflicts comment"])
+        self.assertIn("`Needs input:`", self.texts()["reopen-conflicts failed check comment"])
         self.assertIn("`Needs input:`", self.texts()["SYSTEM_PROMPT"])

@@ -43,18 +43,50 @@ state = json.load(open(os.environ["FAKE_STATE"]))
 argv = sys.argv[1:]
 with open(os.environ["FAKE_STATE"] + ".gh", "a") as log:
     log.write(json.dumps(argv) + "\\n")
+if argv[0] == "api":
+    repo = "/".join(argv[1].split("/")[1:3])
+    if repo in state.get("rules_fails", []):
+        sys.exit("gh: HTTP 403")
+    print(json.dumps(state["rules"].get(repo, [])))
+    sys.exit(0)
+if argv[:2] == ["pr", "view"]:
+    pulls = [p for repo_pulls in state["pulls"].values() for p in repo_pulls if p["url"] == argv[2]]
+    print(json.dumps({"statusCheckRollup": pulls[0]["statusCheckRollup"]}))
+    sys.exit(0)
 repo = argv[argv.index("-R") + 1]
 if repo in state.get("gh_fails", []):
     sys.exit("gh: HTTP 502")
-print(json.dumps(state["pulls"].get(repo, [])))
+print(json.dumps([{k: v for k, v in p.items() if k != "statusCheckRollup"} for p in state["pulls"].get(repo, [])]))
 """
 
 
-def pull(number: int, branch: str, *, head: str = HEAD, mergeable: str = "CONFLICTING", author: str = "app/factory-app", base: str = "main") -> dict:
+def pull(
+    number: int, branch: str, *, head: str = HEAD, mergeable: str = "CONFLICTING", author: str = "app/factory-app",
+    base: str = "main", checks: list | None = None,
+) -> dict:
     return {
         "number": number, "url": f"https://github.com/{REPO}/pull/{number}", "headRefName": branch,
         "headRefOid": head, "baseRefName": base, "author": {"login": author}, "mergeable": mergeable,
+        "statusCheckRollup": checks or [],
     }
+
+
+def check_run(name: str, conclusion: str | None = "FAILURE", *, started: str = "2026-01-01T00:00:00Z", url: str | None = None) -> dict:
+    return {
+        "__typename": "CheckRun", "name": name, "workflowName": "ci", "status": "COMPLETED" if conclusion else "IN_PROGRESS",
+        "conclusion": conclusion or "", "startedAt": started, "detailsUrl": url or f"https://github.com/{REPO}/actions/runs/{name}",
+    }
+
+
+def status_context(name: str, state: str, url: str | None = None) -> dict:
+    return {"__typename": "StatusContext", "context": name, "state": state, "targetUrl": url}
+
+
+def required(*names: str) -> list:
+    return [
+        {"type": "pull_request", "parameters": {}},
+        {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": name} for name in names]}},
+    ]
 
 
 def card(task_id: str, status: str, branch: str, repo: str = REPO) -> dict:
@@ -73,7 +105,7 @@ class ReopenConflictsTest(unittest.TestCase):
         for fake in (self.hermes, self.gh):
             os.chmod(fake, 0o755)
         self.state_path = self.dir / "state.json"
-        self.state = {"settings": {"github": {"login": BOT_LOGIN}}, "tasks": [], "comments": {}, "pulls": {}}
+        self.state = {"settings": {"github": {"login": BOT_LOGIN}}, "tasks": [], "comments": {}, "pulls": {}, "rules": {}}
 
     def run_script(self, home: Path | None = None) -> subprocess.CompletedProcess:
         self.state_path.write_text(json.dumps(self.state))
@@ -107,6 +139,16 @@ class ReopenConflictsTest(unittest.TestCase):
             f"conflict_head: {head}"
         )
         return text
+
+    def failed_comment(self, number: int, listed: str, head: str = HEAD) -> str:
+        return (
+            f"Pull request https://github.com/{REPO}/pull/{number} at head {head} fails a required check:\n{listed}\n\n"
+            "Read the failing job, fix the cause, and publish the fix with push-signed. When the failure lies in a "
+            "step the pull request does not change, re-run it once with `gh run rerun <run-id> --failed`. When the "
+            "pull request body fails the repository's body check, rewrite the body. When you cannot fix it with "
+            "confidence, stop and make the first line of your final message `Needs input:` followed by the reason.\n\n"
+            f"failed_check_head: {head}"
+        )
 
     def test_a_conflicting_review_card_gets_a_comment_then_a_review_reopen(self) -> None:
         self.state["tasks"] = [card("t_1", "review", "abc-1")]
@@ -237,6 +279,166 @@ class ReopenConflictsTest(unittest.TestCase):
         self.assertEqual(proc.stdout, f"t_2 https://github.com/{REPO}/pull/8\n")
         self.assertIn("reopen-conflicts: t_1:", proc.stderr)
         self.assertNotIn(["kanban", "reopen-review", "t_1"], [call[:3] for call in self.writes()])
+
+    FAILED_REASON = "a required check failed; see the card comments"
+    RULES_CALL = ["api", f"repos/{REPO}/rules/branches/main?per_page=100"]
+
+    def failing_review_card(self, **kwargs) -> None:
+        checks = [check_run("lint", url="https://ci.example/lint"), check_run("build", "SUCCESS"), check_run("docs", "FAILURE")]
+        self.state["tasks"] = [card("t_1", kwargs.get("status", "review"), "abc-1")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1", mergeable="MERGEABLE", checks=checks, head=kwargs.get("head", HEAD))]
+        self.state["rules"][REPO] = required("lint", "build")
+
+    def test_a_review_card_whose_required_check_failed_gets_a_comment_then_a_review_reopen(self) -> None:
+        self.failing_review_card()
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, f"t_1 https://github.com/{REPO}/pull/7\n", ""))
+        self.assertEqual(self.writes(), [
+            ["kanban", "comment", "t_1", self.failed_comment(7, "- `lint`: https://ci.example/lint")],
+            ["kanban", "reopen-review", "t_1", "--reason", self.FAILED_REASON],
+        ])
+        self.assertEqual(self.gh_calls()[1:], [
+            ["pr", "view", f"https://github.com/{REPO}/pull/7", "--json", "statusCheckRollup"], self.RULES_CALL,
+        ])
+
+    def test_a_blocked_card_whose_required_check_failed_changes_nothing(self) -> None:
+        self.failing_review_card(status="blocked")
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr, self.writes()), (0, "", "", []))
+        self.assertEqual([call[0] for call in self.gh_calls()], ["pr"])
+
+    def test_a_status_context_failure_is_listed_with_its_target_url_and_names_are_sorted(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1", mergeable="MERGEABLE", checks=[
+            status_context("zeta", "FAILURE", "https://ci.example/zeta"), status_context("alpha", "ERROR"),
+        ])]
+        self.state["rules"][REPO] = required("zeta", "alpha")
+
+        self.run_script()
+
+        listed = "- `alpha`\n- `zeta`: https://ci.example/zeta"
+        self.assertEqual(self.writes()[0], ["kanban", "comment", "t_1", self.failed_comment(7, listed)])
+
+    def test_a_failed_check_head_already_on_the_card_skips_blocked_and_only_reopens_review(self) -> None:
+        self.state["tasks"] = [card("t_1", "blocked", "abc-1"), card("t_2", "review", "abc-2")]
+        self.state["pulls"][REPO] = [
+            pull(7, "abc-1", mergeable="MERGEABLE", checks=[check_run("lint")]),
+            pull(8, "abc-2", mergeable="MERGEABLE", checks=[check_run("lint")]),
+        ]
+        self.state["rules"][REPO] = required("lint")
+        marker = {"body": f"earlier\nfailed_check_head: {HEAD}"}
+        self.state["comments"] = {"t_1": [marker], "t_2": [marker]}
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, f"t_2 https://github.com/{REPO}/pull/8\n"))
+        self.assertEqual(self.writes(), [["kanban", "reopen-review", "t_2", "--reason", self.FAILED_REASON]])
+
+    def test_a_conflict_marker_does_not_stand_for_a_failed_check_and_a_new_head_is_told_again(self) -> None:
+        self.failing_review_card(head=NEW_HEAD)
+        self.state["comments"] = {"t_1": [{"body": f"failed_check_head: {HEAD}\nconflict_head: {NEW_HEAD}"}]}
+
+        proc = self.run_script()
+
+        self.assertEqual(proc.stdout, f"t_1 https://github.com/{REPO}/pull/7\n")
+        self.assertEqual(self.writes()[0][:3], ["kanban", "comment", "t_1"])
+        self.assertTrue(self.writes()[0][3].endswith(f"failed_check_head: {NEW_HEAD}"))
+
+    def test_a_failure_no_rule_requires_changes_nothing(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1", mergeable="MERGEABLE", checks=[check_run("lint"), check_run("build", "SUCCESS")])]
+        self.state["rules"][REPO] = required("build")
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr, self.writes()), (0, "", "", []))
+
+    def test_a_required_check_whose_newer_run_passed_changes_nothing(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1", mergeable="MERGEABLE", checks=[
+            check_run("lint", "FAILURE", started="2026-01-01T00:00:00Z"), check_run("lint", "SUCCESS", started="2026-01-01T01:00:00Z"),
+            check_run("docs"),
+        ])]
+        self.state["rules"][REPO] = required("lint")
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout, self.writes()), (0, "", []))
+
+    def test_a_pending_required_check_changes_nothing(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1"), card("t_2", "review", "abc-2"), card("t_3", "review", "abc-3")]
+        self.state["pulls"][REPO] = [
+            pull(7, "abc-1", mergeable="MERGEABLE", checks=[check_run("lint"), check_run("build", None)]),
+            pull(8, "abc-2", mergeable="MERGEABLE", checks=[check_run("lint"), status_context("build", "PENDING")]),
+            pull(9, "abc-3", mergeable="MERGEABLE", checks=[check_run("lint")]),
+        ]
+        self.state["rules"][REPO] = required("lint", "build")
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr, self.writes()), (0, "", "", []))
+
+    def test_unknown_mergeability_reads_no_checks_even_when_one_failed(self) -> None:
+        self.failing_review_card()
+        self.state["pulls"][REPO][0]["mergeable"] = "UNKNOWN"
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout, self.writes()), (0, "", []))
+        self.assertEqual([call[0] for call in self.gh_calls()], ["pr"])
+
+    def test_a_mergeable_pull_request_with_passing_checks_reads_no_rules(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1", mergeable="MERGEABLE", checks=[check_run("lint", "SUCCESS")])]
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout, self.writes()), (0, "", []))
+        self.assertEqual([call[0] for call in self.gh_calls()], ["pr", "pr"])
+
+    def test_a_conflict_wins_over_a_failed_check(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1", checks=[check_run("lint")])]
+        self.state["rules"][REPO] = required("lint")
+
+        self.run_script()
+
+        self.assertEqual([call[:2] for call in self.writes()], [["kanban", "comment"], ["kanban", "reopen-review"]])
+        self.assertEqual(self.writes()[0][3], self.comment(7))
+        self.assertEqual(len(self.gh_calls()), 1)
+
+    def test_a_rules_read_failure_is_reported_and_the_other_repository_still_runs(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1", OTHER_REPO), card("t_2", "review", "abc-2")]
+        self.state["pulls"][OTHER_REPO] = [pull(7, "abc-1", mergeable="MERGEABLE", checks=[check_run("lint")])]
+        self.state["pulls"][REPO] = [pull(8, "abc-2")]
+        self.state["rules_fails"] = [OTHER_REPO]
+
+        proc = self.run_script()
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, f"t_2 https://github.com/{REPO}/pull/8\n")
+        self.assertEqual(proc.stderr, "reopen-conflicts: t_1: gh api repos/example-org/other-repo/rules/branches/main?per_page=100 failed: gh: HTTP 403\n")
+
+    def test_the_rules_are_read_once_for_each_repository_and_base(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1"), card("t_2", "review", "abc-2"), card("t_3", "review", "abc-3")]
+        failing = [check_run("lint")]
+        self.state["pulls"][REPO] = [
+            pull(7, "abc-1", mergeable="MERGEABLE", checks=failing),
+            pull(8, "abc-2", mergeable="MERGEABLE", checks=failing),
+            pull(9, "abc-3", mergeable="MERGEABLE", checks=failing, base="release/1"),
+        ]
+        self.state["rules"][REPO] = required("lint")
+
+        proc = self.run_script()
+
+        self.assertEqual(proc.stdout.count("\n"), 3)
+        self.assertEqual([call for call in self.gh_calls() if call[0] == "api"], [
+            self.RULES_CALL, ["api", f"repos/{REPO}/rules/branches/release%2F1?per_page=100"],
+        ])
 
     def test_a_home_that_is_not_a_profile_home_exits_2(self) -> None:
         proc = self.run_script(home=self.dir)

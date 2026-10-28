@@ -1206,13 +1206,18 @@ hermes -p claude-worker cron create "every 1m" --name dispatch-triage --no-agent
 ```
 
 **Conflict job.** GitHub sends no webhook when a pull request starts to
-conflict because its base branch moved. `reopen-conflicts` lists the App's
-open pull requests for every `review` or `blocked` card every 5 minutes. For
-each one GitHub reports as `CONFLICTING`, it comments on the card and hands
-the card back to its worker. The worker merges the base branch, resolves the
-conflicts, and publishes the merge with `push-signed`. A card is sent back
-once per pull request head, so a worker that blocks on the same head stays
-blocked. Create the job when `cron list` has no `reopen-conflicts` job:
+conflict because its base branch moved, or when a required check fails after
+the worker handed the card off. `reopen-conflicts` lists the App's open pull
+requests for every `review` or `blocked` card every 5 minutes. For each one
+GitHub reports as `CONFLICTING`, it comments on the card and hands the card
+back to its worker. It does the same for a `review` card whose pull request is
+`MERGEABLE` and whose newest run of a check that a rule of the base branch
+requires failed on the current head. A pull request with a pending or missing
+required check waits, and a `blocked` card is never sent back for a failed
+check, because its worker stopped for a person. The worker merges the base branch and resolves the
+conflicts, or fixes the failing check, and publishes with `push-signed`. A card
+is sent back once per pull request head and reason, so a worker that blocks on
+the same head stays blocked. Create the job when `cron list` has no `reopen-conflicts` job:
 
 ```sh
 hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null
