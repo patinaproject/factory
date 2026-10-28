@@ -278,6 +278,7 @@ class ClaudeSessionTest(GitFixture):
             "worktree": str(self.worktree),
             "branch": "abc-123-fix",
             "progress": False,
+            "comments_seen": 0,
             "adopted": None,
             "subtype": "success",
             "num_turns": 7,
@@ -756,6 +757,13 @@ class ClaudeSessionTest(GitFixture):
         self.run_session()
 
         self.assertEqual(self.prompt(), f"{COMMENTS_HEADING}\n\ndefault wrote:\n> Linear reply: Why SQLite?")
+
+    def test_the_report_counts_the_comments_in_the_card_snapshot_the_run_read(self) -> None:
+        self.set_comments((100, "operator", "Before."), (200, "default", "Linear reply: Which one?"))
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["comments_seen"]), (0, 2))
 
     def test_a_triage_run_and_the_mcp_probe_register_neither_hook_and_start_no_inbox(self) -> None:
         self.configure_fake_claude(init=[])

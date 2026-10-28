@@ -1237,8 +1237,8 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
 
     session = result_line.Session(
         session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
-        progress=progress, adopted=adopted._asdict() if adopted else None, superseded=superseded, issue_links=links,
-        triage_documents=documents, session_title=session_title,
+        progress=progress, comments_seen=len(comments), adopted=adopted._asdict() if adopted else None,
+        superseded=superseded, issue_links=links, triage_documents=documents, session_title=session_title,
     )
     if output is None:
         error = f"claude exited {exit_code} without JSON output: {detail}"

@@ -26,7 +26,8 @@ UNSET: Any = _Unset()
 @dataclass(frozen=True)
 class Session:
     """The Claude session a run used, and what `claude-session` did around it. `progress` is true when the run
-    changed the worktree's HEAD or its `git status --porcelain`."""
+    changed the worktree's HEAD or its `git status --porcelain`. `comments_seen` is the number of card comments
+    in the snapshot the run read; a triage round's park records it, so a reply past it releases the card."""
 
     session_id: str
     resumed: bool
@@ -34,6 +35,7 @@ class Session:
     worktree: str
     branch: str
     progress: bool
+    comments_seen: int
     adopted: Optional[dict]
     superseded: Optional[dict]
     issue_links: Optional[dict]
