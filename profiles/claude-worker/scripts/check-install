@@ -33,7 +33,9 @@ claude-session gives triage cards, and that the triage refs file is as fresh as
 the owned refs. It checks that the default board cannot take the worker slots triage needs
 (kanban.max_spawn plus triage.max_running within kanban.max_in_progress, and triage.max_running
 within kanban.max_spawn) and reports a triage card that has stayed assigned in ready, with no worker,
-for 30 minutes or more. When any difference is
+for 30 minutes or more. It reports a triage card blocked with kind needs_input or in Hermes' triage status
+for it, which park-waiting moves to scheduled, and a scheduled triage card whose newest park has a comment
+from blocker-order saying its round was not posted. When any difference is
 reported and the source checkout is not at origin/HEAD, the last line names
 that checkout. It gives the fast-forward command only when the checkout is
 behind, on the default branch, and clean. --ref turns the line off, because
@@ -1300,6 +1302,60 @@ def check_stranded_triage(root: Path, now: float) -> list:
     ]
 
 
+PARK_WAITING_FIX = Manual(
+    "run card_transition.py --board triage park-waiting while dispatch is paused, as the deploy step in part 15 says"
+)
+UNPOSTED_FIX = Manual(
+    "read the card's Linear agent session, and post the questions from the card's newest park reason if they are missing"
+)
+
+
+def check_waiting_triage(root: Path, plugin: Path) -> list:
+    """A triage card waits for a reply only in `scheduled`, and its round reached Linear.
+
+    A card blocked or parked in Hermes' `triage` status for input waits the way that looped; a card in `triage`
+    for another kind is a real loop and is not reported. A `scheduled` card whose newest park has a
+    `NOT_POSTED` comment after it may wait for an answer to a question nobody saw."""
+    path = root / "kanban" / "boards" / TRIAGE_BOARD / "kanban.db"
+    if not path.is_file():
+        return []
+    try:
+        blocked = kanban_board.blocked_for_input(str(path))
+        waiting = kanban_board.scheduled(str(path))
+    except sqlite3.Error as error:
+        return [Drift("waiting triage card check", path, f"cannot be read: {error} (part 15, check 27)", ADVISORY)]
+    drifts = [
+        Drift(
+            "waiting triage card", card["id"],
+            f"is {card['status']} with block kind needs_input, but a triage round waits for a reply in scheduled "
+            "(part 15, check 27)",
+            PARK_WAITING_FIX,
+        )
+        for card in blocked
+    ]
+    if not plugin.is_file():
+        return drifts
+    try:
+        not_posted = blocker_order(plugin).NOT_POSTED
+    except Exception as error:
+        return [*drifts, Drift(
+            "waiting triage card check", plugin, f"cannot load the plugin: {type(error).__name__}: {error}", ADVISORY,
+        )]
+    for task_id, card in sorted(waiting.items()):
+        parked_at = card["events"][-1]["created_at"] if card["events"] else None
+        failures = [
+            comment["body"] for comment in card["comments"]
+            if parked_at is not None and comment["created_at"] >= parked_at and comment["body"].startswith(not_posted)
+        ]
+        if failures:
+            drifts.append(Drift(
+                "waiting triage card", task_id,
+                f"waits in scheduled, but its round may never have reached Linear: {failures[-1]} (part 15, check 27)",
+                UNPOSTED_FIX,
+            ))
+    return drifts
+
+
 def check_kanban_boards(root: Path) -> list:
     """Probe every board database for the columns `kanban_board` reads: the blocker check's, and the comments
     and events that release a triage card waiting for a reply.
@@ -1668,7 +1724,7 @@ def json_file(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def watched_tools(plugin: Path) -> tuple:
+def blocker_order(plugin: Path):
     spec = importlib.util.spec_from_file_location(
         "blocker_order_installed", plugin, submodule_search_locations=[str(plugin.parent)]
     )
@@ -1676,6 +1732,11 @@ def watched_tools(plugin: Path) -> tuple:
     sys.modules[spec.name] = module
     sys.dont_write_bytecode = True
     spec.loader.exec_module(module)
+    return module
+
+
+def watched_tools(plugin: Path) -> tuple:
+    module = blocker_order(plugin)
     return module.PROCESS_TOOLS, module.REQUIRED_TOOLS
 
 
@@ -1845,6 +1906,7 @@ def main() -> int:
                 triage_max_running(settings),
             ),
             *check_stranded_triage(root, time.time()),
+            *check_waiting_triage(root, worker / "plugins" / "blocker-order" / "__init__.py"),
             *check_triage_playbook(repo),
             *check_checkouts(settings),
             *check_work_skills(
