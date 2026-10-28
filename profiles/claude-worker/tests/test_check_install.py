@@ -1325,12 +1325,13 @@ class CheckInstallTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as board:
             board.execute(f"CREATE TABLE tasks ({columns})")
-            board.execute("CREATE TABLE task_events (task_id, kind, created_at)")
+            board.execute("CREATE TABLE task_events (id, task_id, kind, payload, created_at)")
+            board.execute("CREATE TABLE task_comments (id, task_id, author, body, created_at)")
         board.close()
         return path
 
     def test_board_databases_that_hold_the_columns_the_blocker_check_reads_are_silent(self) -> None:
-        columns = "id, title, body, branch_name, status, assignee, claim_lock, created_at"
+        columns = "id, title, body, branch_name, status, block_kind, assignee, claim_lock, created_at"
         self.kanban_database(self.root / "kanban.db", columns)
         self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", columns)
 
@@ -1339,7 +1340,7 @@ class CheckInstallTest(unittest.TestCase):
     def test_a_triage_board_with_a_stranded_card_is_reported_by_the_full_check(self) -> None:
         board = self.kanban_database(
             self.root / "kanban" / "boards" / "triage" / "kanban.db",
-            "id, title, body, branch_name, status, assignee, claim_lock, created_at",
+            "id, title, body, branch_name, status, block_kind, assignee, claim_lock, created_at",
         )
         with sqlite3.connect(board) as db:
             db.execute(
@@ -1357,9 +1358,22 @@ class CheckInstallTest(unittest.TestCase):
         triage = self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", "id, title, body, state")
 
         self.assertEqual(self.check(), (1, (
-            f"kanban board database {triage}: has no tasks.branch_name, tasks.status, so a card cannot wait for "
-            "its blockers (part 15, check 29)\n"
+            f"kanban board database {triage}: has no tasks.branch_name, tasks.status, tasks.block_kind, so a card "
+            "cannot wait for its blockers or a reply (part 15, check 29)\n"
             f"stranded triage card check {triage}: cannot be read: no such column: t.created_at (part 10)\n"
+        )))
+
+    def test_a_board_database_missing_a_comment_or_event_column_the_release_reads(self) -> None:
+        board = self.root / "kanban.db"
+        with sqlite3.connect(board) as db:
+            db.execute("CREATE TABLE tasks (id, title, body, branch_name, status, block_kind)")
+            db.execute("CREATE TABLE task_events (id, task_id, kind, data, created_at)")
+            db.execute("CREATE TABLE task_comments (id, task_id, author, text, created_at)")
+        db.close()
+
+        self.assertEqual(self.check(), (1, (
+            f"kanban board database {board}: has no task_comments.body, task_events.payload, so a card cannot wait "
+            "for its blockers or a reply (part 15, check 29)\n"
         )))
 
     def test_a_board_database_that_cannot_be_read(self) -> None:

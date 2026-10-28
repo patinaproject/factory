@@ -1301,10 +1301,11 @@ def check_stranded_triage(root: Path, now: float) -> list:
 
 
 def check_kanban_boards(root: Path) -> list:
-    """Probe every board database the way `claude-session` reads it, for the columns its blocker check needs.
+    """Probe every board database for the columns `kanban_board` reads: the blocker check's, and the comments
+    and events that release a triage card waiting for a reply.
 
-    Hermes' `tasks` table is internal. A renamed column makes the check fail open, so cards start out of order
-    with nothing else to say so."""
+    Hermes' tables are internal. A renamed column makes the blocker check fail open, so cards start out of order,
+    and stops the sweep that releases a waiting card, with nothing else to say so."""
     drifts = []
     for path in sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")]):
         if not path.is_file():
@@ -1317,7 +1318,7 @@ def check_kanban_boards(root: Path) -> list:
         if missing:
             drifts.append(Drift(
                 "kanban board database", path,
-                f"has no tasks.{', tasks.'.join(missing)}, so a card cannot wait for its blockers (part 15, check 29)",
+                f"has no {', '.join(missing)}, so a card cannot wait for its blockers or a reply (part 15, check 29)",
                 Manual("change kanban_board.py to Hermes' new column names in a pull request"),
             ))
     return drifts

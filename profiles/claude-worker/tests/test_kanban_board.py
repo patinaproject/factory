@@ -17,7 +17,17 @@ from tests.support import SCRIPTS
 sys.path.insert(0, str(SCRIPTS))
 import kanban_board  # noqa: E402
 
-TASKS = "CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, branch_name TEXT, status TEXT, assignee TEXT)"
+TASKS = (
+    "CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, branch_name TEXT, status TEXT, assignee TEXT, block_kind TEXT)"
+)
+INSERT = "INSERT INTO tasks (id, title, body, branch_name, status, assignee) VALUES"
+# Hermes' comment and event tables, from `hermes_cli/kanban_db.py`.
+COMMENTS_AND_EVENTS = (
+    "CREATE TABLE task_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, author TEXT NOT NULL, "
+    "body TEXT NOT NULL, created_at INTEGER NOT NULL);"
+    "CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, run_id INTEGER, "
+    "kind TEXT NOT NULL, payload TEXT, created_at INTEGER NOT NULL);"
+)
 
 
 WRITER = """
@@ -25,10 +35,10 @@ import json, os, sqlite3, sys
 board = sqlite3.connect(sys.argv[1])
 board.execute("PRAGMA journal_mode = WAL")
 board.execute(%r)
-board.executemany("INSERT INTO tasks VALUES (?, ?, ?, ?, ?, 'claude-worker')", json.loads(sys.argv[2]))
+board.executemany(%r + " (?, ?, ?, ?, ?, 'claude-worker')", json.loads(sys.argv[2]))
 board.commit()
 os._exit(0)
-""" % TASKS
+""" % (TASKS, INSERT)
 
 
 def wal_board(path: Path, rows: list[tuple]) -> None:
@@ -77,7 +87,7 @@ def busy_board(path: Path, journal_mode: str) -> None:
         board.execute(f"PRAGMA journal_mode = {journal_mode}")
         board.execute(TASKS)
         board.executemany(
-            "INSERT INTO tasks VALUES (?, 'T', ?, 'b', 's0', 'claude-worker')",
+            INSERT + " (?, 'T', ?, 'b', 's0', 'claude-worker')",
             [(f"t_{n}", "0" * 400) for n in range(CARDS)],
         )
         board.commit()
@@ -101,14 +111,14 @@ class KanbanBoardTest(unittest.TestCase):
 
         cards = kanban_board.cards(str(self.path))
 
-        self.assertEqual(cards, [{"id": "t_a", "title": "A", "body": "", "branch_name": "a-work", "status": "todo"}])
+        self.assertEqual(cards, [{"id": "t_a", "title": "A", "body": "", "branch_name": "a-work", "status": "todo", "block_kind": None}])
         self.assertEqual(contents(), before)
 
     def test_a_wal_board_with_no_wal_files_is_read_without_changing_it(self) -> None:
         with closing(sqlite3.connect(self.path)) as board:
             board.execute("PRAGMA journal_mode = WAL")
             board.execute(TASKS)
-            board.execute("INSERT INTO tasks VALUES ('t_a', 'A', '', 'a-work', 'todo', 'claude-worker')")
+            board.execute(INSERT + " ('t_a', 'A', '', 'a-work', 'todo', 'claude-worker')")
             board.commit()
         for suffix in ("-wal", "-shm"):
             Path(f"{self.path}{suffix}").unlink(missing_ok=True)
@@ -216,17 +226,65 @@ class KanbanBoardTest(unittest.TestCase):
         with self.assertRaisesRegex(sqlite3.OperationalError, "^unable to open database file$"):
             kanban_board.cards(str(self.path))
 
-    def test_missing_columns_names_each_column_the_tasks_table_lacks(self) -> None:
-        with sqlite3.connect(self.path) as board:
+    def test_missing_columns_names_each_column_the_board_lacks(self) -> None:
+        with closing(sqlite3.connect(self.path)) as board:
             board.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, status TEXT)")
-        board.close()
+            board.execute("CREATE TABLE task_comments (id, task_id, author, text, created_at)")
+            board.commit()
 
-        self.assertEqual(kanban_board.missing_columns(str(self.path)), ["branch_name"])
+        self.assertEqual(kanban_board.missing_columns(str(self.path)), [
+            "tasks.branch_name", "tasks.block_kind", "task_comments.body", "task_events.id", "task_events.task_id",
+            "task_events.kind", "task_events.payload", "task_events.created_at",
+        ])
 
     def test_a_board_with_every_column_is_missing_none(self) -> None:
         wal_board(self.path, [])
+        with closing(sqlite3.connect(self.path)) as board:
+            board.executescript(COMMENTS_AND_EVENTS)
 
         self.assertEqual(kanban_board.missing_columns(str(self.path)), [])
+
+    def hermes_board(self, tasks: list[tuple], comments: list[tuple], events: list[tuple]) -> None:
+        with closing(sqlite3.connect(self.path)) as board:
+            board.execute(TASKS)
+            board.executescript(COMMENTS_AND_EVENTS)
+            board.executemany(INSERT.replace("assignee)", "assignee, block_kind)") + " (?, 'T', '', 'b', ?, NULL, ?)", tasks)
+            board.executemany("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)", comments)
+            board.executemany("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)", events)
+            board.commit()
+
+    def test_scheduled_gives_each_waiting_cards_comments_and_parks_as_show_json_does(self) -> None:
+        park = json.dumps({"reason": "Needs input: which?\n\ncomments_seen: 1"})
+        self.hermes_board(
+            [("t_wait", "scheduled", "needs_input"), ("t_run", "running", None), ("t_new", "scheduled", None)],
+            [("t_wait", "default", "Linear reply: later", 300), ("t_wait", "operator", "first", 100),
+             ("t_run", "default", "Linear reply: x", 100)],
+            [("t_wait", "scheduled", park, 200), ("t_wait", "unblocked", None, 250), ("t_wait", "scheduled", None, 150),
+             ("t_run", "scheduled", park, 100)],
+        )
+
+        self.assertEqual(kanban_board.scheduled(str(self.path)), {"t_wait": {
+            "comments": [
+                {"author": "operator", "body": "first", "created_at": 100},
+                {"author": "default", "body": "Linear reply: later", "created_at": 300},
+            ],
+            "events": [
+                {"kind": "scheduled", "payload": None, "created_at": 150},
+                {"kind": "scheduled", "payload": {"reason": "Needs input: which?\n\ncomments_seen: 1"}, "created_at": 200},
+            ],
+        }})
+
+    def test_blocked_for_input_names_the_cards_blocked_or_parked_in_triage_for_input(self) -> None:
+        self.hermes_board(
+            [("t_blocked", "blocked", "needs_input"), ("t_parked", "triage", "needs_input"),
+             ("t_loop", "triage", "transient"), ("t_cap", "blocked", "capability"),
+             ("t_waits", "scheduled", "needs_input")],
+            [], [],
+        )
+
+        self.assertEqual(kanban_board.blocked_for_input(str(self.path)), [
+            {"id": "t_blocked", "status": "blocked"}, {"id": "t_parked", "status": "triage"},
+        ])
 
 
 if __name__ == "__main__":

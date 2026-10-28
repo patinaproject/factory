@@ -821,9 +821,12 @@ class ClaudeSessionTest(GitFixture):
         database.unlink(missing_ok=True)
         if not board_fails:
             with sqlite3.connect(database) as db:
-                db.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, assignee TEXT, status TEXT, branch_name TEXT)")
+                db.execute(
+                    "CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, assignee TEXT, status TEXT, branch_name TEXT, "
+                    "block_kind TEXT)"
+                )
                 db.executemany(
-                    "INSERT INTO tasks VALUES (:id, :title, :body, 'claude-worker', :status, :branch_name)", board or []
+                    "INSERT INTO tasks VALUES (:id, :title, :body, 'claude-worker', :status, :branch_name, NULL)", board or []
                 )
             db.close()
         self.board_env = {"HERMES_KANBAN_DB": str(database)}
