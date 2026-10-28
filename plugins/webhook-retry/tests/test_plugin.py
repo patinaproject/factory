@@ -64,6 +64,16 @@ class PluginTest(unittest.TestCase):
         store = FakeStore(sessions if sessions is not None else {"s1": ev.source.chat_id})
         return self.plugin.record_delivery(event=ev, gateway=None, session_store=store)
 
+    def test_a_delivery_that_arrives_while_paused_is_queued_and_skipped(self):
+        ev = event()
+        with mock.patch.object(self.plugin, "paused", create=True, return_value=True):
+            result = self.dispatch(ev)
+
+        entry = self.entries()[ev.source.chat_id]
+        self.assertEqual(result["action"], "skip")
+        self.assertEqual((entry["state"], entry["reason"]), ("queued", "paused"))
+        self.assertEqual((entry["delivered_at"], entry["next_try_at"]), ("2026-10-15T08:30:00Z", "2026-10-15T08:30:00Z"))
+
     def test_usage_limit_failure_queues_the_delivery(self):
         ev = event()
         self.assertIsNone(self.dispatch(ev))
