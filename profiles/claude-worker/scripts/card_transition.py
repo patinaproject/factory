@@ -186,7 +186,9 @@ def resume(card: Card, assign: bool = True) -> dict:
 def replied(show: dict) -> bool:
     """The release rule, for a `scheduled` card as `hermes kanban show --json` gives it."""
     result_line = plugin_module("blocker-order", "result_line")
-    park = [event for event in show["events"] if event["kind"] == "scheduled"][-1]
+    parks = [event for event in show["events"] if event["kind"] == "scheduled"]
+    # Hermes writes a `scheduled` event with every park; without one, any reply counts as after it.
+    park = parks[-1] if parks else {"payload": None, "created_at": 0}
     _, seen = result_line.read_comments_seen((park["payload"] or {}).get("reason"))
     replies = [(at, comment) for at, comment in enumerate(show["comments"]) if reply_inbox.is_reply(comment["body"])]
     if seen is not None:

@@ -381,6 +381,9 @@ class ReleaseRuleTest(CardTransitionTest):
         self.assertFalse(self.released([], [park(None, created_at=500)], comment_at=[400]))
         self.assertTrue(self.released([], [park(None, created_at=500)], comment_at=[600]))
 
+    def test_a_card_with_no_park_event_is_released_by_any_reply(self):
+        self.assertTrue(self.released([], []))
+
 
 class ParkWaitingTest(CardTransitionTest):
     def board(self, block_kind: str) -> None:
