@@ -32,6 +32,8 @@ ACTIVITY_MUTATION = """mutation AgentActivityCreate($input: AgentActivityCreateI
 
 VIEWER_QUERY = "query { viewer { id } }"
 
+SESSION_VERBS = {"triage": "Triage", "work": "Work on"}
+
 SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: AgentSessionUpdateInput!) {
   agentSessionUpdate(id: $id, input: $input) { success }
 }"""
@@ -249,18 +251,19 @@ class LinearClient:
 
     def set_external_urls(self, agent_session_id: str, urls: list) -> None:
         external_urls = [{"label": u["label"], "url": u["url"]} for u in urls]
-        payload = self._graphql(
-            SESSION_UPDATE_MUTATION,
-            {"id": agent_session_id, "input": {"externalUrls": external_urls}},
-        )["agentSessionUpdate"]
-        if not payload["success"]:
-            raise LinearError("agentSessionUpdate reported success: false")
+        self._update_session(agent_session_id, {"externalUrls": external_urls})
 
-    def set_session_title(self, agent_session_id: str, title: str) -> None:
-        payload = self._graphql(
-            SESSION_UPDATE_MUTATION,
-            {"id": agent_session_id, "input": {"summary": session_summary(title)}},
-        )["agentSessionUpdate"]
+    def title_session(self, agent_session_id: str, issue_id: str, purpose: str) -> str:
+        """Replace Linear's default `Work on <identifier>` session title with one that says what the session is for."""
+        issue = self.get_issue(issue_id)
+        summary = _session_summary(f"{SESSION_VERBS[purpose]} {issue['identifier']}: {issue['title']}")
+        self._update_session(agent_session_id, {"summary": summary})
+        return summary
+
+    def _update_session(self, agent_session_id: str, input: dict) -> None:
+        payload = self._graphql(SESSION_UPDATE_MUTATION, {"id": agent_session_id, "input": input})[
+            "agentSessionUpdate"
+        ]
         if not payload["success"]:
             raise LinearError("agentSessionUpdate reported success: false")
 
@@ -639,7 +642,7 @@ class _Unauthorized(Exception):
     pass
 
 
-def session_summary(title: str) -> str:
+def _session_summary(title: str) -> str:
     """Linear accepts a session summary of 1 to 255 characters with no line breaks."""
     return " ".join(title.split())[:255].strip()
 

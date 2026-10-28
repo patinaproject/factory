@@ -412,6 +412,6 @@ Type `Issue`. The issue is the data change issue.
      mark a delegated issue `ready-for-agent` long after its delegation. For
      `use_session`, use `agent_session_id`. When that is null, or for
      `open_session`, open a session with `linear_agent_session_create` for the
-     issue and use the returned `agent_session_id`. Then carry out `then` as
+     issue, with `purpose` `work`, and use the returned `agent_session_id`. Then carry out `then` as
      "Implementation card" says, with that session. That moves an existing card
      to the session and keeps a link to the old one.
