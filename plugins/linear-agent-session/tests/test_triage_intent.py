@@ -13,6 +13,7 @@ intent_module = plugin.triage_intent
 Card = plugin.triage_exit.Card
 Intent = intent_module.Intent
 Reply = intent_module.Reply
+Thread = intent_module.Thread
 
 APP = "app-user-1"
 PERSON = "user-ted"
@@ -61,8 +62,8 @@ def issue_event(updated_from=None):
     return {"type": "Issue", "action": "update", "updatedFrom": updated_from or {"stateId": "old"}, "data": {"id": ISSUE_ID}}
 
 
-def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY):
-    return intent_module.decide(payload, live or issue(), list(triage), list(work), APP, NOW, reply)
+def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD):
+    return intent_module.decide(payload, live or issue(), list(triage), list(work), APP, NOW, reply, thread)
 
 
 def expected(action, **overrides):
@@ -385,6 +386,50 @@ class ReplyTest(unittest.TestCase):
         self.assertEqual(client.calls, [])
 
 
+def thread_item(activity_id, type="response", body="text"):
+    return {"id": activity_id, "type": type, "author": None, "created_at": "2026-10-27T11:00:00.000Z", "body": body}
+
+
+class ThreadTest(unittest.TestCase):
+    class Client:
+        def __init__(self, items=None, error=None):
+            self.items, self.error, self.calls = items, error, []
+
+        def session_thread(self, agent_session_id):
+            self.calls.append(agent_session_id)
+            if self.error:
+                raise self.error
+            return self.items
+
+    def test_a_reply_carries_the_earlier_activities_without_itself(self):
+        earlier = [thread_item("a1", "elicitation", "1, 2 or 3?"), thread_item("a2", "thought")]
+        client = self.Client(earlier + [thread_item("activity-1", "prompt", "All of them")])
+        self.assertEqual(
+            intent_module.resolve_thread(session_event("prompted", body="All of them"), client), Thread(earlier, "linear")
+        )
+        self.assertEqual(client.calls, ["session-1"])
+
+    def test_a_session_with_no_earlier_activity_has_an_empty_thread(self):
+        client = self.Client([thread_item("activity-1", "prompt")])
+        self.assertEqual(intent_module.resolve_thread(session_event("prompted", body="hi"), client), Thread([], "linear"))
+
+    def test_a_thread_that_cannot_be_read_is_missing(self):
+        client = self.Client(error=RuntimeError("down"))
+        self.assertEqual(intent_module.resolve_thread(session_event("prompted", body="hi"), client), Thread(None, "missing"))
+
+    def test_events_without_a_reply_have_no_thread(self):
+        client = self.Client([])
+        for payload in (session_event("created"), session_event("prompted", signal="stop"), issue_event()):
+            with self.subTest(payload["type"]):
+                self.assertEqual(intent_module.resolve_thread(payload, client), intent_module.NO_THREAD)
+        self.assertEqual(client.calls, [])
+
+    def test_the_intent_holds_the_thread_beside_the_reply(self):
+        thread = Thread([thread_item("a1")], "linear")
+        result = decide(session_event("prompted", body="yes"), reply=Reply("yes", "payload"), thread=thread)
+        self.assertEqual((result.thread, result.thread_source), ([thread_item("a1")], "linear"))
+
+
 class RenderTest(unittest.TestCase):
     def test_the_block_holds_the_intent_as_json(self):
         block = intent_module.render(expected("create_card", foreign_cards=[]))
@@ -409,8 +454,8 @@ class RenderTest(unittest.TestCase):
 
 
 class FakeLinearClient:
-    def __init__(self, live, error=None):
-        self.live, self.error, self.asked = live, error, []
+    def __init__(self, live, error=None, thread_error=None):
+        self.live, self.error, self.thread_error, self.asked = live, error, thread_error, []
 
     def get_issue(self, issue_id):
         self.asked.append(issue_id)
@@ -420,6 +465,11 @@ class FakeLinearClient:
 
     def read_prompt(self, **_):
         return {"found": False}
+
+    def session_thread(self, _agent_session_id):
+        if self.thread_error:
+            raise self.thread_error
+        return [thread_item("a1", "response", "1, 2 or 3?"), thread_item("activity-1", "prompt", "yes")]
 
 
 class ComputeTest(unittest.TestCase):
@@ -442,6 +492,21 @@ class ComputeTest(unittest.TestCase):
         self.assertEqual(
             (result.action, result.triage_card["id"], result.card["id"], result.reply), ("triage_card_reply", "t_triage", "t_work", "yes")
         )
+
+    def test_a_reply_keeps_its_action_and_text_when_the_thread_cannot_be_read(self):
+        client = FakeLinearClient(issue(), thread_error=RuntimeError("down"))
+        result = self.compute(session_event("prompted", body="yes"), client)
+        self.assertEqual(
+            (result.action, result.reply, result.thread, result.thread_source), ("create_card", "yes", None, "missing")
+        )
+
+    def test_a_computed_reply_carries_the_thread_without_the_reply_activity(self):
+        result = self.compute(session_event("prompted", body="yes"), FakeLinearClient(issue()))
+        self.assertEqual((result.thread, result.thread_source), ([thread_item("a1", "response", "1, 2 or 3?")], "linear"))
+
+    def test_an_issue_event_has_no_thread(self):
+        result = self.compute(issue_event(), FakeLinearClient(issue()))
+        self.assertEqual((result.thread, result.thread_source), (None, None))
 
     def test_an_issue_event_reads_the_data_issue(self):
         client = FakeLinearClient(issue())
