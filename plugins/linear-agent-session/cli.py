@@ -47,6 +47,7 @@ def main(argv: Optional[list] = None) -> int:
 
     session = commands.add_parser("session-create", help="open a new agent session on an issue")
     session.add_argument("issue")
+    session.add_argument("--purpose", required=True, choices=["triage", "work"])
 
     delegated = commands.add_parser("delegated", help="list issues delegated to the agent app")
     delegated.add_argument("--include-closed", action="store_true")
@@ -98,7 +99,9 @@ def main(argv: Optional[list] = None) -> int:
         }
         output = plugin.tools.run_activity(plugin.linear.client_from_env, tool_args)
     elif args.command == "session-create":
-        output = plugin.tools.run_session_create(plugin.linear.client_from_env, {"issue": args.issue})
+        output = plugin.tools.run_session_create(
+            plugin.linear.client_from_env, {"issue": args.issue, "purpose": args.purpose}
+        )
     elif args.command == "delegated":
         output = plugin.tools.run_delegated_issues(
             plugin.linear.client_from_env, {"include_closed": args.include_closed}

@@ -5,7 +5,7 @@ import logging
 from typing import Callable, Optional
 
 from . import github_issue
-from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, LinearClient, LinearError, activity_content
+from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, SESSION_VERBS, LinearClient, LinearError, activity_content
 
 logger = logging.getLogger(__name__)
 
@@ -97,9 +97,20 @@ SESSION_CREATE_SCHEMA = {
     "name": "linear_agent_session_create",
     "description": (
         "Open an agent session on `issue` (UUID or ABC-123). Acts as the agent app, for a delegation "
-        "that arrived without a session. Returns the agent_session_id."
+        "that arrived without a session, titled by `purpose`. Returns the agent_session_id and session_title."
     ),
-    "parameters": ISSUE_PARAMETERS,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            **ISSUE_PARAMETERS["properties"],
+            "purpose": {
+                "type": "string",
+                "enum": list(SESSION_VERBS),
+                "description": "Required. triage for a triage card's session, work for an implementation card's.",
+            },
+        },
+        "required": ["purpose"],
+    },
 }
 
 
@@ -234,9 +245,20 @@ def run_activity_read(client_factory: ClientFactory, args: dict) -> str:
 
 
 def run_session_create(client_factory: ClientFactory, args: dict) -> str:
-    return _tool_result_or_error(
-        lambda: {"agent_session_id": client_factory().create_session_on_issue(_issue_argument(args))}
-    )
+    def run() -> dict:
+        issue = _issue_argument(args)
+        purpose = args.get("purpose")
+        if purpose not in SESSION_VERBS:
+            raise LinearError(f"pass purpose: one of {', '.join(SESSION_VERBS)}")
+        client = client_factory()
+        session_id = client.create_session_on_issue(issue)
+        try:
+            title = {"title": client.title_session(session_id, issue, purpose)}
+        except (*CLIENT_ERRORS, OSError) as error:
+            title = {"error": f"titling the agent session failed: {error}"}
+        return {"agent_session_id": session_id, "session_title": title}
+
+    return _tool_result_or_error(run)
 
 
 def run_issue(client_factory: ClientFactory, args: dict) -> str:

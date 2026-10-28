@@ -284,6 +284,7 @@ class ClaudeSessionTest(GitFixture):
             "superseded": None,
             "issue_links": {"action": "waiting", "reason": f"no open pull request by {BOT_LOGIN} on abc-123-fix"},
             "triage_documents": None,
+            "session_title": None,
             "result": "Opened the pull request.",
             "usage": None,
             "first_context_tokens": None,
@@ -561,6 +562,42 @@ class ClaudeSessionTest(GitFixture):
                     "error": f"checking the triage Documents failed: {reason}",
                 }))
                 self.assertEqual(report["result"], "Opened the pull request.")
+
+    def session_updates(self) -> list:
+        return [r["session_update"] for r in self.linear_requests(self.hermes_home) if "session_update" in r]
+
+    def test_a_triage_run_titles_its_session_as_triage(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        title = "Triage ABC-123: Fix checkout"
+        self.assertEqual((status, report["session_title"]), (0, {"title": title}))
+        self.assertEqual(self.session_updates(), [{"id": "live-session", "input": {"summary": title}}])
+
+    def test_an_implementation_run_titles_its_session_as_work_on_the_issue(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.set_linear_issue(issue_title="Fix\nthe checkout")
+
+        status, report = self.run_session()
+
+        title = "Work on ABC-123: Fix the checkout"
+        self.assertEqual((status, report["session_title"]), (0, {"title": title}))
+        self.assertEqual(self.session_updates(), [{"id": "live-session", "input": {"summary": title}}])
+
+    def test_a_card_without_a_session_sends_no_title(self) -> None:
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["session_title"], self.session_updates()), (0, None, []))
+
+    def test_a_failed_session_title_is_reported_without_failing_the_run(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.set_linear_issue(session_update_error="Entity not found")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["session_title"]), (0, {"error": "titling the agent session failed: Entity not found"}))
+        self.assertEqual(report["result"], "Opened the pull request.")
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(

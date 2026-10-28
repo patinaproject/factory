@@ -24,7 +24,8 @@ right after `kanban`, and pass `board: triage` to `kanban_comment`.
 5. Choose the agent session. When `delegated` is true and the issue has an
    `agentSessions` entry whose `appUserId` is `<<app_user_id>>`, use the newest
    such entry. Otherwise open one with
-   `linear_agent_session_create` and use the `agent_session_id` it returns.
+   `linear_agent_session_create` with `purpose` `triage` and use the
+   `agent_session_id` it returns.
 6. Pick the repository and the priorities as "Implementation card" steps 2
    and 3 say.
 7. Create the card with no assignee. `dispatch-triage` assigns it to the

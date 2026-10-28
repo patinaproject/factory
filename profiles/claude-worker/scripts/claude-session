@@ -722,6 +722,18 @@ def title_triage_documents(client, issue_id: str) -> dict:
     return {"renamed": renamed, "missing": missing}
 
 
+def title_agent_session(client, session_id: str | None, issue_id: str, triage: bool) -> dict | None:
+    """The result goes in the run's report and never changes its status."""
+    if session_id is None:
+        return None
+    linear = plugin_module("linear-agent-session", "linear")
+
+    try:
+        return {"title": client.title_session(session_id, issue_id, "triage" if triage else "work")}
+    except (*linear.CLIENT_ERRORS, OSError) as error:
+        return {"error": f"titling the agent session failed: {error}"}
+
+
 def triage_mentions(client, issue_id: str, identifier: str) -> str:
     """Resolved here, not by the model, because a team can list several triage people and the model picked one."""
     linear = plugin_module("linear-agent-session", "linear")
@@ -1179,10 +1191,12 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         comments = card["comments"]
         seen_path = lock_path.with_name(COMMENTS_SEEN_NAME)
         seen = json.loads(seen_path.read_text()) if seen_path.exists() else []
+        card_session_id = reply_inbox.session_id_of(card["task"]["body"])
+        session_title = title_agent_session(client, card_session_id, args.issue_id, triage)
         inbox = None if triage else lock_path.with_name(INBOX_NAME)
         if inbox:
             answer_command = f"{helper_command(SESSION_REPLY)} --inbox {shlex.quote(str(inbox))}"
-            reply_inbox.reset(inbox, answer_command, reply_inbox.session_id_of(card["task"]["body"]))
+            reply_inbox.reset(inbox, answer_command, card_session_id)
         own = os.environ.get("HERMES_PROFILE") or Path(os.environ.get("HERMES_HOME", "")).name
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),
@@ -1224,7 +1238,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     session = result_line.Session(
         session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
         progress=progress, adopted=adopted._asdict() if adopted else None, superseded=superseded, issue_links=links,
-        triage_documents=documents,
+        triage_documents=documents, session_title=session_title,
     )
     if output is None:
         error = f"claude exited {exit_code} without JSON output: {detail}"

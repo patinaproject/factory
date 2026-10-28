@@ -38,6 +38,7 @@ class Session:
     superseded: Optional[dict]
     issue_links: Optional[dict]
     triage_documents: Optional[dict]
+    session_title: Optional[dict]
 
 
 @dataclass(frozen=True)

@@ -16,6 +16,8 @@ fails the read, and `people_timeout` times it out.
 A posted activity is logged as `activity`, with the session's issue holding no other session.
 Its blockers come from its `blocked_by` list of {id, identifier, gitBranchName, stateType, delegate}, none
 when unset, and `blockers_error` fails the read.
+Its title comes from `issue_title`, "Fix checkout" when unset. An AgentSessionUpdate is logged as
+`session_update` with its variables, and `session_update_error` makes it fail.
 The app's own user id is app-user.
 """
 from __future__ import annotations
@@ -53,7 +55,21 @@ def _fake_urlopen(request, timeout=None):
     elif request.get_header("Authorization", "").removeprefix("Bearer ") in state["accepted"]:
         body = json.loads(request.data.decode())
         query = body["query"]
-        if "IssueRoleLabels" in query:
+        if "query Issue(" in query:
+            issue = {
+                "id": "issue-uuid", "identifier": "ABC-123", "title": state.get("issue_title", "Fix checkout"),
+                "description": None, "url": "https://linear.app/example/issue/ABC-123", "branchName": "abc-123-fix",
+                "priority": 0, "state": {"name": "Todo", "type": "unstarted"}, "delegate": None,
+                "labels": {"nodes": []}, "attachments": {"nodes": []}, "agentSessions": {"nodes": []},
+                "inverseRelations": {"nodes": []},
+            }
+            response = _Response(200, {"data": {"issue": issue}})
+        elif "AgentSessionUpdate" in query and state.get("session_update_error"):
+            response = _Response(200, {"errors": [{"message": state["session_update_error"]}]})
+        elif "AgentSessionUpdate" in query:
+            entry["session_update"] = body["variables"]
+            response = _Response(200, {"data": {"agentSessionUpdate": {"success": True}}})
+        elif "IssueRoleLabels" in query:
             def nodes(names):
                 return [{"name": n, "isGroup": False, "retiredAt": None, "archivedAt": None} for n in names]
             team = {"labels": {"nodes": nodes(state.get("team_labels", []))}}
