@@ -319,6 +319,35 @@ class AutoDeployTest(unittest.TestCase):
         self.assertEqual(self.m.state()["outcome"], "FAILED")
         self.assertIn("claude-worker: claude_session.model differs", self.m.state()["detail"])
 
+    def test_a_failed_commit_is_not_retried_after_a_later_blocked_run(self) -> None:
+        self.m.drifts([], exit=2, stderr="boom")
+        self.deploy()
+        self.assertEqual(self.m.outcomes(), [("FAILED", self.m.head)])
+        estop = self.m.root / "ESTOP"
+        estop.write_text(json.dumps({"reason": "operator maintenance"}))
+        self.deploy()
+        estop.unlink()
+        before = len(self.m.hermes_argv())
+
+        self.deploy()
+
+        self.assertEqual(self.m.hermes_argv()[before:], [])
+        self.assertEqual([outcome for outcome, _ in self.m.outcomes()], ["FAILED", "BLOCKED"])
+        self.m.drifts([])
+        self.m.push("B")
+        self.deploy()
+        self.assertEqual(self.m.state()["deployed"], self.m.head)
+
+    def test_an_unreadable_hold_key_holds_nothing_and_the_next_delivery_retries(self) -> None:
+        self.m.update_hermes(fail=[{"argv": ["kanban", "diagnostics", "--json"], "stderr": "config unreadable"}])
+        self.deploy()
+        self.assertEqual(self.m.outcomes(), [("FAILED", None)])
+        self.assertEqual(self.m.changes(), [])
+
+        self.m.update_hermes(fail=[])
+        self.deploy()
+        self.assertEqual(self.m.state()["deployed"], self.m.head)
+
     def test_install_drift_that_remains_records_failed(self) -> None:
         self.m.drifts([{**self.m.install("plugins", "install", "x"), "sticky": True}])
         self.deploy()

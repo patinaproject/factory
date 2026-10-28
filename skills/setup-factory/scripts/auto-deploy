@@ -116,7 +116,7 @@ def write_private(path: Path, data: dict) -> None:
 
 def fresh_state() -> dict:
     return {
-        "deployed": None, "attempted": None, "outcome": None, "detail": "", "manual": [],
+        "deployed": None, "attempted": None, "failed": None, "outcome": None, "detail": "", "manual": [],
         "restarted": None, "hold": None, "events": [], "updated_at": None,
     }
 
@@ -191,6 +191,10 @@ class Deploy:
         self.state["attempted"] = commit
         if outcome == DEPLOYED:
             self.state["deployed"] = commit
+            self.state["failed"] = None
+        elif outcome == FAILED and commit:
+            # Kept apart from `outcome`, which a later BLOCKED or WAITING record replaces.
+            self.state["failed"] = commit
         if manual is not None:
             self.state["manual"] = [{"line": self.redact(m.line), "action": self.redact(m.action)} for m in manual]
         self.state["events"] = (events + [{"seq": seq, "outcome": outcome, "commit": commit, "detail": detail, "at": now()}])[-EVENTS_KEPT:]
@@ -381,10 +385,15 @@ class Deploy:
             if target == self.state["deployed"]:
                 self.log(f"{short(target)} is already deployed")
                 return 0
-            if target == self.state["attempted"] and self.state["outcome"] == FAILED:
+            if target == self.state["failed"]:
                 self.log(f"{short(target)} failed; waiting for origin/{self.branch} to move")
                 return 0
-            if self.hold_key_present():
+            try:
+                held = self.hold_key_present()
+            except DeployError as error:
+                self.record(FAILED, None, f"cannot read {HOLD_KEY}: {error}")
+                return 0
+            if held:
                 self.record(BLOCKED, target, f"{HOLD_KEY} is already set in the root home; a person set it, so the run holds no card")
                 return 0
             outcome = self.attempt(target, lambda: self.drain_and_install(target, continued))
@@ -503,7 +512,7 @@ class Deploy:
         print(f"origin/{self.branch} is {target}; deployed is {self.state['deployed'] or 'nothing'}")
         if target == self.state["deployed"]:
             print("already deployed; a run changes nothing")
-        elif target == self.state["attempted"] and self.state["outcome"] == FAILED:
+        elif target == self.state["failed"]:
             print("failed before; a run waits for the branch to move")
         if self.hold_key_present():
             print(f"{HOLD_KEY} is set in the root home; a run would record BLOCKED")
