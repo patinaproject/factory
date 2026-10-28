@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, NamedTuple, Optional
 
 if __package__:
     from . import broker_client
@@ -153,6 +153,28 @@ ISSUE_EDIT_QUERY = """query IssueEdit($id: String!) {
     team { states { nodes { id name } } labels(first: 250) { nodes { id name isGroup parent { id } } } }
   }
   issueLabels(first: 250, filter: { team: { null: true } }) { nodes { id name isGroup parent { id } } }
+}"""
+
+ISSUE_RELATIONS_QUERY = """query IssueRelations($a: String!, $b: String!) {
+  a: issue(id: $a) { ...RelationFields }
+  b: issue(id: $b) { ...RelationFields }
+}
+fragment RelationFields on Issue {
+  id identifier
+  state { name type }
+  team { states { nodes { id name type } } }
+  relations(first: 51) { pageInfo { hasNextPage } nodes { id type issue { id identifier } relatedIssue { id identifier } } }
+  inverseRelations(first: 51) { pageInfo { hasNextPage } nodes { id type issue { id identifier } relatedIssue { id identifier } } }
+}"""
+
+RELATIONS_READ = 50
+
+ISSUE_RELATION_CREATE_MUTATION = """mutation IssueRelationCreate($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) { success }
+}"""
+
+ISSUE_RELATION_DELETE_MUTATION = """mutation IssueRelationDelete($id: String!) {
+  issueRelationDelete(id: $id) { success }
 }"""
 
 ISSUE_SEARCH_QUERY = """query IssueSearch($term: String!, $first: Int!) {
@@ -468,6 +490,84 @@ class LinearClient:
             "state": target["name"] if target else issue["state"]["name"],
         }
 
+    def relate_issues(self, id_or_identifier: str, other: str, kind: str) -> dict:
+        """Make `issue` a duplicate of `other` (kind `duplicate`), or make `other` block it (kind `blocks`).
+
+        A duplicate also loses the `related` relation between the two and moves to the team's duplicate status.
+        No other relation is touched.
+        """
+        if kind not in RELATION_RULES:
+            raise LinearError(f"unknown relation kind {kind!r}; expected one of {', '.join(RELATION_RULES)}")
+        a, b, relations = self._read_relations(id_or_identifier, other)
+        existing = decide_relation(kind, a, b, relations)
+        if existing is None:
+            # A `blocks` relation runs from the blocker to the blocked issue; a duplicate from the duplicate to the original.
+            source, target = (b, a) if kind == "blocks" else (a, b)
+            payload = self._graphql(
+                ISSUE_RELATION_CREATE_MUTATION,
+                {"input": {"issueId": source["id"], "relatedIssueId": target["id"], "type": kind}},
+            )
+            if not payload["issueRelationCreate"]["success"]:
+                raise LinearError("issueRelationCreate reported success: false")
+        result = {
+            "identifier": a["identifier"],
+            "related_issue": b["identifier"],
+            "relation": kind,
+            "created": existing is None,
+            "removed_related": False,
+            "state": a["state"]["name"],
+        }
+        if kind == "duplicate":
+            # The relation this call created can make a list of 50 one longer.
+            a, b, relations = self._read_relations(id_or_identifier, other, most=RELATIONS_READ + 1)
+            for relation in relations.values():
+                if relation.type == "related" and {relation.source, relation.target} == {a["id"], b["id"]}:
+                    payload = self._graphql(ISSUE_RELATION_DELETE_MUTATION, {"id": relation.id})
+                    if not payload["issueRelationDelete"]["success"]:
+                        raise LinearError("issueRelationDelete reported success: false")
+                    result["removed_related"] = True
+            result["state"] = self._move_to_duplicate_status(a)
+        return result
+
+    def _read_relations(self, first: str, second: str, most: int = RELATIONS_READ) -> tuple:
+        data = self._graphql(ISSUE_RELATIONS_QUERY, {"a": first, "b": second})
+        for key, name in (("a", first), ("b", second)):
+            if data[key] is None:
+                raise LinearError(f"Linear has no issue {name} that the agent app can read")
+        relations: dict = {}
+        names = {i["id"]: i["identifier"] for i in (data["a"], data["b"])}
+        for issue in (data["a"], data["b"]):
+            for side in ("relations", "inverseRelations"):
+                if issue[side]["pageInfo"]["hasNextPage"] or len(issue[side]["nodes"]) > most:
+                    raise LinearError(
+                        f"{issue['identifier']} has more than {RELATIONS_READ} {side}, more than the agent reads, so nothing was changed"
+                    )
+                for node in issue[side]["nodes"]:
+                    relations[node["id"]] = Relation(
+                        node["id"], node["type"], node["issue"]["id"], node["relatedIssue"]["id"]
+                    )
+                    names[node["issue"]["id"]] = node["issue"]["identifier"]
+                    names[node["relatedIssue"]["id"]] = node["relatedIssue"]["identifier"]
+        return {**data["a"], "names": names}, {**data["b"], "names": names}, relations
+
+    def _move_to_duplicate_status(self, issue: dict) -> str:
+        if issue["state"]["type"] == "duplicate":
+            return issue["state"]["name"]
+        states = [s for s in issue["team"]["states"]["nodes"] if s["type"] == "duplicate"]
+        if len(states) != 1:
+            problem = (
+                "no status of type duplicate"
+                if not states
+                else "more than one status of type duplicate: " + ", ".join(sorted(s["name"] for s in states))
+            )
+            raise LinearError(
+                f"the duplicate relation exists, but {issue['identifier']}'s team has {problem}, so its status did not change"
+            )
+        payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": {"stateId": states[0]["id"]}})
+        if not payload["issueUpdate"]["success"]:
+            raise LinearError("issueUpdate reported success: false")
+        return states[0]["name"]
+
     def search_issues(self, term: str) -> list:
         nodes = self._graphql(ISSUE_SEARCH_QUERY, {"term": term, "first": 10})["searchIssues"]["nodes"]
         return [
@@ -658,6 +758,47 @@ def _issue_summary(issue: dict) -> dict:
         "stateType": issue["state"]["type"],
         "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]],
     }
+
+
+class Relation(NamedTuple):
+    id: str
+    type: str
+    source: str
+    target: str
+
+
+# Each rule is (relation type, source role, target role, verdict, message). A role is `a` (the issue being
+# changed), `b` (the other issue), or `*` (any issue but those two). `existing` means the request already holds.
+RELATION_RULES = {
+    "duplicate": (
+        ("duplicate", "a", "b", "existing", None),
+        ("duplicate", "a", "*", "conflict", "{a} is already a duplicate of {target}"),
+        ("duplicate", "b", "a", "conflict", "{b} is already a duplicate of {a}"),
+    ),
+    "blocks": (
+        ("blocks", "b", "a", "existing", None),
+        ("blocks", "a", "b", "conflict", "{b} is already blocked on {a}"),
+    ),
+}
+
+
+def decide_relation(kind: str, a: dict, b: dict, relations: dict) -> Optional[Relation]:
+    """The relation that already satisfies the request, or None when one must be created. Raises on a conflict."""
+    if a["id"] == b["id"]:
+        raise LinearError(f"{a['identifier']} cannot be related to itself")
+    roles = {a["id"]: "a", b["id"]: "b"}
+    for type_, source, target, verdict, message in RELATION_RULES[kind]:
+        for relation in relations.values():
+            if (
+                relation.type == type_
+                and roles.get(relation.source, "*") == source
+                and roles.get(relation.target, "*") == target
+            ):
+                if verdict == "existing":
+                    return relation
+                text = message.format(a=a["identifier"], b=b["identifier"], target=a["names"][relation.target])
+                raise LinearError(f"{text} (relation {relation.id}), so nothing was changed")
+    return None
 
 
 def _blocking_issues(relations: dict) -> list:

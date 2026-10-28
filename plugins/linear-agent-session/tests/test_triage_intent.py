@@ -263,7 +263,7 @@ class IssueUpdateTest(unittest.TestCase):
         return expected(action, **{"agent_session_id": None, **overrides})
 
     def test_a_closed_issue_is_closed_whatever_else_is_true(self):
-        for state in ("completed", "canceled"):
+        for state in ("completed", "canceled", "duplicate"):
             with self.subTest(state):
                 live = issue(stateType=state, delegate=None)
                 self.assertEqual(

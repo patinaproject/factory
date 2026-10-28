@@ -431,6 +431,7 @@ class RegisterTest(unittest.TestCase):
                 "linear_delegated_issues",
                 "linear_issue",
                 "linear_issue_edit",
+                "linear_issue_relate",
                 "linear_issue_search",
                 "linear_issue_to_todo",
                 "linear_issue_undelegate",
