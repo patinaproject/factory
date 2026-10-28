@@ -9,7 +9,9 @@ workflow runs, and the repository activity that card_branch reads to tell the Ap
 branches from a person's. Actions needs write so a worker can re-run failed jobs.
 The App's settings name the permissions it asks for, but an installation keeps
 the old ones until an org owner accepts the new, so the check also compares the
-permissions of the installation token that the gateway's broker mints.
+permissions of the installation token that the gateway's broker mints. It also
+checks that the App subscribes to the events the factory needs beyond the
+`github` route's own: `push`, which starts auto-deploy.
 
 Silent when every read succeeds. Prints one line per missing permission or
 refused read, naming the permission to grant, and exits 1. Exits 2 when it
@@ -51,6 +53,7 @@ STATUSES = Permission("statuses", "Commit statuses", "read")
 ACTIONS = Permission("actions", "Actions", "write")
 METADATA = Permission("metadata", "Metadata", "read")
 REQUIRED = (CONTENTS, PULL_REQUESTS, ISSUES, CHECKS, STATUSES, ACTIONS, METADATA)
+REQUIRED_EVENTS = {"push": "Push"}
 
 PULL_REQUEST_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
@@ -104,15 +107,18 @@ def shortfalls(granted: dict) -> list[tuple[Permission, str]]:
 
 
 def check_app(slug: str) -> tuple[list[str], set]:
-    """Report each permission the App's settings lack, and return their keys."""
     try:
-        granted = gh(METADATA, slug, "the App", f"apps/{slug}").get("permissions") or {}
+        app = gh(METADATA, slug, "the App", f"apps/{slug}")
     except Refused as refused:
         return [str(refused)], set()
-    missing = shortfalls(granted)
-    return [f"App {slug}: grant {permission.grant()}, it has {has}" for permission, has in missing], {
-        permission.key for permission, _ in missing
-    }
+    missing = shortfalls(app.get("permissions") or {})
+    events = set(app.get("events") or [])
+    problems = [f"App {slug}: grant {permission.grant()}, it has {has}" for permission, has in missing]
+    problems.extend(
+        f'App {slug}: subscribe to the "{label}" event, which starts auto-deploy'
+        for event, label in REQUIRED_EVENTS.items() if event not in events
+    )
+    return problems, {permission.key for permission, _ in missing}
 
 
 def installation_permissions(slug: str) -> dict:

@@ -62,6 +62,14 @@ It checks that each repository plugin installed in a home is enabled there, from
 --user --json`, and imports each installed plugin the way Hermes does with import-plugins, in the same
 store Python, so a plugin Hermes would skip or fail to load is reported. Hermes only logs both.
 
+On macOS, while no auto-deploy run is alive, it reports a missing or unreadable <root>/auto-deploy.json, a
+stale run lock, kanban.dispatch_profiles set in the root home, a hermes pause and a factory-gateway.lock that a
+dead run left, a gateway restart that auto-deploy recorded and that has not succeeded, and a default-branch commit that auto-deploy has not deployed a day after it was committed. The
+stranded triage check is silent while auto-deploy holds the cards.
+
+--json prints the same drift as a JSON list of records, each with the remedy that install_plan.py names:
+an install command and its step, a manual action, or advisory. The text output is the records' lines.
+
 LAUNCHD_ROOT and LAUNCHCTL_BIN point the launchd and broker user checks at
 another file system root and launchctl, for tests.
 """
@@ -91,8 +99,10 @@ from typing import Callable, NamedTuple
 import factory_settings
 import factory_source
 import gh_login
+import install_plan
 import kanban_board
 from factory_settings import SETTINGS_KEY, find_hermes
+from install_plan import ADVISORY, Drift, Homes, Install, Manual
 
 PROFILE = "profiles/claude-worker"
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
@@ -111,8 +121,7 @@ HEALTHY_RUNS = (None, "ok", "delivery_queued")
 RUN_ERROR_LIMIT = 200
 SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE)
 TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
-# watch-gateway runs from launchd and restart-gateway is the one it runs, so both live beside the cron wrapper.
-ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway")
+ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway", "auto-deploy", "report-deploy")
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -121,26 +130,21 @@ RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
 REJECTED = re.compile(r'^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ .*"POST /webhooks/([^ ?"]+)[^"]*" 429 ')
 
 
-class Drift(NamedTuple):
-    kind: str
-    where: str
-    detail: str
-
-    def __str__(self) -> str:
-        return f"{self.kind} {self.where}: {self.detail}"
-
-
 class Refusal(Exception):
     pass
+
+
+MANUAL, UNSET = object(), object()
 
 
 class Want(NamedTuple):
     ok: Callable[[object], bool]
     text: str
+    target: object = MANUAL
 
 
 def equal(value) -> Want:
-    return Want(lambda live: live == value, json.dumps(value))
+    return Want(lambda live: live == value, json.dumps(value), value)
 
 
 def prefixed(prefix: str, what: str) -> Want:
@@ -148,11 +152,12 @@ def prefixed(prefix: str, what: str) -> Want:
 
 
 def one_of(*wants: Want) -> Want:
-    return Want(lambda live: any(want.ok(live) for want in wants), " or ".join(want.text for want in wants))
+    target = MANUAL if any(want.target is MANUAL for want in wants) else wants[0].target
+    return Want(lambda live: any(want.ok(live) for want in wants), " or ".join(want.text for want in wants), target)
 
 
 def unset() -> Want:
-    return Want(lambda live: live in (None, ""), "unset")
+    return Want(lambda live: live in (None, ""), "unset", UNSET)
 
 
 def declared(what: str, *, besides: tuple = ()) -> Want:
@@ -202,7 +207,7 @@ class Service(NamedTuple):
     name: str
     kind: str
     plist: str
-    scheduled: bool = False  # an interval job is loaded but not running between its runs
+    scheduled: bool = False
     env: tuple = ()  # EnvironmentVariables keys the plist must set
     interval: int = 0  # the StartInterval the plist must set, in seconds
 
@@ -238,7 +243,7 @@ CONFIG = (
     ConfigKey(10, "kanban.auto_decompose", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.default_assignee", (ROOT,), unset()),
     ConfigKey(5, "terminal.timeout", (WORKER,), equal(400)),
-    ConfigKey(5, "terminal.env_passthrough", (WORKER,), Want(lambda live: not live, "empty")),
+    ConfigKey(5, "terminal.env_passthrough", (WORKER,), Want(lambda live: not live, "empty", [])),
     ConfigKey(5, "platforms.factory_uploads.enabled", (ROOT,), equal(True)),
     ConfigKey(
         5, "platforms.factory_uploads.extra.repositories", (ROOT,),
@@ -263,6 +268,7 @@ CRON = (
     CronJob(12, "reopen-conflicts", 5, equal("local")),
     CronJob(12, "dispatch-triage", 1, equal("local")),
     CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
+    CronJob(12, "report-deploy", 5, declared("the operator's chat platform", besides=("local",)), home=ROOT),
 )
 # Jobs that moved from Hermes' cron to launchd, because `hermes pause` stops Hermes' cron.
 LAUNCHD_JOBS = ("refresh-gh-app-login",)
@@ -276,6 +282,10 @@ SERVICES = (
     Service(
         10, "gh login refresh", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist",
         scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME"), interval=gh_login.REFRESH_INTERVAL_SECONDS,
+    ),
+    Service(
+        12, "auto deploy", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
+        scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME", "PATH"),
     ),
 )
 # watch-gateway's own files in the root home. WATCH_INTERVAL and RESTARTS_PER_HOUR equal the script's.
@@ -330,38 +340,43 @@ def compare_files(commit: Commit, files: dict, strip: str, home: Path) -> list:
     return details
 
 
-def check_profile(commit: Commit, worker: Path) -> list:
+def check_profile(commit: Commit, homes: Homes) -> list:
     files = {}
     for path in PROFILE_PATHS:
         files.update(commit.files(path))
-    return [Drift("profile", "claude-worker", d) for d in compare_files(commit, files, f"{PROFILE}/", worker)]
+    fix = install_plan.profile_update(homes)
+    return [Drift("profile", "claude-worker", d, fix) for d in compare_files(commit, files, f"{PROFILE}/", homes.worker)]
 
 
 # Plugins that run in the gateway only. Their code lives in the root home and never in the worker's.
-ROOT_ONLY_PLUGINS = frozenset({"factory-uploads", "work", "webhook-retry"})
+ROOT_ONLY_PLUGINS = frozenset({"factory-uploads", "work", "webhook-retry", "factory-deploy"})
 
 
-def check_plugins(commit: Commit, homes: list) -> list:
-    """`homes` is [root, worker]."""
+def check_plugins(commit: Commit, homes: Homes) -> list:
     plugins: dict = {}
     for path, blob_id in commit.files("plugins").items():
         _, name, rest = path.split("/", 2)
         if not rest.startswith("tests/"):
             plugins.setdefault(name, {})[path] = blob_id
     drifts = []
+    pair = [homes.root, homes.worker]
     for name, files in sorted(plugins.items()):
-        wanted = homes[:1] if name in ROOT_ONLY_PLUGINS else homes
-        for home in homes[len(wanted):]:
+        wanted = pair[:1] if name in ROOT_ONLY_PLUGINS else pair
+        for home in pair[len(wanted):]:
             if (home / "plugins" / name).exists():
-                drifts.append(Drift("plugin", f"{name} in {home}", "installed, but it runs only in the root home"))
+                drifts.append(Drift(
+                    "plugin", f"{name} in {home}", "installed, but it runs only in the root home",
+                    install_plan.plugin_remove(homes, home, name),
+                ))
         for home in wanted:
             where = f"{name} in {home}"
             installed = home / "plugins" / name
             if not installed.is_dir():
-                drifts.append(Drift("plugin", where, "not installed"))
+                drifts.append(Drift("plugin", where, "not installed", install_plan.plugin_install(homes, home, name, reinstall=False)))
                 continue
             details = compare_files(commit, files, f"plugins/{name}/", installed)
-            drifts.extend(Drift("plugin", where, d) for d in details)
+            fix = install_plan.plugin_install(homes, home, name, reinstall=True)
+            drifts.extend(Drift("plugin", where, d, fix) for d in details)
     return drifts
 
 
@@ -376,7 +391,8 @@ def matches(rendered, installed) -> bool:
     return rendered == installed
 
 
-def check_routes(commit: Commit, root: Path, hermes: str) -> list:
+def check_routes(commit: Commit, homes: Homes) -> list:
+    root, hermes = homes.root, homes.hermes
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         for path, blob_id in commit.files("templates").items():
@@ -392,24 +408,29 @@ def check_routes(commit: Commit, root: Path, hermes: str) -> list:
             [sys.executable, str(work / "templates" / "render.py")], env=env, capture_output=True, text=True
         )
     if render.returncode != 0:
-        return [Drift("webhook config", str(root), f"render.py failed at {commit.short}: {render.stderr.strip()}")]
+        return [Drift(
+            "webhook config", str(root), f"render.py failed at {commit.short}: {render.stderr.strip()}",
+            Manual("fix the factory settings that render.py names, as part 10 describes"),
+        )]
 
     drifts = []
     env = {**os.environ, "HERMES_HOME": str(root)}
     for key, value in json.loads(render.stdout).items():
         # Without --raw, Hermes masks secrets; matches() never compares them.
         proc = subprocess.run([hermes, "config", "get", key, "--json"], env=env, capture_output=True, text=True)
+        fix = install_plan.route_set(homes, key, value)
         if proc.returncode != 0:
-            drifts.append(Drift("webhook config", key, f"not installed in {root}"))
+            drifts.append(Drift("webhook config", key, f"not installed in {root}", fix))
         elif not matches(value, json.loads(proc.stdout)):
-            drifts.append(Drift("webhook config", key, f"differs from the value rendered at {commit.short}"))
+            drifts.append(Drift("webhook config", key, f"differs from the value rendered at {commit.short}", fix))
         elif f'"{LINEAR_ISSUE_FIELD}"' in proc.stdout:
-            drifts.extend(check_linear_ids(root, key))
+            drifts.extend(check_linear_ids(homes, key))
     return drifts
 
 
-def check_linear_ids(root: Path, key: str) -> list:
+def check_linear_ids(homes: Homes, key: str) -> list:
     # Re-rendering the route before refresh-owned-refs ran drops every closure, so the order is checked here.
+    root = homes.root
     try:
         refs = json.loads((root / OWNED_REFS).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -422,13 +443,14 @@ def check_linear_ids(root: Path, key: str) -> list:
         "webhook config", key,
         f"filters on Linear issue ids, but {root / OWNED_REFS} holds none; deploy the profile and run refresh-owned-refs "
         "once before the route (part 11)",
+        install_plan.refresh_owned_refs(homes),
     )]
 
 
 def check_rejected_deliveries(root: Path) -> list:
     log = root / "logs" / "agent.log"
     if not log.is_file():
-        return [Drift("webhook deliveries", str(root), f"cannot read {log} to count 429 responses")]
+        return [Drift("webhook deliveries", str(root), f"cannot read {log} to count 429 responses", ADVISORY)]
     since = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     rejected: Counter = Counter()
     for path in (log.with_name("agent.log.1"), log):
@@ -440,44 +462,53 @@ def check_rejected_deliveries(root: Path) -> list:
                 if match and match.group(1) >= since:
                     rejected[match.group(2)] += 1
     return [
-        Drift("webhook route", route, f"{count} rejected with HTTP 429 in the last hour; check {RATE_LIMIT_KEY}")
+        Drift("webhook route", route, f"{count} rejected with HTTP 429 in the last hour; check {RATE_LIMIT_KEY}", ADVISORY)
         for route, count in sorted(rejected.items())
     ]
 
 
+DASHBOARD_FIX = Manual(
+    "follow step 6 of references/cloudflare-sst.md, or allow the refresh_tokens grant on the saas Access application, "
+    "then restart the dashboard service"
+)
+
+
 def check_dashboard(root: Path, hermes: str) -> list:
     where = str(root)
+
+    def drift(detail: str) -> Drift:
+        return Drift("dashboard sign-in", where, detail, DASHBOARD_FIX)
+
     proc = subprocess.run(
         [hermes, "config", "get", "dashboard", "--json"],
         env={**os.environ, "HERMES_HOME": str(root)}, capture_output=True, text=True,
     )
     if proc.returncode != 0:
-        return [Drift("dashboard sign-in", where, f"hermes config get dashboard failed: {proc.stderr.strip()}")]
+        return [drift(f"hermes config get dashboard failed: {proc.stderr.strip()}")]
     try:
         dashboard = json.loads(proc.stdout)
     except ValueError:
-        return [Drift("dashboard sign-in", where, "hermes config get dashboard did not return JSON")]
+        return [drift("hermes config get dashboard did not return JSON")]
     self_hosted = (dashboard.get("oauth") or {}).get("self_hosted") or {}
     issuer = (self_hosted.get("issuer") or "").rstrip("/")
     drifts = []
     if not dashboard.get("public_url"):
-        drifts.append(Drift("dashboard sign-in", where, "dashboard.public_url is not set"))
+        drifts.append(drift("dashboard.public_url is not set"))
     if not issuer:
-        return [*drifts, Drift("dashboard sign-in", where, "dashboard.oauth.self_hosted.issuer is not set")]
+        return [*drifts, drift("dashboard.oauth.self_hosted.issuer is not set")]
     if not self_hosted.get("client_id"):
-        drifts.append(Drift("dashboard sign-in", where, "dashboard.oauth.self_hosted.client_id is not set"))
+        drifts.append(drift("dashboard.oauth.self_hosted.client_id is not set"))
     if "offline_access" not in (self_hosted.get("scopes") or DEFAULT_OIDC_SCOPES).split():
-        drifts.append(Drift(
-            "dashboard sign-in", where,
+        drifts.append(drift(
             "dashboard.oauth.self_hosted.scopes does not request offline_access, so the issuer returns no refresh token",
         ))
     try:
         with urllib.request.urlopen(f"{issuer}/.well-known/openid-configuration", timeout=10) as resp:
             grants = json.load(resp).get("grant_types_supported") or []
     except (OSError, ValueError) as exc:
-        return [*drifts, Drift("dashboard sign-in", where, f"cannot read the issuer's discovery document: {exc}")]
+        return [*drifts, drift(f"cannot read the issuer's discovery document: {exc}")]
     if "refresh_tokens" not in grants and "refresh_token" not in grants:
-        drifts.append(Drift("dashboard sign-in", where, "the issuer does not offer the refresh_tokens grant"))
+        drifts.append(drift("the issuer does not offer the refresh_tokens grant"))
     return drifts
 
 
@@ -494,7 +525,16 @@ def config_value(home: Path, hermes: str, key: str):
     raise Refusal(f"hermes config get {key} failed in {home}: {proc.stderr.strip()}")
 
 
-def check_config(home_paths: dict, hermes: str, table: tuple = CONFIG) -> list:
+def config_fix(homes: Homes, home: Path, entry: ConfigKey):
+    if entry.want.target is UNSET:
+        return install_plan.config_unset(homes, home, entry.key)
+    if entry.want.target is MANUAL:
+        return Manual(f"set {entry.key} as part {entry.part} describes")
+    return install_plan.config_set(homes, home, entry.key, entry.want.target)
+
+
+def check_config(homes: Homes, table: tuple = CONFIG) -> list:
+    home_paths, hermes = {ROOT: homes.root, WORKER: homes.worker}, homes.hermes
     reads = [(entry, home) for entry in table for home in entry.homes]
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         values = list(pool.map(lambda read: config_value(home_paths[read[1]], hermes, read[0].key), reads))
@@ -503,13 +543,16 @@ def check_config(home_paths: dict, hermes: str, table: tuple = CONFIG) -> list:
     for (entry, home), value in zip(reads, values):
         if not entry.want.ok(value):
             detail = f"is not {entry.want.text} (part {entry.part})"
-            drifts.append(Drift("config", f"{entry.key} in {home_paths[home]}", detail))
+            drifts.append(Drift("config", f"{entry.key} in {home_paths[home]}", detail, config_fix(homes, home_paths[home], entry)))
         by_key.setdefault(entry.key, []).append(value)
     for entry in table:
         values = by_key[entry.key]
         if entry.same_in_homes and any(value != values[0] for value in values):
             between = " and ".join(str(home_paths[home]) for home in entry.homes)
-            drifts.append(Drift("config", entry.key, f"differs between {between} (part {entry.part})"))
+            drifts.append(Drift(
+                "config", entry.key, f"differs between {between} (part {entry.part})",
+                Manual(f"find which home is right with the operator and set the other as part {entry.part} describes"),
+            ))
     return drifts
 
 
@@ -524,11 +567,11 @@ def check_upload_broker(root: Path, token_env: str, mcp_envs: dict) -> list:
         client = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(client)
     except (OSError, SyntaxError, ImportError):
-        return [Drift("upload broker", str(root / BROKER_CLIENT), "cannot be loaded, so the broker is not asked (part 5)")]
+        return [Drift("upload broker", str(root / BROKER_CLIENT), "cannot be loaded, so the broker is not asked (part 5)", ADVISORY)]
     path = root / client.SOCKET_NAME
 
     def drift(detail: str) -> list:
-        return [Drift("upload broker", str(path), f"{detail} (part 5)")]
+        return [Drift("upload broker", str(path), f"{detail} (part 5)", ADVISORY)]
 
     try:
         status = client.status(str(path), timeout=UPLOAD_STATUS_SECONDS)
@@ -571,14 +614,18 @@ def check_worker_secrets(commit: Commit, worker: Path, hermes: str, settings) ->
     drifts = []
     # The live command is never printed, since a tuned command could embed a secret.
     if token_env and not (enabled and live.get("command") == helper):
-        drifts.append(Drift("config", where, f"is not the worker helper {helper} (part 5)"))
+        drifts.append(Drift("config", where, f"is not the worker helper {helper} (part 5)", Manual("set the worker's secrets.command as part 5 describes")))
     elif not token_env and enabled:
-        drifts.append(Drift("config", where, "is set, but a worker without a proxy token loads no secret (part 5)"))
+        drifts.append(Drift(
+            "config", where, "is set, but a worker without a proxy token loads no secret (part 5)",
+            Manual("turn off the worker's secrets.command as part 5 describes"),
+        ))
     held = {**GATEWAY_ONLY, **{name: 3 for name in (token_env, *mcp_envs.values()) if name}}
     for name, part in held.items():
         if env_has(worker, name):
             drifts.append(Drift(
-                "secret", f"{name} in {worker}/.env", f"is set, but the worker holds no factory secret; remove it (part {part})"
+                "secret", f"{name} in {worker}/.env", f"is set, but the worker holds no factory secret; remove it (part {part})",
+                Manual("follow Retire the worker's identity in references/infisical.md"),
             ))
     files = commit.files(SECRET_NAMES)
     declared = set(DECLARED_NAME.findall(commit.blob(files[SECRET_NAMES]).decode())) if SECRET_NAMES in files else set()
@@ -588,6 +635,7 @@ def check_worker_secrets(commit: Commit, worker: Path, hermes: str, settings) ->
             drifts.append(Drift(
                 "config", f"claude_session.{key} in {worker}",
                 f"names {name}, which {SECRET_NAMES} does not declare, so every process a home starts inherits it (part 3)",
+                Manual(f"declare {name} in {SECRET_NAMES} or name a declared variable"),
             ))
     return drifts
 
@@ -598,16 +646,24 @@ def cron_jobs(home: Path) -> list:
 
 
 def cron_differences(job: CronJob, live: dict) -> list:
+    job_id = live["id"]
     details = []
     if not live["enabled"]:
-        details.append("is disabled")
+        details.append(("is disabled", ("resume", job_id)))
     schedule = live["schedule"]
     if schedule.get("kind") != "interval" or schedule.get("minutes") != job.minutes:
-        details.append(f"runs {live['schedule_display']}, not every {job.minutes}m")
+        details.append((
+            f"runs {live['schedule_display']}, not every {job.minutes}m",
+            ("edit", job_id, "--schedule", install_plan.schedule(job.minutes)),
+        ))
     if live["script"] != job.runs or not live["no_agent"]:
-        details.append(f"is not a script-only job that runs {job.runs}")
+        details.append((f"is not a script-only job that runs {job.runs}", ("edit", job_id, "--no-agent", "--script", job.runs)))
     if not job.deliver.ok(live["deliver"]):
-        details.append(f"delivers to {json.dumps(live['deliver'])}, not {job.deliver.text}")
+        target = job.deliver.target
+        details.append((
+            f"delivers to {json.dumps(live['deliver'])}, not {job.deliver.text}",
+            None if target is MANUAL else ("edit", job_id, "--deliver", target),
+        ))
     return details
 
 
@@ -685,7 +741,8 @@ def unresolved_deliveries(home: Path, live: dict, hermes: str) -> list:
     return details
 
 
-def check_root_wrappers(commit: Commit, root: Path) -> list:
+def check_root_wrappers(commit: Commit, homes: Homes) -> list:
+    root = homes.root
     drifts = []
     for name in ROOT_WRAPPERS:
         source = f"skills/setup-factory/scripts/{name}"
@@ -693,42 +750,70 @@ def check_root_wrappers(commit: Commit, root: Path) -> list:
             continue
         installed = root / "scripts" / name
         where = str(installed)
+        fix = install_plan.wrapper_install(homes, name)
         if not installed.is_file():
-            drifts.append(Drift("script", where, f"is missing; install it from {source} (part 12)"))
+            drifts.append(Drift("script", where, f"is missing; install it from {source} (part 12)", fix))
         elif installed.read_bytes() != commit.blob(commit.files(source)[source]):
-            drifts.append(Drift("script", where, f"differs from {commit.label} at {commit.short} (part 12)"))
+            drifts.append(Drift("script", where, f"differs from {commit.label} at {commit.short} (part 12)", fix))
     return drifts
 
 
-def check_cron(commit: Commit, root: Path, worker: Path, hermes: str) -> list:
-    homes = {ROOT: root, WORKER: worker}
-    live_jobs = {name: cron_jobs(home) for name, home in homes.items()}
-    drifts = check_root_wrappers(commit, root)
-    secrets = known_secrets(homes.values())
+def check_cron(commit: Commit, homes: Homes) -> list:
+    hermes = homes.hermes
+    paths = {ROOT: homes.root, WORKER: homes.worker}
+    live_jobs = {name: cron_jobs(home) for name, home in paths.items()}
+    drifts = check_root_wrappers(commit, homes)
+    secrets = known_secrets(paths.values())
     for job in CRON:
-        home = homes[job.home]
+        home = paths[job.home]
         where = f"{job.name} in {home}"
+        operator_platform = Manual(f"set {job.name}'s delivery to the operator's chat platform as part {job.part} describes")
+
+        def drift(detail: str, remedy) -> Drift:
+            return Drift("cron job", where, f"{detail} (part {job.part})", remedy)
+
         found = [live for live in live_jobs[job.home] if live["name"] == job.name]
         if not found:
-            drifts.append(Drift("cron job", where, f"is missing (part {job.part})"))
+            target = job.deliver.target
+            drifts.append(drift("is missing", operator_platform if target is MANUAL else install_plan.cron_command(
+                homes, home, "create", install_plan.schedule(job.minutes), "--name", job.name, "--no-agent",
+                "--script", job.runs, "--deliver", target,
+            )))
         elif len(found) > 1:
-            drifts.append(Drift("cron job", where, f"exists {len(found)} times (part {job.part})"))
+            drifts.append(drift(
+                f"exists {len(found)} times", Manual(f"remove all but one {job.name} job with hermes cron remove <job id>")
+            ))
         for live in found:
-            details = [
-                *cron_differences(job, live), *unresolved_deliveries(home, live, hermes), *last_run_failure(job, live, secrets)
-            ]
-            drifts.extend(Drift("cron job", where, f"{d} (part {job.part})") for d in details)
+            drifts.extend(
+                drift(d, operator_platform if args is None else install_plan.cron_command(homes, home, *args))
+                for d, args in cron_differences(job, live)
+            )
+            drifts.extend(
+                drift(d, Manual(f"set the platform's home channel in {home} as part {job.part} describes"))
+                for d in unresolved_deliveries(home, live, hermes)
+            )
+            drifts.extend(drift(d, ADVISORY) for d in last_run_failure(job, live, secrets))
     owners = {job.name: job for job in CRON}
     for name, jobs in live_jobs.items():
         for live in jobs:
-            where = f"{live['name']} in {homes[name]}"
+            where = f"{live['name']} in {paths[name]}"
             owner = owners.get(live["name"])
             if live["name"] in LAUNCHD_JOBS:
-                drifts.append(Drift("cron job", where, "is replaced by a launchd job; remove it with hermes cron remove (part 10)"))
+                remove = " ".join(install_plan.cron_command(homes, paths[name], "remove", live["id"]).argv)
+                drifts.append(Drift(
+                    "cron job", where, "is replaced by a launchd job; remove it with hermes cron remove (part 10)",
+                    Manual(f"once the part 10 launchd job has run, run {remove}"),
+                ))
             elif owner is None:
-                drifts.append(Drift("cron job", where, "is not a job the setup runbook creates"))
+                drifts.append(Drift(
+                    "cron job", where, "is not a job the setup runbook creates",
+                    Manual("remove it with hermes cron remove <job id> once the operator agrees"),
+                ))
             elif owner.home != name:
-                drifts.append(Drift("cron job", where, f"belongs to the {owner.home} profile (part {owner.part})"))
+                drifts.append(Drift(
+                    "cron job", where, f"belongs to the {owner.home} profile (part {owner.part})",
+                    install_plan.cron_command(homes, paths[name], "remove", live["id"]),
+                ))
     return drifts
 
 
@@ -765,41 +850,50 @@ def hermes_lock_drifts(service: Service, plist: dict) -> list:
         "service", service.name,
         f"its --lock is Hermes' own {lock}, which the running gateway always holds; "
         f"name a factory-owned file or drop --lock (part {service.part})",
+        service_fix(service),
     )]
+
+
+def service_fix(service: Service) -> Manual:
+    return Manual(f"print, install, and load the launchd job as part {service.part} describes")
 
 
 def check_services(launchd_root: Path, launchctl: str) -> list:
     drifts = []
     for service in SERVICES:
+        fix = service_fix(service)
         pattern = str(launchd_root / os.path.expanduser(service.plist).lstrip("/"))
         plists = sorted(glob.glob(pattern))
         if len(plists) != 1:
             found = "no plist matches" if not plists else f"{len(plists)} plists match"
-            drifts.append(Drift("service", service.name, f"{found} {service.plist} (part {service.part})"))
+            drifts.append(Drift("service", service.name, f"{found} {service.plist} (part {service.part})", fix))
             continue
         try:
             with open(plists[0], "rb") as handle:
                 plist = plistlib.load(handle)
         except (OSError, plistlib.InvalidFileException) as exc:
-            drifts.append(Drift("service", service.name, f"cannot read {plists[0]}: {exc.__class__.__name__}"))
+            drifts.append(Drift("service", service.name, f"cannot read {plists[0]}: {exc.__class__.__name__}", fix))
             continue
         # The plist's ProgramArguments can hold a token, so only Label, RunAtLoad, StartInterval, and the names of
         # EnvironmentVariables are read here; hermes_lock_drifts reads --root and --lock and nothing else.
         if plist.get("RunAtLoad") is not True:
-            drifts.append(Drift("service", service.name, f"does not run at load (part {service.part})"))
+            drifts.append(Drift("service", service.name, f"does not run at load (part {service.part})", fix))
         if service.interval and plist.get("StartInterval") != service.interval:
-            drifts.append(Drift("service", service.name, f"does not run every {service.interval} seconds (part {service.part})"))
+            drifts.append(Drift("service", service.name, f"does not run every {service.interval} seconds (part {service.part})", fix))
         variables = plist.get("EnvironmentVariables")
         unset = [name for name in service.env if not isinstance(variables, dict) or not variables.get(name)]
         if unset:
-            drifts.append(Drift("service", service.name, f"does not set {', '.join(unset)} (part {service.part})"))
+            drifts.append(Drift("service", service.name, f"does not set {', '.join(unset)} (part {service.part})", fix))
         drifts.extend(hermes_lock_drifts(service, plist))
         state = launchd_state(launchctl, service.domains(), plist["Label"])
         if state is None:
-            drifts.append(Drift("service", service.name, f"is not loaded in launchd (part {service.part})"))
+            drifts.append(Drift("service", service.name, f"is not loaded in launchd (part {service.part})", fix))
         elif state != "running" and not service.scheduled:
-            drifts.append(Drift("service", service.name, f"is {state}, not running (part {service.part})"))
+            drifts.append(Drift("service", service.name, f"is {state}, not running (part {service.part})", fix))
     return drifts
+
+
+HEARTBEAT_FIX = Manual("ask the operator to store the heartbeat URL, mode 600, as part 12's checkpoint describes")
 
 
 def check_gateway_watch(root: Path, now: float | None = None) -> list:
@@ -812,7 +906,7 @@ def check_gateway_watch(root: Path, now: float | None = None) -> list:
         checked = float(state["checked_at"])
     except (OSError, ValueError, KeyError, TypeError):
         drifts.append(Drift(
-            "gateway watch", str(state_path), "is missing or unreadable, so watch-gateway has not run (part 12)"
+            "gateway watch", str(state_path), "is missing or unreadable, so watch-gateway has not run (part 12)", ADVISORY
         ))
     else:
         if now - checked > 3 * WATCH_INTERVAL:
@@ -820,6 +914,7 @@ def check_gateway_watch(root: Path, now: float | None = None) -> list:
                 "gateway watch", str(state_path),
                 f"was last written {int((now - checked) // 60)} minutes ago, but watch-gateway runs every "
                 f"{WATCH_INTERVAL // 60} (part 12)",
+                ADVISORY,
             ))
         restarts = [t for t in state.get("restarts", []) if isinstance(t, (int, float)) and now - t < 3600]
         if state.get("state") == "unresolved" and len(restarts) >= RESTARTS_PER_HOUR:
@@ -827,6 +922,7 @@ def check_gateway_watch(root: Path, now: float | None = None) -> list:
                 "gateway watch", str(state_path),
                 f"restarted the gateway {len(restarts)} times in the last hour and its secrets stay unresolved: "
                 "read the factory-secrets log (part 14)",
+                ADVISORY,
             ))
     try:
         mode = beat_path.stat().st_mode & 0o777
@@ -834,10 +930,127 @@ def check_gateway_watch(root: Path, now: float | None = None) -> list:
         drifts.append(Drift(
             "gateway watch", str(beat_path),
             "is missing, so nothing alerts a person when the gateway, Slack, or the machine is down (part 12)",
+            HEARTBEAT_FIX,
         ))
     else:
         if mode & 0o077:
-            drifts.append(Drift("gateway watch", str(beat_path), f"has mode {mode:03o}; it holds a URL, so use 600 (part 12)"))
+            drifts.append(Drift("gateway watch", str(beat_path), f"has mode {mode:03o}; it holds a URL, so use 600 (part 12)", HEARTBEAT_FIX))
+    return drifts
+
+
+AUTO_DEPLOY_STATE = "auto-deploy.json"
+AUTO_DEPLOY_LOCK = "auto-deploy.lock"
+FACTORY_GATEWAY_LOCK = "factory-gateway.lock"
+HOLD_KEY = "kanban.dispatch_profiles"
+UNDEPLOYED_SECONDS = 24 * 3600
+START_DEPLOY = Manual(
+    "start auto-deploy once with launchctl kickstart gui/$(id -u)/ai.patinaproject.factory.auto-deploy "
+    "(user/$(id -u) over SSH), which releases what a dead run engaged, as Deploy a merged factory change describes"
+)
+
+
+def read_pid(path: Path) -> int | None:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def live_deploy(pid) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    proc = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
+    return proc.returncode == 0 and "auto-deploy" in proc.stdout
+
+
+def auto_deploy_state(root: Path) -> dict | None:
+    try:
+        state = json.loads((root / AUTO_DEPLOY_STATE).read_text())
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def hold_engaged(root: Path) -> bool:
+    state = auto_deploy_state(root)
+    return bool(state and state.get("hold"))
+
+
+def check_auto_deploy(
+    root: Path, dispatch_profiles, commit: Commit | None, committed_at: float | None, now: float,
+    alive: Callable[[object], bool] = live_deploy,
+) -> list:
+    state_path, run_lock, gateway_lock = root / AUTO_DEPLOY_STATE, root / AUTO_DEPLOY_LOCK, root / FACTORY_GATEWAY_LOCK
+    holder = read_pid(run_lock)
+    if alive(holder):
+        return []
+    drifts = []
+    if run_lock.exists():
+        drifts.append(Drift(
+            "auto deploy", str(run_lock), f"names pid {holder}, which is not a running auto-deploy; the next run reclaims it",
+            ADVISORY,
+        ))
+    if not state_path.exists():
+        return [*drifts, Drift("auto deploy", str(state_path), "is missing, so auto-deploy has never run (part 12)", START_DEPLOY)]
+    state = auto_deploy_state(root)
+    if state is None:
+        return [*drifts, Drift(
+            "auto deploy", str(state_path), "is unreadable, so every auto-deploy run stops before it deploys",
+            Manual("move the state file aside and start auto-deploy once, as Deploy a merged factory change describes"),
+        )]
+    hold = state.get("hold") if isinstance(state.get("hold"), dict) else {}
+    pid = hold.get("pid")
+    if hold and alive(pid):
+        return drifts
+    if hold.get("dispatch_profiles"):
+        drifts.append(Drift(
+            "auto deploy", f"{HOLD_KEY} in {root}",
+            f"was set by auto-deploy run {pid}, which is not running, so Hermes claims no card", START_DEPLOY,
+        ))
+    elif dispatch_profiles is not None:
+        drifts.append(Drift(
+            "auto deploy", f"{HOLD_KEY} in {root}",
+            "is set, and no auto-deploy run set it, so Hermes claims no card for a profile outside it and auto-deploy "
+            "deploys nothing",
+            Manual(f"ask whoever set it whether the hold is still wanted, and if not run hermes config unset {HOLD_KEY} in the root home"),
+        ))
+    if hold.get("pause"):
+        drifts.append(Drift(
+            "auto deploy", str(state_path),
+            f"records a hermes pause of auto-deploy run {pid}, which is not running, so no turn may run", START_DEPLOY,
+        ))
+    if hold.get("gateway_lock") and read_pid(gateway_lock) == pid:
+        drifts.append(Drift(
+            "auto deploy", str(gateway_lock),
+            f"holds auto-deploy run {pid}, which is not running, so watch-gateway restarts nothing", START_DEPLOY,
+        ))
+    pending = state.get("restart_pending")
+    if pending:
+        drifts.append(Drift(
+            "auto deploy", str(state_path),
+            f"records a gateway restart for {str(pending)[:12]} that has not succeeded, so the gateway may still run "
+            "the plugins and config from before it",
+            Manual("run auto-deploy --retry, which restarts the gateway through restart-gateway, as Deploy a merged "
+                   "factory change describes"),
+        ))
+    if commit is not None and committed_at is not None and state.get("deployed") != commit.sha and now - committed_at >= UNDEPLOYED_SECONDS:
+        outcome = state.get("outcome") if state.get("attempted") == commit.sha else None
+        if outcome in ("FAILED", "WAITING", "BLOCKED"):
+            detail = str(state.get("detail") or "")
+            if len(detail) > RUN_ERROR_LIMIT:
+                detail = detail[:RUN_ERROR_LIMIT - 3] + "..."
+            why = f"auto-deploy recorded {outcome}" + (f": {detail}" if detail else "")
+        else:
+            why = "auto-deploy recorded no outcome for it, so its push did not start a run"
+        drifts.append(Drift(
+            "auto deploy", f"origin/{commit.label} at {commit.short}",
+            f"is not deployed {int((now - committed_at) // 3600)} hours after it was committed; {why}",
+            Manual("fix what the outcome names, then run auto-deploy --retry as Deploy a merged factory change describes"),
+        ))
     return drifts
 
 
@@ -899,11 +1112,14 @@ def broker_only_names(commit: Commit) -> tuple:
     return (names["UPLOAD_TOKEN"], *names["LINEAR_CREDENTIALS"])
 
 
+BROKER_USER_FIX = Manual("ask the operator to run the step of Broker user, macOS, in part 5 that the line names, with sudo")
+
+
 def check_broker_user(
     commit: Commit, launchd_root: Path, root: Path, launchctl: str, config: dict, accounts: Accounts
 ) -> list:
     def drift(detail: str) -> Drift:
-        return Drift("broker user", config["user"], f"{detail} (part 5)")
+        return Drift("broker user", config["user"], f"{detail} (part 5)", BROKER_USER_FIX)
 
     def local(path: str) -> Path:
         return launchd_root / path.lstrip("/")
@@ -983,13 +1199,14 @@ def check_broker_user(
     return drifts
 
 
-def check_owned_refs(root: Path) -> list:
+def check_owned_refs(homes: Homes) -> list:
+    root, fix = homes.root, install_plan.refresh_owned_refs(homes)
     drifts = []
     for name in (OWNED_REFS, TRIAGE_REFS):
         path = root / name
         if not path.is_file():
             drifts.append(Drift(
-                "owned refs", str(path), "is missing; create or run the refresh-owned-refs cron job (part 12)"
+                "owned refs", str(path), "is missing; create or run the refresh-owned-refs cron job (part 12)", fix
             ))
             continue
         age = time.time() - path.stat().st_mtime
@@ -997,11 +1214,13 @@ def check_owned_refs(root: Path) -> list:
             drifts.append(Drift(
                 "owned refs", str(path),
                 f"is {int(age // 60)} minutes old; the refresh-owned-refs cron job is not running (part 12)",
+                fix,
             ))
     return drifts
 
 
-def check_triage_board(root: Path, hermes: str, settings) -> list:
+def check_triage_board(homes: Homes, settings) -> list:
+    root, hermes = homes.root, homes.hermes
     proc = subprocess.run(
         [hermes, "kanban", "boards", "list", "--json"], env={**os.environ, "HERMES_HOME": str(root)},
         capture_output=True, text=True,
@@ -1009,13 +1228,20 @@ def check_triage_board(root: Path, hermes: str, settings) -> list:
     if proc.returncode != 0:
         raise Refusal(f"hermes kanban boards list failed in {root}: {proc.stderr.strip()}")
     board = next((b for b in json.loads(proc.stdout) if b.get("slug") == TRIAGE_BOARD), None)
-    if board is None:
-        return [Drift("kanban board", TRIAGE_BOARD, f"is missing in {root} (part 10)")]
     repositories = settings.get("repositories") if isinstance(settings, dict) else None
     default = next((r["path"] for r in repositories or [] if r.get("routing") == "default"), None)
+    if board is None:
+        fix = install_plan.board_create(homes, TRIAGE_BOARD, "Triage", default)
+        return [Drift("kanban board", TRIAGE_BOARD, f"is missing in {root} (part 10)", fix)]
     if default and board.get("default_workdir") != default:
-        return [Drift("kanban board", TRIAGE_BOARD, f"default_workdir is not {default} (part 10)")]
+        return [Drift(
+            "kanban board", TRIAGE_BOARD, f"default_workdir is not {default} (part 10)",
+            install_plan.board_workdir(homes, TRIAGE_BOARD, default),
+        )]
     return []
+
+
+CAPACITY_FIX = Manual("set kanban.max_spawn, kanban.max_in_progress, and triage.max_running as part 10 describes, then restart-gateway")
 
 
 def check_triage_capacity(max_spawn, max_in_progress, max_running) -> list:
@@ -1030,12 +1256,14 @@ def check_triage_capacity(max_spawn, max_in_progress, max_running) -> list:
             "kanban capacity", "kanban.max_spawn",
             f"{max_spawn} plus triage.max_running {max_running} is more than kanban.max_in_progress "
             f"{max_in_progress}, so the default board can take every slot triage needs (part 10)",
+            CAPACITY_FIX,
         ))
     if max_running > max_spawn:
         drifts.append(Drift(
             "kanban capacity", "kanban.max_spawn",
             f"triage.max_running {max_running} is more than kanban.max_spawn {max_spawn}, so triage cannot run "
             "that many cards on its own board (part 10)",
+            CAPACITY_FIX,
         ))
     return drifts
 
@@ -1046,9 +1274,8 @@ def triage_max_running(settings):
 
 
 def check_stranded_triage(root: Path, now: float) -> list:
-    """A triage card that Hermes' dispatcher has left assigned in `ready`, which a starved board looks like."""
     path = root / "kanban" / "boards" / TRIAGE_BOARD / "kanban.db"
-    if not path.is_file():
+    if not path.is_file() or hold_engaged(root):
         return []
     events = ", ".join(f"'{kind}'" for kind in WAIT_EVENTS)
     sql = (
@@ -1060,12 +1287,13 @@ def check_stranded_triage(root: Path, now: float) -> list:
     try:
         cards = kanban_board.read(str(path), sql)
     except sqlite3.Error as error:
-        return [Drift("stranded triage card check", path, f"cannot be read: {error} (part 10)")]
+        return [Drift("stranded triage card check", path, f"cannot be read: {error} (part 10)", ADVISORY)]
     return [
         Drift(
             "stranded triage card", card["id"],
             f"has waited {int((now - card['since']) // 60)} minutes in ready with an assignee and no worker, "
             "so the default board is probably holding every worker slot (part 10)",
+            ADVISORY,
         )
         for card in cards
         if now - card["since"] >= STRANDED_MINUTES * 60
@@ -1084,12 +1312,13 @@ def check_kanban_boards(root: Path) -> list:
         try:
             missing = kanban_board.missing_columns(str(path))
         except (sqlite3.Error, AttributeError) as error:
-            drifts.append(Drift("kanban board database", path, f"cannot be read for blockers: {error} (part 15, check 29)"))
+            drifts.append(Drift("kanban board database", path, f"cannot be read for blockers: {error} (part 15, check 29)", ADVISORY))
             continue
         if missing:
             drifts.append(Drift(
                 "kanban board database", path,
                 f"has no tasks.{', tasks.'.join(missing)}, so a card cannot wait for its blockers (part 15, check 29)",
+                Manual("change kanban_board.py to Hermes' new column names in a pull request"),
             ))
     return drifts
 
@@ -1102,6 +1331,7 @@ def check_triage_playbook(repo: Path) -> list:
         "triage playbook", repo,
         f"has no {factory_source.TRIAGE_PLAYBOOK}, so triage cards cannot follow the triage playbook; "
         "update the checkout to a commit that vendors it (part 10)",
+        Manual("vendor the triage playbook on the default branch with pnpm skills:install"),
     )]
 
 
@@ -1125,17 +1355,20 @@ def check_source_checkout(commit: Commit) -> list:
     if not is_ancestor(head, commit.sha):
         ahead = is_ancestor(commit.sha, head)
         blockers.append(f"is ahead of {commit.label}" if ahead else f"has diverged from {commit.label}")
+    fix = install_plan.source_reset(repo, commit.label, commit.sha)
     if blockers:
         return [Drift(
             "source checkout", str(repo),
             f"is not at {commit.label} {commit.short} and {' and '.join(blockers)}. "
             "Do not fast-forward it. Fix it by hand. Leave the worker-owned checkouts to refresh-checkouts.",
+            fix,
         )]
     return [Drift(
         "source checkout", str(repo),
         f"is behind {commit.label} at {commit.short}. Fast-forward only this checkout "
         f"with git -C {repo} merge --ff-only {commit.sha}. "
         "Leave the worker-owned checkouts to refresh-checkouts.",
+        fix,
     )]
 
 
@@ -1147,14 +1380,15 @@ def check_checkouts(settings) -> list:
     for repository in settings.get("repositories") or []:
         path = repository["path"]
         if not Path(path).is_dir():
-            drifts.append(Drift("checkout", path, "does not exist (part 10)"))
+            drifts.append(Drift("checkout", path, "does not exist (part 10)", Manual("clone the repository as part 10 describes")))
             continue
         head = subprocess.run(
             ["git", "-C", path, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], capture_output=True
         )
         if head.returncode != 0:
             drifts.append(Drift(
-                "checkout", path, f"origin/HEAD is not set; run git -C {path} remote set-head origin -a (part 10)"
+                "checkout", path, f"origin/HEAD is not set; run git -C {path} remote set-head origin -a (part 10)",
+                install_plan.origin_head(path),
             ))
     return drifts
 
@@ -1163,25 +1397,31 @@ def check_checkouts(settings) -> list:
 WORK_SKILL_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
+WORK_SKILLS_FIX = Manual("fix the work skills directory or the part 5 setting")
+
+
 def check_work_skills(skills_dir, allow) -> list:
     # An unset directory is check_config's to report.
     if not skills_dir:
         return []
     root = Path(skills_dir)
     if not root.is_dir():
-        return [Drift("work skills", str(root), "does not exist (part 5)")]
+        return [Drift("work skills", str(root), "does not exist (part 5)", WORK_SKILLS_FIX)]
     if allow is not None and not isinstance(allow, list):
-        return [Drift("work skills", "plugins.entries.work.settings.allow", "is not a list of skill names (part 5)")]
+        return [Drift("work skills", "plugins.entries.work.settings.allow", "is not a list of skill names (part 5)", WORK_SKILLS_FIX)]
     names = {
         child.name for child in root.iterdir()
         if WORK_SKILL_NAME.match(child.name) and (child / "SKILL.md").is_file()
     }
     if not names:
-        return [Drift("work skills", str(root), "holds no <name>/SKILL.md (part 5)")]
+        return [Drift("work skills", str(root), "holds no <name>/SKILL.md (part 5)", WORK_SKILLS_FIX)]
     return [
-        Drift("work skills", str(root), f"lacks the allowed skill {name} (part 5)")
+        Drift("work skills", str(root), f"lacks the allowed skill {name} (part 5)", WORK_SKILLS_FIX)
         for name in sorted(set(allow or []) - names)
     ]
+
+
+SETTINGS_FIX = Manual("change the factory settings and set them in both homes as part 10 describes")
 
 
 def check_model_tiers(settings, worker: Path) -> list:
@@ -1195,6 +1435,7 @@ def check_model_tiers(settings, worker: Path) -> list:
     return [Drift(
         "model tier", f"claude_session in {worker}",
         "has a model but no tier_models.sonnet, so every subagent runs on that model (part 3)",
+        SETTINGS_FIX,
     )]
 
 
@@ -1204,9 +1445,9 @@ def check_settings(settings, worker: Path) -> list:
         return []
     problems = factory_settings.validate(settings)
     return [
-        *(Drift("config", f"claude_session in {worker}", error) for error in problems.global_errors),
+        *(Drift("config", f"claude_session in {worker}", error, SETTINGS_FIX) for error in problems.global_errors),
         *(
-            Drift("config", f"{full_name} in {worker}", error)
+            Drift("config", f"{full_name} in {worker}", error, SETTINGS_FIX)
             for full_name, found in sorted(problems.repository_errors.items()) for error in found
         ),
     ]
@@ -1244,10 +1485,10 @@ def check_mcp_servers(settings, worker: Path) -> list:
     for repository, report in zip(repositories, reports):
         full_name = repository["full_name"]
         if isinstance(report, str):
-            drifts.append(Drift("mcp", full_name, f"cannot read the MCP server status: {report} (part 10)"))
+            drifts.append(Drift("mcp", full_name, f"cannot read the MCP server status: {report} (part 10)", ADVISORY))
             continue
         drifts.extend(
-            Drift("mcp", f"{server['name']} in {full_name}", f"is {server['status']}, not connected or disabled (part 10)")
+            Drift("mcp", f"{server['name']} in {full_name}", f"is {server['status']}, not connected or disabled (part 10)", ADVISORY)
             for server in report["servers"]
             if server["status"] != "connected" and server["name"] not in report["disabled"]
         )
@@ -1318,7 +1559,10 @@ def check_root_mcp_servers(root: Path, hermes: str) -> list:
     try:
         return root_mcp_drifts(root, hermes)
     except Refusal as error:
-        return [Drift("root mcp", str(root), f"cannot check: {error} (part 10)")]
+        return [Drift("root mcp", str(root), f"cannot check: {error} (part 10)", ADVISORY)]
+
+
+ROOT_MCP_FIX = Manual("change the server in the root home's mcp_servers as references/mcp-identities.md describes")
 
 
 def root_mcp_drifts(root: Path, hermes: str) -> list:
@@ -1345,12 +1589,12 @@ def root_mcp_drifts(root: Path, hermes: str) -> list:
                 raise Refusal(f"mcp_servers.{name}.headers.{header} is not a string")
             if not HEADER_REFERENCE.fullmatch(value):
                 drifts.append(Drift(
-                    "root mcp", where, f"header {header} holds a literal value, not a ${{VAR}} reference (part 10)"
+                    "root mcp", where, f"header {header} holds a literal value, not a ${{VAR}} reference (part 10)", ROOT_MCP_FIX
                 ))
         if (sampling or {}).get("enabled") is not False:
-            drifts.append(Drift("root mcp", where, "does not set sampling.enabled to false (part 10)"))
+            drifts.append(Drift("root mcp", where, "does not set sampling.enabled to false (part 10)", ROOT_MCP_FIX))
         if not root_mcp_connects(root, hermes, name):
-            drifts.append(Drift("root mcp", where, f"does not connect: run hermes mcp test {name} (part 10)"))
+            drifts.append(Drift("root mcp", where, f"does not connect: run hermes mcp test {name} (part 10)", ADVISORY))
     return drifts
 
 
@@ -1434,6 +1678,9 @@ def watched_tools(plugin: Path) -> tuple:
     return module.PROCESS_TOOLS, module.REQUIRED_TOOLS
 
 
+HERMES_TOOL_FIX = Manual("change the blocker-order plugin to Hermes' new tool names in a pull request")
+
+
 def check_hermes_tools(root: Path, plugin: Path) -> list:
     """Alert when Hermes no longer registers a tool the installed blocker-order plugin watches."""
     if not plugin.is_file():
@@ -1442,21 +1689,23 @@ def check_hermes_tools(root: Path, plugin: Path) -> list:
         process_tools, required = watched_tools(plugin)
         registered = hermes_tool_names(root)
     except Refusal as error:
-        return [Drift("hermes tool", "blocker-order", f"cannot read Hermes' tool names: {error}")]
+        return [Drift("hermes tool", "blocker-order", f"cannot read Hermes' tool names: {error}", ADVISORY)]
     except Exception as error:
-        return [Drift("hermes tool", "blocker-order", f"cannot read Hermes' tool names: {type(error).__name__}: {error}")]
+        return [Drift("hermes tool", "blocker-order", f"cannot read Hermes' tool names: {type(error).__name__}: {error}", ADVISORY)]
     have = f"its terminal toolset registers {', '.join(registered) or 'nothing'}"
     drifts = []
     if not set(process_tools) & set(registered):
         drifts.append(Drift(
             "hermes tool", "blocker-order",
             f"Hermes registers none of {', '.join(process_tools)}, which the plugin watches; {have} (PROCESS_TOOLS in {BLOCKER_ORDER})",
+            HERMES_TOOL_FIX,
         ))
     for name in required:
         if name not in registered:
             drifts.append(Drift(
                 "hermes tool", "blocker-order",
                 f"Hermes registers no {name}, which the plugin watches; {have} (REQUIRED_TOOLS in {BLOCKER_ORDER})",
+                HERMES_TOOL_FIX,
             ))
     return drifts
 
@@ -1484,21 +1733,24 @@ def plugin_statuses(home: Path, hermes: str) -> dict:
         raise Refusal("did not print a JSON list of plugins with a name and status") from None
 
 
-def check_plugin_status(commit: Commit, homes: list, hermes: str) -> list:
+def check_plugin_status(commit: Commit, homes: Homes) -> list:
     """Alert when a repository plugin is installed in a home but Hermes does not enable it there."""
-    drifts = []
-    pairs = installed_plugins(commit, homes)
+    drifts, hermes = [], homes.hermes
+    pairs = installed_plugins(commit, [homes.root, homes.worker])
     for home in sorted({home for home, _ in pairs}):
         try:
             statuses = plugin_statuses(home, hermes)
         except Refusal as error:
-            drifts.append(Drift("plugin status", str(home), f"cannot run hermes plugins list: {error}"))
+            drifts.append(Drift("plugin status", str(home), f"cannot run hermes plugins list: {error}", ADVISORY))
             continue
         for name in (name for h, name in pairs if h == home):
             status = statuses.get(name)
             if status != "enabled":
                 shown = f"is {status}" if status else "is not in the list"
-                drifts.append(Drift("plugin status", f"{name} in {home}", f"{shown} in hermes plugins list, so its hooks do not run"))
+                drifts.append(Drift(
+                    "plugin status", f"{name} in {home}", f"{shown} in hermes plugins list, so its hooks do not run",
+                    install_plan.plugin_enable(homes, home, name) if status else install_plan.plugin_install(homes, home, name, reinstall=True),
+                ))
     return drifts
 
 
@@ -1513,10 +1765,10 @@ def check_plugin_imports(commit: Commit, homes: list, root: Path) -> list:
             if not isinstance(errors, dict):
                 raise Refusal("exited 0 without a JSON object")
         except Refusal as error:
-            drifts.append(Drift("plugin import", str(home), f"cannot import the plugins: {error}"))
+            drifts.append(Drift("plugin import", str(home), f"cannot import the plugins: {error}", ADVISORY))
             continue
         drifts.extend(
-            Drift("plugin import", f"{name} in {home}", f"fails to import: {error}")
+            Drift("plugin import", f"{name} in {home}", f"fails to import: {error}", Manual("fix the plugin's import error in a pull request"))
             for name, error in sorted(errors.items()) if error
         )
     return drifts
@@ -1554,6 +1806,7 @@ def main() -> int:
     parser.add_argument("--ref", help="commit to compare against; defaults to origin/HEAD")
     parser.add_argument("--print-source", action="store_true", help="print the source checkout path and exit")
     parser.add_argument("--no-fetch", action="store_true", help="compare without running git fetch origin first")
+    parser.add_argument("--json", action="store_true", help="print the drift records, each with its remedy, as one JSON list")
     args = parser.parse_args()
     try:
         root, worker = homes()
@@ -1566,23 +1819,24 @@ def main() -> int:
         commit = resolve_commit(repo, args.ref)
         hermes = find_hermes()
         hermes = os.path.abspath(hermes)
+        homes_ = Homes(hermes, sys.executable, root, worker, repo)
         settings = config_value(worker, hermes, SETTINGS_KEY)
         launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))
         launchctl = os.environ.get("LAUNCHCTL_BIN", "launchctl")
         broker = broker_user_config(launchd_root) if sys.platform == "darwin" else None
         drifts = [
-            *check_profile(commit, worker),
-            *check_plugins(commit, [root, worker]),
-            *check_config({ROOT: root, WORKER: worker}, hermes, CONFIG if broker is None else BROKER_USER_CONFIG),
+            *check_profile(commit, homes_),
+            *check_plugins(commit, homes_),
+            *check_config(homes_, CONFIG if broker is None else BROKER_USER_CONFIG),
             *check_worker_secrets(commit, worker, hermes, settings),
             *check_upload_broker(root, *factory_settings.token_variables(settings)),
-            *check_cron(commit, root, worker, hermes),
-            *check_routes(commit, root, hermes),
+            *check_cron(commit, homes_),
+            *check_routes(commit, homes_),
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
             *check_gateway_watch(root),
-            *check_owned_refs(root),
-            *check_triage_board(root, hermes, settings),
+            *check_owned_refs(homes_),
+            *check_triage_board(homes_, settings),
             *check_kanban_boards(root),
             *check_triage_capacity(
                 config_value(root, hermes, "kanban.max_spawn"),
@@ -1601,11 +1855,15 @@ def main() -> int:
             *check_mcp_servers(settings, worker),
             *check_root_mcp_servers(root, hermes),
             *check_hermes_tools(root, worker / "plugins" / "blocker-order" / "__init__.py"),
-            *check_plugin_status(commit, [root, worker], hermes),
+            *check_plugin_status(commit, homes_),
             *check_plugin_imports(commit, [root, worker], root),
         ]
         if sys.platform == "darwin":
             drifts.extend(check_services(launchd_root, launchctl))
+            drifts.extend(check_auto_deploy(
+                root, config_value(root, hermes, HOLD_KEY), None if args.ref else commit,
+                float(git(repo, "show", "-s", "--format=%ct", commit.sha)), time.time(),
+            ))
         if broker is not None:
             drifts.extend(check_broker_user(commit, launchd_root, root, launchctl, broker, live_accounts()))
         if drifts and args.ref is None:
@@ -1613,8 +1871,11 @@ def main() -> int:
     except (Refusal, factory_settings.SettingsError) as exc:
         print(f"check-install: {exc}", file=sys.stderr)
         return 2
-    for drift in drifts:
-        print(drift)
+    if args.json:
+        print(json.dumps([drift.to_json() for drift in drifts], indent=2))
+    else:
+        for drift in drifts:
+            print(drift)
     return 1 if drifts else 0
 
 

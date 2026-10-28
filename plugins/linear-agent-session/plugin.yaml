@@ -37,6 +37,12 @@ config_schema:
     type: list
     default: []
     description: Repositories the factory works, each with full_name, path, routing, and an optional worker_entry, such as /patina-mode, that claude-session puts before its built-in task prompt.
+  factory_repository:
+    type: dict
+    default: {}
+    description: >-
+      The factory's own repository, as full_name and default_branch. The github route keeps a push to
+      that branch from any sender, and factory-deploy starts auto-deploy for it.
   kanban_url:
     type: str
     default: ""

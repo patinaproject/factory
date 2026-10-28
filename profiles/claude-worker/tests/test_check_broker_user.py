@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 from tests.support import SCRIPTS, git, with_interpreter
-from tests.test_check_install import FAKE_LAUNCHCTL, check_install
+from tests.test_check_install import FAKE_LAUNCHCTL, check_install, classified
 
 SETUP_SCRIPT = SCRIPTS.parents[2] / "skills" / "setup-factory" / "scripts" / "setup-broker-user"
 BASE = "/Library/Application Support/factory-broker"
@@ -88,11 +88,9 @@ class CheckBrokerUserTest(unittest.TestCase):
 
     def check(self, config=CONFIG) -> list:
         accounts = check_install.Accounts(self.users.get, self.groups.get, ME, root_uid=os.getuid())
-        return [
-            str(d) for d in check_install.check_broker_user(
-                self.commit, self.launchd, self.root, str(self.launchctl), config, accounts
-            )
-        ]
+        return classified(self, check_install.check_broker_user(
+            self.commit, self.launchd, self.root, str(self.launchctl), config, accounts
+        ))
 
     def test_a_broker_set_up_as_the_runbook_says_is_silent(self) -> None:
         self.assertEqual(self.check(), [])
