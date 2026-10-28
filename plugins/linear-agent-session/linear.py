@@ -256,6 +256,14 @@ class LinearClient:
         if not payload["success"]:
             raise LinearError("agentSessionUpdate reported success: false")
 
+    def set_session_title(self, agent_session_id: str, title: str) -> None:
+        payload = self._graphql(
+            SESSION_UPDATE_MUTATION,
+            {"id": agent_session_id, "input": {"summary": session_summary(title)}},
+        )["agentSessionUpdate"]
+        if not payload["success"]:
+            raise LinearError("agentSessionUpdate reported success: false")
+
     def reply_in_session(self, agent_session_id: str, body: str) -> None:
         """Reply in the session's comment thread. Linear turns a mention in a comment into one that notifies,
         but leaves a mention in an activity body as plain text or a link."""
@@ -629,6 +637,11 @@ class TokenLinearClient(LinearClient):
 
 class _Unauthorized(Exception):
     pass
+
+
+def session_summary(title: str) -> str:
+    """Linear accepts a session summary of 1 to 255 characters with no line breaks."""
+    return " ".join(title.split())[:255].strip()
 
 
 def _issue_summary(issue: dict) -> dict:

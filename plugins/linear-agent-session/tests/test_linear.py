@@ -91,6 +91,26 @@ class ActivityTest(unittest.TestCase):
         self.assertIn("agentSessionUpdate(id: $id, input: $input)", update["query"])
         self.assertEqual(update["variables"], {"id": "session-1", "input": {"externalUrls": urls}})
 
+    def test_a_session_title_is_sent_as_a_one_line_summary_of_at_most_255_characters(self):
+        long_title = "Triage ABC-1: first line\n\n  second\tline " + "x" * 300
+        expected = "Triage ABC-1: first line second line " + "x" * (255 - len("Triage ABC-1: first line second line "))
+        for title, summary in (("Work on ABC-1: Fix checkout", "Work on ABC-1: Fix checkout"), (long_title, expected)):
+            with self.subTest(title=title[:20]):
+                fake = FakeLinear([session_update_ok()])
+                make_client(fake).set_session_title("session-1", title)
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1", "input": {"summary": summary}})
+        self.assertEqual(len(expected), 255)
+
+    def test_a_cut_title_does_not_end_in_a_space(self):
+        fake = FakeLinear([session_update_ok()])
+        make_client(fake).set_session_title("session-1", "a" * 254 + " b")
+        self.assertEqual(fake.graphql_requests[0]["variables"]["input"], {"summary": "a" * 254})
+
+    def test_a_session_update_that_reports_failure_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"agentSessionUpdate": {"success": False}}})])
+        with self.assertRaisesRegex(linear.LinearError, "success: false"):
+            make_client(fake).set_session_title("session-1", "Work on ABC-1: Fix checkout")
+
     def test_older_open_sessions_of_the_app_are_closed_with_a_link_to_the_live_one(self):
         old = "2026-10-27T09:00:00.000Z"
         new = "2026-10-27T11:00:00.000Z"
