@@ -6,6 +6,7 @@ This one is a urlopen like `FakeLinear`, so tests use it through `make_client`.
 from __future__ import annotations
 
 import json
+import re
 
 from . import FakeLinear, FakeResponse
 
@@ -27,7 +28,6 @@ class RelationsLinear(FakeLinear):
         states=STATES,
         create_moves_to_duplicate=False,
         create_removes_related=False,
-        page_size=50,
     ) -> None:
         super().__init__()
         self.issues = {i: {"id": f"uuid-{i}", "identifier": i, "state": "Todo", **extra} for i, extra in dict(issues).items()}
@@ -38,7 +38,6 @@ class RelationsLinear(FakeLinear):
         ]
         self.create_moves_to_duplicate = create_moves_to_duplicate
         self.create_removes_related = create_removes_related
-        self.page_size = page_size
         self.mutations = []
         self.created = 0
 
@@ -55,8 +54,8 @@ class RelationsLinear(FakeLinear):
             return super().__call__(request, timeout)
         body = json.loads(request.data.decode())
         self.graphql_requests.append(body)
-        query, variables = body["query"], body["variables"]
-        marker = next(m for m in QUERY_MARKERS if f"{m}(" in query)
+        self.query, variables = body["query"], body["variables"]
+        marker = next(m for m in QUERY_MARKERS if f"{m}(" in self.query)
         return FakeResponse(200, json.dumps({"data": getattr(self, f"_{marker}")(variables)}).encode())
 
     def _find(self, key):
@@ -88,6 +87,7 @@ class RelationsLinear(FakeLinear):
         }
 
     def _IssueRelations(self, variables):
+        self.page_size = int(re.search(r"relations\(first: (\d+)\)", self.query).group(1))
         return {"a": self._issue(variables["a"]), "b": self._issue(variables["b"])}
 
     def _IssueRelationCreate(self, variables):

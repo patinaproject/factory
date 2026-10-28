@@ -161,9 +161,11 @@ fragment RelationFields on Issue {
   id identifier
   state { name type }
   team { states { nodes { id name type } } }
-  relations(first: 50) { pageInfo { hasNextPage } nodes { id type issue { id identifier } relatedIssue { id identifier } } }
-  inverseRelations(first: 50) { pageInfo { hasNextPage } nodes { id type issue { id identifier } relatedIssue { id identifier } } }
+  relations(first: 51) { pageInfo { hasNextPage } nodes { id type issue { id identifier } relatedIssue { id identifier } } }
+  inverseRelations(first: 51) { pageInfo { hasNextPage } nodes { id type issue { id identifier } relatedIssue { id identifier } } }
 }"""
+
+RELATIONS_READ = 50
 
 ISSUE_RELATION_CREATE_MUTATION = """mutation IssueRelationCreate($input: IssueRelationCreateInput!) {
   issueRelationCreate(input: $input) { success }
@@ -505,7 +507,8 @@ class LinearClient:
             "state": a["state"]["name"],
         }
         if kind == "duplicate":
-            a, b, relations = self._read_relations(id_or_identifier, other)
+            # The relation this call created can make a list of 50 one longer.
+            a, b, relations = self._read_relations(id_or_identifier, other, most=RELATIONS_READ + 1)
             for relation in relations.values():
                 if relation.type == "related" and {relation.source, relation.target} == {a["id"], b["id"]}:
                     payload = self._graphql(ISSUE_RELATION_DELETE_MUTATION, {"id": relation.id})
@@ -515,7 +518,7 @@ class LinearClient:
             result["state"] = self._move_to_duplicate_status(a)
         return result
 
-    def _read_relations(self, first: str, second: str) -> tuple:
+    def _read_relations(self, first: str, second: str, most: int = RELATIONS_READ) -> tuple:
         data = self._graphql(ISSUE_RELATIONS_QUERY, {"a": first, "b": second})
         for key, name in (("a", first), ("b", second)):
             if data[key] is None:
@@ -524,9 +527,9 @@ class LinearClient:
         names = {i["id"]: i["identifier"] for i in (data["a"], data["b"])}
         for issue in (data["a"], data["b"]):
             for side in ("relations", "inverseRelations"):
-                if issue[side]["pageInfo"]["hasNextPage"]:
+                if issue[side]["pageInfo"]["hasNextPage"] or len(issue[side]["nodes"]) > most:
                     raise LinearError(
-                        f"{issue['identifier']} has more than 50 {side}, more than the agent reads, so nothing was changed"
+                        f"{issue['identifier']} has more than {RELATIONS_READ} {side}, more than the agent reads, so nothing was changed"
                     )
                 for node in issue[side]["nodes"]:
                     relations[node["id"]] = Relation(

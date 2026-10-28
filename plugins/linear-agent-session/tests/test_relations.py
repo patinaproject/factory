@@ -163,11 +163,17 @@ class RefusalTest(unittest.TestCase):
             with self.subTest(args):
                 self.refused([], "ABC-1 cannot be related to itself", **args)
 
-    def test_more_than_50_relations_change_nothing(self):
-        fake = RelationsLinear(ISSUES, relations=[("related", "ABC-3", "ABC-1")] * 3, page_size=2)
+    def test_exactly_50_relations_still_take_a_duplicate(self):
+        fake = RelationsLinear(ISSUES, relations=[("related", "ABC-1", "ABC-3")] * 49 + [("related", "ABC-1", "ABC-2")])
+        output = relate(fake, duplicate_of="ABC-2")
+        self.assertEqual((output["created"], output["removed_related"], output["state"]), (True, True, "Duplicate"))
+        self.assertEqual(len(fake.stored()), 50)
+
+    def test_51_relations_change_nothing(self):
+        fake = RelationsLinear(ISSUES, relations=[("related", "ABC-1", "ABC-3")] * 51)
         self.assertEqual(
             relate(fake, duplicate_of="ABC-2"),
-            {"error": "ABC-1 has more than 50 inverseRelations, more than the agent reads, so nothing was changed"},
+            {"error": "ABC-1 has more than 50 relations, more than the agent reads, so nothing was changed"},
         )
         self.assertEqual(fake.mutations, [])
 
