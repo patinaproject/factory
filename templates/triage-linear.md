@@ -301,14 +301,22 @@ delegated the issue.
 1. When `reply` is null, comment on the triage card that a Linear reply arrived
    without text, post a `thought` on `agent_session_id` asking the human to send
    the reply again, and stop.
-2. Comment on the triage card once with the reply, attributed to Linear, with
-   each pull request URL replaced as `card_reply` step 2 says, and never correct
-   it afterward.
-3. Run `<<card_transition>> --board triage triage-reply <task id>`. It
-   unblocks a `blocked` triage card or resumes a `triage` one, and leaves it
-   unassigned, because `dispatch-triage` assigns it again when fewer triage
-   cards run than the factory's cap.
-4. Post one `thought` on `agent_session_id` that names the triage card's
+2. Pipe the intent's `reply`, exactly as it arrived, into
+   `<<card_transition>> --board triage triage-reply <task id>` with a quoted
+   heredoc, so the shell expands nothing in it:
+
+   ```sh
+   <<card_transition>> --board triage triage-reply <task id> <<'LINEAR_REPLY'
+   <reply>
+   LINEAR_REPLY
+   ```
+
+   It writes the reply on the card itself, once. Never put the reply on the
+   command line, and never comment it yourself. It releases a `scheduled` triage
+   card, which waits for this reply, unblocks a `blocked` one, or resumes a
+   `triage` one, and leaves it unassigned, because `dispatch-triage` assigns it
+   again when fewer triage cards run than the factory's cap.
+3. Post one `thought` on `agent_session_id` that names the triage card's
    task id and says that triage resumes with the reply when the line's
    `action` is `unblocked` or `resumed`, or, for `none`, that the reply is on
    the card for its worker. When it prints `error`, post that error as the
