@@ -802,9 +802,12 @@ def check_cron(commit: Commit, homes: Homes) -> list:
             where = f"{live['name']} in {paths[name]}"
             owner = owners.get(live["name"])
             if live["name"] in LAUNCHD_JOBS:
+                remove = " ".join(install_plan.cron_command(homes, paths[name], "remove", live["id"]).argv)
                 drifts.append(Drift(
                     "cron job", where, "is replaced by a launchd job; remove it with hermes cron remove (part 10)",
-                    install_plan.cron_command(homes, paths[name], "remove", live["id"]),
+                    # Not an install: removed before the launchd job runs, which only a person installs, the worker's
+                    # gh login would expire within the hour.
+                    Manual(f"once the part 10 launchd job has run, run {remove}"),
                 ))
             elif owner is None:
                 drifts.append(Drift(

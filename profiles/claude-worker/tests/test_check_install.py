@@ -150,6 +150,7 @@ REMEDY_CLASSES = (
     ("cron job", r"^cron job (retry-failed-webhooks|report-deploy) in .*: (is missing|delivers to \S+, not )", "manual"),
     ("cron job", r": (is missing|is disabled|runs .*, not every|is not a script-only job|delivers to \S+, not |belongs to)", "install"),
     ("cron job", ": last run", "advisory"),
+    ("cron job", ": is replaced by a launchd job", "manual"),
     ("cron job", "", "manual"),
     ("script", "", "install"),
     ("service", "", "manual"),
