@@ -29,7 +29,10 @@ def register(ctx: Any) -> None:
 
 
 def is_push(payload: Any) -> bool:
-    """A push payload has these keys and, unlike every other event the route keeps, no action."""
+    """A push payload has these keys and, unlike every other event the route keeps, no action.
+
+    webhook-retry keeps a copy, so it never queues a push for a replay turn; its tests keep the two the same.
+    """
     return isinstance(payload, dict) and "action" not in payload and all(key in payload for key in PUSH_KEYS)
 
 
