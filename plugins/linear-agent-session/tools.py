@@ -124,7 +124,7 @@ DELEGATED_ISSUES_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "include_closed": {"type": "boolean", "description": "Also list completed and canceled issues."}
+            "include_closed": {"type": "boolean", "description": "Also list completed, canceled, and duplicate issues."}
         },
     },
 }

@@ -151,7 +151,7 @@ LINEAR_FILTERS = [
             {
                 "all": [
                     {"field": "updatedFrom.stateId", "exists": True},
-                    {"field": "data.state.type", "in": ["completed", "canceled"]},
+                    {"field": "data.state.type", "in": ["completed", "canceled", "duplicate"]},
                     {"field": "data.id", "in_file": "owned-refs.json"},
                 ]
             },

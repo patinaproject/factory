@@ -187,7 +187,7 @@ ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdat
   issueUpdate(id: $id, input: $input) { success }
 }"""
 
-CLOSED_STATE_TYPES = ("completed", "canceled")
+CLOSED_STATE_TYPES = ("completed", "canceled", "duplicate")
 READY_STATE_NAME = "Todo"
 
 # The triage roles are the factory's own vocabulary; a workspace names each label as it likes.
