@@ -1219,7 +1219,11 @@ required check waits, and a `blocked` card is never sent back for a failed
 check, because its worker stopped for a person. The worker merges the base branch and resolves the
 conflicts, or fixes the failing check, and publishes with `push-signed`. A card
 is sent back once per pull request head and reason, so a worker that blocks on
-the same head stays blocked. Create the job when `cron list` has no `reopen-conflicts` job:
+the same head stays blocked. The same job re-requests a reviewer whose changes
+request is on an older head once every required check passes. A changes
+request on the current head, or the reviewer's unresolved review thread, sends
+the card back once per head instead. Create the job when `cron list` has no
+`reopen-conflicts` job:
 
 ```sh
 hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null

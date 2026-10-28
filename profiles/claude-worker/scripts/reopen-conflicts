@@ -27,7 +27,17 @@ new head that still fails is told again. A `review` card that holds the line is
 a handback that failed partway, because the ready gate refuses a conflicting
 head and a failing required check, so the review reopen runs again. Prints one
 line per card sent back, `<task id> <pull request url>`. A failure for one
-repository or card goes to stderr and the others still run. Exits 1 when any
+repository or card goes to stderr and the others still run.
+
+A mergeable pull request whose review decision is `CHANGES_REQUESTED`, and that
+was not sent back for a failed check, gets the review sweep, which
+`stale_reviews.decide` judges. A changes request on the current head, or an
+unresolved review thread from a reviewer who is not requested now, sends the
+card back once per head with the line `review_head: <sha>`. Otherwise, once
+every required check passed, each reviewer whose changes request is on an older
+head and who is not requested now is requested again, and the card's Linear
+agent session gets an activity that names them. That line is `<task id> <pull
+request url> re-requested <login>,<login>`. A review is never dismissed. Exits 1 when any
 failed, or 2 when HERMES_HOME is not a profile home or the factory settings
 cannot be read.
 """
@@ -46,13 +56,17 @@ from urllib.parse import quote
 import card_branch
 import factory_settings
 import merged_checks
+import stale_reviews
 
 REPO_LINE = re.compile(r"^repo:\s*(\S+)\s*$", re.MULTILINE)
+SESSION_LINE = re.compile(r"^linear_agent_session_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 CONFLICT_MARKER = "conflict_head: "
 FAILED_CHECK_MARKER = "failed_check_head: "
+REVIEW_MARKER = "review_head: "
 CONFLICT_REASON = "merge conflict with the base branch; see the card comments"
 FAILED_CHECK_REASON = "a required check failed; see the card comments"
-PR_FIELDS = "number,url,headRefName,headRefOid,baseRefName,author,mergeable"
+REVIEW_REASON = "changes-requested review still needs work; see the card comments"
+PR_FIELDS = "number,url,headRefName,headRefOid,baseRefName,author,mergeable,reviewDecision"
 
 
 class Refusal(Exception):
@@ -127,10 +141,13 @@ def required_contexts(repo: str, base: str, cache: dict) -> set:
     return cache[(repo, base)]
 
 
-def failed_required_checks(pull: dict, repo: str, cache: dict) -> dict:
-    """Maps each required check whose newest run failed to its details URL; empty while any required check is unsettled."""
+def newest_checks(pull: dict) -> dict:
     view = run(os.environ.get("GH_BIN", "gh"), "pr", "view", pull["url"], "--json", "statusCheckRollup")
-    newest = merged_checks.newest_runs(json.loads(view).get("statusCheckRollup") or [])
+    return merged_checks.newest_runs(json.loads(view).get("statusCheckRollup") or [])
+
+
+def failed_required_checks(pull: dict, newest: dict, repo: str, cache: dict) -> dict:
+    """Maps each required check whose newest run failed to its details URL; empty while any required check is unsettled."""
     if not any(merged_checks.failed(check) for runs in newest.values() for check in runs):
         return {}
     failures = {}
@@ -178,13 +195,51 @@ def failed_check_handback(pull: dict, failures: dict) -> Handback:
     return Handback(marker, text, FAILED_CHECK_REASON)
 
 
-def handback_for(pull: dict, status: str, repo: str, cache: dict) -> Handback | None:
+def review_handback(pull: dict, reason: str) -> Handback:
+    marker = f"{REVIEW_MARKER}{pull['headRefOid']}"
+    text = (
+        f"Pull request {pull['url']} has a changes-requested review and is not ready for another look: {reason}. "
+        "Fix it and publish the fix with push-signed. When you cannot, stop and make the first line of your final "
+        "message `Needs input:` followed by the reason.\n\n"
+        f"{marker}"
+    )
+    return Handback(marker, text, REVIEW_REASON)
+
+
+def re_request(repo: str, task: dict, pull: dict, logins: tuple[str, ...]) -> None:
+    reviewers = [arg for login in logins for arg in ("-f", f"reviewers[]={login}")]
+    run(os.environ.get("GH_BIN", "gh"), "api", "-X", "POST", f"repos/{repo}/pulls/{pull['number']}/requested_reviewers", *reviewers)
+    print(f"{task['id']} {pull['url']} re-requested {','.join(logins)}")
+    session = SESSION_LINE.search(task.get("body") or "")
+    if session is None:
+        raise Failed("the card has no linear_agent_session_id line")
+    cli = Path(os.environ["HERMES_HOME"]) / "plugins" / "linear-agent-session" / "cli.py"
+    run(
+        sys.executable, str(cli), "activity", "--agent-session-id", session.group(1), "--type", "elicitation",
+        "--body", f"Changes are in, re-requested review from {', '.join('@' + login for login in logins)}",
+        "--external-url", f"Pull request={pull['url']}",
+    )
+
+
+def handback_for(pull: dict, task: dict, repo: str, cache: dict) -> Handback | None:
+    """Re-requests stale reviewers as a side effect when the review sweep decides so."""
     if pull["mergeable"] == "CONFLICTING":
         return conflict_handback(pull)
-    if pull["mergeable"] != "MERGEABLE" or status != "review":
+    review = pull.get("reviewDecision") == "CHANGES_REQUESTED"
+    if pull["mergeable"] != "MERGEABLE" or (task["status"] != "review" and not review):
         return None
-    failures = failed_required_checks(pull, repo, cache)
-    return failed_check_handback(pull, failures) if failures else None
+    newest = newest_checks(pull)
+    if task["status"] == "review":
+        failures = failed_required_checks(pull, newest, repo, cache)
+        if failures:
+            return failed_check_handback(pull, failures)
+    if not review:
+        return None
+    reviews, requested, authors = stale_reviews.read_reviews(run, os.environ.get("GH_BIN", "gh"), repo, pull["number"])
+    outcome = stale_reviews.decide(pull, reviews, requested, authors, newest, required_contexts(repo, pull["baseRefName"], cache))
+    if isinstance(outcome, stale_reviews.Request):
+        re_request(repo, task, pull, outcome.logins)
+    return review_handback(pull, outcome.reason) if isinstance(outcome, stale_reviews.Handback) else None
 
 
 def send_back(hermes: str, task: dict, handback: Handback, sent: bool) -> None:
@@ -231,7 +286,7 @@ def main() -> int:
             if pull is None:
                 continue
             try:
-                handback = handback_for(pull, task["status"], repo, rules)
+                handback = handback_for(pull, task, repo, rules)
                 if handback is None:
                     continue
                 sent = already_sent(hermes, task["id"], handback.marker)
