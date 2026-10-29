@@ -22,12 +22,14 @@ UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?[A-Za-z_][A-Za-z0-9_]*\}$")
 GITHUB_EVENT_LINE = re.compile(r"^- Event: (\S+), action (\S+)$", re.MULTILINE)
 SUMMARY_LIMIT = 120
 LINEAR_PAYLOAD_TYPES = ("Issue", "AgentSessionEvent")
+PUSH_KEYS = ("ref", "before", "after", "pusher")
 
 _session_store: Any = None
 
 
 def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", record_delivery)
+    ctx.register_hook("post_gateway_admission", mark_admitted)
     ctx.register_hook("api_request_error", note_request_error)
     ctx.register_hook("on_session_end", clear_finished_turn)
 
@@ -44,7 +46,13 @@ def load_config() -> Mapping[str, Any]:
     return load_config_readonly()
 
 
-def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> None:
+def paused() -> bool:
+    from agent.estop import paused_reply
+
+    return paused_reply() is not None
+
+
+def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> Optional[dict[str, str]]:
     global _session_store
     try:
         if session_store is not None:
@@ -55,7 +63,7 @@ def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> N
         route = source.user_id.removeprefix("webhook:")
         key = source.chat_id
         decoded = queue_store.decode_key(key)
-        if decoded is None or secret_is_unresolved(route):
+        if decoded is None or is_push(event.raw_message) or secret_is_unresolved(route):
             return None
         profile, route, delivery = decoded
         fields = {
@@ -71,12 +79,40 @@ def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> N
             "last_error": "",
             "next_try_at": None,
             "reported": False,
+            "admitted": False,
         }
-        queue_store.mutate(
-            queue_store.queue_dir(hermes_home()), lambda entries: queue_store.apply(entries, key, "dispatch", **fields)
-        )
+        is_paused = paused()
+        if is_paused:
+            fields.update(reason="paused", next_try_at=fields["delivered_at"])
+        event_name = "paused" if is_paused else "dispatch"
+
+        def change(entries: dict) -> bool:
+            current = entries.get(key)
+            if current is None:
+                return queue_store.apply(entries, key, event_name, **fields)
+            # A redelivery of a turn that already started must not queue it to run again.
+            if is_paused and current.get("admitted"):
+                return False
+            return queue_store.apply(entries, key, event_name, **{k: v for k, v in fields.items() if k != "admitted"})
+
+        queue_store.mutate(queue_store.queue_dir(hermes_home()), change)
+        if is_paused:
+            return {"action": "skip", "reason": "Hermes is paused; the delivery is queued for replay after resume"}
     except Exception:
         logger.exception("webhook-retry: could not record a delivery")
+    return None
+
+
+def mark_admitted(source: Any = None, **_: Any) -> None:
+    try:
+        key = source["chat_id"]
+        if queue_store.decode_key(key) is None:
+            return None
+        queue_store.mutate(
+            queue_store.queue_dir(hermes_home()), lambda entries: queue_store.apply(entries, key, "admitted", admitted=True)
+        )
+    except Exception:
+        logger.exception("webhook-retry: could not mark a delivery admitted")
     return None
 
 
@@ -100,7 +136,7 @@ def note_request_error(
         queue_store.mutate(
             queue_store.queue_dir(hermes_home()),
             lambda entries: queue_store.apply(
-                entries, key, "usage_limit", last_error=message, next_try_at=queue_store.stamp(next_try)
+                entries, key, "usage_limit", reason="usage_limit", last_error=message, next_try_at=queue_store.stamp(next_try)
             ),
         )
     except Exception:
@@ -147,6 +183,10 @@ def secret_is_unresolved(route: str) -> bool:
     route_config = (extra.get("routes") or {}).get(route) or {}
     secret = route_config.get("secret", extra.get("secret", ""))
     return isinstance(secret, str) and UNRESOLVED_REFERENCE.match(secret) is not None
+
+
+def is_push(payload: Any) -> bool:
+    return isinstance(payload, dict) and "action" not in payload and all(key in payload for key in PUSH_KEYS)
 
 
 def linear_payload(event: Any) -> Optional[dict]:

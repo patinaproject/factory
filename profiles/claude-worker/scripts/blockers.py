@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from typing import Callable, Iterable
 
-FINISHED_ISSUE_STATES = ("completed", "canceled")
+FINISHED_ISSUE_STATES = ("completed", "canceled", "duplicate")
 FINISHED_CARD_STATUSES = ("done", "archived")
 # A blocker delegated together with this card can still be in triage, with no card yet. The wait runs
 # inside this card's claim, which Hermes leases for 15 minutes, so it stays well under that.

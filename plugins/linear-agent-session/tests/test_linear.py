@@ -91,6 +91,29 @@ class ActivityTest(unittest.TestCase):
         self.assertIn("agentSessionUpdate(id: $id, input: $input)", update["query"])
         self.assertEqual(update["variables"], {"id": "session-1", "input": {"externalUrls": urls}})
 
+    def title(self, issue_title, purpose="work"):
+        issue = {**IssueTest.RESPONSE["data"]["issue"], "title": issue_title}
+        fake = FakeLinear([(200, {"data": {"issue": issue}}), session_update_ok()])
+        summary = make_client(fake).title_session("session-1", "ABC-123", purpose)
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "session-1", "input": {"summary": summary}})
+        return summary
+
+    def test_a_session_title_names_its_purpose_and_the_issue(self):
+        self.assertEqual(self.title("Fix checkout", "work"), "Work on ABC-123: Fix checkout")
+        self.assertEqual(self.title("Fix checkout", "triage"), "Triage ABC-123: Fix checkout")
+
+    def test_a_session_title_is_one_line_of_at_most_255_characters(self):
+        prefix = "Work on ABC-123: first line second line "
+        self.assertEqual(self.title("first line\n\n  second\tline " + "x" * 300), prefix + "x" * (255 - len(prefix)))
+
+    def test_a_cut_title_does_not_end_in_a_space(self):
+        self.assertEqual(self.title("a" * (254 - len("Work on ABC-123: ")) + " b"), "Work on ABC-123: " + "a" * (254 - len("Work on ABC-123: ")))
+
+    def test_a_session_update_that_reports_failure_is_an_error(self):
+        fake = FakeLinear([(200, IssueTest.RESPONSE), (200, {"data": {"agentSessionUpdate": {"success": False}}})])
+        with self.assertRaisesRegex(linear.LinearError, "success: false"):
+            make_client(fake).title_session("session-1", "ABC-123", "work")
+
     def test_older_open_sessions_of_the_app_are_closed_with_a_link_to_the_live_one(self):
         old = "2026-10-27T09:00:00.000Z"
         new = "2026-10-27T11:00:00.000Z"
@@ -174,6 +197,63 @@ class ActivityTest(unittest.TestCase):
         fake = FakeLinear([(400, {"errors": [{"message": "Argument Validation Error"}]})])
         with self.assertRaisesRegex(linear.LinearError, "Argument Validation Error"):
             make_client(fake).create_activity("session-1", {"type": "thought", "body": "x"})
+
+
+class SessionThreadTest(unittest.TestCase):
+    @staticmethod
+    def node(activity_id, created, content, user=None, ephemeral=False):
+        return {"id": activity_id, "createdAt": created, "ephemeral": ephemeral, "user": user, "content": content}
+
+    def read(self, nodes):
+        data = {"data": {"agentSession": {"activities": {"nodes": nodes}}}}
+        fake = FakeLinear([(200, data)])
+        return fake, make_client(fake).session_thread("session-1")
+
+    def test_the_thread_is_oldest_first_with_each_activitys_type_author_time_and_body(self):
+        newest_first = [
+            self.node("a3", "2026-10-28T10:03:00.000Z", {"__typename": "AgentActivityPromptContent", "body": "All of them"}, {"name": "Ted"}),
+            self.node("a2", "2026-10-28T10:02:00.000Z", {"__typename": "AgentActivityElicitationContent", "body": "Which one: 1, 2?"}),
+            self.node("a1", "2026-10-28T10:01:00.000Z", {"__typename": "AgentActivityThoughtContent", "body": "Reading"}),
+        ]
+        fake, thread = self.read(newest_first)
+        self.assertEqual(
+            thread,
+            [
+                {"id": "a1", "type": "thought", "author": None, "created_at": "2026-10-28T10:01:00.000Z", "body": "Reading"},
+                {"id": "a2", "type": "elicitation", "author": None, "created_at": "2026-10-28T10:02:00.000Z", "body": "Which one: 1, 2?"},
+                {"id": "a3", "type": "prompt", "author": "Ted", "created_at": "2026-10-28T10:03:00.000Z", "body": "All of them"},
+            ],
+        )
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1"})
+        self.assertIn("activities(first: 30, orderBy: createdAt)", fake.graphql_requests[0]["query"])
+
+    def test_ephemeral_activities_are_skipped(self):
+        body = {"__typename": "AgentActivityThoughtContent", "body": "Working"}
+        _, thread = self.read([self.node("a1", "2026-10-28T10:01:00.000Z", body, ephemeral=True)])
+        self.assertEqual(thread, [])
+
+    def test_an_action_reads_as_its_action_parameter_and_result(self):
+        action = {"__typename": "AgentActivityActionContent", "action": "Searching", "parameter": "checkout", "result": "3 issues"}
+        bare = {"__typename": "AgentActivityActionContent", "action": "Reading", "parameter": "PAT-1", "result": None}
+        _, thread = self.read(
+            [self.node("a2", "2026-10-28T10:02:00.000Z", bare), self.node("a1", "2026-10-28T10:01:00.000Z", action)]
+        )
+        self.assertEqual([(t["type"], t["body"]) for t in thread], [("action", "Searching checkout -> 3 issues"), ("action", "Reading PAT-1")])
+
+    def test_a_long_body_is_cut_and_marked(self):
+        body = {"__typename": "AgentActivityResponseContent", "body": "x" * 2001}
+        _, thread = self.read([self.node("a1", "2026-10-28T10:01:00.000Z", body)])
+        self.assertEqual(thread[0]["body"], "x" * 2000 + "... [truncated]")
+
+    def test_a_body_at_the_limit_is_kept_whole(self):
+        body = {"__typename": "AgentActivityErrorContent", "body": "y" * 2000}
+        _, thread = self.read([self.node("a1", "2026-10-28T10:01:00.000Z", body)])
+        self.assertEqual((thread[0]["type"], thread[0]["body"]), ("error", "y" * 2000))
+
+    def test_a_session_the_app_cannot_read_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"agentSession": None}})])
+        with self.assertRaises(linear.LinearError):
+            make_client(fake).session_thread("session-1")
 
 
 class TokenTest(unittest.TestCase):
@@ -391,19 +471,67 @@ class BrokerClientTest(unittest.TestCase):
         self.assertEqual(len(fake.token_requests), 1)
 
 
+class TokenClientTest(unittest.TestCase):
+    def test_posts_with_the_given_token_and_never_mints_one(self):
+        fake = FakeLinear([activity_ok("activity-7"), sessions_ok()])
+        client = linear.TokenLinearClient("static-token", urlopen=fake)
+
+        self.assertEqual(client.create_activity("live", {"type": "thought", "body": "x"}), "activity-7")
+        self.assertEqual(client.close_older_sessions("live"), [])
+
+        self.assertEqual(fake.token_requests, [])
+        self.assertEqual({r["authorization"] for r in fake.graphql_requests}, {"Bearer static-token"})
+
+
 class SessionCreateTest(unittest.TestCase):
-    def test_creates_a_session_on_the_issue(self):
-        fake = FakeLinear(
-            [(200, {"data": {"agentSessionCreateOnIssue": {"success": True, "agentSession": {"id": "session-77"}}}})]
+    CREATED = (200, {"data": {"agentSessionCreateOnIssue": {"success": True, "agentSession": {"id": "session-77"}}}})
+
+    def issue(self):
+        return 200, {"data": {"issue": {**IssueTest.RESPONSE["data"]["issue"], "title": "Fix checkout"}}}
+
+    def create(self, fake, args):
+        return json.loads(tools.run_session_create(lambda: make_client(fake), args))
+
+    def test_creates_a_session_on_the_issue_and_titles_it_for_its_purpose(self):
+        fake = FakeLinear([self.CREATED, self.issue(), session_update_ok()])
+        output = self.create(fake, {"issue": "ABC-123", "purpose": "triage"})
+        self.assertEqual(
+            output, {"agent_session_id": "session-77", "session_title": {"title": "Triage ABC-123: Fix checkout"}}
         )
-        output = json.loads(tools.run_session_create(lambda: make_client(fake), {"issue": "ABC-123"}))
-        self.assertEqual(output, {"agent_session_id": "session-77"})
-        self.assertEqual(fake.graphql_requests[0]["variables"], {"input": {"issueId": "ABC-123"}})
-        self.assertIn("agentSessionCreateOnIssue", fake.graphql_requests[0]["query"])
+        create, _, update = fake.graphql_requests
+        self.assertEqual(create["variables"], {"input": {"issueId": "ABC-123"}})
+        self.assertIn("agentSessionCreateOnIssue", create["query"])
+        self.assertIn("agentSessionUpdate", update["query"])
+        self.assertEqual(
+            update["variables"], {"id": "session-77", "input": {"summary": "Triage ABC-123: Fix checkout"}}
+        )
+
+    def test_a_work_session_is_titled_work_on_the_issue(self):
+        fake = FakeLinear([self.CREATED, self.issue(), session_update_ok()])
+        output = self.create(fake, {"issue": "ABC-123", "purpose": "work"})
+        self.assertEqual(output["session_title"], {"title": "Work on ABC-123: Fix checkout"})
+
+    def test_a_failed_title_still_returns_the_session_id(self):
+        fake = FakeLinear([self.CREATED, self.issue(), (200, {"errors": [{"message": "Entity not found"}]})])
+        output = self.create(fake, {"issue": "ABC-123", "purpose": "triage"})
+        self.assertEqual(
+            output,
+            {
+                "agent_session_id": "session-77",
+                "session_title": {"error": "titling the agent session failed: Entity not found"},
+            },
+        )
+
+    def test_a_missing_or_unknown_purpose_is_an_error_before_any_session_is_created(self):
+        for args in ({"issue": "ABC-123"}, {"issue": "ABC-123", "purpose": "review"}):
+            with self.subTest(args=args):
+                fake = FakeLinear([])
+                self.assertEqual(self.create(fake, args), {"error": "pass purpose: one of triage, work"})
+                self.assertEqual(fake.graphql_requests, [])
 
     def test_unsuccessful_create_is_an_error(self):
         fake = FakeLinear([(200, {"data": {"agentSessionCreateOnIssue": {"success": False, "agentSession": None}}})])
-        output = json.loads(tools.run_session_create(lambda: make_client(fake), {"issue": "ABC-123"}))
+        output = self.create(fake, {"issue": "ABC-123", "purpose": "work"})
         self.assertEqual(output, {"error": "agentSessionCreateOnIssue reported success: false"})
 
 
@@ -412,10 +540,13 @@ class IssueArgumentTest(unittest.TestCase):
 
     RUNNERS = {
         "linear_issue": lambda fake, args: tools.run_issue(lambda: make_client(fake), args),
-        "linear_agent_session_create": lambda fake, args: tools.run_session_create(lambda: make_client(fake), args),
+        "linear_agent_session_create": lambda fake, args: tools.run_session_create(
+            lambda: make_client(fake), {**args, "purpose": "work"}
+        ),
         "linear_issue_undelegate": lambda fake, args: tools.run_undelegate(lambda: make_client(fake), args),
         "linear_issue_to_todo": lambda fake, args: tools.run_to_todo(lambda: make_client(fake), args),
         "linear_issue_edit": lambda fake, args: tools.run_edit(lambda: make_client(fake), {**args, "state": "Done"}),
+        "linear_issue_relate": lambda fake, args: tools.run_relate(lambda: make_client(fake), {**args, "duplicate_of": "ABC-2"}),
     }
 
     def test_issue_tools_take_the_names_models_guess(self):
@@ -436,15 +567,16 @@ class IssueArgumentTest(unittest.TestCase):
 
     def test_hermes_lets_every_guessed_name_reach_the_handler(self):
         # Hermes refuses a deferred tool_call that lacks a name in the schema's "required" list.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA, tools.RELATE_SCHEMA):
             for name in ("issue", "id", "issue_id"):
                 with self.subTest(tool=schema["name"], name=name):
-                    missing = [r for r in schema["parameters"].get("required", []) if r not in {name: "ABC-9"}]
+                    required = [r for r in schema["parameters"].get("required", []) if r != "purpose"]
+                    missing = [r for r in required if r not in {name: "ABC-9"}]
                     self.assertEqual(missing, [])
 
     def test_the_deferred_catalog_line_names_the_argument(self):
         # Hermes lists a deferred tool by the first 60 characters of its description.
-        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA):
+        for schema in (tools.ISSUE_SCHEMA, tools.SESSION_CREATE_SCHEMA, tools.UNDELEGATE_SCHEMA, tools.TO_TODO_SCHEMA, tools.EDIT_SCHEMA, tools.RELATE_SCHEMA):
             with self.subTest(tool=schema["name"]):
                 self.assertIn("`issue`", schema["description"][:60])
 
@@ -592,6 +724,7 @@ class IssueTest(unittest.TestCase):
                 "id": "2f9a6f0e-0000-4000-8000-000000000001",
                 "identifier": "ABC-123",
                 "title": "Fix checkout",
+                "cardTitle": "ABC-123: Fix checkout",
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "gitBranchName": "abc-123-fix-checkout",
                 "priority": 2,
@@ -988,7 +1121,7 @@ class DelegatedIssuesTest(unittest.TestCase):
                 "attachments": [{"url": pr, "sourceType": "github"}],
             },
         )
-        open_filter = {"delegate": {"isMe": {"eq": True}}, "state": {"type": {"nin": ["completed", "canceled"]}}}
+        open_filter = {"delegate": {"isMe": {"eq": True}}, "state": {"type": {"nin": ["completed", "canceled", "duplicate"]}}}
         self.assertEqual(
             [r["variables"] for r in fake.graphql_requests],
             [{"filter": open_filter, "after": None}, {"filter": open_filter, "after": "cursor-1"}],
@@ -1080,6 +1213,17 @@ class UndelegateTest(unittest.TestCase):
     def test_unsuccessful_update_is_an_error(self):
         _, output = self.run_undelegate([issue_delegate("app-user-1"), (200, {"data": {"issueUpdate": {"success": False}}})])
         self.assertEqual(output, {"error": "issueUpdate reported success: false"})
+
+
+class CardTitleTest(unittest.TestCase):
+    def test_unsafe_characters_are_removed_and_spaces_collapsed(self):
+        self.assertEqual(
+            linear.card_title("PAT-1", 'Fix "quoted" [bracket] title: it’s $(rm) — ok?'),
+            "PAT-1: Fix quoted bracket title its rm ok",
+        )
+
+    def test_dots_hyphens_and_digits_stay(self):
+        self.assertEqual(linear.card_title("PAT-2", "  v1.2 - re-run  "), "PAT-2: v1.2 - re-run")
 
 
 if __name__ == "__main__":

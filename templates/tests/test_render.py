@@ -19,6 +19,7 @@ render = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(render)
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "profiles" / "claude-worker" / "scripts"))
 import card_transition  # noqa: E402
+import reply_inbox  # noqa: E402
 
 SETTINGS = {
     "app_user_id": "00000000-0000-4000-8000-000000000001",
@@ -33,6 +34,7 @@ SETTINGS = {
         "installation_id": 67890,
         "private_key_path": "/srv/keys/example-app.pem",
     },
+    "factory_repository": {"full_name": "example-org/factory", "default_branch": "main"},
 }
 
 GITHUB_EVENTS = [
@@ -134,6 +136,13 @@ SELF_FILTER = {
         {"not": {"field": "sender.login", "equals": "example-app[bot]"}},
     ]
 }
+PUSH_FILTER = {
+    "all": [
+        {"field": "event", "equals": "push"},
+        {"field": "repository.full_name", "equals": "example-org/factory"},
+        {"field": "ref", "equals": "refs/heads/main"},
+    ]
+}
 LINEAR_FILTERS = [
     {
         "any": [
@@ -142,7 +151,7 @@ LINEAR_FILTERS = [
             {
                 "all": [
                     {"field": "updatedFrom.stateId", "exists": True},
-                    {"field": "data.state.type", "in": ["completed", "canceled"]},
+                    {"field": "data.state.type", "in": ["completed", "canceled", "duplicate"]},
                     {"field": "data.id", "in_file": "owned-refs.json"},
                 ]
             },
@@ -204,15 +213,15 @@ class RouteStructureTest(unittest.TestCase):
         self.assertEqual(
             route,
             {
-                "events": GITHUB_EVENTS,
+                "events": [*GITHUB_EVENTS, "push"],
                 "secret": "${GITHUB_WEBHOOK_SECRET}",
-                "filters": [REPO_FILTER, EVENT_FILTER, SELF_FILTER],
+                "filters": [{"any": [PUSH_FILTER, {"all": [REPO_FILTER, EVENT_FILTER, SELF_FILTER]}]}],
                 "toolsets": TOOLSETS,
             },
         )
 
     def test_route_events_list_matches_the_table(self):
-        self.assertEqual(self.routes["github"]["events"], [row.name for row in render.GITHUB_EVENT_TABLE])
+        self.assertEqual(self.routes["github"]["events"], [*(row.name for row in render.GITHUB_EVENT_TABLE), "push"])
 
     def test_prompt_list_and_filter_cover_the_same_event_actions(self):
         prompt = self.routes["github"]["prompt"]
@@ -220,7 +229,9 @@ class RouteStructureTest(unittest.TestCase):
         for match in re.finditer(r"^- `([a-z_]+)` with action ((?:`[a-z_]+`(?:, |, or | or )?)+), only when ", prompt, re.M):
             listed.update((match.group(1), action) for action in re.findall(r"`([a-z_]+)`", match.group(2)))
         filtered = set()
-        for clause in self.routes["github"]["filters"][1]["any"]:
+        push, table = self.routes["github"]["filters"][0]["any"]
+        self.assertEqual(push, PUSH_FILTER)
+        for clause in table["all"][1]["any"]:
             event, actions = clause["all"][0], clause["all"][1]
             self.assertEqual((event["field"], actions["field"]), ("event", "action"))
             filtered.update((event["equals"], action) for action in actions["in"])
@@ -292,6 +303,15 @@ class TriageIntentContractTest(unittest.TestCase):
 
         self.assertEqual(missing, [])
         self.assertNotIn("<triage_intent>", render.build_routes(SETTINGS)["github"]["prompt"])
+
+
+class ReplyPrefixContractTest(unittest.TestCase):
+    """The running worker recognizes a person's reply by `reply_inbox.REPLY_PREFIX`, so triage must write it."""
+
+    def test_the_linear_prompt_has_triage_start_a_card_reply_with_the_prefix(self):
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+
+        self.assertIn(f"`{reply_inbox.REPLY_PREFIX}`", prompt)
 
 
 class PromptSubstitutionTest(unittest.TestCase):
@@ -496,6 +516,16 @@ class ValidationTest(unittest.TestCase):
         "exactly one repository must have routing 'default', found 0": with_repo(0, routing="synced_github"),
         "github must be an object": settings(github="example-factory-bot"),
         "kanban_url 7 must be a string": settings(kanban_url=7),
+        "factory_repository must be an object": settings(factory_repository=None),
+        "factory_repository.full_name 'factory' must look like owner/name": settings(
+            factory_repository={"full_name": "factory", "default_branch": "main"}
+        ),
+        "factory_repository.default_branch None must be a branch name": settings(
+            factory_repository={"full_name": "example-org/factory"}
+        ),
+        "factory_repository.default_branch 'main..x' must be a branch name": settings(
+            factory_repository={"full_name": "example-org/factory", "default_branch": "main..x"}
+        ),
     }
     NO_LOGIN = "github.login must be the App's login, such as my-app[bot]; the github route keeps only the App's own events"
 
@@ -542,7 +572,7 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         routes = render.build_routes(SETTINGS)
         self.assertEqual(json.loads(out), {
-            "platforms.webhook.extra.rate_limit": 600,
+            "platforms.webhook.extra.rate_limit": 1200,
             "platforms.webhook.extra.routes.linear": routes["linear"],
             "platforms.webhook.extra.routes.github": routes["github"],
         })
@@ -609,7 +639,7 @@ class RouteCheckTest(unittest.TestCase):
         for name, route in self.routes.items():
             self.install(name, route)
         self.write_config("secret: ${LINEAR_WEBHOOK_SECRET}\nsecret: ${GITHUB_WEBHOOK_SECRET}\n")
-        self.install_rate_limit(600)
+        self.install_rate_limit(1200)
 
     def install_rate_limit(self, value):
         (self.tmp / "rate_limit.json").write_text(json.dumps(value))
@@ -620,7 +650,7 @@ class RouteCheckTest(unittest.TestCase):
         self.assertEqual(self.check(), (0, [
             "route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference",
             "route github: matches; secret is the ${GITHUB_WEBHOOK_SECRET} reference",
-            "rate_limit: matches 600",
+            "rate_limit: matches 1200",
         ]))
 
     def test_a_missing_rate_limit_is_reported(self):
@@ -630,7 +660,7 @@ class RouteCheckTest(unittest.TestCase):
         code, lines = self.check()
 
         self.assertEqual(code, 1)
-        self.assertEqual(lines[2], "rate_limit: not installed, so Hermes allows 30 a minute; install 600")
+        self.assertEqual(lines[2], "rate_limit: not installed, so Hermes allows 30 a minute; install 1200")
 
     def test_a_lower_rate_limit_is_reported(self):
         self.install_rendered()
@@ -639,7 +669,7 @@ class RouteCheckTest(unittest.TestCase):
         code, lines = self.check()
 
         self.assertEqual(code, 1)
-        self.assertEqual(lines[2], "rate_limit: 30 differs from 600")
+        self.assertEqual(lines[2], "rate_limit: 30 differs from 1200")
 
     def test_a_changed_route_names_the_differing_keys(self):
         self.install_rendered()
@@ -676,7 +706,7 @@ class RouteCheckTest(unittest.TestCase):
         self.assertEqual(self.check(), (1, [
             "route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference",
             "route github: not installed",
-            "rate_limit: matches 600",
+            "rate_limit: matches 1200",
         ]))
 
 
@@ -909,6 +939,46 @@ class HermesFilterTest(HermesFiltersCase):
         self.assertIs(self.matches("issue_comment", payload("created", issue=issue(APP), comment=comment(HUMAN, "Hi."))), True)
 
 
+def push(ref: str = "refs/heads/main", repo: str = "example-org/factory", sender: str = APP) -> dict:
+    return {
+        "ref": ref,
+        "before": "1" * 40,
+        "after": "2" * 40,
+        "repository": {"full_name": repo, "default_branch": "main"},
+        "pusher": {"name": sender.removesuffix("[bot]")},
+        "sender": {"login": sender},
+    }
+
+
+class HermesPushFilterTest(HermesFiltersCase):
+    route_name = "github"
+
+    def setUp(self):
+        super().setUp()
+        (self.home / "owned-refs.json").write_text(json.dumps(OWNED_REFS))
+
+    def test_a_push_to_the_factory_default_branch_is_kept_from_any_sender(self):
+        self.assertIn("push", self.route["events"])
+        for sender in (APP, HUMAN):
+            with self.subTest(sender):
+                self.assertIs(self.matches("push", push(sender=sender)), True)
+
+    def test_every_other_push_is_dropped(self):
+        for name, body in {
+            "another branch": push("refs/heads/goodyear/pat-1-fix"),
+            "a tag": push("refs/tags/v1.0.0"),
+            "a branch named like the default in a subdirectory": push("refs/heads/feature/main"),
+            "an installed repository's default branch": push(repo="example-org/app"),
+            "an unconfigured repository": push(repo="other-org/factory"),
+        }.items():
+            with self.subTest(name):
+                self.assertIs(self.matches("push", body), False)
+
+    def test_a_push_shaped_payload_under_another_event_is_not_kept_as_a_push(self):
+        body = {**push(), "action": "completed", "check_run": check_run(OWNED_BRANCH, "success")}
+        self.assertIs(self.matches("check_run", body), False)
+
+
 CARD_ISSUES = [f"00000000-0000-4000-8000-{n:012d}" for n in range(1, 5)]
 CARDLESS_ISSUES = [f"00000000-0000-4000-8000-{n:012d}" for n in range(101, 144)]
 
@@ -943,11 +1013,13 @@ class LinearClosureReplayTest(HermesFiltersCase):
         kept = [i for i in CARD_ISSUES if self.matches("Issue", linear_closure(i))]
         self.assertEqual(kept, CARD_ISSUES)
         self.assertIs(self.matches("Issue", linear_closure(CARD_ISSUES[0], "canceled")), True)
+        self.assertIs(self.matches("Issue", linear_closure(CARD_ISSUES[0], "duplicate")), True)
 
     def test_closures_of_issues_without_a_card_are_dropped(self):
         dropped = [i for i in CARDLESS_ISSUES if not self.matches("Issue", linear_closure(i))]
         self.assertEqual(dropped, CARDLESS_ISSUES)
         self.assertIs(self.matches("Issue", linear_closure(CARDLESS_ISSUES[0], "canceled")), False)
+        self.assertIs(self.matches("Issue", linear_closure(CARDLESS_ISSUES[0], "duplicate")), False)
 
     def test_session_events_and_delegate_changes_are_kept_without_a_card(self):
         cardless = CARDLESS_ISSUES[0]

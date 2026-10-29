@@ -42,7 +42,7 @@ def refuse(permission, graphql=False):
 
 repo = state["repo"]
 if endpoint == "apps/example-app":
-    print(json.dumps({"slug": "example-app", "permissions": state["app_permissions"]}))
+    print(json.dumps({"slug": "example-app", "permissions": state["app_permissions"], "events": state["app_events"]}))
 elif endpoint == "graphql":
     refuse("graphql", graphql=True)
     print(json.dumps({"data": {"repository": {"pullRequest": {"headRefOid": state["sha"]}}}}))
@@ -100,6 +100,7 @@ class CheckGithubAccessTest(unittest.TestCase):
             "repo": REPO,
             "sha": SHA,
             "app_permissions": dict(ALL_PERMISSIONS),
+            "app_events": ["check_run", "issues", "pull_request", "push"],
             "pulls": [{"number": 7, "head": {"sha": SHA}, "base": {"ref": "main"}}],
             "deny": [],
         }
@@ -216,6 +217,13 @@ class CheckGithubAccessTest(unittest.TestCase):
             'App example-app: grant "Actions: Read and write", it has read',
             'Installation of example-app: accept "Checks: Read-only" on the installation, it has no access',
         ])
+
+    def test_an_app_that_does_not_subscribe_to_push_is_reported(self) -> None:
+        self.state["app_events"] = ["check_run", "issues", "pull_request"]
+
+        status, lines, _ = self.check()
+
+        self.assertEqual((status, lines), (1, ['App example-app: subscribe to the "Push" event, which starts auto-deploy']))
 
     def test_a_broker_that_does_not_report_permissions_is_reported(self) -> None:
         status, lines, _ = self.check(broker=[minted(None)])

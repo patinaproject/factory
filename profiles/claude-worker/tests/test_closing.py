@@ -23,10 +23,11 @@ def session_module():
     return module
 
 
-def workflow_check(body: str) -> tuple[int, str]:
+def workflow_check(body: str, head_ref: str = "", author: str = "someone") -> tuple[int, str]:
     proc = subprocess.run(
         [sys.executable, str(SCRIPTS / "closing.py")],
-        env={"PATH": "/usr/bin:/bin", "GITHUB_REPOSITORY": REPO, "PR_BODY": body},
+        env={"PATH": "/usr/bin:/bin", "GITHUB_REPOSITORY": REPO, "PR_BODY": body,
+             "PR_HEAD_REF": head_ref, "PR_AUTHOR": author},
         capture_output=True, text=True, timeout=60,
     )
     return proc.returncode, proc.stdout + proc.stderr
@@ -117,6 +118,18 @@ class WorkflowCheckTest(unittest.TestCase):
         code, output = workflow_check("")
         self.assertEqual(code, 1)
         self.assertIn("PR body is empty", output)
+
+
+    def test_exempt_pull_requests_need_no_closing_line(self) -> None:
+        for head_ref, author in (("release-please--branches--main", "someone"), ("bot/bump-skills", "someone"),
+                                 ("dependabot/npm_and_yarn/x", "dependabot[bot]")):
+            with self.subTest(head_ref, author=author):
+                self.assertEqual(workflow_check("Sync skills v4.4.0", head_ref, author)[0], 0)
+
+    def test_other_pull_requests_still_need_a_closing_line(self) -> None:
+        for head_ref in ("", "330-sync-skills", "feature/bot/bump-skills"):
+            with self.subTest(head_ref):
+                self.assertEqual(workflow_check("Sync skills v4.4.0", head_ref)[0], 1)
 
 
 class AgreementTest(unittest.TestCase):

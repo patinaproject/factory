@@ -2,10 +2,12 @@ manifest_version: 2
 name: webhook-retry
 version: "0.1.0"
 description: >-
-  Records each webhook delivery, queues it when its agent turn fails on a usage
-  limit, and lets the retry-failed-webhooks cron job rerun it once usage is
-  back, oldest first and one at a time. A Linear Issue update that only moved
-  an issue out of Triage gets its triage card archived through
+  Records each webhook delivery. It queues the delivery when it arrives while
+  Hermes is paused, when its agent turn fails on a usage limit, or when it never
+  reaches a turn, and lets the retry-failed-webhooks cron job rerun it once
+  usage is back and Hermes is resumed, oldest first within its subject and one
+  at a time. A reply addressed to a teammate is not replayed. A Linear Issue
+  update that only moved an issue out of Triage gets its triage card archived through
   linear-agent-session's triage-exit command instead of a turn. Runs in the
-  root home only.
-provides_hooks: [pre_gateway_dispatch, api_request_error, on_session_end]
+  root home only. It never records a push, which factory-deploy owns.
+provides_hooks: [pre_gateway_dispatch, post_gateway_admission, api_request_error, on_session_end]

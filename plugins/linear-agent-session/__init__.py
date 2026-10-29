@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, linear, missing_secret, replies, tools, triage_exit, triage_intent
+from . import blocks, kanban_guard, linear, missing_secret, replies, tools, triage_exit, triage_intent, triage_round
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,12 @@ UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$")
 # Linear writes a mention in an agent activity body as `<user id="<user id>" notify>name</user>`.
 MENTION = re.compile(r"<user\b[^>]*\bid=\"([^\"]+)\"")
 TEAMMATE_REPLY = "the session reply mentions teammates and not the agent"
+
+
+def session_platform() -> str:
+    from gateway.session_context import get_session_env
+
+    return get_session_env("HERMES_SESSION_PLATFORM")
 
 
 def register(ctx: Any) -> None:
@@ -109,6 +115,13 @@ def register(ctx: Any) -> None:
         description=tools.EDIT_SCHEMA["description"],
     )
     ctx.register_tool(
+        name="linear_issue_relate",
+        toolset=TOOLSET,
+        schema=tools.RELATE_SCHEMA,
+        handler=lambda args, **_: tools.run_relate(get_client, args),
+        description=tools.RELATE_SCHEMA["description"],
+    )
+    ctx.register_tool(
         name="linear_issue_search",
         toolset=TOOLSET,
         schema=tools.SEARCH_SCHEMA,
@@ -121,6 +134,14 @@ def register(ctx: Any) -> None:
         schema=tools.GITHUB_EDIT_SCHEMA,
         handler=lambda args, **_: tools.run_github_edit(args),
         description=tools.GITHUB_EDIT_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name=triage_round.NAME,
+        toolset=TOOLSET,
+        schema=triage_round.SCHEMA,
+        handler=triage_round.make_handler(get_client),
+        check_fn=lambda: False,
+        description=triage_round.SCHEMA["description"],
     )
     ctx.register_hook(
         "pre_gateway_dispatch",
@@ -142,6 +163,7 @@ def register(ctx: Any) -> None:
             ),
         ),
     )
+    ctx.register_hook("pre_tool_call", kanban_guard.make_hook(session_platform))
     ctx.register_hook("kanban_task_blocked", blocks.make_blocked_hook(get_client))
     ctx.register_hook(
         "post_llm_call",
@@ -169,6 +191,12 @@ def unresolved_routes(config: Mapping[str, Any]) -> dict[str, str]:
     return unresolved
 
 
+def paused() -> bool:
+    from agent.estop import paused_reply
+
+    return paused_reply() is not None
+
+
 def make_dispatch_hook(
     get_client: Callable[[], linear.LinearClient],
     webhook_route: Callable[[], str],
@@ -181,6 +209,8 @@ def make_dispatch_hook(
     intent_pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-intent")
 
     async def guard_then_acknowledge(event: Any, **_: Any) -> Optional[dict[str, str]]:
+        if paused():
+            return None
         route = _delivery_route(event)
         if route is None:
             return None

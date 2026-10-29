@@ -16,14 +16,6 @@ import sys
 
 import closing
 
-EXEMPT_HEAD_PREFIXES = ("release-please--", "bot/bump-")
-EXEMPT_AUTHORS = ("dependabot[bot]",)
-
-
-def exempt(head_ref: str, author: str) -> bool:
-    return head_ref.startswith(EXEMPT_HEAD_PREFIXES) or author in EXEMPT_AUTHORS
-
-
 def missing(title: str, body: str, repo: str) -> list[str]:
     in_body = closing.closes(body, repo)
     return [
@@ -49,7 +41,7 @@ def missing_from_commits(commits: list[dict[str, str]], body: str, repo: str) ->
 
 
 def main() -> int:
-    if exempt(os.environ.get("PR_HEAD_REF", ""), os.environ.get("PR_AUTHOR", "")):
+    if closing.exempt(os.environ.get("PR_HEAD_REF", ""), os.environ.get("PR_AUTHOR", "")):
         print("Release, bump, and dependabot pull requests skip the title closing check.")
         return 0
     title, body, repo = os.environ.get("PR_TITLE", ""), os.environ.get("PR_BODY", ""), os.environ["GITHUB_REPOSITORY"]

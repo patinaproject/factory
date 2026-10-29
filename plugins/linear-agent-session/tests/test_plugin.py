@@ -189,6 +189,34 @@ class TeammateReplyTest(unittest.TestCase):
         self.assertEqual(client.calls, [])
 
 
+class PausedHookTest(unittest.TestCase):
+    def test_a_delivery_while_paused_gets_no_acknowledgement_or_intent(self):
+        calls = []
+        cases = {
+            "session created": session_event("created"),
+            "teammate reply": reply_event(f"{LUKE} thoughts?").raw_message,
+            "unresolved secret": session_event("created"),
+            "triage exit": {"type": "Issue", "action": "update", "updatedFrom": {"stateId": "s"}, "data": {"id": "issue-1"}},
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                client = RecordingClient()
+                config = webhook_config({"linear": {"secret": "${LINEAR_WEBHOOK_SECRET}"}}) if name == "unresolved secret" else RESOLVED_CONFIG
+                hook = plugin.make_dispatch_hook(
+                    lambda: client, lambda: "linear", lambda: config,
+                    lambda payload: calls.append(("exit", payload)),
+                    lambda payload: calls.append(("intent", payload)),
+                )
+                with mock.patch.object(plugin, "paused", return_value=True):
+                    self.assertIsNone(asyncio.run(hook(event=event(payload))))
+                self.assertEqual((client.calls, calls), ([], []))
+
+    def test_the_hook_resumes_acknowledging_when_not_paused(self):
+        client = RecordingClient()
+        self.assertIsNone(run_hook(event(session_event("created")), client))
+        self.assertEqual(client.calls, [ACK])
+
+
 class IntentHookTest(unittest.TestCase):
     """The hook puts the computed intent in front of a Linear turn through Hermes' `rewrite` action."""
 
@@ -403,9 +431,11 @@ class RegisterTest(unittest.TestCase):
                 "linear_delegated_issues",
                 "linear_issue",
                 "linear_issue_edit",
+                "linear_issue_relate",
                 "linear_issue_search",
                 "linear_issue_to_todo",
                 "linear_issue_undelegate",
+                "linear_triage_round",
             ],
         )
         for name, tool in ctx.tools.items():
@@ -413,8 +443,18 @@ class RegisterTest(unittest.TestCase):
             self.assertEqual(tool["schema"]["name"], name)
         self.assertEqual(
             [name for name, _ in ctx.hooks],
-            ["pre_gateway_dispatch", "kanban_task_blocked", "post_llm_call", "transform_api_error_classification"],
+            ["pre_gateway_dispatch", "pre_tool_call", "kanban_task_blocked", "post_llm_call", "transform_api_error_classification"],
         )
+
+    def test_only_the_triage_round_tool_is_hidden_from_every_model(self):
+        # Hermes' get_definitions leaves out a tool whose check_fn fails; registry.dispatch never calls it.
+        ctx = FakeContext()
+        plugin.register(ctx)
+        hidden = sorted(name for name, tool in ctx.tools.items() if tool.get("check_fn") and not tool["check_fn"]())
+        self.assertEqual(hidden, ["linear_triage_round"])
+        with self.assertLogs("linear_agent_session.triage_round", "WARNING"):
+            output = ctx.tools["linear_triage_round"]["handler"]({"task_id": "t_1", "board": "triage", "reason": "q"})
+        self.assertEqual(json.loads(output)["outcome"], "failed")
 
     def test_the_manifest_lists_every_registered_tool(self):
         ctx = FakeContext()
@@ -564,6 +604,23 @@ class CliTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn('"action": "error"', out.getvalue())
 
+    def test_teammate_reply_command_reports_whether_the_hook_would_skip_the_payload(self):
+        cli = _load_cli()
+        replies = {
+            "teammate": (reply_event(f"{LUKE} thoughts?").raw_message, True),
+            "agent": (reply_event("please continue").raw_message, False),
+            "issue": ({"type": "Issue", "action": "update"}, False),
+        }
+        for name, (payload, expected) in replies.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "payload.json")
+                with open(path, "w") as handle:
+                    json.dump(payload, handle)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = cli.main(["teammate-reply", "--payload-file", path])
+                self.assertEqual((code, json.loads(out.getvalue())), (0, {"addressed": expected}))
+
     def test_activity_command(self):
         fake = FakeLinear([activity_ok("activity-5"), (200, {"data": {"agentSessionUpdate": {"success": True}}})])
         code, output = self.run_cli(
@@ -597,6 +654,86 @@ class CliTest(unittest.TestCase):
         code, output = self.run_cli(["issue", "ABC-404"], fake)
         self.assertEqual(code, 1)
         self.assertEqual(output, {"error": "Entity not found: Issue"})
+
+    def test_session_command_prints_every_activity_oldest_first_across_pages(self):
+        def node(created, kind, **content):
+            return {"createdAt": created, "signal": content.pop("signal", None),
+                    "content": {"__typename": f"AgentActivity{kind}Content", **content}}
+
+        def page(nodes, cursor):
+            return 200, {"data": {"agentSession": {
+                "id": "9f1c2a3b-0000-4000-8000-000000000001", "status": "complete", "issue": {"identifier": "ABC-7"},
+                "activities": {"nodes": nodes, "pageInfo": {"hasNextPage": bool(cursor), "endCursor": cursor}},
+            }}}
+
+        fake = FakeLinear([
+            page([node("2026-10-27T10:03:00.000Z", "Response", body="Done."),
+                  node("2026-10-27T10:02:00.000Z", "Action", action="Ran", parameter="tests", result="ok")], "cursor-1"),
+            page([node("2026-10-27T10:01:00.000Z", "Prompt", body="Please go.", signal="continue"),
+                  node("2026-10-27T10:00:00.000Z", "Thought", body="Starting.")], None),
+        ])
+        code, output = self.run_cli(["session", "9f1c2a3b-0000-4000-8000-000000000001"], fake)
+        self.assertEqual(code, 0)
+        self.assertEqual(output, {
+            "id": "9f1c2a3b-0000-4000-8000-000000000001", "issue": "ABC-7", "status": "complete",
+            "activities": [
+                {"createdAt": "2026-10-27T10:00:00.000Z", "type": "thought", "body": "Starting."},
+                {"createdAt": "2026-10-27T10:01:00.000Z", "type": "prompt", "signal": "continue", "body": "Please go."},
+                {"createdAt": "2026-10-27T10:02:00.000Z", "type": "action", "action": "Ran", "parameter": "tests",
+                 "result": "ok"},
+                {"createdAt": "2026-10-27T10:03:00.000Z", "type": "response", "body": "Done."},
+            ],
+        })
+        self.assertEqual([r["variables"]["after"] for r in fake.graphql_requests], [None, "cursor-1"])
+
+    def test_session_command_resolves_a_url_a_uuid_and_a_slug_id(self):
+        uuid = "9f1c2a3b-0000-4000-8000-000000000001"
+        empty = {"id": uuid, "status": "active", "issue": None,
+                 "activities": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+        for reference, expected in (
+            (f"https://linear.app/example/agent-session/{uuid}", uuid),
+            (uuid, uuid),
+            ("a1b2c3d4e5f60", "a1b2c3d4e5f60"),
+        ):
+            with self.subTest(reference):
+                fake = FakeLinear([(200, {"data": {"agentSession": empty}})])
+                code, output = self.run_cli(["session", reference], fake)
+                self.assertEqual((code, output["issue"]), (0, None))
+                self.assertEqual(fake.graphql_requests[0]["variables"]["id"], expected)
+
+    def test_session_command_refuses_a_reference_that_is_not_a_session(self):
+        fake = FakeLinear([])
+        code, output = self.run_cli(["session", "ABC-123"], fake)
+        self.assertEqual(code, 1)
+        self.assertEqual(output, {"error": "'ABC-123' is not an agent session URL, UUID, or slugId"})
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_session_command_names_an_unknown_id_and_prints_no_session(self):
+        fake = FakeLinear([(200, {"errors": [{"message": "Entity not found: AgentSession"}], "data": None})])
+        code, output = self.run_cli(["session", "a1b2c3d4e5f60"], fake)
+        self.assertEqual(code, 1)
+        self.assertEqual(output, {"error": "agent session a1b2c3d4e5f60: Entity not found: AgentSession"})
+
+    def test_session_command_through_the_broker_never_prints_the_token(self):
+        empty = {"id": "a1b2c3d4e5f60", "status": "active", "issue": {"identifier": "ABC-7"},
+                 "activities": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+        fake = FakeLinear([(200, {"data": {"agentSession": empty}})])
+        cli = _load_cli()
+        out, err = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.realpath(tmp)
+            worker = os.path.join(root, "profiles", "claude-worker")
+            os.makedirs(worker)
+            broker = FakeBroker(os.path.join(root, "factory-uploads.sock"), linear_token=[linear_token("brokered-secret")])
+            self.addCleanup(broker.close)
+            with mock.patch.dict(os.environ, {"LINEAR_CLIENT_ID": "", "LINEAR_CLIENT_SECRET": "", "HERMES_HOME": worker}), \
+                    mock.patch("urllib.request.urlopen", fake), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["session", "a1b2c3d4e5f60"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["issue"], "ABC-7")
+        self.assertEqual(fake.graphql_requests[0]["authorization"], "Bearer brokered-secret")
+        self.assertNotIn("brokered-secret", out.getvalue() + err.getvalue())
 
     def test_delegated_and_undelegate_commands(self):
         page = {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}

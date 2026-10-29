@@ -57,6 +57,15 @@ private record, never to the repository.
 {{/operator_only}}{{#onepassword}}- Never run `op`, and never read the operator-only credentials, even when a
   login shell puts an `op` wrapper on `PATH`.
 {{/onepassword}}
+### Linear
+
+- To read a Linear agent session from its URL or ID, run
+  `python3 {{gateway_home}}/plugins/linear-agent-session/cli.py session <url-or-id>`.
+  It prints every activity, oldest first.
+- The command gets the app's token from the gateway's broker and never prints
+  it. Never read the token, and never call the plugin's client inline.
+- Posting into an agent session is not available to operator sessions.
+
 ### Remote access and ingress
 
 - The factory's tunnel routes and Cloudflare Access applications are code in
@@ -86,11 +95,14 @@ private record, never to the repository.
   {{worker_checkouts}}.
   Change them only through a Kanban card.
 - The gateway runs as a service. Restart it only when the operator asks,
-  from a shell outside Hermes. The one other restarter is `watch-gateway`,
-  a launchd job that restarts a gateway whose secrets did not resolve. Leave
-  it running.
-- A merged factory change is not live until it is deployed. Follow the
-  setup-factory runbook's "Deploy a merged factory change" section.
+  from a shell outside Hermes. Two launchd jobs also restart it, each
+  through `restart-gateway`. `watch-gateway` restarts a gateway whose
+  secrets did not resolve. `auto-deploy` restarts it after it installs a
+  merged factory change that needs a restart. Leave both running.
+- `auto-deploy` deploys each merge to the factory's default branch. While
+  it installs, it holds `factory-gateway.lock`. To fix what it reports, or
+  to deploy by hand, follow the setup-factory runbook's "Deploy a merged
+  factory change" section.
   `HERMES_HOME={{worker}} python3 {{worker}}/scripts/check-install` lists what is out of
   date.
 <!-- factory:end -->

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 import importlib.machinery
 import importlib.util
 import atexit
 import json
 import os
 import plistlib
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -121,7 +123,7 @@ WORKER_JOBS = [
     cron_job("dispatch-triage", 1),
 ]
 RETRY_SCRIPT = "retry-failed-webhooks"
-ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack")]
+ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack"), cron_job("report-deploy", 5, "slack")]
 RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
 
 SCRIPT = SCRIPTS / "check-install"
@@ -130,6 +132,72 @@ if str(SCRIPTS) not in sys.path:
 loader = importlib.machinery.SourceFileLoader("check_install", str(SCRIPT))
 check_install = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(check_install)
+
+REMEDY_CLASSES = (
+    ("profile", "", "install"),
+    ("plugin", "", "install"),
+    ("plugin status", "cannot run hermes plugins list", "advisory"),
+    ("plugin status", "", "install"),
+    ("plugin import", "cannot import the plugins", "advisory"),
+    ("plugin import", "", "manual"),
+    ("config", r"^config (platforms\.webhook\.(enabled|extra\.host)|kanban\.(review_dispatch|auto_decompose|default_assignee)"
+     r"|terminal\.(timeout|env_passthrough)|platforms\.factory_uploads\.enabled|streaming\.enabled"
+     r"|platforms\.slack\.extra\.native_task_cards|\S+\.github\.private_key_path) in ", "install"),
+    ("config", "", "manual"),
+    ("cron job", r"^cron job (retry-failed-webhooks|report-deploy) in .*: (is missing|delivers to \S+, not )", "manual"),
+    ("cron job", r": (is missing|is disabled|runs .*, not every|is not a script-only job|delivers to \S+, not |belongs to)", "install"),
+    ("cron job", ": last run", "advisory"),
+    ("cron job", ": is replaced by a launchd job", "manual"),
+    ("cron job", "", "manual"),
+    ("script", "", "install"),
+    ("service", "", "manual"),
+    ("gateway watch", "gateway-heartbeat-url: ", "manual"),
+    ("gateway watch", "", "advisory"),
+    ("auto deploy", "auto-deploy.lock: ", "advisory"),
+    ("auto deploy", "", "manual"),
+    ("upload broker", "", "advisory"),
+    ("broker user", "", "manual"),
+    ("secret", "", "manual"),
+    ("dashboard sign-in", "", "manual"),
+    ("webhook config", "render.py failed", "manual"),
+    ("webhook config", "", "install"),
+    ("webhook deliveries", "", "advisory"),
+    ("webhook route", "", "advisory"),
+    ("owned refs", "", "install"),
+    ("kanban board", "", "install"),
+    ("kanban board database", "cannot be read", "advisory"),
+    ("kanban board database", "", "manual"),
+    ("kanban capacity", "", "manual"),
+    ("stranded triage card", "", "advisory"),
+    ("stranded triage card check", "", "advisory"),
+    ("waiting triage card", "", "manual"),
+    ("waiting triage card check", "", "advisory"),
+    ("triage playbook", "", "manual"),
+    ("source checkout", "", "install"),
+    ("checkout", "does not exist", "manual"),
+    ("checkout", "", "install"),
+    ("work skills", "", "manual"),
+    ("model tier", "", "manual"),
+    ("mcp", "", "advisory"),
+    ("root mcp", "cannot check|does not connect", "advisory"),
+    ("root mcp", "", "manual"),
+    ("hermes tool", "cannot read", "advisory"),
+    ("hermes tool", "", "manual"),
+)
+
+
+def remedy_class(record: dict) -> str | None:
+    for kind, pattern, remedy in REMEDY_CLASSES:
+        if record["kind"] == kind and re.search(pattern, record["line"]):
+            return remedy
+    return None
+
+
+def classified(case: unittest.TestCase, drifts) -> list:
+    records = [d if isinstance(d, dict) else d.to_json() for d in drifts]
+    for record in records:
+        case.assertEqual(record["remedy"]["type"], remedy_class(record), record["line"])
+    return [record["line"] for record in records]
 
 SECRET_NAMES = "plugin.yaml"
 SECRET_NAMES_MANIFEST = "kind: platform\noptional_env:\n  - name: LINEAR_CLIENT_SECRET\n  - name: CLAUDE_PROXY_TOKEN\n  - name: SENTRY_ACCESS_TOKEN\n"
@@ -204,6 +272,7 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, "triage-refs.json", "[]\n")
         self.watch_state({"checked_at": time.time(), "state": "healthy", "restarts": []})
         self.install(self.root, "gateway-heartbeat-url", "https://monitor.example/ping/id\n")
+        self.install(self.root, "auto-deploy.json", json.dumps({"deployed": git(self.repo, "rev-parse", "HEAD"), "hold": None}))
         os.chmod(self.root / "gateway-heartbeat-url", 0o600)
         self.boards(BOARDS)
 
@@ -249,15 +318,120 @@ class CheckInstallTest(unittest.TestCase):
         config = {"public_url": public_url, "oauth": {"client_id": "", "self_hosted": self_hosted}}
         self.install(self.root, "installed-dashboard.json", json.dumps(config))
 
-    def check(self, *args: str) -> tuple:
+    def run_check(self, *args: str) -> subprocess.CompletedProcess:
         env = {**os.environ, **self.launchd.env, "HERMES_HOME": str(self.worker), "HERMES_BIN": str(self.hermes)}
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPTS / "check-install"), *args], env=env, capture_output=True, text=True
-        )
-        return proc.returncode, proc.stdout
+        return subprocess.run([sys.executable, str(SCRIPTS / "check-install"), *args], env=env, capture_output=True, text=True)
+
+    def check(self, *args: str) -> tuple:
+        if "--print-source" in args:
+            proc = self.run_check(*args)
+            return proc.returncode, proc.stdout
+        proc = self.run_check("--json", *args)
+        self.raw = proc.stdout
+        if not proc.stdout:
+            return proc.returncode, ""
+        lines = classified(self, json.loads(proc.stdout))
+        return proc.returncode, "".join(f"{line}\n" for line in lines)
 
     def test_matching_install_is_silent(self) -> None:
         self.assertEqual(self.check(), (0, ""))
+        self.assertEqual(json.loads(self.raw), [])
+
+    def test_the_text_output_is_the_lines_of_the_json_records(self) -> None:
+        self.install(self.worker, "SOUL.md", "stale\n")
+        shutil.rmtree(self.root / "plugins" / "p1")
+        self.config(self.root, {**ROOT_CONFIG, "kanban.review_dispatch": True, "kanban.max_spawn": 0})
+        self.cron(self.worker, [job for job in WORKER_JOBS if job["name"] != "dispatch-triage"])
+        os.chmod(self.root / "gateway-heartbeat-url", 0o644)
+        self.boards([BOARDS[0]])
+
+        text, records = self.run_check(), self.run_check("--json")
+
+        self.assertEqual((text.returncode, records.returncode), (1, 1))
+        self.assertEqual(text.stdout, "".join(f"{record['line']}\n" for record in json.loads(records.stdout)))
+        self.assertEqual(len(text.stdout.splitlines()), 7)
+
+    def test_each_record_names_its_remedy(self) -> None:
+        self.install(self.worker, "SOUL.md", "stale\n")
+        self.config(self.root, {**ROOT_CONFIG, "kanban.review_dispatch": True})
+        self.cron(self.worker, [job for job in WORKER_JOBS if job["name"] != "dispatch-triage"])
+        os.chmod(self.root / "gateway-heartbeat-url", 0o644)
+
+        self.check()
+
+        hermes, beat = str(self.hermes), self.root / "gateway-heartbeat-url"
+        self.assertEqual(json.loads(self.raw), [
+            {
+                "kind": "profile", "where": "claude-worker", "detail": f"SOUL.md differs from main at {self.sha}",
+                "line": f"profile claude-worker: SOUL.md differs from main at {self.sha}",
+                "remedy": {
+                    "type": "install", "step": "PROFILE", "argv": [hermes, "profile", "update", "claude-worker", "-y"],
+                    "restarts_gateway": False,
+                },
+            },
+            {
+                "kind": "config", "where": f"kanban.review_dispatch in {self.root}", "detail": "is not false (part 10)",
+                "line": f"config kanban.review_dispatch in {self.root}: is not false (part 10)",
+                "remedy": {
+                    "type": "install", "step": "CONFIG", "argv": [hermes, "config", "set", "kanban.review_dispatch", "false"],
+                    "restarts_gateway": True,
+                },
+            },
+            {
+                "kind": "cron job", "where": f"dispatch-triage in {self.worker}", "detail": "is missing (part 12)",
+                "line": f"cron job dispatch-triage in {self.worker}: is missing (part 12)",
+                "remedy": {
+                    "type": "install", "step": "CRON",
+                    "argv": [
+                        hermes, "-p", "claude-worker", "cron", "create", "every 1m", "--name", "dispatch-triage",
+                        "--no-agent", "--script", "dispatch-triage", "--deliver", "local",
+                    ],
+                    "restarts_gateway": False,
+                },
+            },
+            {
+                "kind": "gateway watch", "where": str(beat), "detail": "has mode 644; it holds a URL, so use 600 (part 12)",
+                "line": f"gateway watch {beat}: has mode 644; it holds a URL, so use 600 (part 12)",
+                "remedy": {
+                    "type": "manual",
+                    "action": "ask the operator to store the heartbeat URL, mode 600, as part 12's checkpoint describes",
+                },
+            },
+        ])
+
+    def test_a_differing_cron_job_is_edited_in_place(self) -> None:
+        self.cron(self.worker, [
+            cron_job("dispatch-triage", 5, enabled=False) if job["name"] == "dispatch-triage" else job for job in WORKER_JOBS
+        ])
+
+        self.check()
+
+        cron = [str(self.hermes), "-p", "claude-worker", "cron"]
+        self.assertEqual([record["remedy"]["argv"] for record in json.loads(self.raw)], [
+            [*cron, "resume", "dispatch-triage"],
+            [*cron, "edit", "dispatch-triage", "--schedule", "every 1m"],
+        ])
+
+    def test_a_render_that_fails_needs_the_operator(self) -> None:
+        git(self.repo, "checkout", "-q", "-b", "broken-render")
+        self.install(self.repo, "templates/render.py", "import sys\nsys.exit('no factory settings')\n")
+        git(self.repo, "commit", "-q", "-am", "break render")
+        sha = git(self.repo, "rev-parse", "--short=7", "HEAD")
+
+        self.assertEqual(self.check("--ref", "broken-render", "--no-fetch"), (1, (
+            f"webhook config {self.root}: render.py failed at {sha}: no factory settings\n"
+        )))
+        self.assertEqual(json.loads(self.raw)[0]["remedy"]["type"], "manual")
+
+    def test_every_drift_kind_check_install_builds_has_a_remedy_class(self) -> None:
+        tree = ast.parse(SCRIPT.read_text())
+        kinds = {
+            node.args[0].value for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Drift"
+        }
+
+        self.assertEqual(kinds - {kind for kind, _, _ in REMEDY_CLASSES}, set())
+        self.assertIn("source checkout", kinds)
 
     def test_a_stale_or_missing_watch_state_is_reported(self) -> None:
         self.watch_state({"checked_at": time.time() - 3600, "state": "healthy", "restarts": []})
@@ -293,7 +467,7 @@ class CheckInstallTest(unittest.TestCase):
         os.chmod(beat, 0o644)
         code, out = self.check()
         self.assertEqual((code, out), (1, f"gateway watch {beat}: has mode 644; it holds a URL, so use 600 (part 12)\n"))
-        self.assertNotIn("monitor.example", out)
+        self.assertNotIn("monitor.example", self.raw)
 
         beat.unlink()
         self.assertEqual(self.check(), (1, (
@@ -321,6 +495,38 @@ class CheckInstallTest(unittest.TestCase):
             f"script {self.root}/scripts/watch-gateway: is missing; install it from "
             "skills/setup-factory/scripts/watch-gateway (part 12)\n"
             f"script {self.root}/scripts/restart-gateway: differs from both at {sha} (part 12)\n"
+        )))
+
+    def test_auto_deploy_is_checked_on_macos(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("auto-deploy is a launchd job")
+        state = self.root / "auto-deploy.json"
+        deployed = state.read_text()
+        state.unlink()
+        missing = self.check()
+        state.write_text(deployed)
+        self.config(self.root, {**ROOT_CONFIG, "kanban.dispatch_profiles": []})
+        held = self.check()
+
+        self.assertEqual((missing, held), (
+            (1, f"auto deploy {state}: is missing, so auto-deploy has never run (part 12)\n"),
+            (1, f"auto deploy kanban.dispatch_profiles in {self.root}: is set, and no auto-deploy run set it, so Hermes "
+                "claims no card for a profile outside it and auto-deploy deploys nothing\n"),
+        ))
+
+    def test_the_auto_deploy_wrappers_are_compared_with_the_repository(self) -> None:
+        for name in ("auto-deploy", "report-deploy"):
+            self.install(self.repo, f"skills/setup-factory/scripts/{name}", f"#!/usr/bin/env python3\n{name}\n")
+        git(self.repo, "checkout", "-q", "-b", "deploy")
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-q", "-m", "deploy")
+        self.install(self.root, "scripts/report-deploy", "stale\n")
+        sha = git(self.repo, "rev-parse", "--short=7", "HEAD")
+
+        self.assertEqual(self.check("--ref", "deploy", "--no-fetch"), (1, (
+            f"script {self.root}/scripts/auto-deploy: is missing; install it from "
+            "skills/setup-factory/scripts/auto-deploy (part 12)\n"
+            f"script {self.root}/scripts/report-deploy: differs from deploy at {sha} (part 12)\n"
         )))
 
     def test_the_constants_equal_the_watch_script(self) -> None:
@@ -740,7 +946,7 @@ class CheckInstallTest(unittest.TestCase):
         code, out = self.check()
 
         self.assertEqual(code, 1)
-        self.assertNotIn("s3cr3t-value", out)
+        self.assertNotIn("s3cr3t-value", self.raw)
 
     def test_declared_input_that_is_not_set(self) -> None:
         config = dict(ROOT_CONFIG)
@@ -817,7 +1023,7 @@ class CheckInstallTest(unittest.TestCase):
                 code, out = self.check()
 
                 self.assertEqual((code, out), (1, drift))
-                self.assertNotIn("s3cr3t-value", out)
+                self.assertNotIn("s3cr3t-value", self.raw)
 
     def test_worker_without_a_proxy_token_loads_no_secret(self) -> None:
         self.config(self.worker, {**WORKER_CONFIG, "secrets.command": {"enabled": True, "command": "s3cr3t-value"}})
@@ -828,7 +1034,7 @@ class CheckInstallTest(unittest.TestCase):
             (code, out),
             (1, f"config secrets.command in {self.worker}: is set, but a worker without a proxy token loads no secret (part 5)\n"),
         )
-        self.assertNotIn("s3cr3t-value", out)
+        self.assertNotIn("s3cr3t-value", self.raw)
 
     def test_worker_secret_source_disabled_without_a_proxy_token_is_silent(self) -> None:
         self.config(self.worker, {**WORKER_CONFIG, "secrets.command": {"enabled": False, "command": "y"}})
@@ -853,7 +1059,7 @@ class CheckInstallTest(unittest.TestCase):
             f"secret FACTORY_INFISICAL_CLIENT_SECRET in {self.worker}/.env: {held} (part 14)\n",
             f"secret CLAUDE_PROXY_TOKEN in {self.worker}/.env: {held} (part 3)\n",
         ])))
-        self.assertNotIn("s3cr3t", out)
+        self.assertNotIn("s3cr3t", self.raw)
 
     def test_an_mcp_token_in_the_worker_env_is_reported_by_name_only(self) -> None:
         self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
@@ -867,7 +1073,7 @@ class CheckInstallTest(unittest.TestCase):
             f"secret SENTRY_ACCESS_TOKEN in {self.worker}/.env: is set, but the worker holds no factory secret; "
             "remove it (part 3)\n",
         ))
-        self.assertNotIn("s3cr3t", out)
+        self.assertNotIn("s3cr3t", self.raw)
 
     def test_an_mcp_token_variable_hermes_would_pass_to_every_process(self) -> None:
         self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
@@ -904,7 +1110,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job refresh-checkouts in {self.worker}: is missing (part 12)\n"
-                f"cron job {RETRY_SCRIPT} in {self.root}: exists 2 times (part 12)\n"),
+                f"cron job {RETRY_SCRIPT} in {self.root}: exists 2 times (part 12)\n"
+                f"cron job report-deploy in {self.root}: exists 2 times (part 12)\n"),
         )
 
     def test_cron_job_changed_by_hand(self) -> None:
@@ -914,7 +1121,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("reopen-conflicts", 5),
             cron_job("dispatch-triage", 1),
         ])
-        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local")])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local"), ROOT_JOBS[1]])
 
         self.assertEqual(
             self.check(),
@@ -1007,6 +1214,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"
+                f"cron job report-deploy in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -1016,6 +1225,8 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(),
             (1, f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"
+                f"cron job report-deploy in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -1027,19 +1238,20 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_explicit_and_local_delivery_targets_need_no_home_channel(self) -> None:
         (self.root / ".env").unlink()
-        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "slack:C0123")])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "slack:C0123"), cron_job("report-deploy", 5, "slack:C0123")])
 
         self.assertEqual(self.check(), (0, ""))
 
     def test_retry_cron_job_missing_or_changed(self) -> None:
         self.cron(self.root, [])
         missing = self.check()
-        self.cron(self.root, [cron_job(RETRY_SCRIPT, 30, "slack", enabled=False)])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 30, "slack", enabled=False), ROOT_JOBS[1]])
         changed = self.check()
 
         self.assertEqual(
             (missing, changed),
-            ((1, f"cron job {RETRY_SCRIPT} in {self.root}: is missing (part 12)\n"),
+            ((1, f"cron job {RETRY_SCRIPT} in {self.root}: is missing (part 12)\n"
+                 f"cron job report-deploy in {self.root}: is missing (part 12)\n"),
              (1, f"cron job {RETRY_SCRIPT} in {self.root}: is disabled (part 12)\n"
                  f"cron job {RETRY_SCRIPT} in {self.root}: runs every 30m, not every 10m (part 12)\n")),
         )
@@ -1115,12 +1327,13 @@ class CheckInstallTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as board:
             board.execute(f"CREATE TABLE tasks ({columns})")
-            board.execute("CREATE TABLE task_events (task_id, kind, created_at)")
+            board.execute("CREATE TABLE task_events (id, task_id, kind, payload, created_at)")
+            board.execute("CREATE TABLE task_comments (id, task_id, author, body, created_at)")
         board.close()
         return path
 
     def test_board_databases_that_hold_the_columns_the_blocker_check_reads_are_silent(self) -> None:
-        columns = "id, title, body, branch_name, status, assignee, claim_lock, created_at"
+        columns = "id, title, body, branch_name, status, block_kind, assignee, claim_lock, created_at"
         self.kanban_database(self.root / "kanban.db", columns)
         self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", columns)
 
@@ -1129,7 +1342,7 @@ class CheckInstallTest(unittest.TestCase):
     def test_a_triage_board_with_a_stranded_card_is_reported_by_the_full_check(self) -> None:
         board = self.kanban_database(
             self.root / "kanban" / "boards" / "triage" / "kanban.db",
-            "id, title, body, branch_name, status, assignee, claim_lock, created_at",
+            "id, title, body, branch_name, status, block_kind, assignee, claim_lock, created_at",
         )
         with sqlite3.connect(board) as db:
             db.execute(
@@ -1147,9 +1360,23 @@ class CheckInstallTest(unittest.TestCase):
         triage = self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", "id, title, body, state")
 
         self.assertEqual(self.check(), (1, (
-            f"kanban board database {triage}: has no tasks.branch_name, tasks.status, so a card cannot wait for "
-            "its blockers (part 15, check 29)\n"
+            f"kanban board database {triage}: has no tasks.branch_name, tasks.status, tasks.block_kind, so a card "
+            "cannot wait for its blockers or a reply (part 15, check 29)\n"
             f"stranded triage card check {triage}: cannot be read: no such column: t.created_at (part 10)\n"
+            f"waiting triage card check {triage}: cannot be read: no such column: status (part 15, check 27)\n"
+        )))
+
+    def test_a_board_database_missing_a_comment_or_event_column_the_release_reads(self) -> None:
+        board = self.root / "kanban.db"
+        with sqlite3.connect(board) as db:
+            db.execute("CREATE TABLE tasks (id, title, body, branch_name, status, block_kind)")
+            db.execute("CREATE TABLE task_events (id, task_id, kind, data, created_at)")
+            db.execute("CREATE TABLE task_comments (id, task_id, author, text, created_at)")
+        db.close()
+
+        self.assertEqual(self.check(), (1, (
+            f"kanban board database {board}: has no task_comments.body, task_events.payload, so a card cannot wait "
+            "for its blockers or a reply (part 15, check 29)\n"
         )))
 
     def test_a_board_database_that_cannot_be_read(self) -> None:
@@ -1478,6 +1705,7 @@ class CheckInstallTest(unittest.TestCase):
             f"{agents}/ai.patinaproject.factory.gateway-watch.plist", "ai.patinaproject.factory.gateway-watch"
         )
         self.launchd.plist(f"{agents}/ai.patinaproject.factory.gh-login.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS)
+        self.launchd.plist(f"{agents}/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL, **AUTO_DEPLOY_FIELDS)
         env = {"PATH": "/usr/bin:/bin", **self.launchd.env, "HOME": str(home), "HERMES_HOME": str(self.worker)}
         proc = subprocess.run(
             ["/usr/bin/env", "python3", str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True
@@ -1494,7 +1722,7 @@ class CheckInstallTest(unittest.TestCase):
 
 class CheckTriageCapacityTest(unittest.TestCase):
     def rows(self, max_spawn, max_in_progress, max_running) -> list:
-        return [str(d) for d in check_install.check_triage_capacity(max_spawn, max_in_progress, max_running)]
+        return classified(self, check_install.check_triage_capacity(max_spawn, max_in_progress, max_running))
 
     def test_limits_that_fit_report_nothing(self) -> None:
         self.assertEqual(self.rows(2, 4, 2), [])
@@ -1546,7 +1774,7 @@ class CheckStrandedTriageTest(unittest.TestCase):
         self.db.commit()
 
     def rows(self) -> list:
-        return [str(d) for d in check_install.check_stranded_triage(self.root, self.NOW)]
+        return classified(self, check_install.check_stranded_triage(self.root, self.NOW))
 
     def test_an_assigned_ready_card_with_no_claim_past_the_threshold(self) -> None:
         self.card("t_stuck", age=95)
@@ -1604,6 +1832,14 @@ class CheckStrandedTriageTest(unittest.TestCase):
             "the default board is probably holding every worker slot (part 10)"
         ])
 
+    def test_a_card_held_by_auto_deploy_is_not_stranded(self) -> None:
+        self.card("t_held", age=95)
+        (self.root / "auto-deploy.json").write_text(json.dumps({"hold": {"pid": 4242, "dispatch_profiles": True}}))
+        held = self.rows()
+        (self.root / "auto-deploy.json").write_text(json.dumps({"hold": None}))
+
+        self.assertEqual((held, len(self.rows())), ([], 1))
+
     def test_a_missing_database_is_silent(self) -> None:
         self.path.unlink()
 
@@ -1623,10 +1859,157 @@ GH_LOGIN_LABEL = "ai.patinaproject.factory.gh-login"
 GH_LOGIN_FIELDS = {
     "StartInterval": 900, "EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/w"},
 }
+AUTO_DEPLOY_LABEL = "ai.patinaproject.factory.auto-deploy"
+AUTO_DEPLOY_FIELDS = {"EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/h", "PATH": "/h/.local/bin:/usr/bin"}}
+class CheckAutoDeployTest(unittest.TestCase):
+    NOW = 2_000_000.0
+    SHA = "c" * 40
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.alive: set = set()
+        self.commit = check_install.Commit(self.root, self.SHA, "main")
+
+    def state(self, **fields) -> None:
+        (self.root / "auto-deploy.json").write_text(json.dumps({"deployed": self.SHA, "hold": None, **fields}))
+
+    def check(self, dispatch_profiles=None, *, age_hours: float = 1, commit="default") -> list:
+        commit = self.commit if commit == "default" else commit
+        return classified(self, check_install.check_auto_deploy(
+            self.root, dispatch_profiles, commit, self.NOW - age_hours * 3600, self.NOW, self.alive.__contains__,
+        ))
+
+    def hold(self, pid: int = 4242, **parts) -> dict:
+        return {"pid": pid, "commit": "d" * 40, "dispatch_profiles": False, "pause": None, "gateway_lock": False, **parts}
+
+    def test_a_deployed_commit_with_no_hold_is_silent(self) -> None:
+        self.state()
+
+        self.assertEqual(self.check(), [])
+
+    def test_a_missing_or_unreadable_state_file_is_reported(self) -> None:
+        missing = self.check()
+        (self.root / "auto-deploy.json").write_text("{not json")
+        unreadable = self.check()
+
+        self.assertEqual((missing, unreadable), (
+            [f"auto deploy {self.root}/auto-deploy.json: is missing, so auto-deploy has never run (part 12)"],
+            [f"auto deploy {self.root}/auto-deploy.json: is unreadable, so every auto-deploy run stops before it deploys"],
+        ))
+
+    def test_a_stale_run_lock_is_reported_and_a_live_ones_silences_everything(self) -> None:
+        self.state(hold=self.hold(dispatch_profiles=True))
+        (self.root / "auto-deploy.lock").write_text("4242\n")
+
+        stale = self.check()
+        self.alive.add(4242)
+        live = self.check([])
+
+        self.assertEqual(stale, [
+            f"auto deploy {self.root}/auto-deploy.lock: names pid 4242, which is not a running auto-deploy; the next run reclaims it",
+            f"auto deploy kanban.dispatch_profiles in {self.root}: was set by auto-deploy run 4242, which is not running, "
+            "so Hermes claims no card",
+        ])
+        self.assertEqual(live, [])
+
+    def test_a_dead_runs_hold_pause_and_gateway_lock_are_reported(self) -> None:
+        self.state(hold=self.hold(dispatch_profiles=True, pause="auto-deploy 4242: installing", gateway_lock=True))
+        (self.root / "factory-gateway.lock").write_text("4242\n")
+
+        self.assertEqual(self.check([]), [
+            f"auto deploy kanban.dispatch_profiles in {self.root}: was set by auto-deploy run 4242, which is not running, "
+            "so Hermes claims no card",
+            f"auto deploy {self.root}/auto-deploy.json: records a hermes pause of auto-deploy run 4242, which is not "
+            "running, so no turn may run",
+            f"auto deploy {self.root}/factory-gateway.lock: holds auto-deploy run 4242, which is not running, so "
+            "watch-gateway restarts nothing",
+        ])
+
+    def test_a_pending_restart_with_no_live_run_is_reported(self) -> None:
+        self.state(restart_pending=self.SHA)
+        pending = self.check()
+        (self.root / "auto-deploy.lock").write_text("4242\n")
+        self.alive.add(4242)
+        running = self.check()
+
+        self.assertEqual((pending, running), ([
+            f"auto deploy {self.root}/auto-deploy.json: records a gateway restart for {self.SHA[:12]} that has not "
+            "succeeded, so the gateway may still run the plugins and config from before it",
+        ], []))
+
+    def test_a_hold_whose_run_is_alive_is_silent(self) -> None:
+        self.state(hold=self.hold(dispatch_profiles=True, gateway_lock=True))
+        (self.root / "factory-gateway.lock").write_text("4242\n")
+        self.alive.add(4242)
+
+        self.assertEqual(self.check([]), [])
+
+    def test_a_gateway_lock_a_person_holds_is_not_reported(self) -> None:
+        self.state(hold=self.hold(gateway_lock=True))
+        (self.root / "factory-gateway.lock").write_text("deploying by hand since 10:00\n")
+
+        self.assertEqual(self.check(), [])
+
+    def test_a_dispatch_profiles_key_no_run_set_is_reported(self) -> None:
+        self.state()
+
+        self.assertEqual(self.check([]), [
+            f"auto deploy kanban.dispatch_profiles in {self.root}: is set, and no auto-deploy run set it, so Hermes "
+            "claims no card for a profile outside it and auto-deploy deploys nothing",
+        ])
+        self.assertEqual(self.check(["claude-worker"])[0], self.check([])[0])
+
+    def test_an_undeployed_commit_a_day_old_is_reported_with_its_outcome(self) -> None:
+        self.state(deployed="b" * 40, attempted=self.SHA, outcome="FAILED", detail="check-settings exited 1: model differs")
+        failed = self.check(age_hours=30)
+        self.state(deployed="b" * 40, attempted="b" * 40, outcome="DEPLOYED")
+        lost = self.check(age_hours=24)
+
+        self.assertEqual(failed, [
+            f"auto deploy origin/main at ccccccc: is not deployed 30 hours after it was committed; auto-deploy "
+            "recorded FAILED: check-settings exited 1: model differs",
+        ])
+        self.assertEqual(lost, [
+            "auto deploy origin/main at ccccccc: is not deployed 24 hours after it was committed; auto-deploy "
+            "recorded no outcome for it, so its push did not start a run",
+        ])
+
+    def test_an_undeployed_commit_under_a_day_or_a_ref_is_silent(self) -> None:
+        self.state(deployed="b" * 40, attempted=self.SHA, outcome="WAITING")
+
+        self.assertEqual((self.check(age_hours=23.9), self.check(age_hours=48, commit=None)), ([], []))
+
+    def test_live_deploy_needs_a_running_auto_deploy(self) -> None:
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "auto-deploy"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        done = subprocess.Popen([sys.executable, "-c", "pass", "auto-deploy"])
+        done.wait()
+
+        self.assertEqual(
+            [check_install.live_deploy(pid) for pid in (proc.pid, os.getpid(), done.pid, None, "4242")],
+            [True, False, False, False, False],
+        )
+
+    def test_the_names_equal_auto_deploy_and_the_push_hook(self) -> None:
+        scripts = SCRIPTS.parents[2] / "skills" / "setup-factory" / "scripts"
+        loader = importlib.machinery.SourceFileLoader("auto_deploy", str(scripts / "auto-deploy"))
+        deploy = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(deploy)
+        hook_spec = importlib.util.spec_from_file_location("factory_deploy", SCRIPTS.parents[2] / "plugins" / "factory-deploy" / "__init__.py")
+        hook = importlib.util.module_from_spec(hook_spec)
+        hook_spec.loader.exec_module(hook)
+        service = next(s for s in check_install.SERVICES if s.name == "auto deploy")
+
+        self.assertEqual((Path(service.plist).name, check_install.HOLD_KEY), (f"{deploy.LABEL}.plist", deploy.HOLD_KEY))
+        printed = plistlib.loads(deploy.plist(Path("/h"), Path("/h/profiles/claude-worker")))
+        self.assertEqual(sorted(printed["EnvironmentVariables"]), sorted(service.env))
+        self.assertEqual(hook.LABEL, deploy.LABEL)
+        self.assertIn("factory-deploy", check_install.ROOT_ONLY_PLUGINS)
 
 
 class Launchd:
-    """A file system root with the runbook's two plists and a fake launchctl that reports their state."""
 
     def __init__(self, tmp: Path) -> None:
         self.root = tmp / "launchd"
@@ -1647,11 +2030,16 @@ class Launchd:
         self.gh_login = self.plist(
             f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{GH_LOGIN_LABEL}.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS,
         )
+        self.deploy = self.plist(
+            f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL,
+            **AUTO_DEPLOY_FIELDS,
+        )
         uid = os.getuid()
         self.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
             f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
             f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
         })
         self.env = {
             "LAUNCHD_ROOT": str(self.root), "LAUNCHCTL_BIN": str(self.launchctl),
@@ -1695,7 +2083,7 @@ class CheckMcpServersTest(unittest.TestCase):
 
     def check(self, reports: dict) -> list:
         (self.worker / "scripts" / "reports.json").write_text(json.dumps(reports))
-        return [str(d) for d in check_install.check_mcp_servers(self.settings, self.worker)]
+        return classified(self, check_install.check_mcp_servers(self.settings, self.worker))
 
     def test_reports_each_server_neither_connected_nor_disabled(self) -> None:
         app = {"servers": [
@@ -1742,7 +2130,7 @@ class CheckMcpServersTest(unittest.TestCase):
         (self.worker / "scripts" / "claude-session").unlink()
 
         self.assertEqual(self.check({}), [])
-        self.assertEqual([str(d) for d in check_install.check_mcp_servers(None, self.worker)], [])
+        self.assertEqual(classified(self, check_install.check_mcp_servers(None, self.worker)), [])
 
 
 FAKE_ROOT_MCP_HERMES = """#!/usr/bin/env python3
@@ -1800,7 +2188,7 @@ class CheckRootMcpServersTest(unittest.TestCase):
     def check(self, servers, connects=("sentry",)) -> list:
         (self.root / "config.yaml").write_text(json.dumps({"model": "x", "mcp_servers": servers}))
         (self.root / "connects.json").write_text(json.dumps(list(connects)))
-        return [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+        return classified(self, check_install.check_root_mcp_servers(self.root, str(self.hermes)))
 
     def test_a_connected_server_with_sampling_off_and_a_reference_is_silent(self) -> None:
         self.assertEqual(self.check({"sentry": ROOT_SERVER}), [])
@@ -1850,14 +2238,14 @@ class CheckRootMcpServersTest(unittest.TestCase):
     def test_a_config_that_does_not_parse_is_one_drift_that_quotes_none_of_it(self) -> None:
         (self.root / "config.yaml").write_text(f"mcp_servers: [unclosed Sentry-Bearer {SECRET}\n")
 
-        lines = [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+        lines = classified(self, check_install.check_root_mcp_servers(self.root, str(self.hermes)))
 
         self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: ValueError (part 10)"])
 
     def test_a_config_read_that_times_out_is_one_drift(self) -> None:
         (self.root / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
         with mock.patch.object(check_install.subprocess, "run", side_effect=subprocess.TimeoutExpired("python3", 60)):
-            lines = [str(d) for d in check_install.check_root_mcp_servers(self.root, str(self.hermes))]
+            lines = classified(self, check_install.check_root_mcp_servers(self.root, str(self.hermes)))
 
         self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: timed out (part 10)"])
 
@@ -1905,9 +2293,10 @@ def install_fake_hermes(root: Path) -> Path:
     tools = tree / "tools"
     tools.mkdir(parents=True)
     for name, source in (("__init__", ""), ("registry", FAKE_REGISTRY), ("process_registry", ""),
-                         ("terminal_tool", FAKE_TERMINAL_TOOL)):
+                         ("terminal_tool", FAKE_TERMINAL_TOOL), ("kanban_tools", "")):
         (tools / f"{name}.py").write_text(source)
-    (tools / "registered.json").write_text(json.dumps({"terminal": "terminal", "process_manage": "terminal"}))
+    (tools / "registered.json").write_text(json.dumps(
+        {"terminal": "terminal", "process_manage": "terminal", "kanban_schedule": "kanban"}))
     python = root / "tools" / "python-9" / "bin"
     python.mkdir(parents=True)
     (python / "python3").symlink_to(sys.executable)
@@ -1920,13 +2309,83 @@ def install_fake_hermes(root: Path) -> Path:
     return tree
 
 
+class CheckWaitingTriageTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "hermes"
+        self.path = self.root / "kanban" / "boards" / "triage" / "kanban.db"
+        self.path.parent.mkdir(parents=True)
+        self.db = sqlite3.connect(self.path)
+        self.addCleanup(self.db.close)
+        self.db.execute("CREATE TABLE tasks (id, status, block_kind)")
+        self.db.execute("CREATE TABLE task_comments (id INTEGER PRIMARY KEY, task_id, author, body, created_at)")
+        self.db.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id, kind, payload, created_at)")
+        self.plugin = PLUGIN
+
+    def card(self, id: str, status: str, block_kind: str | None = None, comments=(), parks=()) -> None:
+        self.db.execute("INSERT INTO tasks VALUES (?, ?, ?)", (id, status, block_kind))
+        for body, at in comments:
+            self.db.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, 'claude-worker', ?, ?)",
+                            (id, body, at))
+        for at in parks:
+            self.db.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'scheduled', ?, ?)",
+                            (id, json.dumps({"reason": "Needs input: which?\n\ncomments_seen: 0"}), at))
+        self.db.commit()
+
+    def check(self) -> list:
+        return classified(self, check_install.check_waiting_triage(self.root, self.plugin))
+
+    def test_each_card_that_waits_for_input_the_old_way_is_reported(self) -> None:
+        self.card("t_blocked", "blocked", "needs_input")
+        self.card("t_parked", "triage", "needs_input")
+
+        self.assertEqual(self.check(), [
+            "waiting triage card t_blocked: is blocked with block kind needs_input, but a triage round waits for a "
+            "reply in scheduled (part 15, check 27)",
+            "waiting triage card t_parked: is triage with block kind needs_input, but a triage round waits for a "
+            "reply in scheduled (part 15, check 27)",
+        ])
+
+    def test_a_waiting_card_a_real_loop_and_another_block_are_silent(self) -> None:
+        self.card("t_waits", "scheduled", "needs_input", comments=[("Linear reply: earlier", 50)], parks=[100])
+        self.card("t_loop", "triage", "transient")
+        self.card("t_stuck", "blocked", "capability")
+
+        self.assertEqual(self.check(), [])
+
+    def test_a_round_not_posted_after_the_newest_park_is_reported(self) -> None:
+        self.card("t_failed", "scheduled", comments=[("Triage round not posted: failed: RuntimeError", 100)], parks=[100])
+        self.card("t_unknown", "scheduled", comments=[("Triage round not posted: unknown", 300)], parks=[100, 300])
+        self.card("t_reposted", "scheduled", comments=[("Triage round not posted: unknown", 100)], parks=[100, 400])
+
+        self.assertEqual(self.check(), [
+            "waiting triage card t_failed: waits in scheduled, but its round may never have reached Linear: "
+            "Triage round not posted: failed: RuntimeError (part 15, check 27)",
+            "waiting triage card t_unknown: waits in scheduled, but its round may never have reached Linear: "
+            "Triage round not posted: unknown (part 15, check 27)",
+        ])
+
+    def test_an_unreadable_board_gives_a_row(self) -> None:
+        self.db.execute("DROP TABLE task_comments")
+
+        [row] = self.check()
+        self.assertEqual(row, f"waiting triage card check {self.path}: cannot be read: no such table: task_comments (part 15, check 27)")
+
+    def test_without_a_triage_board_nothing_runs(self) -> None:
+        self.db.close()
+        self.path.unlink()
+
+        self.assertEqual(self.check(), [])
+
+
 class CheckHermesToolsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         self.root = self.tmp / "root"
         self.tree = install_fake_hermes(self.root)
-        self.register({"terminal": "terminal", "process_manage": "terminal", "read_file": "file"})
+        self.register({"terminal": "terminal", "process_manage": "terminal", "kanban_schedule": "kanban", "read_file": "file"})
         self.plugin = self.tmp / "worker" / "plugins" / "blocker-order" / "__init__.py"
         shutil.copytree(PLUGIN.parent, self.plugin.parent, ignore=shutil.ignore_patterns("tests", "__pycache__"))
 
@@ -1934,30 +2393,39 @@ class CheckHermesToolsTest(unittest.TestCase):
         (self.tree / "tools" / "registered.json").write_text(json.dumps(tools))
 
     def check(self) -> list:
-        return [str(d) for d in check_install.check_hermes_tools(self.root, self.plugin)]
+        return classified(self, check_install.check_hermes_tools(self.root, self.plugin))
 
     def test_a_hermes_that_registers_the_watched_tools_is_silent(self) -> None:
         self.assertEqual(self.check(), [])
 
     def test_the_legacy_process_name_alone_still_counts(self) -> None:
-        self.register({"terminal": "terminal", "process": "terminal"})
+        self.register({"terminal": "terminal", "process": "terminal", "kanban_schedule": "kanban"})
 
         self.assertEqual(self.check(), [])
 
     def test_a_renamed_process_tool_names_the_missing_tool(self) -> None:
-        self.register({"terminal": "terminal", "process_run": "terminal", "read_file": "file"})
+        self.register({"terminal": "terminal", "process_run": "terminal", "kanban_schedule": "kanban", "read_file": "file"})
 
         self.assertEqual(self.check(), [
             "hermes tool blocker-order: Hermes registers none of process_manage, process, which the plugin watches; "
-            "its terminal toolset registers process_run, terminal (PROCESS_TOOLS in plugins/blocker-order/__init__.py)",
+            "its terminal and kanban toolsets register kanban_schedule, process_run, terminal (PROCESS_TOOLS in plugins/blocker-order/__init__.py)",
         ])
 
     def test_a_missing_terminal_tool_is_named(self) -> None:
-        self.register({"process_manage": "terminal"})
+        self.register({"process_manage": "terminal", "kanban_schedule": "kanban"})
 
         self.assertEqual(self.check(), [
-            "hermes tool blocker-order: Hermes registers no terminal, which the plugin watches; "
-            "its terminal toolset registers process_manage (REQUIRED_TOOLS in plugins/blocker-order/__init__.py)",
+            "hermes tool blocker-order: Hermes registers no terminal, which the plugin needs; "
+            "its terminal and kanban toolsets register kanban_schedule, process_manage (REQUIRED_TOOLS in plugins/blocker-order/__init__.py)",
+        ])
+
+    def test_a_missing_kanban_schedule_tool_is_named(self) -> None:
+        self.register({"terminal": "terminal", "process_manage": "terminal", "kanban_block": "kanban"})
+
+        self.assertEqual(self.check(), [
+            "hermes tool blocker-order: Hermes registers no kanban_schedule, which the plugin needs; "
+            "its terminal and kanban toolsets register kanban_block, process_manage, terminal "
+            "(REQUIRED_TOOLS in plugins/blocker-order/__init__.py)",
         ])
 
     def test_the_probe_runs_in_a_scratch_home_and_writes_no_bytecode(self) -> None:
@@ -2054,7 +2522,7 @@ class CheckServicesTest(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def check(self) -> list:
-        return [str(d) for d in check_install.check_services(self.launchd.root, str(self.launchd.launchctl))]
+        return classified(self, check_install.check_services(self.launchd.root, str(self.launchd.launchctl)))
 
     def test_installed_running_services_are_silent(self) -> None:
         self.assertEqual(self.check(), [])
@@ -2065,6 +2533,7 @@ class CheckServicesTest(unittest.TestCase):
             "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
             f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
             f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"gui/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
         })
 
         self.assertEqual(self.check(), [])
@@ -2089,6 +2558,7 @@ class CheckServicesTest(unittest.TestCase):
             "service Hermes gateway: is not loaded in launchd (part 15)",
             "service gateway watch: is not loaded in launchd (part 12)",
             "service gh login refresh: is not loaded in launchd (part 10)",
+            "service auto deploy: is not loaded in launchd (part 12)",
         ])
 
     def test_a_missing_watch_job_is_reported(self) -> None:
@@ -2114,6 +2584,7 @@ class CheckServicesTest(unittest.TestCase):
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
             f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "waiting",
+            f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
         })
 
     def test_a_login_refresh_job_without_its_environment_is_reported_by_name_only(self) -> None:
@@ -2130,6 +2601,45 @@ class CheckServicesTest(unittest.TestCase):
 
         self.assertEqual(self.check(), ["service gh login refresh: does not run every 900 seconds (part 10)"])
 
+    def test_the_auto_deploy_job_is_loaded_between_runs_and_runs_at_load(self) -> None:
+        uid = os.getuid()
+        states = {
+            "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
+        }
+        self.launchd.states({**states, f"user/{uid}/ai.patinaproject.factory.auto-deploy": "running"})
+        running = self.check()
+        self.launchd.states(states)
+        unloaded = self.check()
+        self.launchd.plist(
+            f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
+            "ai.patinaproject.factory.auto-deploy", RunAtLoad=False, **AUTO_DEPLOY_FIELDS,
+        )
+        self.launchd.states({**states, f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running"})
+        not_at_load = self.check()
+        self.launchd.deploy.unlink()
+
+        self.assertEqual((running, unloaded, not_at_load, self.check()), (
+            [],
+            ["service auto deploy: is not loaded in launchd (part 12)"],
+            ["service auto deploy: does not run at load (part 12)"],
+            ["service auto deploy: no plist matches ~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist (part 12)"],
+        ))
+
+    def test_an_auto_deploy_job_without_its_environment_is_reported_by_name_only(self) -> None:
+        uid = os.getuid()
+        self.launchd.plist(
+            f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL,
+            EnvironmentVariables={"HERMES_HOME": "/h", "TOKEN": "s3cr3t"},
+        )
+        self.launchd.states({
+            "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"user/{uid}/{AUTO_DEPLOY_LABEL}": "not running",
+        })
+
+        self.assertEqual(self.check(), ["service auto deploy: does not set GH_CONFIG_DIR, PATH (part 12)"])
+
     def watch_with(self, *lock: str, root: tuple = ("--root", "/h")) -> None:
         self.launchd.plist(
             f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist",
@@ -2141,6 +2651,7 @@ class CheckServicesTest(unittest.TestCase):
             "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
             f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
             f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"gui/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
         })
 
     def test_a_watcher_whose_lock_is_hermes_own_gateway_lock_is_reported(self) -> None:

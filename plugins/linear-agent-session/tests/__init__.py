@@ -20,6 +20,7 @@ def load_plugin():
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    module.paused = lambda: False
     return module
 
 

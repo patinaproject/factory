@@ -3,12 +3,14 @@
 ```text
 /
 ├── .agents/skills/            # Vendored skills, plus a setup-factory symlink
+├── .agents/skills-sync.json   # Which skills the sync vendors, and the release vendored now
 ├── .claude/
 │   ├── settings.json          # Claude Code project settings and SessionStart hook
 │   └── skills/                # Skill symlinks for Claude Code, including setup-factory
 ├── .codex/                    # Codex configuration and environment setup
 ├── .github/
 │   └── workflows/
+│       ├── skills-sync.yml    # Opens or refreshes the bot/bump-skills pull request
 │       └── test.yml           # Runs scripts/test.sh on pull requests
 ├── .husky/                    # commit-msg and pre-commit hooks
 ├── docs/
@@ -16,6 +18,7 @@
 │   ├── issue-publishing.md    # Issue-writing rules
 │   ├── issue-tracker.md       # Symlink to docs/agents/issue-tracker.md
 │   ├── release-flow.md        # How releases are cut
+│   ├── rules.md               # Each rule and what enforces it
 │   └── wiki-index.md          # Planned wiki pages
 ├── plugins/
 │   ├── blocker-order/         # transform_tool_result hook that links and blocks a card behind its issue's open blocker cards, and blocks a card whose Claude run ends with `Needs input:`
@@ -23,7 +26,7 @@
 │   ├── factory-uploads/       # Unix-socket broker that uploads evidence images and issues the worker its Linear and proxy tokens; runs in the gateway or, through service.py, as its own macOS user
 │   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, block and triage-park report hook, activity, issue, and session tools, cli.py
 │   ├── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
-│   ├── webhook-retry/         # Hooks that queue a delivery whose turn failed on a usage limit, and retry.py, which reruns it
+│   ├── webhook-retry/         # Hooks that queue a delivery that arrived while paused, never reached a turn, or failed on a usage limit, and retry.py, which reruns it
 │   └── work/                  # Registers the skills in a configured directory as work:<name> skills
 ├── profiles/
 │   └── claude-worker/         # Kanban worker profile distribution
@@ -33,6 +36,8 @@
 │       └── scripts/           # claude-session, card_branch.py, factory_source.py, archive_card.py, blockers.py, kanban_board.py, github-upload-image, guard-ci-wait, guard-commit-closes, wait-for-checks, push-signed, worker-secrets, proxy-token, mcp-headers, check-install, and the refresh cron scripts
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
+│   ├── skills-sync            # Syncs the vendored skills and agents from the latest stable skills release
+│   ├── skills_sync.py         # The sync's logic, with its tests in scripts/tests/
 │   └── ...                    # Repository maintenance scripts
 ├── skills/
 │   └── setup-factory/         # Agent runbook that sets up a factory on a machine

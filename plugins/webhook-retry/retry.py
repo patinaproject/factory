@@ -19,9 +19,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import queue_store as store  # noqa: E402
 
 REPLAY_PREAMBLE = """\
-This is a replay of a webhook delivery that arrived at {delivered_at} and could not run then because the model's usage limit was reached.
+This is a replay of a webhook delivery that arrived at {delivered_at} and could not run then because {cause}.
 
 """
+CAUSES = {
+    "usage_limit": "the model's usage limit was reached",
+    "paused": "Hermes was paused",
+    "unadmitted": "it never reached an agent turn, because a restart, drain, or concurrency cap dropped it",
+}
 # The shape of `triage_intent.render`, which this script cannot import from the plugin.
 ERROR_BLOCK = (
     "## Computed triage intent\n\n<triage_intent>\n"
@@ -31,6 +36,7 @@ ERROR_BLOCK = (
 TRIAGE_INTENT_TIMEOUT_SECONDS = 120
 # Above the check's own worst case: three `hermes` reads of up to 60 s each, the live issue read, and a 120 s archive.
 TRIAGE_EXIT_TIMEOUT_SECONDS = 360
+TEAMMATE_REPLY_TIMEOUT_SECONDS = 120
 SECRET_PATTERNS = (
     re.compile(r"lin_(?:api|oauth)_\w+"),
     re.compile(r"gh[pousr]_\w+"),
@@ -107,9 +113,14 @@ class Run:
                 self.say(f"interrupted {entry['route']} {entry['delivery']}: not retried again, it may have run")
                 continue
             age = moment - store.parse_stamp(entry["delivered_at"])
-            if entry["state"] == "pending" and age > store.PENDING_AGE:
+            state = entry["state"]
+            # An entry recorded before admission was tracked has no `admitted`, and its turn may have run.
+            if state == "pending" and entry.get("admitted") is False and age >= store.UNSTARTED_AGE:
+                if self.update(key, "unadmitted", reason="unadmitted", next_try_at=entry["delivered_at"]):
+                    state = "queued"
+            if state == "pending" and age > store.PENDING_AGE:
                 self.update(key, "expire")
-            elif entry["state"] == "queued" and (age > store.GIVE_UP_AGE or entry["attempts"] >= store.MAX_ATTEMPTS):
+            elif state == "queued" and (age > store.GIVE_UP_AGE or entry["attempts"] >= store.MAX_ATTEMPTS):
                 reason = "older than 48 hours" if age > store.GIVE_UP_AGE else f"{entry['attempts']} attempts"
                 if self.update(key, "give_up"):
                     self.say(f"gave up {entry['route']} {entry['delivery']}: {reason}")
@@ -120,7 +131,7 @@ class Run:
                 summary = entry["summary"]
                 self.say(
                     f"queued {entry['route']} {entry['delivery']} {summary['event']} {summary['action']} "
-                    f"{summary['subject']}: waiting for usage (next try {entry['next_try_at']})"
+                    f"{summary['subject']}: {store.reason_of(entry)} (next try {entry['next_try_at']})"
                 )
                 self.mark_reported(key)
 
@@ -129,36 +140,53 @@ class Run:
         queued = [(key, entry) for key, entry in self.entries().items() if entry["state"] == "queued"]
         queued.sort(key=lambda pair: pair[1]["delivered_at"])
         due = []
+        waiting = set()
         for key, entry in queued:
-            # A later delivery waits behind an earlier one, such as a Done update behind a "Try again" reply.
+            subject = entry["summary"]["subject"]
+            # A later delivery waits behind an earlier one of its subject, such as a Done update behind a "Try again" reply.
             if not everything and (store.parse_stamp(entry["next_try_at"]) or moment) > moment:
-                break
-            due.append(key)
+                waiting.add(subject)
+            if subject not in waiting:
+                due.append(key)
         return due
 
-    def triage_exit_handled(self, entry: dict[str, Any]) -> bool:
-        """Run linear-agent-session's triage-exit check. Anything but a clean `handled` answer replays the turn."""
+    def cli_answer(self, entry: dict[str, Any], command: str, timeout: int) -> Optional[dict]:
         cli = self.home / "plugins" / "linear-agent-session" / "cli.py"
-        payload = entry.get("payload")
-        if not isinstance(payload, dict) or payload.get("type") != "Issue" or not cli.is_file():
-            return False
+        if not cli.is_file():
+            return None
         with tempfile.TemporaryDirectory(prefix="webhook-retry-") as scratch:
             payload_file = Path(scratch) / "payload.json"
-            payload_file.write_text(json.dumps(payload))
+            payload_file.write_text(json.dumps(entry["payload"]))
             os.chmod(payload_file, 0o600)
             try:
                 proc = subprocess.run(
-                    [sys.executable, str(cli), "triage-exit", "--payload-file", str(payload_file)],
-                    capture_output=True, text=True, timeout=TRIAGE_EXIT_TIMEOUT_SECONDS,
+                    [sys.executable, str(cli), command, "--payload-file", str(payload_file)],
+                    capture_output=True, text=True, timeout=timeout,
                     env={**os.environ, "HERMES_HOME": str(self.home)},
                 )
             except subprocess.TimeoutExpired:
-                return False
+                return None
         try:
             answer = json.loads(proc.stdout)
         except ValueError:
+            return None
+        return answer if proc.returncode == 0 and isinstance(answer, dict) else None
+
+    def triage_exit_handled(self, entry: dict[str, Any]) -> bool:
+        """Run linear-agent-session's triage-exit check. Anything but a clean `handled` answer replays the turn."""
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "Issue":
             return False
-        return proc.returncode == 0 and isinstance(answer, dict) and answer.get("handled") is True
+        answer = self.cli_answer(entry, "triage-exit", TRIAGE_EXIT_TIMEOUT_SECONDS)
+        return answer is not None and answer.get("handled") is True
+
+    def addressed_to_teammate(self, entry: dict[str, Any]) -> bool:
+        """Run linear-agent-session's teammate-reply check. Anything but a clean `addressed` answer replays the turn."""
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "AgentSessionEvent":
+            return False
+        answer = self.cli_answer(entry, "teammate-reply", TEAMMATE_REPLY_TIMEOUT_SECONDS)
+        return answer is not None and answer.get("addressed") is True
 
     def intent_block(self, entry: dict[str, Any]) -> str:
         """The block the dispatch hook adds, recomputed for the stored delivery time because a replay skips the hook.
@@ -192,7 +220,8 @@ class Run:
             query = Path(scratch) / "query.txt"
             report = Path(scratch) / "report.json"
             query.write_text(
-                REPLAY_PREAMBLE.format(delivered_at=entry["delivered_at"]) + self.intent_block(entry) + entry["prompt"]
+                REPLAY_PREAMBLE.format(delivered_at=entry["delivered_at"], cause=CAUSES[store.reason_of(entry)])
+                + self.intent_block(entry) + entry["prompt"]
             )
             os.chmod(query, 0o600)
             command = [
@@ -216,6 +245,9 @@ class Run:
         for key in due:
             if store.now() >= deadline:
                 break
+            if store.paused(self.home):
+                self.say("Hermes is paused: the queued deliveries wait for hermes resume")
+                return
             entry = self.entries().get(key)
             if entry is None or not self.update(key, "retry_started"):
                 continue
@@ -224,6 +256,11 @@ class Run:
                 retried += 1
                 self.update(key, "retry_succeeded")
                 self.say(f"retried {who}: handled the Triage exit without a turn")
+                continue
+            if self.addressed_to_teammate(entry):
+                retried += 1
+                self.update(key, "retry_succeeded")
+                self.say(f"retried {who}: skipped a reply addressed to a teammate")
                 continue
             code, stderr, usage = self.replay(hermes, entry)
             retried += 1
@@ -236,7 +273,7 @@ class Run:
                 delay = reset if reset is not None else store.backoff_seconds(attempts)
                 next_try = store.stamp(store.now() + dt.timedelta(seconds=delay))
                 self.update(
-                    key, "retry_usage_limit", attempts=attempts, next_try_at=next_try,
+                    key, "retry_usage_limit", attempts=attempts, next_try_at=next_try, reason="usage_limit",
                     last_error=store.truncate(usage.get("message", ""), store.ERROR_LIMIT),
                 )
                 self.say(f"retried {who}: rate-limited again, next try {next_try}")
@@ -259,6 +296,7 @@ def list_entries(directory: Path) -> int:
         print(" ".join([
             entry["state"], entry["route"], entry["delivery"], summary["event"] or "-", summary["action"] or "-",
             summary["subject"] or "-", entry["delivered_at"], str(entry["attempts"]), entry["next_try_at"] or "-",
+            "-" if entry["state"] == "pending" else store.reason_of(entry),
         ]))
     return 0
 

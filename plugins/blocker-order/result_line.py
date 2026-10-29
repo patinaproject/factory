@@ -4,14 +4,20 @@
 key named here is the same key on both sides. `claude-session` imports this file from the worker home's
 copy of the plugin, the way it imports `linear.py`. The worker reads the same line through
 `profiles/claude-worker/SOUL.md`.
+
+A triage round's park reason ends with the `comments_seen` marker, which `mark_comments_seen` writes and
+`read_comments_seen` reads. `card_transition.py` imports this file the same way to read it back.
 """
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import MISSING, asdict, dataclass, field, fields
 from typing import Any, Optional, Union
 
 NEEDS_INPUT = "Needs input:"
+COMMENTS_SEEN = "comments_seen:"
+_COMMENTS_SEEN_LINE = re.compile(r"\s*^" + COMMENTS_SEEN + r"[ \t]*(\d+)[ \t]*\Z", re.MULTILINE)
 
 
 class _Unset:
@@ -26,7 +32,8 @@ UNSET: Any = _Unset()
 @dataclass(frozen=True)
 class Session:
     """The Claude session a run used, and what `claude-session` did around it. `progress` is true when the run
-    changed the worktree's HEAD or its `git status --porcelain`."""
+    changed the worktree's HEAD or its `git status --porcelain`. `comments_seen` is the number of card comments
+    in the snapshot the run read; a triage round's park records it, so a reply past it releases the card."""
 
     session_id: str
     resumed: bool
@@ -34,10 +41,12 @@ class Session:
     worktree: str
     branch: str
     progress: bool
+    comments_seen: int
     adopted: Optional[dict]
     superseded: Optional[dict]
     issue_links: Optional[dict]
     triage_documents: Optional[dict]
+    session_title: Optional[dict]
 
 
 @dataclass(frozen=True)
@@ -110,6 +119,20 @@ def needs_input(report: Optional[Report]) -> Optional[str]:
     outcome = getattr(report, "outcome", None)
     text = outcome.result if outcome is not None else None
     return text if isinstance(text, str) and text.startswith(NEEDS_INPUT) else None
+
+
+def mark_comments_seen(result: str, count: int) -> str:
+    """A triage park's reason: the run's whole result, then a last line with the comments the run saw."""
+    return f"{result.rstrip()}\n\n{COMMENTS_SEEN} {count}"
+
+
+def read_comments_seen(reason: Optional[str]) -> tuple[str, Optional[int]]:
+    """The reason without its marker, and the count the marker records, or None when it has no marker."""
+    text = reason or ""
+    match = _COMMENTS_SEEN_LINE.search(text)
+    if match is None:
+        return text, None
+    return text[: match.start()], int(match.group(1))
 
 
 def encode(report: Report) -> dict:

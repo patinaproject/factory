@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, NamedTuple, Optional
 
 if __package__:
     from . import broker_client
@@ -31,6 +31,8 @@ ACTIVITY_MUTATION = """mutation AgentActivityCreate($input: AgentActivityCreateI
 }"""
 
 VIEWER_QUERY = "query { viewer { id } }"
+
+SESSION_VERBS = {"triage": "Triage", "work": "Work on"}
 
 SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: AgentSessionUpdateInput!) {
   agentSessionUpdate(id: $id, input: $input) { success }
@@ -58,6 +60,65 @@ ACTIVITY_QUERY = f"""query AgentActivity($id: String!) {{
 
 SESSION_ACTIVITIES_QUERY = f"""query AgentSessionActivities($id: String!) {{
   agentSession(id: $id) {{ activities(first: 50, orderBy: createdAt) {{ nodes {{ {ACTIVITY_FIELDS} }} }} }}
+}}"""
+
+SESSION_READ_QUERY = """query AgentSessionRead($id: String!, $after: String) {
+  agentSession(id: $id) {
+    id status issue { identifier }
+    activities(first: 50, after: $after, orderBy: createdAt) {
+      nodes {
+        createdAt signal
+        content {
+          __typename
+          ... on AgentActivityThoughtContent { body }
+          ... on AgentActivityResponseContent { body }
+          ... on AgentActivityPromptContent { body }
+          ... on AgentActivityElicitationContent { body }
+          ... on AgentActivityErrorContent { body }
+          ... on AgentActivityActionContent { action parameter result }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
+
+SESSION_REFERENCE = re.compile(
+    r"^(?:https://linear\.app/[^/\s]+/agent-session/)?"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{13})/?(?:[?#]\S*)?$",
+    re.I,
+)
+
+# Linear returns the newest activities first with `first` and `orderBy: createdAt`, so the limit keeps the newest.
+THREAD_LIMIT = 30
+THREAD_BODY_LIMIT = 2000
+THREAD_TRUNCATED = "... [truncated]"
+THREAD_TYPES = {
+    "AgentActivityPromptContent": "prompt",
+    "AgentActivityResponseContent": "response",
+    "AgentActivityElicitationContent": "elicitation",
+    "AgentActivityThoughtContent": "thought",
+    "AgentActivityActionContent": "action",
+    "AgentActivityErrorContent": "error",
+}
+
+SESSION_HISTORY_QUERY = f"""query AgentSessionHistory($id: String!) {{
+  agentSession(id: $id) {{
+    activities(first: {THREAD_LIMIT}, orderBy: createdAt) {{
+      nodes {{
+        id createdAt ephemeral user {{ name }}
+        content {{
+          __typename
+          ... on AgentActivityPromptContent {{ body }}
+          ... on AgentActivityResponseContent {{ body }}
+          ... on AgentActivityElicitationContent {{ body }}
+          ... on AgentActivityThoughtContent {{ body }}
+          ... on AgentActivityErrorContent {{ body }}
+          ... on AgentActivityActionContent {{ action parameter result }}
+        }}
+      }}
+    }}
+  }}
 }}"""
 
 COMMENT_CREATE_MUTATION = """mutation CommentCreate($input: CommentCreateInput!) {
@@ -153,6 +214,28 @@ ISSUE_EDIT_QUERY = """query IssueEdit($id: String!) {
   issueLabels(first: 250, filter: { team: { null: true } }) { nodes { id name isGroup parent { id } } }
 }"""
 
+ISSUE_RELATIONS_QUERY = """query IssueRelations($a: String!, $b: String!) {
+  a: issue(id: $a) { ...RelationFields }
+  b: issue(id: $b) { ...RelationFields }
+}
+fragment RelationFields on Issue {
+  id identifier
+  state { name type }
+  team { states { nodes { id name type } } }
+  relations(first: 51) { pageInfo { hasNextPage } nodes { id type issue { id identifier } relatedIssue { id identifier } } }
+  inverseRelations(first: 51) { pageInfo { hasNextPage } nodes { id type issue { id identifier } relatedIssue { id identifier } } }
+}"""
+
+RELATIONS_READ = 50
+
+ISSUE_RELATION_CREATE_MUTATION = """mutation IssueRelationCreate($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) { success }
+}"""
+
+ISSUE_RELATION_DELETE_MUTATION = """mutation IssueRelationDelete($id: String!) {
+  issueRelationDelete(id: $id) { success }
+}"""
+
 ISSUE_SEARCH_QUERY = """query IssueSearch($term: String!, $first: Int!) {
   searchIssues(term: $term, first: $first) { nodes { identifier title url team { name } state { name } } }
 }"""
@@ -163,7 +246,7 @@ ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdat
   issueUpdate(id: $id, input: $input) { success }
 }"""
 
-CLOSED_STATE_TYPES = ("completed", "canceled")
+CLOSED_STATE_TYPES = ("completed", "canceled", "duplicate")
 READY_STATE_NAME = "Todo"
 
 # The triage roles are the factory's own vocabulary; a workspace names each label as it likes.
@@ -198,6 +281,11 @@ def activity_content(
             raise LinearError(f"a {type} activity needs body")
         return {"type": type, "body": body}
     raise LinearError(f"unknown activity type {type!r}; expected one of {', '.join(ACTIVITY_TYPES)}")
+
+
+def card_title(identifier: str, title: str) -> str:
+    kept = re.sub(r"[^A-Za-z0-9 .-]", "", title)
+    return f"{identifier}: {' '.join(kept.split())}"
 
 
 class LinearClient:
@@ -249,10 +337,19 @@ class LinearClient:
 
     def set_external_urls(self, agent_session_id: str, urls: list) -> None:
         external_urls = [{"label": u["label"], "url": u["url"]} for u in urls]
-        payload = self._graphql(
-            SESSION_UPDATE_MUTATION,
-            {"id": agent_session_id, "input": {"externalUrls": external_urls}},
-        )["agentSessionUpdate"]
+        self._update_session(agent_session_id, {"externalUrls": external_urls})
+
+    def title_session(self, agent_session_id: str, issue_id: str, purpose: str) -> str:
+        """Replace Linear's default `Work on <identifier>` session title with one that says what the session is for."""
+        issue = self.get_issue(issue_id)
+        summary = _session_summary(f"{SESSION_VERBS[purpose]} {issue['identifier']}: {issue['title']}")
+        self._update_session(agent_session_id, {"summary": summary})
+        return summary
+
+    def _update_session(self, agent_session_id: str, fields: dict) -> None:
+        payload = self._graphql(SESSION_UPDATE_MUTATION, {"id": agent_session_id, "input": fields})[
+            "agentSessionUpdate"
+        ]
         if not payload["success"]:
             raise LinearError("agentSessionUpdate reported success: false")
 
@@ -285,6 +382,51 @@ class LinearClient:
                 }
         return {"found": False}
 
+    def read_session(self, session_reference: str) -> dict:
+        """A session by URL, UUID, or slugId, with every activity oldest first."""
+        match = SESSION_REFERENCE.match(session_reference.strip())
+        if not match:
+            raise LinearError(f"{session_reference!r} is not an agent session URL, UUID, or slugId")
+        session_id = match.group(1)
+        activities, after = [], None
+        while True:
+            try:
+                session = self._graphql(SESSION_READ_QUERY, {"id": session_id, "after": after})["agentSession"]
+            except LinearError as error:
+                raise LinearError(f"agent session {session_id}: {error}") from None
+            if session is None:
+                raise LinearError(f"agent session {session_id}: Entity not found: AgentSession")
+            page = session["activities"]
+            activities += page["nodes"]
+            if not page["pageInfo"]["hasNextPage"]:
+                break
+            after = page["pageInfo"]["endCursor"]
+        issue = session["issue"]
+        return {
+            "id": session["id"],
+            "issue": issue["identifier"] if issue else None,
+            "status": session["status"],
+            "activities": [_session_activity(node) for node in sorted(activities, key=lambda n: n["createdAt"])],
+        }
+
+    def session_thread(self, agent_session_id: str) -> list:
+        session = self._graphql(SESSION_HISTORY_QUERY, {"id": agent_session_id})["agentSession"]
+        if session is None:
+            raise LinearError(f"Linear has no agent session {agent_session_id} that the agent app can read")
+        nodes = sorted(
+            (n for n in session["activities"]["nodes"] if not n["ephemeral"]), key=lambda n: n["createdAt"]
+        )
+        return [
+            {
+                "id": n["id"],
+                "type": THREAD_TYPES[n["content"]["__typename"]],
+                "author": n["user"]["name"] if n["user"] else None,
+                "created_at": n["createdAt"],
+                "body": _bounded(_activity_text(n["content"])),
+            }
+            for n in nodes
+        ]
+
     def create_session_on_issue(self, id_or_identifier: str) -> str:
         payload = self._graphql(SESSION_CREATE_MUTATION, {"input": {"issueId": id_or_identifier}})[
             "agentSessionCreateOnIssue"
@@ -299,6 +441,7 @@ class LinearClient:
         priority_name, card_priority = PRIORITIES[priority]
         return {
             **_issue_summary(issue),
+            "cardTitle": card_title(issue["identifier"], issue["title"]),
             "priority": priority,
             "priorityName": priority_name,
             "cardPriority": card_priority,
@@ -456,6 +599,84 @@ class LinearClient:
             "labels": sorted(n["name"] for n in labels.values()),
             "state": target["name"] if target else issue["state"]["name"],
         }
+
+    def relate_issues(self, id_or_identifier: str, other: str, kind: str) -> dict:
+        """Make `issue` a duplicate of `other` (kind `duplicate`), or make `other` block it (kind `blocks`).
+
+        A duplicate also loses the `related` relation between the two and moves to the team's duplicate status.
+        No other relation is touched.
+        """
+        if kind not in RELATION_RULES:
+            raise LinearError(f"unknown relation kind {kind!r}; expected one of {', '.join(RELATION_RULES)}")
+        a, b, relations = self._read_relations(id_or_identifier, other)
+        existing = decide_relation(kind, a, b, relations)
+        if existing is None:
+            # A `blocks` relation runs from the blocker to the blocked issue; a duplicate from the duplicate to the original.
+            source, target = (b, a) if kind == "blocks" else (a, b)
+            payload = self._graphql(
+                ISSUE_RELATION_CREATE_MUTATION,
+                {"input": {"issueId": source["id"], "relatedIssueId": target["id"], "type": kind}},
+            )
+            if not payload["issueRelationCreate"]["success"]:
+                raise LinearError("issueRelationCreate reported success: false")
+        result = {
+            "identifier": a["identifier"],
+            "related_issue": b["identifier"],
+            "relation": kind,
+            "created": existing is None,
+            "removed_related": False,
+            "state": a["state"]["name"],
+        }
+        if kind == "duplicate":
+            # The relation this call created can make a list of 50 one longer.
+            a, b, relations = self._read_relations(id_or_identifier, other, most=RELATIONS_READ + 1)
+            for relation in relations.values():
+                if relation.type == "related" and {relation.source, relation.target} == {a["id"], b["id"]}:
+                    payload = self._graphql(ISSUE_RELATION_DELETE_MUTATION, {"id": relation.id})
+                    if not payload["issueRelationDelete"]["success"]:
+                        raise LinearError("issueRelationDelete reported success: false")
+                    result["removed_related"] = True
+            result["state"] = self._move_to_duplicate_status(a)
+        return result
+
+    def _read_relations(self, first: str, second: str, most: int = RELATIONS_READ) -> tuple:
+        data = self._graphql(ISSUE_RELATIONS_QUERY, {"a": first, "b": second})
+        for key, name in (("a", first), ("b", second)):
+            if data[key] is None:
+                raise LinearError(f"Linear has no issue {name} that the agent app can read")
+        relations: dict = {}
+        names = {i["id"]: i["identifier"] for i in (data["a"], data["b"])}
+        for issue in (data["a"], data["b"]):
+            for side in ("relations", "inverseRelations"):
+                if issue[side]["pageInfo"]["hasNextPage"] or len(issue[side]["nodes"]) > most:
+                    raise LinearError(
+                        f"{issue['identifier']} has more than {RELATIONS_READ} {side}, more than the agent reads, so nothing was changed"
+                    )
+                for node in issue[side]["nodes"]:
+                    relations[node["id"]] = Relation(
+                        node["id"], node["type"], node["issue"]["id"], node["relatedIssue"]["id"]
+                    )
+                    names[node["issue"]["id"]] = node["issue"]["identifier"]
+                    names[node["relatedIssue"]["id"]] = node["relatedIssue"]["identifier"]
+        return {**data["a"], "names": names}, {**data["b"], "names": names}, relations
+
+    def _move_to_duplicate_status(self, issue: dict) -> str:
+        if issue["state"]["type"] == "duplicate":
+            return issue["state"]["name"]
+        states = [s for s in issue["team"]["states"]["nodes"] if s["type"] == "duplicate"]
+        if len(states) != 1:
+            problem = (
+                "no status of type duplicate"
+                if not states
+                else "more than one status of type duplicate: " + ", ".join(sorted(s["name"] for s in states))
+            )
+            raise LinearError(
+                f"the duplicate relation exists, but {issue['identifier']}'s team has {problem}, so its status did not change"
+            )
+        payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": {"stateId": states[0]["id"]}})
+        if not payload["issueUpdate"]["success"]:
+            raise LinearError("issueUpdate reported success: false")
+        return states[0]["name"]
 
     def search_issues(self, term: str) -> list:
         nodes = self._graphql(ISSUE_SEARCH_QUERY, {"term": term, "first": 10})["searchIssues"]["nodes"]
@@ -616,8 +837,43 @@ class BrokerLinearClient(LinearClient):
         return {"client_id": "", "access_token": reply["token"], "expires_at": float(reply["expires_at"])}
 
 
+class TokenLinearClient(LinearClient):
+    """A client for a process that already holds an access token, such as Claude's `LINEAR_API_KEY`."""
+
+    def __init__(self, token: str, **kwargs: Any) -> None:
+        super().__init__("", "", **kwargs)
+        self._static_token = token
+
+    def _mint_token(self) -> dict:
+        return {"client_id": "", "access_token": self._static_token, "expires_at": float("inf")}
+
+
 class _Unauthorized(Exception):
     pass
+
+
+def _session_activity(node: dict) -> dict:
+    content = node["content"]
+    kind = content["__typename"].removeprefix("AgentActivity").removesuffix("Content").lower()
+    fields = ("action", "parameter", "result") if kind == "action" else ("body",)
+    signal = {"signal": node["signal"]} if node["signal"] else {}
+    return {"createdAt": node["createdAt"], "type": kind, **signal, **{f: content[f] for f in fields}}
+
+
+def _session_summary(title: str) -> str:
+    """Linear accepts a session summary of 1 to 255 characters with no line breaks."""
+    return " ".join(title.split())[:255].strip()
+
+
+def _activity_text(content: dict) -> str:
+    if "action" not in content:
+        return content["body"]
+    text = f"{content['action']} {content['parameter']}".strip()
+    return f"{text} -> {content['result']}" if content.get("result") else text
+
+
+def _bounded(text: str) -> str:
+    return text if len(text) <= THREAD_BODY_LIMIT else text[:THREAD_BODY_LIMIT] + THREAD_TRUNCATED
 
 
 def _issue_summary(issue: dict) -> dict:
@@ -631,6 +887,47 @@ def _issue_summary(issue: dict) -> dict:
         "stateType": issue["state"]["type"],
         "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]],
     }
+
+
+class Relation(NamedTuple):
+    id: str
+    type: str
+    source: str
+    target: str
+
+
+# Each rule is (relation type, source role, target role, verdict, message). A role is `a` (the issue being
+# changed), `b` (the other issue), or `*` (any issue but those two). `existing` means the request already holds.
+RELATION_RULES = {
+    "duplicate": (
+        ("duplicate", "a", "b", "existing", None),
+        ("duplicate", "a", "*", "conflict", "{a} is already a duplicate of {target}"),
+        ("duplicate", "b", "a", "conflict", "{b} is already a duplicate of {a}"),
+    ),
+    "blocks": (
+        ("blocks", "b", "a", "existing", None),
+        ("blocks", "a", "b", "conflict", "{b} is already blocked on {a}"),
+    ),
+}
+
+
+def decide_relation(kind: str, a: dict, b: dict, relations: dict) -> Optional[Relation]:
+    """The relation that already satisfies the request, or None when one must be created. Raises on a conflict."""
+    if a["id"] == b["id"]:
+        raise LinearError(f"{a['identifier']} cannot be related to itself")
+    roles = {a["id"]: "a", b["id"]: "b"}
+    for type_, source, target, verdict, message in RELATION_RULES[kind]:
+        for relation in relations.values():
+            if (
+                relation.type == type_
+                and roles.get(relation.source, "*") == source
+                and roles.get(relation.target, "*") == target
+            ):
+                if verdict == "existing":
+                    return relation
+                text = message.format(a=a["identifier"], b=b["identifier"], target=a["names"][relation.target])
+                raise LinearError(f"{text} (relation {relation.id}), so nothing was changed")
+    return None
 
 
 def _blocking_issues(relations: dict) -> list:

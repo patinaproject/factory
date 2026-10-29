@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import enum
+import importlib.util
 import json
 import os
 import tempfile
@@ -21,6 +22,16 @@ class Platform(enum.Enum):
 RECEIVED = dt.datetime(2026, 10, 15, 8, 30, 0, tzinfo=dt.timezone.utc)
 CONFIG = {"platforms": {"webhook": {"extra": {"routes": {"linear": {"secret": "resolved"}}}}}}
 PAYLOAD = {"type": "Issue", "action": "update", "data": {"identifier": "PAT-5290"}}
+PUSH = {
+    "ref": "refs/heads/main",
+    "before": "1" * 40,
+    "after": "2" * 40,
+    "repository": {"full_name": "example-org/factory"},
+    "pusher": {"name": "example-app", "email": "pusher@example.com"},
+    "sender": {"login": "example-app[bot]"},
+    "head_commit": {"message": "feat: #1 ship it"},
+}
+FACTORY_DEPLOY = Path(__file__).resolve().parents[2] / "factory-deploy" / "__init__.py"
 
 
 def event(delivery="d1", route="linear", platform=Platform.WEBHOOK, payload=PAYLOAD, text="triage this"):
@@ -43,6 +54,7 @@ class PluginTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
         self.config = CONFIG
+        self.paused = False
         self.start()
 
     def start(self):
@@ -51,6 +63,7 @@ class PluginTest(unittest.TestCase):
             ("hermes_home", lambda: self.home),
             ("load_config", lambda: self.config),
             ("reset_delay", self.plugin.queue_store.reset_delay_seconds),
+            ("paused", lambda: self.paused),
         ):
             patcher = mock.patch.object(self.plugin, name, value)
             patcher.start()
@@ -63,6 +76,79 @@ class PluginTest(unittest.TestCase):
     def dispatch(self, ev, sessions=None):
         store = FakeStore(sessions if sessions is not None else {"s1": ev.source.chat_id})
         return self.plugin.record_delivery(event=ev, gateway=None, session_store=store)
+
+    def test_a_delivery_that_arrives_while_paused_is_queued_and_skipped(self):
+        ev = event()
+        self.paused = True
+
+        result = self.dispatch(ev)
+
+        entry = self.entries()[ev.source.chat_id]
+        self.assertEqual(result["action"], "skip")
+        self.assertEqual((entry["state"], entry["reason"]), ("queued", "paused"))
+        self.assertEqual((entry["delivered_at"], entry["next_try_at"]), ("2026-10-15T08:30:00Z", "2026-10-15T08:30:00Z"))
+        self.assertEqual((entry["attempts"], entry["prompt"]), (0, "triage this"))
+
+    def test_a_delivery_that_is_not_recorded_is_not_skipped_while_paused(self):
+        self.paused = True
+        self.config = {"platforms": {"webhook": {"extra": {"secret": "${LINEAR_WEBHOOK_SECRET}"}}}}
+        slack = event(platform=Platform.SLACK)
+        slack.source.chat_id = "C0123"
+        undecodable = event()
+        undecodable.source.chat_id = "not-a-key"
+
+        results = [self.dispatch(event()), self.dispatch(slack), self.dispatch(undecodable)]
+
+        self.assertEqual((results, self.entries()), ([None, None, None], {}))
+
+    def test_a_paused_redelivery_keeps_one_entry_in_every_state(self):
+        ev = event()
+        key = ev.source.chat_id
+        for state, admitted, expected_state, expected_reason in (
+            ("pending", False, "queued", "paused"),
+            ("pending", True, "pending", "usage_limit"),
+            ("queued", False, "queued", "usage_limit"),
+            ("running", False, "running", "usage_limit"),
+            ("failed", False, "failed", "usage_limit"),
+            ("given_up", False, "given_up", "usage_limit"),
+        ):
+            with self.subTest(state, admitted=admitted):
+                path = self.home / "webhook-retry"
+                path.mkdir(exist_ok=True)
+                held = {"key": key, "state": state, "attempts": 3, "next_try_at": "2026-10-20T00:00:00Z",
+                        "reason": "usage_limit", "prompt": "old", "admitted": admitted}
+                (path / "queue.json").write_text(json.dumps({"version": 1, "entries": {key: held}}))
+                self.paused = True
+
+                result = self.dispatch(ev)
+
+                stored = self.entries()
+                self.assertEqual(result["action"], "skip")
+                self.assertEqual(list(stored), [key])
+                self.assertEqual((stored[key]["state"], stored[key]["reason"]), (expected_state, expected_reason))
+                if expected_state != "queued" or state != "pending":
+                    self.assertEqual(
+                        (stored[key]["attempts"], stored[key]["next_try_at"], stored[key]["prompt"]),
+                        (3, "2026-10-20T00:00:00Z", "old"),
+                    )
+
+    def test_admission_marks_a_pending_entry_admitted_and_never_handles_the_message(self):
+        ev = event()
+        self.dispatch(ev)
+
+        result = self.plugin.mark_admitted(
+            session_key="agent:main:webhook:x", platform="webhook", source={"chat_id": ev.source.chat_id},
+            message_id="m1", text="triage this",
+        )
+
+        stored = self.entries()[ev.source.chat_id]
+        self.assertEqual((result, stored["state"], stored["admitted"]), (None, "pending", True))
+
+    def test_admission_of_an_unrecorded_message_records_nothing(self):
+        self.plugin.mark_admitted(source={"chat_id": "C0123"})
+        self.plugin.mark_admitted(source={"chat_id": chat_key("unknown")})
+
+        self.assertEqual(self.entries(), {})
 
     def test_usage_limit_failure_queues_the_delivery(self):
         ev = event()
@@ -244,13 +330,71 @@ class PluginTest(unittest.TestCase):
 
         self.assertEqual(self.entries()[ev.source.chat_id]["state"], "pending")
 
-    def test_registers_the_three_hooks(self):
+    def test_the_retry_pause_check_reads_both_sentinels_and_fails_closed(self):
+        paused = self.plugin.queue_store.paused
+        fleet = self.home / "fleet"
+        worker = fleet / "profiles" / "worker"
+        worker.mkdir(parents=True)
+        self.assertFalse(paused(worker))
+        (fleet / "ESTOP").write_text("")
+        self.assertTrue(paused(worker))
+        (fleet / "ESTOP").unlink()
+        (worker / "ESTOP").write_text("")
+        self.assertTrue(paused(worker))
+        (worker / "ESTOP").unlink()
+        with mock.patch("pathlib.Path.exists", side_effect=PermissionError("denied")):
+            self.assertTrue(paused(worker))
+
+    def test_a_push_that_factory_deploy_owns_is_never_recorded_paused_or_not(self):
+        push = event("d-push", route="github", payload=PUSH, text="- Event: push\n- Repository: example-org/factory")
+        pull = event("d-pull", route="github", payload={"action": "closed", **PUSH}, text="- Event: pull_request, action closed")
+        results = []
+        for self.paused in (False, True):
+            results.append(self.dispatch(push))
+
+        self.assertEqual(results, [None, None])
+        self.assertEqual(self.entries(), {})
+        self.dispatch(pull)
+        self.assertEqual(list(self.entries()), [pull.source.chat_id])
+
+    def test_webhook_retry_and_factory_deploy_agree_on_what_a_push_is(self):
+        spec = importlib.util.spec_from_file_location("factory_deploy_agreement", FACTORY_DEPLOY)
+        factory_deploy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(factory_deploy)
+        cases = {
+            "push": PUSH,
+            "push from the App, no head commit": {**{k: v for k, v in PUSH.items() if k != "head_commit"}},
+            "push without a pusher": {k: v for k, v in PUSH.items() if k != "pusher"},
+            "push without before": {k: v for k, v in PUSH.items() if k != "before"},
+            "pull_request with every push key": {"action": "closed", **PUSH},
+            "check_run with a ref": {"action": "completed", "ref": "refs/heads/main", "check_run": {}},
+            "Linear issue": PAYLOAD,
+            "a list": ["refs/heads/main"],
+            "nothing": None,
+        }
+        verdicts = {name: (self.plugin.is_push(payload), factory_deploy.is_push(payload)) for name, payload in cases.items()}
+
+        self.assertEqual(verdicts, {
+            "push": (True, True),
+            "push from the App, no head commit": (True, True),
+            "push without a pusher": (False, False),
+            "push without before": (False, False),
+            "pull_request with every push key": (False, False),
+            "check_run with a ref": (False, False),
+            "Linear issue": (False, False),
+            "a list": (False, False),
+            "nothing": (False, False),
+        })
+
+    def test_registers_the_four_hooks(self):
         registered = {}
         ctx = SimpleNamespace(register_hook=lambda name, fn: registered.update({name: fn}))
 
         self.plugin.register(ctx)
 
-        self.assertEqual(set(registered), {"pre_gateway_dispatch", "api_request_error", "on_session_end"})
+        self.assertEqual(
+            set(registered), {"pre_gateway_dispatch", "post_gateway_admission", "api_request_error", "on_session_end"}
+        )
 
 
 if __name__ == "__main__":
