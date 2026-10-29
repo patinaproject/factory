@@ -117,14 +117,16 @@ process output once it exits, with `wait` or `log`, never only from the `notify`
 message, because the `blocker-order` hook sees tool results and not that message. It prints one JSON line.
 
 - On success the line holds `session_id`, `resumed`, `worktree`, `branch`,
-  `progress`, `adopted`, `subtype`, `num_turns`, and `result`. `progress` is
-  true when the run added a commit or changed the worktree. `adopted` is null, or it
+  `progress`, `comments_seen`, `adopted`, `subtype`, `num_turns`, and `result`. `progress` is
+  true when the run added a commit or changed the worktree. `comments_seen` is the number of card comments
+  the run read. `adopted` is null, or it
   names the existing work the unstarted branch was reset to: its `source`
   (`remote_branch` or `takeover_pr`), `ref`, and `head`. Call
   `kanban_heartbeat` with the whole line as the note.
 - When the `result` starts with `Needs input:`, Claude cannot go on without a
   person, and Hermes refuses board changes from Claude. The `blocker-order`
-  hook blocks the card and adds `needs_input_block` to the tool result.
+  hook blocks the card and adds `needs_input_block` to the tool result, or, for
+  a triage card, parks it and adds `triage_round`.
   Follow its `instruction`. Post no elicitation yourself, as in triage. Skip
   steps 4 and 5. A `wait` result that has `output_cut` holds only the last
   2000 characters, so a long result loses its start: call the process tool's
@@ -291,11 +293,15 @@ says. Skip steps 4 and 5.
 After each run, read the first line of the result line's `result`:
 
 - `Needs input:` Claude is waiting for people. The `blocker-order` hook has
-  already blocked the card: follow the result's `needs_input_block`
-  `instruction`. The block posts it on
-  the agent session as the round's one `elicitation`, with the AI-generated
-  disclaimer. Never post that elicitation yourself. A reply from any teammate
-  resumes the card.
+  already parked the card in `scheduled` and posted the round: follow the
+  result's `triage_round` `instruction`. The hook posts the questions on the
+  agent session as the round's one `elicitation`, with the AI-generated
+  disclaimer, and mentions each person they name. Never post that elicitation
+  yourself, even when `post` is `failed` or `unknown`: the hook recorded that
+  on the card. When `parked` is false, call `kanban_schedule` with exactly the
+  reason the `instruction` gives, then stop. When that call fails too, follow
+  step 6 for a failing tool. Never call `kanban_block` with kind
+  `needs_input` for a triage card. A reply from any teammate resumes the card.
 - `Triage outcome:` followed by a role: post the result line's `activity`
   with the rest of the `result`, then call `kanban_complete` with it as the
   summary. `claude-session` names a `thought` only for `ready-for-agent` on
@@ -323,7 +329,10 @@ result line. A failing tool such as `gh` is a blocker of its own;
 name it in the block reason.
 
 - A human must answer a question: post an `elicitation` activity with the
-  question, then call `kanban_block` with kind `needs_input`.
+  question, then call `kanban_block` with kind `needs_input`. On a triage card,
+  post nothing and never block for a question: call `kanban_schedule` with a
+  reason that starts with `Needs input:` and holds the question. The
+  `blocker-order` hook posts it like any round.
 - Anything else: post an `error` activity with the cause, then call
   `kanban_block` with kind `capability` or `transient`.
 

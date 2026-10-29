@@ -435,6 +435,7 @@ class RegisterTest(unittest.TestCase):
                 "linear_issue_search",
                 "linear_issue_to_todo",
                 "linear_issue_undelegate",
+                "linear_triage_round",
             ],
         )
         for name, tool in ctx.tools.items():
@@ -444,6 +445,16 @@ class RegisterTest(unittest.TestCase):
             [name for name, _ in ctx.hooks],
             ["pre_gateway_dispatch", "pre_tool_call", "kanban_task_blocked", "post_llm_call", "transform_api_error_classification"],
         )
+
+    def test_only_the_triage_round_tool_is_hidden_from_every_model(self):
+        # Hermes' get_definitions leaves out a tool whose check_fn fails; registry.dispatch never calls it.
+        ctx = FakeContext()
+        plugin.register(ctx)
+        hidden = sorted(name for name, tool in ctx.tools.items() if tool.get("check_fn") and not tool["check_fn"]())
+        self.assertEqual(hidden, ["linear_triage_round"])
+        with self.assertLogs("linear_agent_session.triage_round", "WARNING"):
+            output = ctx.tools["linear_triage_round"]["handler"]({"task_id": "t_1", "board": "triage", "reason": "q"})
+        self.assertEqual(json.loads(output)["outcome"], "failed")
 
     def test_the_manifest_lists_every_registered_tool(self):
         ctx = FakeContext()

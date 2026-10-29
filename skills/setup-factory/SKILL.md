@@ -1721,7 +1721,7 @@ each check. Report each result.
     card unassigned, with a comment that names the pull request, and no
     `assigned` event to `claude-worker` follows it.
 
-22. Block a card with `kanban_block` kind `needs_input`, then block a second
+22. On the `default` board, block a card with `kanban_block` kind `needs_input`, then block a second
     card twice in a row for the same reason so Hermes moves it to `triage`.
     The first card's Linear agent session gets an `elicitation` that says the
     card is blocked, and the second's gets an `elicitation` that says it is
@@ -1730,7 +1730,9 @@ each check. Report each result.
     this from Hermes' `kanban_task_blocked` hook, so both Hermes homes need
     the plugin at the current commit, and the gateway needs a restart after a
     reinstall. A failed post appears only in the log of the process that
-    blocked the card, as `reporting the block of card <id> failed`.
+    blocked the card, as `reporting the block of card <id> failed`. A triage
+    card's question never blocks it, so this hook posts no triage round. Check 27
+    covers that.
 
 23. Move a card to `blocked` with its pull request open, then submit a
     `changes_requested` review on the pull request as a person. In
@@ -1783,13 +1785,18 @@ each check. Report each result.
     implementation card on the same session and moves the issue to Todo when
     it is in Triage. Start a card by hand on an issue without the label:
     `claude-session` refuses it before Claude starts.
-27. Let a triage card block on a question. Its session gets one
+27. Let a triage card ask a question. The card moves to the Scheduled column,
+    never to Blocked or Triage. In `hermes kanban show <task id> --json`, its
+    newest `scheduled` event's reason ends with a `comments_seen: <n>` line,
+    and no `blocked` event follows the run. Its session gets one
     `elicitation` that starts with the AI-generated disclaimer, and one reply
     in the session's thread mentions each person the questions name. Each of
     them gets one Linear notification. A reply from a teammate
     who did not delegate the issue raises `prompted` on the session the
-    factory created, unblocks the card, and `dispatch-triage` assigns it
-    again.
+    factory created, adds one comment that starts `Linear reply:` to the card,
+    leaves the card `ready` and unassigned, and `dispatch-triage` assigns it
+    again. Send the same reply again: no second comment appears and the card
+    does not move. `check-install` reports no `waiting triage card` line.
 28. No more than `triage.max_running` cards on the `triage` board run at
     once, and the triage card's run never pushes a branch or opens a pull
     request.
@@ -1810,6 +1817,18 @@ each check. Report each result.
     decides. For two issues that block each other, the second card's run
     links nothing, its session gets one `thought` naming the cycle, and its
     Claude starts.
+30. Let one triage card ask two rounds of questions on the same issue, and
+    answer each. After each round the card is in Scheduled, never in Blocked
+    or Triage, and the issue keeps that one card. The second round's
+    elicitation and mention reply read like the first's, and its people get a
+    Linear notification.
+31. Reply in a triage card's session while its round still runs, before the
+    card parks. Once it parks, within a minute `dispatch-triage` prints
+    `released <task id>`, and the card runs again without a second reply.
+32. While a triage card waits in Scheduled, restart the gateway through
+    `restart-gateway` as this part describes. The card is still `scheduled`
+    after the restart, with no new event, and a reply then releases it as in
+    check 27.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate
@@ -2082,6 +2101,25 @@ Hermes process starts. The new helper also writes
      profile as in part 12.
    - A `cron job dispatch-triage` line: after the profile update, create the
      job with the part 12 `cron create` command.
+   - A `waiting triage card <task id>: is blocked with block kind needs_input`
+     or `is triage with block kind needs_input` line: the card waits for a
+     reply the way triage cards waited before a round parked in `scheduled`.
+     After the profile update, with dispatch paused by `hermes pause` in the
+     root home, run this once, then `hermes resume`:
+
+     ```sh
+     HERMES_HOME=<root> python3 <root>/profiles/claude-worker/scripts/card_transition.py --board triage park-waiting
+     ```
+
+     It moves every such card to `scheduled` and posts nothing, so nobody is
+     notified again, and the card's next reply releases it. A card in
+     `triage` leaves it through one `specify` call. Running it again changes
+     nothing.
+   - A `waiting triage card <task id>: waits in scheduled, but its round may
+     never have reached Linear` line: open the card's Linear agent session.
+     When the questions are missing, post them as an `elicitation` from the
+     card's newest `scheduled` reason. The line clears when the card parks
+     again after a reply.
    - A `cron job report-deploy` line, a `script <root>/scripts/auto-deploy`
      or `<root>/scripts/report-deploy` line, or a `service auto deploy` line:
      follow the part 12 "Auto deploy" steps.
