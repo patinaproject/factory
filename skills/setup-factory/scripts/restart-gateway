@@ -17,6 +17,10 @@ drains the gateway's own turns. When the wait expires, the script names the
 at-risk cards and exits 1 without restarting. A gateway record, process table,
 or card that cannot be read counts as at risk, and no running gateway means
 nothing is at risk.
+
+With `--wait-only` it waits for every running card, not only at-risk ones,
+exits 0 once none is running, and never pauses, restarts, or resumes, so a
+deploy can drain the board while its operator holds the pause.
 """
 from __future__ import annotations
 
@@ -179,18 +183,26 @@ def restart(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     out=sys.stdout,
+    wait_only: bool = False,
 ) -> int:
+    def waited_for() -> list[Card]:
+        return running_cards(run) if wait_only else at_risk_cards(run, gateway_pid, processes)
+
+    kind = "running" if wait_only else "at-risk"
     deadline = clock() + timeout
     last: list[Card] | None = None
     while True:
-        cards = at_risk_cards(run, gateway_pid, processes)
+        cards = waited_for()
         if not cards:
-            ours = not paused()
+            ours = not wait_only and not paused()
             if ours:
                 checked(run, ["pause", "--reason", "restart-gateway: restarting the gateway"])
             try:
                 # A dispatcher tick already past the pause check can claim a card just after the pause.
-                cards = at_risk_cards(run, gateway_pid, processes)
+                cards = waited_for()
+                if not cards and wait_only:
+                    print("restart-gateway: no Kanban card is running", file=out, flush=True)
+                    return 0
                 if not cards:
                     print("restart-gateway: no Kanban card is at risk; restarting the gateway", file=out, flush=True)
                     return run(["gateway", "restart"]).returncode
@@ -199,14 +211,14 @@ def restart(
                     checked(run, ["resume"])
         if clock() >= deadline:
             print(
-                f"restart-gateway: {len(cards)} at-risk Kanban card(s) still running after {timeout:g}s; "
+                f"restart-gateway: {len(cards)} {kind} Kanban card(s) still running after {timeout:g}s; "
                 f"not restarting\n{describe(cards)}",
                 file=out,
                 flush=True,
             )
             return 1
         if cards != last:
-            print(f"restart-gateway: waiting for {len(cards)} at-risk Kanban card(s)\n{describe(cards)}", file=out, flush=True)
+            print(f"restart-gateway: waiting for {len(cards)} {kind} Kanban card(s)\n{describe(cards)}", file=out, flush=True)
             last = cards
         sleep(min(poll, max(deadline - clock(), 0)))
 
@@ -216,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=3600, help="seconds to wait for at-risk cards (default 3600)")
     parser.add_argument("--poll", type=float, default=30, help="seconds between board checks (default 30)")
     parser.add_argument("--hermes", default="hermes", help="the Hermes CLI to run (default: hermes on PATH)")
+    parser.add_argument("--wait-only", action="store_true", help="exit 0 once no card is running; never pause, restart, or resume")
     args = parser.parse_args(argv)
     if args.timeout < 0 or args.poll <= 0:
         parser.error("--timeout must be at least 0 and --poll above 0")
@@ -229,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
             read_processes,
             args.timeout,
             args.poll,
+            wait_only=args.wait_only,
         )
     except (RuntimeError, OSError, json.JSONDecodeError) as exc:
         print(f"restart-gateway: {exc}; not restarting", file=sys.stderr)

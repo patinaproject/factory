@@ -54,6 +54,7 @@ import closing
 import factory_settings
 import factory_source
 import gh_login
+import install_drift
 import kanban_board
 import reply_inbox
 
@@ -237,6 +238,15 @@ class Refusal(Exception):
     def __init__(self, message: str, *, transient: bool = False) -> None:
         super().__init__(message)
         self.transient = transient
+
+
+class AfterClaude(Exception):
+    """A failure after Claude was started. It carries the session so the worker can find the run's work."""
+
+    def __init__(self, cause: Exception, session_id: str) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.session_id = session_id
 
 
 class Adoption(NamedTuple):
@@ -674,6 +684,24 @@ def plugin_module(plugin: str, name: str):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
     return importlib.import_module(name)
+
+
+def install_skew() -> str | None:
+    try:
+        home = Path(os.environ["HERMES_HOME"])
+        repo = factory_source.checkout(home)
+        differing = install_drift.skew(home, repo)
+    except (KeyError, OSError, factory_source.SourceError, install_drift.GitError) as error:
+        print(f"claude-session: could not compare the install with the factory checkout: {error}", file=sys.stderr)
+        return None
+    if not differing:
+        return None
+    parts = " and ".join("the profile scripts" if name == "profile" else f"the {name} plugin" for name in differing)
+    return (
+        f"{parts} in {home} differ from the factory checkout at {repo}, so a factory deploy is in progress or was "
+        'left unfinished. Run check-install from the source checkout and finish the deploy steps of "Deploy a '
+        'merged factory change" in skills/setup-factory/SKILL.md'
+    )
 
 
 def linear_access() -> tuple:
@@ -1222,37 +1250,43 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
-        progress = worktree_state(worktree) != before
-        if output is not None:
-            delivered = reply_inbox.delivered_keys(inbox) if inbox else []
-            seen_path.write_text(json.dumps([*seen, *map(comment_key, comments), *delivered]))
-        superseded = links = None
-        if output is not None and not triage:
-            superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login)
-            links = link_issues(
-                args.repo, branch, login, args.issue_identifier, args.issue_url, github_issue_url(card)
-            )
-        documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
-        first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
+        try:
+            progress = worktree_state(worktree) != before
+            if output is not None:
+                delivered = reply_inbox.delivered_keys(inbox) if inbox else []
+                seen_path.write_text(json.dumps([*seen, *map(comment_key, comments), *delivered]))
+            superseded = links = None
+            if output is not None and not triage:
+                superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login)
+                links = link_issues(
+                    args.repo, branch, login, args.issue_identifier, args.issue_url, github_issue_url(card)
+                )
+            documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
+            first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
+        except Exception as error:
+            raise AfterClaude(error, session_id) from error
 
-    session = result_line.Session(
-        session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
-        progress=progress, comments_seen=len(comments), adopted=adopted._asdict() if adopted else None,
-        superseded=superseded, issue_links=links, triage_documents=documents, session_title=session_title,
-    )
-    if output is None:
-        error = f"claude exited {exit_code} without JSON output: {detail}"
-        return 1, result_line.Failed(error, session, blocker_error=blocker_error)
-    outcome = result_line.Outcome(
-        subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"),
-        usage=model_usage(output), first_context_tokens=first,
-    )
-    if outcome.subtype not in COMPLETED_SUBTYPES:
-        error = f"claude run ended with {outcome.subtype} (exit {exit_code})"
-        return 1, result_line.Failed(error, session, outcome, blocker_error)
-    if not triage:
-        return 0, result_line.Done(session, outcome, blocker_error)
-    return 0, result_line.Done(session, outcome, blocker_error, triage_activity(client, args.issue_id, outcome.result))
+    try:
+        session = result_line.Session(
+            session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
+            progress=progress, comments_seen=len(comments), adopted=adopted._asdict() if adopted else None,
+            superseded=superseded, issue_links=links, triage_documents=documents, session_title=session_title,
+        )
+        if output is None:
+            error = f"claude exited {exit_code} without JSON output: {detail}"
+            return 1, result_line.Failed(error, session, blocker_error=blocker_error)
+        outcome = result_line.Outcome(
+            subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"),
+            usage=model_usage(output), first_context_tokens=first,
+        )
+        if outcome.subtype not in COMPLETED_SUBTYPES:
+            error = f"claude run ended with {outcome.subtype} (exit {exit_code})"
+            return 1, result_line.Failed(error, session, outcome, blocker_error)
+        if not triage:
+            return 0, result_line.Done(session, outcome, blocker_error)
+        return 0, result_line.Done(session, outcome, blocker_error, triage_activity(client, args.issue_id, outcome.result))
+    except Exception as error:
+        raise AfterClaude(error, session_id) from error
 
 
 def read_init(proc: subprocess.Popen, timeout: float) -> dict | None:
@@ -1343,6 +1377,11 @@ def main() -> int:
         missing = [flag for flag in ("task_id", "issue_id", "issue_identifier", "issue_url") if not getattr(args, flag)]
         if missing:
             parser.error("the following arguments are required: " + ", ".join(f"--{f.replace('_', '-')}" for f in missing))
+    skew = None if args.mcp_status else install_skew()
+    if skew:
+        # The line is written by hand because a skewed home's result_line is the module that cannot be trusted.
+        print(json.dumps({"error": skew, "transient": True}))
+        return 2
     try:
         result_line = plugin_module("blocker-order", "result_line")
     except Refusal as refusal:
@@ -1356,6 +1395,10 @@ def main() -> int:
         signal.signal(stopped.signum, signal.SIG_DFL)
         os.kill(os.getpid(), stopped.signum)
         raise
+    except AfterClaude as failed:
+        cause = failed.cause
+        message = str(cause) if isinstance(cause, (Refusal, factory_settings.SettingsError)) else f"{type(cause).__name__}: {cause}"
+        status, report = 1, result_line.Crashed(message, failed.session_id)
     except Refusal as refusal:
         status, report = 2, result_line.Refused(str(refusal), refusal.transient)
     except factory_settings.SettingsError as error:
