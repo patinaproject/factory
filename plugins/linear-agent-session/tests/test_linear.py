@@ -18,6 +18,7 @@ from tests import (
     linear_token,
     load_plugin,
     session_update_ok,
+    session_urls_ok,
     sessions_ok,
 )
 
@@ -42,8 +43,8 @@ def make_client(fake, clock=None, token_cache_path=None):
 
 class ActivityTest(unittest.TestCase):
     def post(self, args):
-        updates = [session_update_ok()] if args.get("external_urls") else []
-        fake = FakeLinear([activity_ok("activity-42"), *updates, sessions_ok()])
+        urls = [session_urls_ok(), session_update_ok()] if args.get("external_urls") else []
+        fake = FakeLinear([activity_ok("activity-42"), *urls, sessions_ok()])
         output = json.loads(tools.run_activity(lambda: make_client(fake), args))
         return fake, output
 
@@ -81,15 +82,45 @@ class ActivityTest(unittest.TestCase):
             {"type": "action", "action": "Ran", "parameter": "tests", "result": "ok"},
         )
 
-    def test_external_urls_replace_session_urls(self):
+    def post_urls(self, held, urls, *, read=None):
+        read = read if read is not None else session_urls_ok(*held)
+        updates = [] if set(u["url"] for u in urls) <= set(held) else [session_update_ok()]
+        fake = FakeLinear([activity_ok("activity-42"), read, *updates, sessions_ok()])
+        args = {"agent_session_id": "session-1", "type": "response", "body": "Done", "external_urls": urls}
+        return fake, json.loads(tools.run_activity(lambda: make_client(fake), args))
+
+    def test_external_urls_add_to_session_urls(self):
         urls = [{"label": "Pull request", "url": "https://github.com/example-org/example-repo/pull/1"}]
-        fake, output = self.post(
-            {"agent_session_id": "session-1", "type": "response", "body": "Done", "external_urls": urls}
-        )
+        fake, output = self.post_urls(["https://example.test/t_1"], urls)
         self.assertEqual(output["external_urls"], ["https://github.com/example-org/example-repo/pull/1"])
-        update = fake.graphql_requests[1]
+        self.assertIn("agentSession(id: $id)", fake.graphql_requests[1]["query"])
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "session-1"})
+        update = fake.graphql_requests[2]
         self.assertIn("agentSessionUpdate(id: $id, input: $input)", update["query"])
-        self.assertEqual(update["variables"], {"id": "session-1", "input": {"externalUrls": urls}})
+        self.assertEqual(update["variables"], {"id": "session-1", "input": {"addedExternalUrls": urls}})
+
+    def test_external_urls_send_only_missing_urls(self):
+        held = {"label": "Card", "url": "https://example.test/t_1"}
+        missing = {"label": "Pull request #1", "url": "https://example.test/pull/1"}
+        fake, _ = self.post_urls([held["url"]], [{"label": "Pull request", "url": held["url"]}, missing])
+        self.assertEqual(fake.graphql_requests[2]["variables"]["input"], {"addedExternalUrls": [missing]})
+
+    def test_external_urls_drop_duplicates_within_the_call(self):
+        first = {"label": "First", "url": "https://example.test/pull/1"}
+        fake, _ = self.post_urls([], [first, {"label": "Second", "url": first["url"]}])
+        self.assertEqual(fake.graphql_requests[2]["variables"]["input"], {"addedExternalUrls": [first]})
+
+    def test_external_urls_send_no_update_when_session_holds_all(self):
+        url = "https://example.test/pull/1"
+        fake, output = self.post_urls([url], [{"label": "Pull request", "url": url}])
+        self.assertEqual(output["external_urls"], [url])
+        self.assertEqual(len(fake.graphql_requests), 3)
+        self.assertNotIn("agentSessionUpdate", fake.graphql_requests[2]["query"])
+
+    def test_external_urls_send_all_when_the_read_fails(self):
+        urls = [{"label": "Pull request", "url": "https://example.test/pull/1"}]
+        fake, _ = self.post_urls([], urls, read=(200, {"errors": [{"message": "boom"}], "data": None}))
+        self.assertEqual(fake.graphql_requests[2]["variables"]["input"], {"addedExternalUrls": urls})
 
     def title(self, issue_title, purpose="work"):
         issue = {**IssueTest.RESPONSE["data"]["issue"], "title": issue_title}
