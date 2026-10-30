@@ -54,12 +54,15 @@ import closing
 import factory_settings
 import factory_source
 import gh_login
+import install_drift
 import kanban_board
 import reply_inbox
 
 DEFAULT_WORKER_ENTRY = (
     "Work Linear issue {issue_identifier} ({issue_url}) in {repo} on branch {branch}. "
-    "First start the issue through this repository's own issue-start workflow, which moves it to In Progress. "
+    "First start the issue through `working-on-issues`, this repository's own issue-start workflow, which moves "
+    "it to In Progress, and read the issue's `{issue_identifier} Agent brief` Document, its full contract, before "
+    "you change code. "
     "Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
 TAKEOVER_INTRO = "The issue already has an open pull request, {url}, on a branch the factory did not create."
@@ -106,9 +109,9 @@ HANDOFF = (
 )
 TRIAGE_HANDOFF = (
     "This card continues an earlier triage. Its previous Claude session sat idle past the prompt cache and had "
-    "grown large, so this session starts fresh. Read the issue, its comments, and its `Triage notes` Document "
-    "before you act. The previous session's transcript is {transcript}; read it only for a decision you cannot "
-    "find on the issue. {result}"
+    "grown large, so this session starts fresh. Read the issue, its comments, and its `{identifier} Triage notes` "
+    "Document before you act. The previous session's transcript is {transcript}; read it only for a decision you "
+    "cannot find on the issue. {result}"
 )
 PUBLISH_RULE = (
     "Publish commits only by running {push_signed} from the worktree, never `git push`. It creates "
@@ -176,20 +179,20 @@ TRIAGE_RULE = (
     "behavior.\n\n"
     "Follow patina-mode's triage playbook at `{triage_playbook}`. It belongs to the factory, so read it there "
     "and not in this repository's skills. Keep the issue's "
-    "triage state in its `Triage notes` and `Agent brief` Documents, written through the tracker adapter's "
-    "issue-artifact operation, and start every Document with an AI-generated disclaimer. Title them exactly "
-    "`Triage notes` and `Agent brief`, with no issue identifier before the title, even where the adapter "
-    "titles other Documents with one. For a public repository synced to Linear, the Documents stay on the Linear issue and "
+    "triage state in its `{identifier} Triage notes` and `{identifier} Agent brief` Documents, written through "
+    "the tracker adapter's issue-artifact operation, and start every Document with an AI-generated disclaimer. "
+    "Title them exactly `{identifier} Triage notes` and `{identifier} Agent brief`, with the issue identifier "
+    "before the title. For a public repository synced to Linear, the Documents stay on the Linear issue and "
     "the roles are written as GitHub labels, because GitHub is canonical.\n\n"
     "Apply only category and state roles, plus the priority that the playbook's step 13 sets from the repository "
     "adapter's `## Priority rubric`. For a public repository, set the priority on the synced Linear issue, never as a "
     "GitHub label. A role's label may differ in case and punctuation, such as `Ready for agent` "
-    "for `ready-for-agent`. In Triage notes, the Agent brief, and every message to people, name a label as Linear shows "
+    "for `ready-for-agent`. In both Documents and every message to people, name a label as Linear shows "
     "it (read it with the Linear MCP, or from `role_labels` of `linear_issue`), never by its role. Never change the issue's status, assignee, or delegate, with one "
     "exception: when the issue is delegated to the factory's agent app and passes as `ready-for-agent`, move "
-    "it to `Todo`. Recommend `wontfix` in `Triage notes` and never apply it.\n\n"
-    "When the playbook waits for people, update `Triage notes` under \"still needed\", then end your turn. Make "
-    "the first line of your final message `Needs input:` and put that round's questions after it, one per "
+    "it to `Todo`. Recommend `wontfix` in `{identifier} Triage notes` and never apply it.\n\n"
+    "When the playbook waits for people, update `{identifier} Triage notes` under \"still needed\", then end "
+    "your turn. Make the first line of your final message `Needs input:` and put that round's questions after it, one per "
     "line. Mention a person by writing their Linear profile URL alone, with no `@` before it. The worker "
     "replies under the questions with one notifying mention of each person they name. {mentions} Mention each "
     "person once in the round: write their URL on its own line, then the questions they answer. Mention no one "
@@ -237,6 +240,15 @@ class Refusal(Exception):
     def __init__(self, message: str, *, transient: bool = False) -> None:
         super().__init__(message)
         self.transient = transient
+
+
+class AfterClaude(Exception):
+    """A failure after Claude was started. It carries the session so the worker can find the run's work."""
+
+    def __init__(self, cause: Exception, session_id: str) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.session_id = session_id
 
 
 class Adoption(NamedTuple):
@@ -676,6 +688,24 @@ def plugin_module(plugin: str, name: str):
     return importlib.import_module(name)
 
 
+def install_skew() -> str | None:
+    try:
+        home = Path(os.environ["HERMES_HOME"])
+        repo = factory_source.checkout(home)
+        differing = install_drift.skew(home, repo)
+    except (KeyError, OSError, factory_source.SourceError, install_drift.GitError) as error:
+        print(f"claude-session: could not compare the install with the factory checkout: {error}", file=sys.stderr)
+        return None
+    if not differing:
+        return None
+    parts = " and ".join("the profile scripts" if name == "profile" else f"the {name} plugin" for name in differing)
+    return (
+        f"{parts} in {home} differ from the factory checkout at {repo}, so a factory deploy is in progress or was "
+        'left unfinished. Run check-install from the source checkout and finish the deploy steps of "Deploy a '
+        'merged factory change" in skills/setup-factory/SKILL.md'
+    )
+
+
 def linear_access() -> tuple:
     """A client and a token from the worker home's linear-agent-session plugin, which gets tokens from the gateway's broker."""
     linear = plugin_module("linear-agent-session", "linear")
@@ -698,7 +728,7 @@ def triage_playbook() -> Path:
 
 
 def title_triage_documents(client, issue_id: str) -> dict:
-    """Rename only the run's own prefixed Documents, and only when no Document has the exact title.
+    """Rename only the run's own bare-titled Documents, and only when no Document has the prefixed title.
 
     The result goes in the run's report and never changes its status: a failure here must not lose the
     triage outcome that the worker relays.
@@ -711,15 +741,27 @@ def title_triage_documents(client, issue_id: str) -> dict:
         renamed, missing = [], []
         for title in TRIAGE_DOCUMENTS:
             prefixed = f"{issue['identifier']} {title}"
-            own = [d for d in issue["documents"] if d["own"] and d["title"] == prefixed]
-            if title not in titles and own:
-                client.rename_document(own[0]["id"], title)
-                renamed.append(prefixed)
-            elif title not in titles and prefixed not in titles:
-                missing.append(title)
+            own = [d for d in issue["documents"] if d["own"] and d["title"] == title]
+            if prefixed not in titles and own:
+                client.rename_document(own[0]["id"], prefixed)
+                renamed.append(title)
+            elif prefixed not in titles:
+                missing.append(prefixed)
     except (*linear.CLIENT_ERRORS, OSError) as error:
         return {"error": f"checking the triage Documents failed: {error}"}
     return {"renamed": renamed, "missing": missing}
+
+
+def title_agent_session(client, session_id: str | None, issue_id: str, triage: bool) -> dict | None:
+    """The result goes in the run's report and never changes its status."""
+    if session_id is None:
+        return None
+    linear = plugin_module("linear-agent-session", "linear")
+
+    try:
+        return {"title": client.title_session(session_id, issue_id, "triage" if triage else "work")}
+    except (*linear.CLIENT_ERRORS, OSError) as error:
+        return {"error": f"titling the agent session failed: {error}"}
 
 
 def triage_mentions(client, issue_id: str, identifier: str) -> str:
@@ -898,7 +940,7 @@ def max_turns_args(transport: dict) -> list[str]:
     return [] if turns is None else ["--max-turns", str(turns)]
 
 
-def handoff_text(plan: SessionPlan, branch: str, head: str, triage: bool = False) -> str | None:
+def handoff_text(plan: SessionPlan, branch: str, head: str, identifier: str, triage: bool = False) -> str | None:
     if plan.previous is None or plan.resumed:
         return None
     last = plan.last_result
@@ -907,7 +949,7 @@ def handoff_text(plan: SessionPlan, branch: str, head: str, triage: bool = False
         if last else "The previous session left no final message."
     )
     if triage:
-        return TRIAGE_HANDOFF.format(transcript=plan.previous, result=result)
+        return TRIAGE_HANDOFF.format(identifier=identifier, transcript=plan.previous, result=result)
     return HANDOFF.format(branch=branch, head=head, transcript=plan.previous, result=result)
 
 
@@ -1148,6 +1190,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         mcp = mcp_config(servers)
         if triage:
             system_prompt = TRIAGE_SYSTEM_PROMPT.format(
+                identifier=args.issue_identifier,
                 triage_playbook=triage_playbook(),
                 mentions=triage_mentions(client, args.issue_id, args.issue_identifier),
             )
@@ -1173,16 +1216,18 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         login = (settings.get("github") or {}).get("login")
         adopted = None if triage else adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
-        handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"), triage)
+        handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"), args.issue_identifier, triage)
         # A successful run marks this snapshot as seen, so a comment that lands mid-run goes to the next run.
         card = read_card(args.card_json, args.task_id)
         comments = card["comments"]
         seen_path = lock_path.with_name(COMMENTS_SEEN_NAME)
         seen = json.loads(seen_path.read_text()) if seen_path.exists() else []
+        card_session_id = reply_inbox.session_id_of(card["task"]["body"])
+        session_title = title_agent_session(client, card_session_id, args.issue_id, triage)
         inbox = None if triage else lock_path.with_name(INBOX_NAME)
         if inbox:
             answer_command = f"{helper_command(SESSION_REPLY)} --inbox {shlex.quote(str(inbox))}"
-            reply_inbox.reset(inbox, answer_command, reply_inbox.session_id_of(card["task"]["body"]))
+            reply_inbox.reset(inbox, answer_command, card_session_id)
         own = os.environ.get("HERMES_PROFILE") or Path(os.environ.get("HERMES_HOME", "")).name
         command = [
             os.environ.get("CLAUDE_BIN", "claude"),
@@ -1208,37 +1253,43 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 output, exit_code, detail = run_claude(command, worktree)
         finally:
             settings_path.unlink(missing_ok=True)
-        progress = worktree_state(worktree) != before
-        if output is not None:
-            delivered = reply_inbox.delivered_keys(inbox) if inbox else []
-            seen_path.write_text(json.dumps([*seen, *map(comment_key, comments), *delivered]))
-        superseded = links = None
-        if output is not None and not triage:
-            superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login)
-            links = link_issues(
-                args.repo, branch, login, args.issue_identifier, args.issue_url, github_issue_url(card)
-            )
-        documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
-        first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
+        try:
+            progress = worktree_state(worktree) != before
+            if output is not None:
+                delivered = reply_inbox.delivered_keys(inbox) if inbox else []
+                seen_path.write_text(json.dumps([*seen, *map(comment_key, comments), *delivered]))
+            superseded = links = None
+            if output is not None and not triage:
+                superseded = supersede_takeover(args.repo, branch, args.takeover_pr, login)
+                links = link_issues(
+                    args.repo, branch, login, args.issue_identifier, args.issue_url, github_issue_url(card)
+                )
+            documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
+            first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
+        except Exception as error:
+            raise AfterClaude(error, session_id) from error
 
-    session = result_line.Session(
-        session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
-        progress=progress, adopted=adopted._asdict() if adopted else None, superseded=superseded, issue_links=links,
-        triage_documents=documents,
-    )
-    if output is None:
-        error = f"claude exited {exit_code} without JSON output: {detail}"
-        return 1, result_line.Failed(error, session, blocker_error=blocker_error)
-    outcome = result_line.Outcome(
-        subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"),
-        usage=model_usage(output), first_context_tokens=first,
-    )
-    if outcome.subtype not in COMPLETED_SUBTYPES:
-        error = f"claude run ended with {outcome.subtype} (exit {exit_code})"
-        return 1, result_line.Failed(error, session, outcome, blocker_error)
-    if not triage:
-        return 0, result_line.Done(session, outcome, blocker_error)
-    return 0, result_line.Done(session, outcome, blocker_error, triage_activity(client, args.issue_id, outcome.result))
+    try:
+        session = result_line.Session(
+            session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
+            progress=progress, comments_seen=len(comments), adopted=adopted._asdict() if adopted else None,
+            superseded=superseded, issue_links=links, triage_documents=documents, session_title=session_title,
+        )
+        if output is None:
+            error = f"claude exited {exit_code} without JSON output: {detail}"
+            return 1, result_line.Failed(error, session, blocker_error=blocker_error)
+        outcome = result_line.Outcome(
+            subtype=output.get("subtype"), num_turns=output.get("num_turns"), result=output.get("result"),
+            usage=model_usage(output), first_context_tokens=first,
+        )
+        if outcome.subtype not in COMPLETED_SUBTYPES:
+            error = f"claude run ended with {outcome.subtype} (exit {exit_code})"
+            return 1, result_line.Failed(error, session, outcome, blocker_error)
+        if not triage:
+            return 0, result_line.Done(session, outcome, blocker_error)
+        return 0, result_line.Done(session, outcome, blocker_error, triage_activity(client, args.issue_id, outcome.result))
+    except Exception as error:
+        raise AfterClaude(error, session_id) from error
 
 
 def read_init(proc: subprocess.Popen, timeout: float) -> dict | None:
@@ -1329,6 +1380,11 @@ def main() -> int:
         missing = [flag for flag in ("task_id", "issue_id", "issue_identifier", "issue_url") if not getattr(args, flag)]
         if missing:
             parser.error("the following arguments are required: " + ", ".join(f"--{f.replace('_', '-')}" for f in missing))
+    skew = None if args.mcp_status else install_skew()
+    if skew:
+        # The line is written by hand because a skewed home's result_line is the module that cannot be trusted.
+        print(json.dumps({"error": skew, "transient": True}))
+        return 2
     try:
         result_line = plugin_module("blocker-order", "result_line")
     except Refusal as refusal:
@@ -1342,6 +1398,10 @@ def main() -> int:
         signal.signal(stopped.signum, signal.SIG_DFL)
         os.kill(os.getpid(), stopped.signum)
         raise
+    except AfterClaude as failed:
+        cause = failed.cause
+        message = str(cause) if isinstance(cause, (Refusal, factory_settings.SettingsError)) else f"{type(cause).__name__}: {cause}"
+        status, report = 1, result_line.Crashed(message, failed.session_id)
     except Refusal as refusal:
         status, report = 2, result_line.Refused(str(refusal), refusal.transient)
     except factory_settings.SettingsError as error:

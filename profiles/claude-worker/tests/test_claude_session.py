@@ -90,8 +90,9 @@ TOKEN_PREFIXES = (
 )
 DEFAULT_ENTRY = (
     "Work Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) in example-org/example-repo "
-    "on branch abc-123-fix. First start the issue through this repository's own issue-start workflow, "
-    "which moves it to In Progress. Open a ready (non-draft) pull request and drive it until it is ready to merge."
+    "on branch abc-123-fix. First start the issue through `working-on-issues`, this repository's own "
+    "issue-start workflow, which moves it to In Progress, and read the issue's `ABC-123 Agent brief` Document, "
+    "its full contract, before you change code. Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
 TRIAGE_ENTRY = (
     "Triage Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) for example-org/example-repo. "
@@ -162,7 +163,8 @@ class ClaudeSessionTest(GitFixture):
         self.hermes_home = self.tmp / "hermes" / "profiles" / "claude-worker"
         self.install_linear_plugin(self.hermes_home)
         self.broker = self.start_broker(linear_token=[granted("cached-token")], proxy_token=[granted("token-value", None)])
-        self.install_from(FACTORY)
+        self.checkout = self.plain_checkout("factory")
+        self.install_from(self.checkout)
         self.github = FakeGithub(self.tmp, REPO)
         self.repository = {"full_name": REPO, "path": str(self.main), "routing": "default", "worker_entry": ""}
         self.settings = self.write_settings([self.repository], {"max_turns": 40})
@@ -179,6 +181,16 @@ class ClaudeSessionTest(GitFixture):
         broker = FakeBroker(self.tmp / "hermes" / "factory-uploads.sock", **answers)
         self.addCleanup(broker.close)
         return broker
+
+    def plain_checkout(self, name: str, playbook: bool = True) -> Path:
+        checkout = self.tmp / name
+        if playbook:
+            source = FACTORY / ".agents/skills/patina-mode/playbooks/triage.md"
+            (checkout / source.relative_to(FACTORY)).parent.mkdir(parents=True)
+            shutil.copy(source, checkout / source.relative_to(FACTORY))
+        else:
+            checkout.mkdir()
+        return checkout
 
     def install_from(self, checkout: Path) -> None:
         (self.hermes_home / "distribution.yaml").write_text(
@@ -278,12 +290,14 @@ class ClaudeSessionTest(GitFixture):
             "worktree": str(self.worktree),
             "branch": "abc-123-fix",
             "progress": False,
+            "comments_seen": 0,
             "adopted": None,
             "subtype": "success",
             "num_turns": 7,
             "superseded": None,
             "issue_links": {"action": "waiting", "reason": f"no open pull request by {BOT_LOGIN} on abc-123-fix"},
             "triage_documents": None,
+            "session_title": None,
             "result": "Opened the pull request.",
             "usage": None,
             "first_context_tokens": None,
@@ -371,11 +385,12 @@ class ClaudeSessionTest(GitFixture):
         for implementation_rule in ("Publish commits only", "A finished check never runs again",
                                     "Every pull request description shows its proof", "To wait for CI"):
             self.assertNotIn(implementation_rule, system)
-        playbook = FACTORY / ".agents/skills/patina-mode/playbooks/triage.md"
+        playbook = self.checkout / ".agents/skills/patina-mode/playbooks/triage.md"
         for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token",
                                 f"patina-mode's triage playbook at `{playbook}`", "`## Priority rubric`",
                                 "`Priority: <value>, set by triage`", "`Priority: none`",
-                                "Never change the issue's status, assignee, or delegate"):
+                                "Never change the issue's status, assignee, or delegate",
+                                "Title them exactly `ABC-123 Triage notes` and `ABC-123 Agent brief`"):
             self.assertIn(triage_contract, system)
         self.assertTrue(playbook.is_absolute() and playbook.is_file())
         for retired_skill in ("`triage` skill", "`grilling`"):
@@ -471,11 +486,12 @@ class ClaudeSessionTest(GitFixture):
         self.assertNotIn("activity", report)
 
     def test_a_triage_card_refuses_when_the_factory_checkout_has_no_playbook(self) -> None:
-        self.install_from(self.main)
+        bare = self.plain_checkout("no-playbook", playbook=False)
+        self.install_from(bare)
 
         status, report = self.run_session(env=TRIAGE_ENV)
 
-        playbook = self.main / ".agents/skills/patina-mode/playbooks/triage.md"
+        playbook = bare / ".agents/skills/patina-mode/playbooks/triage.md"
         self.assertEqual((status, report), (2, {
             "error": f"{playbook} does not exist, so a triage card cannot follow the triage playbook"
         }))
@@ -516,37 +532,45 @@ class ClaudeSessionTest(GitFixture):
         state = json.loads((self.hermes_home / "linear-fake.json").read_text())
         return {document["id"]: document["title"] for document in state["documents"]}
 
-    def test_a_triage_run_gives_its_prefixed_documents_their_exact_titles(self) -> None:
+    def test_a_triage_run_with_prefixed_documents_renames_nothing(self) -> None:
         self.set_documents(("d1", "ABC-123 Triage notes", "app-user"), ("d2", "ABC-123 Agent brief", "app-user"))
 
         status, report = self.run_session(env=TRIAGE_ENV)
 
-        self.assertEqual((status, report["triage_documents"]), (0, {
-            "renamed": ["ABC-123 Triage notes", "ABC-123 Agent brief"], "missing": [],
-        }))
-        self.assertEqual(self.document_titles(), {"d1": "Triage notes", "d2": "Agent brief"})
+        self.assertEqual((status, report["triage_documents"]), (0, {"renamed": [], "missing": []}))
+        self.assertEqual(self.document_titles(), {"d1": "ABC-123 Triage notes", "d2": "ABC-123 Agent brief"})
 
-    def test_a_triage_run_leaves_a_persons_document_and_one_beside_an_exact_title(self) -> None:
+    def test_a_triage_run_gives_its_bare_documents_the_issue_identifier(self) -> None:
+        self.set_documents(("d1", "Triage notes", "app-user"), ("d2", "ABC-123 Agent brief", "app-user"))
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {"renamed": ["Triage notes"], "missing": []}))
+        self.assertEqual(self.document_titles(), {"d1": "ABC-123 Triage notes", "d2": "ABC-123 Agent brief"})
+
+    def test_a_triage_run_leaves_a_persons_document_and_one_beside_a_prefixed_title(self) -> None:
         self.set_documents(
-            ("d1", "ABC-123 Triage notes", "person"),
+            ("d1", "Triage notes", "person"),
             ("d2", "Agent brief", "app-user"),
             ("d3", "ABC-123 Agent brief", "app-user"),
         )
 
         status, report = self.run_session(env=TRIAGE_ENV)
 
-        self.assertEqual((status, report["triage_documents"]), (0, {"renamed": [], "missing": []}))
+        self.assertEqual((status, report["triage_documents"]), (0, {
+            "renamed": [], "missing": ["ABC-123 Triage notes"],
+        }))
         self.assertEqual(self.document_titles(), {
-            "d1": "ABC-123 Triage notes", "d2": "Agent brief", "d3": "ABC-123 Agent brief",
+            "d1": "Triage notes", "d2": "Agent brief", "d3": "ABC-123 Agent brief",
         })
 
     def test_a_triage_run_reports_missing_documents(self) -> None:
-        self.set_documents()
+        self.set_documents(("d1", "ABC-123 Triage notes", "app-user"))
 
         status, report = self.run_session(env=TRIAGE_ENV)
 
         self.assertEqual((status, report["triage_documents"]), (0, {
-            "renamed": [], "missing": ["Triage notes", "Agent brief"],
+            "renamed": [], "missing": ["ABC-123 Agent brief"],
         }))
 
     def test_a_triage_run_reports_a_failed_document_check_without_failing(self) -> None:
@@ -561,6 +585,42 @@ class ClaudeSessionTest(GitFixture):
                     "error": f"checking the triage Documents failed: {reason}",
                 }))
                 self.assertEqual(report["result"], "Opened the pull request.")
+
+    def session_updates(self) -> list:
+        return [r["session_update"] for r in self.linear_requests(self.hermes_home) if "session_update" in r]
+
+    def test_a_triage_run_titles_its_session_as_triage(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        title = "Triage ABC-123: Fix checkout"
+        self.assertEqual((status, report["session_title"]), (0, {"title": title}))
+        self.assertEqual(self.session_updates(), [{"id": "live-session", "input": {"summary": title}}])
+
+    def test_an_implementation_run_titles_its_session_as_work_on_the_issue(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.set_linear_issue(issue_title="Fix\nthe checkout")
+
+        status, report = self.run_session()
+
+        title = "Work on ABC-123: Fix the checkout"
+        self.assertEqual((status, report["session_title"]), (0, {"title": title}))
+        self.assertEqual(self.session_updates(), [{"id": "live-session", "input": {"summary": title}}])
+
+    def test_a_card_without_a_session_sends_no_title(self) -> None:
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["session_title"], self.session_updates()), (0, None, []))
+
+    def test_a_failed_session_title_is_reported_without_failing_the_run(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.set_linear_issue(session_update_error="Entity not found")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["session_title"]), (0, {"error": "titling the agent session failed: Entity not found"}))
+        self.assertEqual(report["result"], "Opened the pull request.")
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(
@@ -720,6 +780,13 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(self.prompt(), f"{COMMENTS_HEADING}\n\ndefault wrote:\n> Linear reply: Why SQLite?")
 
+    def test_the_report_counts_the_comments_in_the_card_snapshot_the_run_read(self) -> None:
+        self.set_comments((100, "operator", "Before."), (200, "default", "Linear reply: Which one?"))
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["comments_seen"]), (0, 2))
+
     def test_a_triage_run_and_the_mcp_probe_register_neither_hook_and_start_no_inbox(self) -> None:
         self.configure_fake_claude(init=[])
         self.run_probe()
@@ -776,9 +843,12 @@ class ClaudeSessionTest(GitFixture):
         database.unlink(missing_ok=True)
         if not board_fails:
             with sqlite3.connect(database) as db:
-                db.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, assignee TEXT, status TEXT, branch_name TEXT)")
+                db.execute(
+                    "CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, assignee TEXT, status TEXT, branch_name TEXT, "
+                    "block_kind TEXT)"
+                )
                 db.executemany(
-                    "INSERT INTO tasks VALUES (:id, :title, :body, 'claude-worker', :status, :branch_name)", board or []
+                    "INSERT INTO tasks VALUES (:id, :title, :body, 'claude-worker', :status, :branch_name, NULL)", board or []
                 )
             db.close()
         self.board_env = {"HERMES_KANBAN_DB": str(database)}
@@ -952,6 +1022,23 @@ class ClaudeSessionTest(GitFixture):
             "GitHub or in the code. The previous session ended with this message:\n\n"
             "Opened PR 7 and waited on review.\n\n"
             "Reviewer asked for a test."
+        ))
+
+    def test_a_fresh_triage_session_hands_off_to_the_issues_triage_notes(self) -> None:
+        transcript = self.write_transcript(
+            session_id=TRIAGE_SESSION_ID, idle=HOUR, context=(10, 90_000, 10_000), said="Asked who owns the API.",
+        )
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["reason"]), (0, "fresh-large-idle"))
+        self.assertEqual(self.claude_call()["argv"][1], (
+            f"{TRIAGE_ENTRY}\n\n"
+            "This card continues an earlier triage. Its previous Claude session sat idle past the prompt cache and "
+            "had grown large, so this session starts fresh. Read the issue, its comments, and its "
+            "`ABC-123 Triage notes` Document before you act. "
+            f"The previous session's transcript is {transcript}; read it only for a decision you cannot find on "
+            "the issue. The previous session ended with this message:\n\nAsked who owns the API."
         ))
 
     def test_context_at_the_threshold_starts_fresh(self) -> None:
@@ -1623,6 +1710,120 @@ class ClaudeSessionTest(GitFixture):
                     f"claude_session.disabled_mcp_servers {value!r} must be a list of MCP server names"
                 )})
                 self.assertFalse(self.log.exists())
+
+    def deploy(self, **ahead: str) -> Path:
+        files = {
+            "profiles/claude-worker/scripts/helper.py": "VALUE = 1\n",
+            "plugins/blocker-order/tests/test_result_line.py": "# tests are never installed\n",
+        }
+        scripts = self.hermes_home / "scripts"
+        scripts.mkdir()
+        (scripts / "helper.py").write_text(files["profiles/claude-worker/scripts/helper.py"])
+        for plugin in ("blocker-order", "linear-agent-session"):
+            for installed in (self.hermes_home / "plugins" / plugin).iterdir():
+                files[f"plugins/{plugin}/{installed.name}"] = installed.read_text()
+        checkout = self.tmp / "deployed"
+        checkout.mkdir()
+        git(checkout, "init", "-q", "-b", "main")
+        self.commit_files(checkout, files)
+        if ahead:
+            self.commit_files(checkout, ahead)
+        self.install_from(checkout)
+        return checkout
+
+    @staticmethod
+    def commit_files(checkout: Path, files: dict) -> None:
+        for name, text in files.items():
+            (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+            (checkout / name).write_text(text)
+        git(checkout, "add", "-A")
+        git(checkout, "commit", "-q", "-m", "deploy")
+
+    def test_a_home_that_matches_the_checkout_runs(self) -> None:
+        self.deploy()
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["session_id"]), (0, SESSION_ID))
+        self.assertTrue(self.log.exists())
+
+    def test_a_plugin_that_differs_from_the_checkout_refuses_as_transient_before_claude_starts(self) -> None:
+        self.deploy(**{"plugins/blocker-order/result_line.py": "# the next commit\n"})
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(set(report), {"error", "transient"})
+        self.assertTrue(report["transient"])
+        self.assertIn("the blocker-order plugin", report["error"])
+        self.assertNotIn("linear-agent-session", report["error"])
+        self.assertIn("a factory deploy is in progress or was left unfinished", report["error"])
+        self.assertEqual(RESULT_LINE.last(json.dumps(report)), RESULT_LINE.Refused(report["error"], transient=True))
+        self.assertFalse(self.log.exists())
+
+    def test_scripts_that_differ_from_the_checkout_refuse_and_name_the_profile(self) -> None:
+        self.deploy(**{"profiles/claude-worker/scripts/helper.py": "VALUE = 2\n"})
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertIn("the profile scripts", report["error"])
+        self.assertFalse(self.log.exists())
+
+    def test_a_ref_ahead_of_head_does_not_refuse(self) -> None:
+        checkout = self.deploy()
+        git(checkout, "checkout", "-q", "-b", "next")
+        self.commit_files(checkout, {"plugins/blocker-order/result_line.py": "# the next commit\n"})
+        git(checkout, "update-ref", "refs/remotes/origin/main", "next")
+        git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        git(checkout, "checkout", "-q", "main")
+
+        status, _ = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertTrue(self.log.exists())
+
+    def test_a_missing_distribution_goes_on_and_says_why_on_one_stderr_line(self) -> None:
+        (self.hermes_home / "distribution.yaml").unlink()
+        command, env = self.session_command()
+
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        notes = [line for line in proc.stderr.splitlines() if "could not compare the install" in line]
+        self.assertEqual(len(notes), 1, proc.stderr)
+        self.assertIn("distribution.yaml does not exist", notes[0])
+
+    def test_mcp_status_does_not_compare_the_install(self) -> None:
+        self.deploy(**{"plugins/blocker-order/result_line.py": "# the next commit\n"})
+        self.configure_fake_claude(init=[{"name": "linear", "status": "connected"}])
+
+        code, report = self.run_probe()
+
+        self.assertEqual((code, report["servers"]), (0, [{"name": "linear", "status": "connected"}]))
+
+    def test_a_claude_that_cannot_start_is_not_reported_as_crashed(self) -> None:
+        missing = self.tmp / "no-claude"
+
+        status, report = self.run_session(env={"CLAUDE_BIN": str(missing)})
+
+        self.assertEqual(status, 1)
+        self.assertEqual(report, {"error": f"FileNotFoundError: [Errno 2] No such file or directory: '{missing}'"})
+
+    def test_a_failure_after_claude_ran_reports_its_session_as_crashed(self) -> None:
+        module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
+        text = module.read_text()
+        module.unlink()
+        module.write_text(
+            text + "\n\ndef Session(*args, **kwargs):\n    raise TypeError(\"unexpected keyword argument 'progress'\")\n"
+        )
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(report, {"error": "TypeError: unexpected keyword argument 'progress'", "session_id": SESSION_ID})
+        self.assertEqual(RESULT_LINE.last(json.dumps(report)), RESULT_LINE.Crashed(report["error"], SESSION_ID))
+        self.assertTrue(self.log.exists())
 
     def run_probe(self, timeout: float = 20) -> tuple:
         command, env = self.session_command()

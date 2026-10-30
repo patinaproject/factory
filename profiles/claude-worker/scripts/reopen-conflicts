@@ -61,6 +61,7 @@ import card_branch
 import factory_settings
 import merged_checks
 import stale_reviews
+from card_transition import pull_ref
 
 REPO_LINE = re.compile(r"^repo:\s*(\S+)\s*$", re.MULTILINE)
 SESSION_LINE = re.compile(r"^linear_agent_session_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
@@ -70,7 +71,6 @@ REVIEW_MARKER = "review_head: "
 CONFLICT_REASON = "merge conflict with the base branch; see the card comments"
 FAILED_CHECK_REASON = "a required check failed; see the card comments"
 REVIEW_REASON = "changes-requested review still needs work; see the card comments"
-PULL_URL = re.compile(r"https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)", re.IGNORECASE)
 PR_FIELDS = "number,url,headRefName,headRefOid,baseRefName,author,mergeable,reviewDecision"
 
 
@@ -247,11 +247,6 @@ def handback_for(pull: dict, task: dict, repo: str, cache: dict) -> Handback | N
     return review_handback(pull, outcome.reason) if isinstance(outcome, stale_reviews.Handback) else None
 
 
-def without_pull_urls(text: str) -> str:
-    """Hermes' respawn guard matches `PULL_URL` in any card comment and would hold the reopened card."""
-    return PULL_URL.sub(lambda match: f"{match[1]}/{match[2]}#{match[3]}", text)
-
-
 def send_back(hermes: str, task: dict, handback: Handback, sent: bool) -> None:
     """Every step either moves the card or leaves it where the next run repeats the step."""
     task_id = task["id"]
@@ -259,7 +254,7 @@ def send_back(hermes: str, task: dict, handback: Handback, sent: bool) -> None:
         run(hermes, "kanban", "unblock", task_id)
         run(hermes, "kanban", "request-review", task_id)
     if not sent:
-        run(hermes, "kanban", "comment", task_id, without_pull_urls(handback.text))
+        run(hermes, "kanban", "comment", task_id, pull_ref(handback.text))
     run(hermes, "kanban", "reopen-review", task_id, "--reason", handback.reason)
 
 

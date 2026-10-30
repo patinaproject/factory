@@ -547,7 +547,7 @@ class ReopenConflictsTest(unittest.TestCase):
 
         self.run_script()
 
-        listed = f"- `ci`: {REPO}#7/checks?check_run_id=9"
+        listed = f"- `ci`: {REPO}#7"
         self.assertEqual(self.writes()[0], ["kanban", "comment", "t_1", self.failed_comment(7, listed)])
 
     def test_a_failed_check_head_already_on_the_card_skips_blocked_and_only_reopens_review(self) -> None:

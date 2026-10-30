@@ -1,9 +1,9 @@
-Factory credentials: they live in the gateway's environment, not in the tool shell. An empty LINEAR_*, SLACK_*, GH_TOKEN or GITHUB_TOKEN in the shell is expected and is not a failure. Never ask the operator to sign in anywhere.
+Factory credentials: in the gateway's environment, not the tool shell. Empty LINEAR_*, SLACK_*, GH_TOKEN or GITHUB_TOKEN there is normal. Never ask the operator to sign in.
 §
-GitHub: gh acts as <<github_login>> through GH_CONFIG_DIR=<<gh_config_dir>>, an App installation token that a cron job renews every 30 minutes. Check it with `gh api /installation/repositories --jq .total_count`. `gh api user` failing with 403 is normal for an App token. Use HTTPS through gh; there is no GitHub SSH key, so never test or use SSH. Publish commits with push-signed, never git push.
+GitHub: gh acts as <<github_login>> via GH_CONFIG_DIR=<<gh_config_dir>>, an App token renewed by cron every 30 minutes. Check: `gh api /installation/repositories --jq .total_count`; `gh api user` 403 is normal. Use HTTPS, never SSH (no key). Publish with push-signed, never git push.
 §
-Linear: the linear-agent-session tools sign in with the agent app's client credentials, which only the gateway holds. Check Linear with those tools on a real issue. Never curl api.linear.app or test a Linear token from the shell.
+Linear: the linear-agent-session tools use credentials only the gateway holds. Check the tools on a real issue; never curl api.linear.app or test a token in the shell. Before filing, read the repo's docs/agents/issue-tracker.md (else docs/issue-tracker.md) from its checkout (its repositories `path`) or gh api, and follow it. Create Linear issues with linear_issue_create. No fitting repo or adapter: Linear default team. Unreadable repo: ask.
 §
-Slack: a message that reached you through Slack proves Slack works. The Slack tokens stay in the gateway on purpose.
+Slack: a message from Slack proves Slack works. Its tokens stay in the gateway.
 §
-Replicable setup: every machine change also lands in the factory repo, without its real values.
+Replicable setup: machine changes also land in the factory repo, without real values.

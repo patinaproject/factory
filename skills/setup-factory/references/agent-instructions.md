@@ -19,6 +19,7 @@ own instructions above or below it.
 | Credentials on the machine that Hermes agents must never receive | `<NAME>` of each operator-only token, such as `OP_SERVICE_ACCOUNT_TOKEN` |
 | The operator's SST app that owns the ingress, and what deploys it | A repository path, and "merging to the default branch" |
 | The SSH hostname and the account people SSH into, when SSH is used | `<ssh-hostname>`, `<account>` |
+| The Linear team key where issues go when no repository fits | `ABC` |
 | The path of this repository's checkout on the machine | `~/factory` |
 
 The private configuration record holds the factory's real values: hostnames,
@@ -75,6 +76,13 @@ python3 <repo>/skills/setup-factory/scripts/agent-block --values <values file> -
 ```
 
 `--print` writes the render to stdout and changes nothing.
+
+The check and the write also cover `settings.json` in the same directory. It
+must hold the allow rules that `agent-block` renders from the same values, such
+as the rule that lets an operator session run `cli.py session` without a prompt.
+The write adds a missing rule, keeps every other entry, creates the file when it
+is absent, and backs it up first. It refuses a file that is not a JSON object, or whose
+`permissions.allow` is not a list.
 
 ## Verify
 

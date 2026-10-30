@@ -50,7 +50,7 @@ pnpm test
 ```
 
 `pnpm test` runs `scripts/test.sh`, which runs the `unittest` suites under
-`plugins/`, `profiles/`, and `templates/` with `python3`. Set `PYTHON` to use
+`plugins/`, `profiles/`, `scripts/`, and `templates/` with `python3`. Set `PYTHON` to use
 another interpreter.
 
 ## Conventions

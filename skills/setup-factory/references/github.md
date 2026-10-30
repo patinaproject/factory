@@ -115,15 +115,19 @@ folder already exists, the secret lives there. In the lines below, replace
 >   and write, Issues read and write, Checks read-only, Commit statuses
 >   read-only, Actions read and write, and Metadata read-only.
 > - **Subscribe to events:** Issues, Issue comment, Pull request, Pull request
->   review, Pull request review comment, Workflow run, and Check run. Not
->   Check suite.
+>   review, Pull request review comment, Workflow run, Check run, and Push.
+>   Not Check suite.
 > - **Where can this GitHub App be installed:** only on this account.
 >
 > Afterwards, ask for the **App ID** from the App's **General** page and for
 > `<app-slug>`. Neither is a secret.
 
-The events are the rows of `GITHUB_EVENT_TABLE` in `templates/render.py`.
-Compare the list with the form when that file changes.
+The events are the rows of `GITHUB_EVENT_TABLE` in `templates/render.py`,
+plus Push. Compare the list with the form when that file changes. A push to
+the factory repository's default branch starts `auto-deploy` (part 12 of the
+runbook). GitHub sends a push for every branch in every installed repository,
+and the `github` route drops each one but that branch. The route's rate limit
+leaves room for them.
 
 ### Upgrade an existing App's events
 
@@ -132,6 +136,12 @@ the route drops each one.
 
 > **HUMAN CHECKPOINT.** Ask the operator to open the App's **Permissions &
 > events** page, clear **Check suite** under **Subscribe to events**, and save.
+
+An App created without Push never starts `auto-deploy`.
+[Check the App's access](#check-the-apps-access) reports it.
+
+> **HUMAN CHECKPOINT.** Ask the operator to open the App's **Permissions &
+> events** page, select **Push** under **Subscribe to events**, and save.
 
 ### Upgrade an existing App's permissions
 
@@ -409,7 +419,8 @@ configured repository, along with a read of the head's workflow runs. It also
 compares the App's permissions with the
 [permission table](#use-gh-on-a-factory-machine). Actions must be read and
 write, because a worker re-runs a job that failed outside its change with
-`gh run rerun --failed`.
+`gh run rerun --failed`. It reads the App's event subscriptions from the same
+App read and reports a missing Push subscription.
 
 The App's settings say what the App asks for. The installation keeps its old
 permissions until an org owner accepts the new ones, so the check also asks the

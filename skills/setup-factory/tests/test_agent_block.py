@@ -35,6 +35,7 @@ VALUES = {
     "ssh_hostname": "ssh.acme.example",
     "ssh_allowlist": "the SSH allowlist in `infra` of the\n  `acme/product` repository",
     "ssh_users": "a@acme.example,b@acme.example",
+    "default_team": "ACME",
     "factory_checkout": "~/acme/factory",
     "worker_checkouts": "`~/acme/product` and `~/acme/factory`",
 }
@@ -255,6 +256,60 @@ class FileTest(unittest.TestCase):
             agent_block.write(self.config, TEMPLATE.read_text(), VALUES)
 
 
+class SettingsTest(unittest.TestCase):
+    RULE = "Bash(python3 ~/.hermes/plugins/linear-agent-session/cli.py session *)"
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.config = Path(tmp.name)
+        self.settings = self.config / "settings.json"
+
+    def saved(self) -> dict:
+        return json.loads(self.settings.read_text())
+
+    def test_check_fails_a_missing_file_and_a_missing_rule_naming_the_rule(self) -> None:
+        self.assertFalse(agent_block.check_settings(self.config, VALUES)[0][0])
+        self.settings.write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}}))
+        self.assertEqual(
+            agent_block.check_settings(self.config, VALUES),
+            [(False, f"{self.settings}: permissions.allow lacks {self.RULE}")],
+        )
+
+    def test_write_creates_the_file_and_check_then_passes(self) -> None:
+        self.assertTrue(agent_block.write_settings(self.config, VALUES).startswith("wrote"))
+        self.assertEqual(self.saved(), {"permissions": {"allow": [self.RULE]}})
+        self.assertEqual(self.settings.read_text(), json.dumps(self.saved(), indent=2) + "\n")
+        self.assertTrue(all(ok for ok, _ in agent_block.check_settings(self.config, VALUES)))
+
+    def test_write_keeps_every_other_key_and_entry_and_backs_up(self) -> None:
+        before = {"model": "opus", "permissions": {"allow": ["Bash(ls)"], "deny": ["Read(.env)"]}, "env": {"A": "1"}}
+        self.settings.write_text(json.dumps(before))
+        agent_block.write_settings(self.config, VALUES)
+        self.assertEqual(
+            self.saved(),
+            {"model": "opus", "permissions": {"allow": ["Bash(ls)", self.RULE], "deny": ["Read(.env)"]}, "env": {"A": "1"}},
+        )
+        backups = list(self.config.glob("settings.json.bak-*"))
+        self.assertEqual([json.loads(b.read_text()) for b in backups], [before])
+
+    def test_write_is_idempotent_and_makes_no_second_backup(self) -> None:
+        agent_block.write_settings(self.config, VALUES)
+        self.assertEqual(agent_block.write_settings(self.config, VALUES), "unchanged")
+        self.assertEqual(self.saved(), {"permissions": {"allow": [self.RULE]}})
+        self.assertEqual(list(self.config.glob("settings.json.bak-*")), [])
+
+    def test_a_settings_file_that_is_not_a_json_object_is_refused_and_left_alone(self) -> None:
+        for text in ("[]", "{not json", '{"permissions": {"allow": "Bash(ls)"}}'):
+            with self.subTest(text):
+                self.settings.write_text(text)
+                with self.assertRaises(ValueError):
+                    agent_block.write_settings(self.config, VALUES)
+                with self.assertRaises(ValueError):
+                    agent_block.check_settings(self.config, VALUES)
+                self.assertEqual(self.settings.read_text(), text)
+
+
 class CommandTest(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -289,6 +344,20 @@ class CommandTest(unittest.TestCase):
         (self.config / "CLAUDE.md").write_text(render(VALUES).replace("push-signed", "push-unsigned"))
         self.assertEqual(self.run_main("--check"), self.run_main())
         self.assertEqual(self.run_main("--check")[0], 1)
+
+    def test_command_checks_and_writes_the_allow_rules_too(self) -> None:
+        (self.config / "CLAUDE.md").write_text(render(VALUES))
+        code, out = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL", out.splitlines()[-1])
+        self.assertEqual(self.run_main("--write")[0], 0)
+        code, out = self.run_main()
+        self.assertEqual((code, [line[:4] for line in out.splitlines()]), (0, ["PASS", "PASS"]))
+
+    def test_command_fails_on_an_invalid_settings_file(self) -> None:
+        (self.config / "settings.json").write_text("[]")
+        code, out = self.run_main()
+        self.assertEqual((code, out.startswith("FAIL")), (1, True))
 
     def test_check_refuses_to_combine_with_write(self) -> None:
         with self.assertRaises(SystemExit):
