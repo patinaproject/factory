@@ -154,6 +154,10 @@ class SilentBlockTest(unittest.TestCase):
         self.assertEqual(blocks.session_id("repo: o/r\n  linear_agent_session_id: s-2"), None)
         self.assertEqual(blocks.session_id("repo: o/r\nlinear_agent_session_id: s-2\n"), "s-2")
 
+    def test_issue_line_must_start_a_line(self):
+        self.assertIsNone(blocks.issue_id("note: linear_issue_id: other\nrepo: o/r"))
+        self.assertEqual(blocks.issue_id("linear_issue_id: issue-uuid-1\nlinear_issue_identifier: ABC-1\n"), "issue-uuid-1")
+
     def test_dependency_wait_posts_nothing(self):
         for status in ("todo", "running", "ready"):
             with self.subTest(status=status):

@@ -1188,6 +1188,35 @@ class TriagePeopleTest(unittest.TestCase):
             make_client(fake).triage_people("ABC-1")
 
 
+def review_owner(assignee, on_triage):
+    issue = {"assignee": assignee, "team": {"triageResponsibility": {"currentUser": on_triage} if on_triage is not False else None}}
+    return 200, {"data": {"issue": issue}}
+
+
+class ReviewOwnerTest(unittest.TestCase):
+    TED = {"name": "Ted", "gitHubUserId": "7"}
+    LUKE = {"name": "Luke Nguyen", "gitHubUserId": None}
+
+    def test_the_assignee_owns_the_review_else_the_person_on_triage(self):
+        cases = (
+            (review_owner(self.TED, self.LUKE), self.TED),
+            (review_owner(None, self.LUKE), self.LUKE),
+            (review_owner(None, None), None),
+            (review_owner(None, False), None),
+        )
+        for response, expected in cases:
+            with self.subTest(expected=expected):
+                fake = FakeLinear([response])
+                output = json.loads(tools.run_review_owner(lambda: make_client(fake), {"issue": "ABC-1"}))
+                self.assertEqual(output, {"owner": expected})
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
+
+    def test_an_issue_linear_does_not_return_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"issue": None}})])
+        output = json.loads(tools.run_review_owner(lambda: make_client(fake), {"issue": "ABC-1"}))
+        self.assertIn("no issue ABC-1", output["error"])
+
+
 class UndelegateTest(unittest.TestCase):
     def run_undelegate(self, responses):
         fake = FakeLinear(responses)

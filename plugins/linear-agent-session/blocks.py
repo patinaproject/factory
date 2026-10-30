@@ -20,6 +20,7 @@ LINEAR_TOKEN = re.compile(r"lin_(?:api|oauth)_[A-Za-z0-9]+")
 # Linear shows a bare profile URL as "@name", so an "@" written before one shows as "@@name".
 PROFILE_MENTION = re.compile(r"@+(?=https://linear\.app/[^/\s]+/profiles/)")
 SESSION_LINE = re.compile(r"^linear_agent_session_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+ISSUE_LINE = re.compile(r"^linear_issue_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,11 @@ def hermes_redact(text: str) -> str:
 
 def session_id(body: Optional[str]) -> Optional[str]:
     match = SESSION_LINE.search(body or "")
+    return match.group(1) if match else None
+
+
+def issue_id(body: Optional[str]) -> Optional[str]:
+    match = ISSUE_LINE.search(body or "")
     return match.group(1) if match else None
 
 

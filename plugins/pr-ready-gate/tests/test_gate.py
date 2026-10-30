@@ -41,8 +41,9 @@ class FakeCtx:
 
 
 class FakeShell:
-    def __init__(self, pr=None, gh_stdout=None, gh_returncode=0, gh_raises=None, head=HEAD, branch=BRANCH, rules=None, state=None, post_returncode=0):
+    def __init__(self, pr=None, gh_stdout=None, gh_returncode=0, gh_raises=None, head=HEAD, branch=BRANCH, rules=None, state=None, post_returncode=0, login="luke"):
         self.post_returncode = post_returncode
+        self.login = login
         self.rules = DEFAULT_RULES if rules is None else rules
         self.state = REVIEW_STATE if state is None else state
         self.gh_stdout = json.dumps(pr if pr is not None else CLEAN) if gh_stdout is None else gh_stdout
@@ -62,6 +63,8 @@ class FakeShell:
         if cmd[1:4] == ["api", "-X", "POST"]:
             stderr = "" if self.post_returncode == 0 else "Reviews may only be requested from collaborators"
             return subprocess.CompletedProcess(cmd, self.post_returncode, "{}", stderr)
+        if cmd[1] == "api" and cmd[2].startswith("user/"):
+            return subprocess.CompletedProcess(cmd, 0, self.login + "\n", "")
         if cmd[1] == "api":
             body = self.state if cmd[2] == "graphql" else self.rules
             return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
@@ -219,7 +222,7 @@ class HookDecisionTest(unittest.TestCase):
         gh_calls = [call for call in shell.calls if call[0][0] == "gh"]
         self.assertEqual(
             gh_calls,
-            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName"], WORKSPACE, 15)],
+            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews"], WORKSPACE, 15)],
         )
 
     def test_published_pr_url_is_viewed_with_its_repo(self):
@@ -227,7 +230,7 @@ class HookDecisionTest(unittest.TestCase):
         self.assertIsNone(call_hook(shell, args={"metadata": {"published_pr": PR_URL}}))
         self.assertEqual(
             shell.gh_call()[0],
-            ["gh", "pr", "view", PR_URL, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName",
+            ["gh", "pr", "view", PR_URL, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews",
              "--repo", "example-org/example-repo"],
         )
 
@@ -587,9 +590,10 @@ P2896 = {
 P2896_RULES = [{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]
 
 
-def call_review_hook(shell, result=LANDED_IN_REVIEW, ctx=None, tool_name="kanban_request_review", args=HANDOFF_ARGS):
-    hook = gate.make_review_hook(ctx or FakeCtx())
-    with mock.patch.dict(os.environ, WORKER_ENV, clear=True), mock.patch.object(gate.subprocess, "run", shell):
+def call_review_hook(shell, result=LANDED_IN_REVIEW, ctx=None, tool_name="kanban_request_review", args=HANDOFF_ARGS, owner_lookup=None):
+    hook = gate.make_review_hook(ctx or FakeCtx(), owner_lookup or gate.linear_owner)
+    env = WORKER_ENV if owner_lookup else {k: v for k, v in WORKER_ENV.items() if k != "HERMES_KANBAN_TASK"}
+    with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(gate.subprocess, "run", shell):
         return hook(tool_name=tool_name, args=args, result=result, task_id="s", status="ok")
 
 
@@ -682,6 +686,100 @@ class ReviewHookTest(unittest.TestCase):
         shell = self.shell(review_nodes(("reviewer", OTHER)))
         self.assertIsNone(call_review_hook(shell, ctx=FakeCtx(profile="default")))
         self.assertEqual(shell.calls, [])
+
+
+LUKE = {"name": "Luke Nguyen", "gitHubUserId": "42"}
+
+
+class OwnerReviewTest(unittest.TestCase):
+    def posts(self, shell):
+        return [call[0] for call in shell.calls if call[0][1:4] == ["api", "-X", "POST"]]
+
+    def review(self, owner=LUKE, pr=None, **fake):
+        shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL, **(pr or {})}, **fake)
+        lookups = []
+
+        def lookup(task_id, workspace, deadline):
+            lookups.append((task_id, workspace))
+            if isinstance(owner, Exception):
+                raise owner
+            return owner
+
+        result = call_review_hook(shell, owner_lookup=lookup)
+        return shell, lookups, None if result is None else json.loads(result)
+
+    def test_the_owner_is_asked_to_review_by_their_github_login(self):
+        shell, lookups, result = self.review()
+        self.assertEqual(lookups, [("t_1", WORKSPACE)])
+        self.assertIn((["gh", "api", "user/42", "--jq", ".login"], WORKSPACE, 6), shell.calls)
+        self.assertEqual(
+            self.posts(shell),
+            [["gh", "api", "-X", "POST", "repos/example-org/example-repo/pulls/7/requested_reviewers", "-f", "reviewers[]=luke"]],
+        )
+        self.assertEqual(result, {**json.loads(LANDED_IN_REVIEW), "owner_review_requested": "luke"})
+
+    def test_an_owner_without_github_in_linear_is_named_and_not_asked(self):
+        shell, _, result = self.review(owner={"name": "Luke Nguyen", "gitHubUserId": None})
+        self.assertEqual(self.posts(shell), [])
+        self.assertEqual(result["owner_review_not_requested"], "Luke Nguyen has not connected GitHub in Linear")
+
+    def test_an_issue_with_no_owner_asks_nobody_and_says_so(self):
+        shell, _, result = self.review(owner=None)
+        self.assertEqual(self.posts(shell), [])
+        self.assertEqual(result["owner_review_not_requested"], "the Linear issue has no assignee and no one is on triage")
+
+    def test_an_owner_already_asked_or_who_already_reviewed_is_not_asked_again(self):
+        for pr in ({"reviewRequests": [{"__typename": "User", "login": "luke"}]},
+                   {"latestReviews": [{"author": {"login": "luke"}, "state": "COMMENTED"}]}):
+            with self.subTest(pr=pr):
+                shell, _, result = self.review(pr=pr)
+                self.assertEqual(self.posts(shell), [])
+                self.assertIsNone(result)
+
+    def test_an_owner_the_gate_just_re_asked_gets_one_request(self):
+        shell = FakeShell(pr={**CLEAN, **AWAITING_RE_REVIEW}, state=state_with(latestOpinionatedReviews=review_nodes(("luke", OTHER))))
+        result = json.loads(call_review_hook(shell, owner_lookup=lambda *_: LUKE))
+        self.assertEqual([post[-1] for post in self.posts(shell)], ["reviewers[]=luke"])
+        self.assertEqual(result["re_requested_reviewers"], ["luke"])
+        self.assertNotIn("owner_review_requested", result)
+
+    def test_a_failed_lookup_or_request_is_reported_and_the_handoff_still_stands(self):
+        for owner, fake, reason in (
+            (gate.GateError("`review-owner` exited 1: Linear is unreachable"), {}, "Linear is unreachable"),
+            (LUKE, {"post_returncode": 22}, "Reviews may only be requested from collaborators"),
+        ):
+            with self.subTest(reason=reason):
+                _, _, result = self.review(owner=owner, **fake)
+                self.assertEqual(result["status"], "review")
+                self.assertNotIn("owner_review_requested", result)
+                self.assertIn(reason, result["owner_review_not_requested"])
+
+    def test_a_merged_pull_request_asks_nobody(self):
+        shell, lookups, result = self.review(pr={"state": "MERGED"})
+        self.assertEqual((lookups, self.posts(shell), result), ([], [], None))
+
+    def test_the_owner_comes_from_linear_agent_sessions_cli_for_the_card(self):
+        calls = []
+
+        def run(cmd, cwd=None, timeout=None, **_):
+            calls.append((cmd, cwd))
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"owner": LUKE}), "")
+
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), mock.patch.object(gate.subprocess, "run", run):
+            owner = gate.linear_owner("t_1", WORKSPACE, gate.time.monotonic() + 20)
+        self.assertEqual(owner, LUKE)
+        self.assertEqual(
+            calls,
+            [([gate.sys.executable, "/home/worker/plugins/linear-agent-session/cli.py", "review-owner", "--task", "t_1"], WORKSPACE)],
+        )
+
+    def test_a_cli_error_reaches_the_reason(self):
+        def run(cmd, **_):
+            return subprocess.CompletedProcess(cmd, 1, json.dumps({"error": "card t_1 names no linear_issue_id"}), "")
+
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), mock.patch.object(gate.subprocess, "run", run):
+            with self.assertRaisesRegex(gate.GateError, "names no linear_issue_id"):
+                gate.linear_owner("t_1", WORKSPACE, gate.time.monotonic() + 20)
 
 
 class RegisterTest(unittest.TestCase):

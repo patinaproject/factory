@@ -249,6 +249,12 @@ Then act on the result:
     from` and the reviewers' logins, each with a leading `@`, separated by a
     comma and a space.
   - Otherwise set `body` to `Ready for review:` and `published_pr`.
+  - When the result has `owner_review_requested`, the gate asked that
+    GitHub login, the Linear issue's owner, to review. Add `Asked @<login>
+    to review.` to the `body`.
+  - When the result has `owner_review_not_requested`, the gate asked no
+    issue owner. Add `No review requested from the issue owner:` and its
+    reason to the `body`.
   - When the result has `re_request_failures`, the gate could not ask
     someone. Name each failure in the `body` after the reviewers or the
     pull request URL.

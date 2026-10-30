@@ -305,6 +305,10 @@ def run_issue(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(run)
 
 
+def run_review_owner(client_factory: ClientFactory, args: dict) -> str:
+    return _tool_result_or_error(lambda: {"owner": client_factory().review_owner(_issue_argument(args))})
+
+
 def run_delegated_issues(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(
         lambda: {"issues": client_factory().list_delegated_issues(include_closed=bool(args.get("include_closed")))}
