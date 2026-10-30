@@ -115,8 +115,6 @@ STRANDED_MINUTES = 30  # Hermes' own threshold for a card stranded in ready
 GUARDED_MINUTES = 10  # two cron ticks of reopen-conflicts, so a hold that a handback lifts is gone
 # Hermes' events that start a card's wait in ready; `assigned` is the dispatch-triage assignment.
 WAIT_EVENTS = ("created", "promoted", "reclaimed", "unblocked", "assigned")
-# Hermes' events that put a card back in ready for its worker.
-READY_EVENTS = (*WAIT_EVENTS, "review_reopened", "changes_requested")
 LINEAR_ISSUE_FIELD = "data.id"
 LINEAR_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Deliver values that name no platform, so no home channel is needed.
@@ -1274,6 +1272,10 @@ GUARDED_FIX = Manual(
 )
 
 
+def board_databases(root: Path) -> list:
+    return sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")])
+
+
 def check_guarded_cards(root: Path, now: float) -> list:
     """A card that Hermes' dispatcher holds in `ready` with `active_pr`, so no worker ever starts it.
 
@@ -1284,7 +1286,7 @@ def check_guarded_cards(root: Path, now: float) -> list:
         "JOIN tasks t ON t.id = e.task_id WHERE t.status = 'ready' ORDER BY e.task_id, e.created_at, e.id"
     )
     drifts = []
-    for path in sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")]):
+    for path in board_databases(root):
         if not path.is_file():
             continue
         try:
@@ -1383,7 +1385,7 @@ def check_kanban_boards(root: Path) -> list:
     Hermes' tables are internal. A renamed column makes the blocker check fail open, so cards start out of order,
     and stops the sweep that releases a waiting card, with nothing else to say so."""
     drifts = []
-    for path in sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")]):
+    for path in board_databases(root):
         if not path.is_file():
             continue
         try:
