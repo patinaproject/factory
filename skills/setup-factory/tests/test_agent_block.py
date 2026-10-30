@@ -35,6 +35,7 @@ VALUES = {
     "ssh_hostname": "ssh.acme.example",
     "ssh_allowlist": "the SSH allowlist in `infra` of the\n  `acme/product` repository",
     "ssh_users": "a@acme.example,b@acme.example",
+    "default_team": "ACME",
     "factory_checkout": "~/acme/factory",
     "worker_checkouts": "`~/acme/product` and `~/acme/factory`",
 }

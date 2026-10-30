@@ -13,6 +13,7 @@
   "ssh_hostname": "<ssh-hostname>",
   "ssh_allowlist": "<where the SSH allowlist lives>",
   "ssh_users": "<emails>",
+  "default_team": "<Linear team key>",
   "factory_checkout": "<factory checkout>",
   "worker_checkouts": "<worker checkout paths>"
 }
