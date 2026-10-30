@@ -218,7 +218,7 @@ def re_request(repo: str, task: dict, pull: dict, logins: tuple[str, ...]) -> No
     run(
         sys.executable, str(cli), "activity", "--agent-session-id", session.group(1), "--type", "elicitation",
         "--body", (
-            f"Re-requested review from {at_logins}: their changes-requested review is on an older head than the "
+            f"Changes are in, re-requested review from {at_logins}: their changes-requested review is on an older head than the "
             f"current head {pull['headRefOid']}. Review the pull request on GitHub, then merge it or request changes."
         ),
         "--external-url", f"Pull request={pull['url']}",

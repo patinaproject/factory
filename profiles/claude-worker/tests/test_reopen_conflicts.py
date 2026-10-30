@@ -301,7 +301,7 @@ class ReopenConflictsTest(unittest.TestCase):
         self.assertEqual(self.cli_calls(), [[
             "activity", "--agent-session-id", SESSION, "--type", "elicitation",
             "--body", (
-                f"Re-requested review from @rev: their changes-requested review is on an older head than the current head {HEAD}. "
+                f"Changes are in, re-requested review from @rev: their changes-requested review is on an older head than the current head {HEAD}. "
                 "Review the pull request on GitHub, then merge it or request changes."
             ),
             "--external-url", f"Pull request=https://github.com/{REPO}/pull/7",
@@ -319,7 +319,7 @@ class ReopenConflictsTest(unittest.TestCase):
         self.assertEqual(proc.stdout, f"t_1 https://github.com/{REPO}/pull/7 re-requested a,b\n")
         self.assertEqual(self.gh_calls()[-1], ["api", "-X", "POST", f"repos/{REPO}/pulls/7/requested_reviewers", "-f", "reviewers[]=a", "-f", "reviewers[]=b"])
         self.assertEqual(self.cli_calls()[0][6], (
-            f"Re-requested review from @a, @b: their changes-requested review is on an older head than the current head {HEAD}. "
+            f"Changes are in, re-requested review from @a, @b: their changes-requested review is on an older head than the current head {HEAD}. "
             "Review the pull request on GitHub, then merge it or request changes."
         ))
 
