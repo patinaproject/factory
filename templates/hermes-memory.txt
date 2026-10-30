@@ -2,7 +2,7 @@ Factory credentials: in the gateway's environment, not the tool shell. Empty LIN
 §
 GitHub: gh acts as <<github_login>> via GH_CONFIG_DIR=<<gh_config_dir>>, an App token renewed by cron every 30 minutes. Check: `gh api /installation/repositories --jq .total_count`; `gh api user` 403 is normal. Use HTTPS, never SSH (no key). Publish with push-signed, never git push.
 §
-Linear: the linear-agent-session tools use credentials only the gateway holds. Check them on a real issue; never curl api.linear.app or test a token in the shell. Before filing, read the target repo's docs/agents/issue-tracker.md (else docs/issue-tracker.md) in its checkout (`path` in its repositories entry) and follow it. Create Linear issues with linear_issue_create. No fitting repo or adapter: Linear default team. Unreadable repo: ask.
+Linear: the linear-agent-session tools use credentials only the gateway holds. Check the tools on a real issue; never curl api.linear.app or test a token in the shell. Before filing, read the repo's docs/agents/issue-tracker.md (else docs/issue-tracker.md) from its checkout (its repositories `path`) or gh api, and follow it. Create Linear issues with linear_issue_create. No fitting repo or adapter: Linear default team. Unreadable repo: ask.
 §
 Slack: a message from Slack proves Slack works. Its tokens stay in the gateway.
 §
