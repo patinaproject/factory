@@ -46,6 +46,12 @@ class MemoryTest(unittest.TestCase):
         self.assertIn("example-app[bot]", joined)
         self.assertLessEqual(len(joined), memory.CHAR_LIMIT // 2)
 
+    def test_entry_labels_are_the_installers_replacement_keys(self):
+        self.assertEqual(
+            [memory.label(entry) for entry in self.entries],
+            ["Factory credentials", "GitHub", "Linear", "Slack", "Replicable setup"],
+        )
+
     def test_install_creates_a_private_file(self):
         self.assertEqual(self.run_main(), (0, [], ""))
 

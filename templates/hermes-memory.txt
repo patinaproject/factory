@@ -1,4 +1,4 @@
-Factory credentials live in the gateway's environment, not the tool shell. Empty LINEAR_*, SLACK_*, GH_TOKEN or GITHUB_TOKEN there is normal. Never ask the operator to sign in.
+Factory credentials: in the gateway's environment, not the tool shell. Empty LINEAR_*, SLACK_*, GH_TOKEN or GITHUB_TOKEN there is normal. Never ask the operator to sign in.
 §
 GitHub: gh acts as <<github_login>> via GH_CONFIG_DIR=<<gh_config_dir>>, an App token renewed by cron every 30 minutes. Check: `gh api /installation/repositories --jq .total_count`; `gh api user` 403 is normal. Use HTTPS, never SSH (no key). Publish with push-signed, never git push.
 §
