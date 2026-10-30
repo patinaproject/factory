@@ -1045,6 +1045,79 @@ class EditTest(unittest.TestCase):
         self.assertNotIn("required", tools.GITHUB_EDIT_SCHEMA["parameters"])
 
 
+def team_for_create(key="ABC"):
+    team = {"id": f"team-{key}", "key": key, "labels": {"nodes": TEAM_LABELS}}
+    return 200, {"data": {"teams": {"nodes": [team]}, "issueLabels": {"nodes": WORKSPACE_LABELS}}}
+
+
+CREATE_OK = (200, {"data": {"issueCreate": {"success": True, "issue": {"identifier": "ABC-7", "url": "https://linear.app/x/issue/ABC-7"}}}})
+
+
+class CreateTest(unittest.TestCase):
+    def create(self, responses, default_team="ABC", **args):
+        fake = FakeLinear(responses)
+        output = json.loads(tools.run_create(lambda: make_client(fake), lambda: default_team, args))
+        return fake, output
+
+    def test_creates_in_the_default_team_without_a_status(self):
+        fake, output = self.create([team_for_create(), CREATE_OK], title="A title", description="Some text.")
+        self.assertEqual(output, {"identifier": "ABC-7", "url": "https://linear.app/x/issue/ABC-7"})
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"key": "ABC"})
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"],
+            {"input": {"teamId": "team-ABC", "title": "A title", "description": "Some text."}},
+        )
+
+    def test_a_team_argument_wins_over_the_default(self):
+        fake, _ = self.create([team_for_create("XYZ"), CREATE_OK], title="A title", team="XYZ")
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"key": "XYZ"})
+        self.assertEqual(fake.graphql_requests[1]["variables"]["input"]["teamId"], "team-XYZ")
+
+    def test_labels_resolve_by_any_spelling_in_the_team_and_the_workspace(self):
+        fake, _ = self.create([team_for_create(), CREATE_OK], title="A title", labels=["ready-for-agent", "BUG"])
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"]["input"],
+            {"teamId": "team-ABC", "title": "A title", "description": "",
+             "labelIds": ["label-Ready for agent", "label-bug"]},
+        )
+
+    def test_no_team_anywhere_is_an_error_with_no_request(self):
+        fake, output = self.create([], default_team="", title="A title")
+        self.assertEqual(output, {"error": "pass team, a Linear team key, or set the default_team setting"})
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_a_blank_or_missing_title_is_an_error_with_no_request(self):
+        for args in ({"title": "  "}, {}):
+            with self.subTest(args=args):
+                fake, output = self.create([], **args)
+                self.assertIn("error", output)
+                self.assertEqual(fake.graphql_requests, [])
+
+    def test_an_unknown_label_or_a_label_group_sends_no_issue_create(self):
+        fake, output = self.create([team_for_create()], title="A title", labels=["urgent"])
+        self.assertEqual(
+            output, {"error": "no label named 'urgent'; the issue's team has: Factory, Needs info, Ready for agent, bug"}
+        )
+        self.assertEqual(len(fake.graphql_requests), 1)
+        fake, output = self.create([team_for_create()], title="A title", labels=["triage"])
+        self.assertEqual(output, {"error": "Triage is a label group; name one of its labels"})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_an_unknown_team_key_is_an_error(self):
+        fake, output = self.create(
+            [(200, {"data": {"teams": {"nodes": []}, "issueLabels": {"nodes": []}}})], title="A title"
+        )
+        self.assertEqual(output, {"error": "Linear has no team with the key 'ABC' that the agent app can read"})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_an_assignee_or_delegate_argument_is_refused_before_linear_is_asked(self):
+        for key in ("assignee", "delegate_id"):
+            with self.subTest(key=key):
+                fake, output = self.create([], title="A title", **{key: "user-1"})
+                self.assertEqual(output, {"error": f"this tool never changes assignee or delegate; drop {key}"})
+                self.assertEqual(fake.graphql_requests, [])
+
+
 class SearchTest(unittest.TestCase):
     def search(self, responses, args):
         fake = FakeLinear(responses)

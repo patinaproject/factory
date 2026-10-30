@@ -12,7 +12,7 @@ description: >-
   parked in triage, posts a triage card's round of questions for the
   blocker-order hook through linear_triage_round, a tool no model sees, and gives agents the linear_agent_activity,
   linear_agent_activity_read, linear_issue, linear_agent_session_create, linear_delegated_issues,
-  linear_issue_undelegate, linear_issue_to_todo, linear_issue_edit, linear_issue_relate, linear_issue_search, and github_issue_edit tools, acting as the
+  linear_issue_undelegate, linear_issue_to_todo, linear_issue_edit, linear_issue_relate, linear_issue_create, linear_issue_search, and github_issue_edit tools, acting as the
   Linear agent app.
 provides_hooks: [pre_gateway_dispatch, pre_tool_call, kanban_task_blocked, transform_api_error_classification]
 provides_tools:
@@ -25,6 +25,7 @@ provides_tools:
   - linear_issue_to_todo
   - linear_issue_edit
   - linear_issue_relate
+  - linear_issue_create
   - linear_issue_search
   - github_issue_edit
   - linear_triage_round
@@ -33,6 +34,10 @@ config_schema:
     type: str
     default: ""
     description: Linear user ID of the agent app in this workspace.
+  default_team:
+    type: str
+    default: ""
+    description: Linear team key, such as ABC, that linear_issue_create files in when the call names no team.
   webhook_route:
     type: str
     default: linear

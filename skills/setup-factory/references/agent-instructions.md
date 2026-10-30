@@ -19,6 +19,7 @@ own instructions above or below it.
 | Credentials on the machine that Hermes agents must never receive | `<NAME>` of each operator-only token, such as `OP_SERVICE_ACCOUNT_TOKEN` |
 | The operator's SST app that owns the ingress, and what deploys it | A repository path, and "merging to the default branch" |
 | The SSH hostname and the account people SSH into, when SSH is used | `<ssh-hostname>`, `<account>` |
+| The Linear team key where issues go when no repository fits | `ABC` |
 | The path of this repository's checkout on the machine | `~/factory` |
 
 The private configuration record holds the factory's real values: hostnames,

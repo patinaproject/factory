@@ -68,6 +68,18 @@ private record, never to the repository.
 - The command gets the app's token from the gateway's broker and never prints
   it. Never read the token, and never call the plugin's client inline.
 - Posting into an agent session is not available to operator sessions.
+- Before you file an issue, name the target repository and read its
+  issue-tracker adapter, `docs/agents/issue-tracker.md`, else
+  `docs/issue-tracker.md`. Read it from the local checkout when one exists,
+  else with
+  `gh api -H 'Accept: application/vnd.github.raw' repos/<owner>/<repo>/contents/<path>`.
+  Follow the adapter's selection and its create operation.
+- To create a Linear issue, use the Linear MCP server. A session with no
+  Linear create tool stops and tells the operator. It never files on GitHub
+  instead.
+- When the repository cannot be read (404 or no access), ask the operator.
+  When it can be read but has no adapter, or no repository fits the request,
+  file in Linear on the `ACME` team.
 
 ### Remote access and ingress
 

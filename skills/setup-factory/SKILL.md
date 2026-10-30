@@ -61,7 +61,7 @@ below first, and ask only when it prints nothing:
 | --- | --- |
 | Hermes install checkout and its tag | `git -C <home>/hermes-agent describe --tags` |
 | Hermes release tag to pin | `tag_name` in `curl -s https://api.github.com/repos/NousResearch/hermes-agent/releases/latest`. Confirm the tag with the operator |
-| Existing factory settings: repositories, `app_user_id`, `kanban_url`, `claude_session`, and the `github` object | `hermes config get plugins.entries.linear-agent-session.settings --json` |
+| Existing factory settings: repositories, `app_user_id`, `default_team`, `kanban_url`, `claude_session`, and the `github` object | `hermes config get plugins.entries.linear-agent-session.settings --json` |
 | `<app-slug>` | `github.login` in the settings, without `[bot]` |
 | GitHub App ID | `gh api /apps/<app-slug> --jq .id`. Any `gh` login can read it |
 | GitHub App's permissions | `gh api /apps/<app-slug> --jq .permissions` |
@@ -840,6 +840,7 @@ key file but does not contain the key.
     "installation_id": "<installation ID from part 9>",
     "private_key_path": "/abs/path/to/github-app.pem"
   },
+  "default_team": "<Linear team key>",
   "kanban_url": "https://<hostname>/kanban",
   "factory_repository": {"full_name": "<owner>/<factory>", "default_branch": "<branch>"},
   "triage": {"max_running": <n>},
@@ -908,7 +909,9 @@ cap, so the factory applies this one itself: triage creates each triage card
 with no assignee, and the `dispatch-triage` cron job from part 12 assigns
 waiting cards only while fewer than `max_running` run or wait assigned.
 
-`kanban_url` is the dashboard's
+`default_team` is the Linear team key, such as `ABC`, where
+`linear_issue_create` files an issue when the call names no team. Its value
+belongs in the private record. `kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
 empty to post no link. Set `github.login` to the App's
 `[bot]` login. It is required: `render.py` rejects a value that does not end
