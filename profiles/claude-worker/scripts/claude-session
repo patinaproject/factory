@@ -60,7 +60,9 @@ import reply_inbox
 
 DEFAULT_WORKER_ENTRY = (
     "Work Linear issue {issue_identifier} ({issue_url}) in {repo} on branch {branch}. "
-    "First start the issue through this repository's own issue-start workflow, which moves it to In Progress. "
+    "First start the issue through `working-on-issues`, this repository's own issue-start workflow, which moves "
+    "it to In Progress, and read the issue's `{issue_identifier} Agent brief` Document, its full contract, before "
+    "you change code. "
     "Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
 TAKEOVER_INTRO = "The issue already has an open pull request, {url}, on a branch the factory did not create."
@@ -107,9 +109,9 @@ HANDOFF = (
 )
 TRIAGE_HANDOFF = (
     "This card continues an earlier triage. Its previous Claude session sat idle past the prompt cache and had "
-    "grown large, so this session starts fresh. Read the issue, its comments, and its `Triage notes` Document "
-    "before you act. The previous session's transcript is {transcript}; read it only for a decision you cannot "
-    "find on the issue. {result}"
+    "grown large, so this session starts fresh. Read the issue, its comments, and its `{identifier} Triage notes` "
+    "Document before you act. The previous session's transcript is {transcript}; read it only for a decision you "
+    "cannot find on the issue. {result}"
 )
 PUBLISH_RULE = (
     "Publish commits only by running {push_signed} from the worktree, never `git push`. It creates "
@@ -177,10 +179,10 @@ TRIAGE_RULE = (
     "behavior.\n\n"
     "Follow patina-mode's triage playbook at `{triage_playbook}`. It belongs to the factory, so read it there "
     "and not in this repository's skills. Keep the issue's "
-    "triage state in its `Triage notes` and `Agent brief` Documents, written through the tracker adapter's "
-    "issue-artifact operation, and start every Document with an AI-generated disclaimer. Title them exactly "
-    "`Triage notes` and `Agent brief`, with no issue identifier before the title, even where the adapter "
-    "titles other Documents with one. For a public repository synced to Linear, the Documents stay on the Linear issue and "
+    "triage state in its `{identifier} Triage notes` and `{identifier} Agent brief` Documents, written through "
+    "the tracker adapter's issue-artifact operation, and start every Document with an AI-generated disclaimer. "
+    "Title them exactly `{identifier} Triage notes` and `{identifier} Agent brief`, with the issue identifier "
+    "before the title. For a public repository synced to Linear, the Documents stay on the Linear issue and "
     "the roles are written as GitHub labels, because GitHub is canonical.\n\n"
     "Apply only category and state roles, plus the priority that the playbook's step 13 sets from the repository "
     "adapter's `## Priority rubric`. For a public repository, set the priority on the synced Linear issue, never as a "
@@ -726,7 +728,7 @@ def triage_playbook() -> Path:
 
 
 def title_triage_documents(client, issue_id: str) -> dict:
-    """Rename only the run's own prefixed Documents, and only when no Document has the exact title.
+    """Rename only the run's own bare-titled Documents, and only when no Document has the prefixed title.
 
     The result goes in the run's report and never changes its status: a failure here must not lose the
     triage outcome that the worker relays.
@@ -739,12 +741,12 @@ def title_triage_documents(client, issue_id: str) -> dict:
         renamed, missing = [], []
         for title in TRIAGE_DOCUMENTS:
             prefixed = f"{issue['identifier']} {title}"
-            own = [d for d in issue["documents"] if d["own"] and d["title"] == prefixed]
-            if title not in titles and own:
-                client.rename_document(own[0]["id"], title)
-                renamed.append(prefixed)
-            elif title not in titles and prefixed not in titles:
-                missing.append(title)
+            own = [d for d in issue["documents"] if d["own"] and d["title"] == title]
+            if prefixed not in titles and own:
+                client.rename_document(own[0]["id"], prefixed)
+                renamed.append(title)
+            elif prefixed not in titles:
+                missing.append(prefixed)
     except (*linear.CLIENT_ERRORS, OSError) as error:
         return {"error": f"checking the triage Documents failed: {error}"}
     return {"renamed": renamed, "missing": missing}
@@ -938,7 +940,7 @@ def max_turns_args(transport: dict) -> list[str]:
     return [] if turns is None else ["--max-turns", str(turns)]
 
 
-def handoff_text(plan: SessionPlan, branch: str, head: str, triage: bool = False) -> str | None:
+def handoff_text(plan: SessionPlan, branch: str, head: str, identifier: str, triage: bool = False) -> str | None:
     if plan.previous is None or plan.resumed:
         return None
     last = plan.last_result
@@ -947,7 +949,7 @@ def handoff_text(plan: SessionPlan, branch: str, head: str, triage: bool = False
         if last else "The previous session left no final message."
     )
     if triage:
-        return TRIAGE_HANDOFF.format(transcript=plan.previous, result=result)
+        return TRIAGE_HANDOFF.format(identifier=identifier, transcript=plan.previous, result=result)
     return HANDOFF.format(branch=branch, head=head, transcript=plan.previous, result=result)
 
 
@@ -1188,6 +1190,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         mcp = mcp_config(servers)
         if triage:
             system_prompt = TRIAGE_SYSTEM_PROMPT.format(
+                identifier=args.issue_identifier,
                 triage_playbook=triage_playbook(),
                 mentions=triage_mentions(client, args.issue_id, args.issue_identifier),
             )
@@ -1213,7 +1216,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         login = (settings.get("github") or {}).get("login")
         adopted = None if triage else adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
-        handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"), triage)
+        handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"), args.issue_identifier, triage)
         # A successful run marks this snapshot as seen, so a comment that lands mid-run goes to the next run.
         card = read_card(args.card_json, args.task_id)
         comments = card["comments"]

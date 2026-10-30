@@ -90,8 +90,9 @@ TOKEN_PREFIXES = (
 )
 DEFAULT_ENTRY = (
     "Work Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) in example-org/example-repo "
-    "on branch abc-123-fix. First start the issue through this repository's own issue-start workflow, "
-    "which moves it to In Progress. Open a ready (non-draft) pull request and drive it until it is ready to merge."
+    "on branch abc-123-fix. First start the issue through `working-on-issues`, this repository's own "
+    "issue-start workflow, which moves it to In Progress, and read the issue's `ABC-123 Agent brief` Document, "
+    "its full contract, before you change code. Open a ready (non-draft) pull request and drive it until it is ready to merge."
 )
 TRIAGE_ENTRY = (
     "Triage Linear issue ABC-123 (https://linear.app/example/issue/ABC-123) for example-org/example-repo. "
@@ -388,7 +389,8 @@ class ClaudeSessionTest(GitFixture):
         for triage_contract in ("`Needs input:`", "`Triage outcome: <role>`", "Reach Linear only with the token",
                                 f"patina-mode's triage playbook at `{playbook}`", "`## Priority rubric`",
                                 "`Priority: <value>, set by triage`", "`Priority: none`",
-                                "Never change the issue's status, assignee, or delegate"):
+                                "Never change the issue's status, assignee, or delegate",
+                                "Title them exactly `ABC-123 Triage notes` and `ABC-123 Agent brief`"):
             self.assertIn(triage_contract, system)
         self.assertTrue(playbook.is_absolute() and playbook.is_file())
         for retired_skill in ("`triage` skill", "`grilling`"):
@@ -530,37 +532,45 @@ class ClaudeSessionTest(GitFixture):
         state = json.loads((self.hermes_home / "linear-fake.json").read_text())
         return {document["id"]: document["title"] for document in state["documents"]}
 
-    def test_a_triage_run_gives_its_prefixed_documents_their_exact_titles(self) -> None:
+    def test_a_triage_run_with_prefixed_documents_renames_nothing(self) -> None:
         self.set_documents(("d1", "ABC-123 Triage notes", "app-user"), ("d2", "ABC-123 Agent brief", "app-user"))
 
         status, report = self.run_session(env=TRIAGE_ENV)
 
-        self.assertEqual((status, report["triage_documents"]), (0, {
-            "renamed": ["ABC-123 Triage notes", "ABC-123 Agent brief"], "missing": [],
-        }))
-        self.assertEqual(self.document_titles(), {"d1": "Triage notes", "d2": "Agent brief"})
+        self.assertEqual((status, report["triage_documents"]), (0, {"renamed": [], "missing": []}))
+        self.assertEqual(self.document_titles(), {"d1": "ABC-123 Triage notes", "d2": "ABC-123 Agent brief"})
 
-    def test_a_triage_run_leaves_a_persons_document_and_one_beside_an_exact_title(self) -> None:
+    def test_a_triage_run_gives_its_bare_documents_the_issue_identifier(self) -> None:
+        self.set_documents(("d1", "Triage notes", "app-user"), ("d2", "ABC-123 Agent brief", "app-user"))
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["triage_documents"]), (0, {"renamed": ["Triage notes"], "missing": []}))
+        self.assertEqual(self.document_titles(), {"d1": "ABC-123 Triage notes", "d2": "ABC-123 Agent brief"})
+
+    def test_a_triage_run_leaves_a_persons_document_and_one_beside_a_prefixed_title(self) -> None:
         self.set_documents(
-            ("d1", "ABC-123 Triage notes", "person"),
+            ("d1", "Triage notes", "person"),
             ("d2", "Agent brief", "app-user"),
             ("d3", "ABC-123 Agent brief", "app-user"),
         )
 
         status, report = self.run_session(env=TRIAGE_ENV)
 
-        self.assertEqual((status, report["triage_documents"]), (0, {"renamed": [], "missing": []}))
+        self.assertEqual((status, report["triage_documents"]), (0, {
+            "renamed": [], "missing": ["ABC-123 Triage notes"],
+        }))
         self.assertEqual(self.document_titles(), {
-            "d1": "ABC-123 Triage notes", "d2": "Agent brief", "d3": "ABC-123 Agent brief",
+            "d1": "Triage notes", "d2": "Agent brief", "d3": "ABC-123 Agent brief",
         })
 
     def test_a_triage_run_reports_missing_documents(self) -> None:
-        self.set_documents()
+        self.set_documents(("d1", "ABC-123 Triage notes", "app-user"))
 
         status, report = self.run_session(env=TRIAGE_ENV)
 
         self.assertEqual((status, report["triage_documents"]), (0, {
-            "renamed": [], "missing": ["Triage notes", "Agent brief"],
+            "renamed": [], "missing": ["ABC-123 Agent brief"],
         }))
 
     def test_a_triage_run_reports_a_failed_document_check_without_failing(self) -> None:
@@ -1012,6 +1022,23 @@ class ClaudeSessionTest(GitFixture):
             "GitHub or in the code. The previous session ended with this message:\n\n"
             "Opened PR 7 and waited on review.\n\n"
             "Reviewer asked for a test."
+        ))
+
+    def test_a_fresh_triage_session_hands_off_to_the_issues_triage_notes(self) -> None:
+        transcript = self.write_transcript(
+            session_id=TRIAGE_SESSION_ID, idle=HOUR, context=(10, 90_000, 10_000), said="Asked who owns the API.",
+        )
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["reason"]), (0, "fresh-large-idle"))
+        self.assertEqual(self.claude_call()["argv"][1], (
+            f"{TRIAGE_ENTRY}\n\n"
+            "This card continues an earlier triage. Its previous Claude session sat idle past the prompt cache and "
+            "had grown large, so this session starts fresh. Read the issue, its comments, and its "
+            "`ABC-123 Triage notes` Document before you act. "
+            f"The previous session's transcript is {transcript}; read it only for a decision you cannot find on "
+            "the issue. The previous session ended with this message:\n\nAsked who owns the API."
         ))
 
     def test_context_at_the_threshold_starts_fresh(self) -> None:
