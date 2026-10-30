@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, check, or write the factory block in a Claude Code CLAUDE.md.
+"""Render, check, or write the factory block in a Claude Code CLAUDE.md, and its allow rules in settings.json.
 
 Setup part 17 owns the text between the `<!-- factory:begin -->` and
 `<!-- factory:end -->` markers. The block is rendered only from
@@ -12,6 +12,12 @@ format character (Unicode category Cf) is removed is a marker line, and one that
 is not exactly the marker is refused with its stray characters named.
 CRLF and CR-only line endings read as line breaks. `--write` replaces the block in place, keeps every other
 line, saves the file with LF endings, and backs up CLAUDE.md first. `--print` writes the render to stdout.
+
+The same values render `ALLOW_RULES`, the Claude Code permission rules that let a session run the
+factory's read-only commands without a prompt. `--check` reports PASS or FAIL for `<config>/settings.json`
+and names each rule it lacks. `--write` adds the missing rules to `permissions.allow`, keeps every other
+key and entry, creates the file when it is absent, backs it up first, and saves it with 2-space indent.
+A `settings.json` that is not a JSON object is refused.
 
 Template syntax: `{{name}}` takes a value, and `{{#name}}...{{/name}}` keeps
 its text only when the value of `name` is set. A value may span lines; its
@@ -35,6 +41,7 @@ END = "<!-- factory:end -->"
 TEMPLATE = Path(__file__).resolve().parents[1] / "references" / "agent-instructions.block.tmpl"
 SECTION = re.compile(r"\{\{#(\w+)\}\}(.*?)\{\{/\1\}\}", re.S)
 PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
+ALLOW_RULES = ("Bash(python3 {{gateway_home}}/plugins/linear-agent-session/cli.py session *)",)
 BLOCK = re.compile(rf"^{re.escape(BEGIN)}$.*?^{re.escape(END)}$\n?", re.M | re.S)
 
 
@@ -141,6 +148,60 @@ def write(config: Path, template: str, values: dict) -> str:
     return f"wrote the factory block{backup}"
 
 
+def allow_rules(values: dict) -> list[str]:
+    def fill(match: re.Match) -> str:
+        value = values.get(match.group(1))
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"value {match.group(1)} must be a non-empty string")
+        return value
+
+    return [PLACEHOLDER.sub(fill, rule) for rule in ALLOW_RULES]
+
+
+def read_settings(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        settings = json.loads(path.read_bytes().decode("utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{path} is not valid JSON: {error}") from None
+    if not isinstance(settings, dict):
+        raise ValueError(f"{path} is not a JSON object; fix it by hand")
+    permissions = settings.get("permissions", {})
+    if not isinstance(permissions, dict) or not isinstance(permissions.get("allow", []), list):
+        raise ValueError(f"{path}: permissions.allow is not a list; fix it by hand")
+    return settings
+
+
+def check_settings(config: Path, values: dict) -> list[tuple[bool, str]]:
+    path = config / "settings.json"
+    if not path.is_file():
+        return [(False, f"{path} is missing; write the allow rules with --write")]
+    allow = read_settings(path).get("permissions", {}).get("allow", [])
+    missing = [rule for rule in allow_rules(values) if rule not in allow]
+    if missing:
+        return [(False, f"{path}: permissions.allow lacks {rule}") for rule in missing]
+    return [(True, f"{path}: permissions.allow holds the factory's allow rules")]
+
+
+def write_settings(config: Path, values: dict) -> str:
+    path = config / "settings.json"
+    settings = read_settings(path)
+    allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+    missing = [rule for rule in allow_rules(values) if rule not in allow]
+    if not missing and path.exists():
+        return "unchanged"
+    allow += missing
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup = ""
+    if path.exists():
+        backup_path = path.with_name(f"settings.json.bak-{time.strftime('%Y%m%d%H%M%S')}")
+        shutil.copy2(path, backup_path)
+        backup = f"; backup at {backup_path}"
+    path.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return f"wrote the allow rules{backup}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--values", required=True, type=Path, help="JSON file of this factory's values")
@@ -159,7 +220,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.write:
             print(f"{config / 'CLAUDE.md'}: {write(config, template, values)}")
-        results = check(config, template, values)
+            print(f"{config / 'settings.json'}: {write_settings(config, values)}")
+        results = check(config, template, values) + check_settings(config, values)
     except (ValueError, OSError) as error:
         print(f"FAIL {error}")
         return 1

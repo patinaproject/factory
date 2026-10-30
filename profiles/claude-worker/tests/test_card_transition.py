@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,9 @@ if argv[0] == "--board":
 state["boards"].append(board)
 state["calls"].append(argv)
 verb, task = argv[0], state["task"]
+if verb == "boards":
+    print(json.dumps([{"slug": "default", "db_path": "/nowhere"}, {"slug": "triage", "db_path": state["db_path"]}]))
+    sys.exit()
 def save():
     json.dump(state, open(path, "w"))
 failures = state["fail"].get(verb, 0)
@@ -34,9 +38,15 @@ if failures:
     state["fail"][verb] = failures - 1
     save()
     sys.exit(f"hermes: cannot {verb} {task['id']}")
+if state.get("released_before") == verb:
+    task["status"] = "ready"
 status = task["status"]
+def comments():
+    at = state["comment_at"]
+    return [{"author": "default", "body": body, "created_at": at[n] if n < len(at) else 1000 + n}
+            for n, body in enumerate(state["comments"])]
 if verb == "show":
-    print(json.dumps({"task": task, "events": state["events"], "comments": []}))
+    print(json.dumps({"task": task, "events": state["events"], "comments": comments()}))
 elif verb == "assign":
     task["assignee"] = None if argv[2] == "none" else argv[2]
 elif verb == "specify":
@@ -53,6 +63,9 @@ elif verb == "complete":
         sys.exit(f"cannot complete {task['id']} (unknown id or terminal state)")
     task["status"] = "done"
 elif verb == "block":
+    if status == "scheduled":
+        save()
+        sys.exit(f"cannot block {task['id']}")
     if status == "blocked":
         if "--kind" not in argv or task["block_kind"]:
             save()
@@ -60,7 +73,17 @@ elif verb == "block":
         task["block_kind"] = argv[argv.index("--kind") + 1]
     else:
         task["status"] = "blocked"
+elif verb == "schedule":
+    if status not in ("todo", "ready", "running", "blocked"):
+        save()
+        sys.exit(f"cannot schedule {task['id']}")
+    state["comments"].append("SCHEDULED: " + argv[2])
+    state["events"].append({"kind": "scheduled", "payload": {"reason": argv[2]}, "created_at": 2000, "run_id": None})
+    task["status"] = "scheduled"
 elif verb == "unblock":
+    if status not in ("blocked", "scheduled"):
+        save()
+        sys.exit(f"cannot unblock {task['id']} (not blocked/scheduled?)")
     task["status"] = "ready"
 elif verb == "request-review":
     task["status"] = "review"
@@ -145,13 +168,15 @@ class CardTransitionTest(unittest.TestCase):
         self.state = {
             "task": {"id": "t_1", "status": "triage", "title": TITLE, "body": BODY, "assignee": "claude-worker",
                      "block_kind": None, "workspace_kind": "scratch", "workspace_path": None},
-            "events": [], "comments": [], "calls": [], "boards": [], "gh_calls": [], "fail": {}, "gh_fail": 0,
+            "events": [], "comments": [], "comment_at": [], "calls": [], "boards": [], "gh_calls": [], "fail": {},
+            "gh_fail": 0, "db_path": str(self.dir / "triage.db"),
             "specify_to": "todo", "refuse_completion": False, "receipt": FAILED_RECEIPT,
             "pr": {"url": URL, "head": HEAD, "rollup": FAILED_NEWEST}, "branch_has_pr": True,
         }
         self.home = self.dir / "hermes"
         (self.home / "plugins").mkdir(parents=True)
         (self.home / "plugins" / "linear-agent-session").symlink_to(REPO / "plugins" / "linear-agent-session")
+        (self.home / "plugins" / "blocker-order").symlink_to(REPO / "plugins" / "blocker-order")
         self.start_broker(proxy_token=[granted("proxy-value", None)])
 
     def start_broker(self, **answers: list) -> FakeBroker:
@@ -165,13 +190,13 @@ class CardTransitionTest(unittest.TestCase):
         self.state["task"]["status"] = status
         self.state.update(changes)
 
-    def transition(self, *argv: str) -> tuple[int, dict]:
+    def transition(self, *argv: str, reply: str = "") -> tuple[int, dict]:
         self.state_path.write_text(json.dumps(self.state))
         env = {**os.environ, "HERMES_BIN": str(self.dir / "bin" / "hermes"), "FAKE_STATE": str(self.state_path),
                "HERMES_HOME": str(self.home),
                "PATH": f"{self.dir / 'bin'}:{os.environ['PATH']}"}
         proc = subprocess.run([sys.executable, str(SCRIPTS / "card_transition.py"), *argv],
-                              capture_output=True, text=True, env=env)
+                              capture_output=True, text=True, env=env, input=reply)
         self.state = json.loads(self.state_path.read_text())
         self.assertEqual(proc.stderr, "")
         return proc.returncode, json.loads(proc.stdout)
@@ -246,24 +271,169 @@ class ResumeTest(CardTransitionTest):
         self.assertEqual(set(self.state["boards"]), {"triage"})
 
 
+def park(seen: int | None, created_at: int = 500) -> dict:
+    reason = "Needs input: which screen?" + (f"\n\ncomments_seen: {seen}" if seen is not None else "")
+    return {"kind": "scheduled", "payload": {"reason": reason}, "created_at": created_at, "run_id": 1}
+
+
+REPLY = "It is the settings screen, see https://github.com/example-org/app/pull/12."
+REPLY_COMMENT = f"Linear reply: It is the settings screen, see {REF}."
+
+
 class TriageReplyTest(CardTransitionTest):
+    def reply(self, text: str = REPLY) -> tuple[int, dict]:
+        return self.transition("--board", "triage", "triage-reply", "t_1", reply=text)
+
+    def test_the_reply_on_standard_input_becomes_one_prefixed_comment_in_every_status(self):
+        for status in ("scheduled", "blocked", "triage", "running", "ready", "review"):
+            with self.subTest(status):
+                self.given(status, comments=["Asked a question."], events=[park(1)])
+                self.reply()
+                self.assertEqual(self.state["comments"], ["Asked a question.", REPLY_COMMENT])
+                self.assertEqual(self.state["calls"][1], ["comment", "t_1", REPLY_COMMENT])
+
     def test_a_parked_triage_card_resumes_without_the_assignment(self):
-        code, out = self.transition("--board", "triage", "triage-reply", "t_1")
+        code, out = self.reply()
         self.assertEqual((code, out), (0, {"action": "resumed", "post": None, "assigned": False}))
         self.assertEqual(self.calls()[-1], ["edit", "t_1", "--title", TITLE, "--body", BODY])
         self.assertIsNone(self.state["task"]["assignee"])
 
     def test_a_blocked_triage_card_is_unassigned_then_unblocked(self):
         self.given("blocked")
-        code, out = self.transition("--board", "triage", "triage-reply", "t_1")
+        code, out = self.reply()
         self.assertEqual((code, out), (0, {"action": "unblocked", "post": None, "pull_request": False}))
-        self.assertEqual(self.state_changes(), [["assign", "t_1", "none"], ["unblock", "t_1"]])
+        self.assertEqual(self.state_changes(), [
+            ["comment", "t_1", REPLY_COMMENT], ["assign", "t_1", "none"], ["unblock", "t_1"],
+        ])
         self.assertEqual(self.state["gh_calls"], [])
 
-    def test_any_other_status_is_left_alone(self):
-        self.given("running")
-        code, out = self.transition("--board", "triage", "triage-reply", "t_1")
-        self.assertEqual((code, out), (0, {"action": "none", "post": None, "status": "running"}))
+    def test_a_scheduled_card_is_unassigned_before_it_is_unblocked_and_left_for_dispatch_triage(self):
+        self.given("scheduled", comments=["Asked a question."], events=[park(1)])
+        code, out = self.reply()
+        self.assertEqual((code, out), (0, {"action": "unblocked", "post": None, "pull_request": False}))
+        self.assertEqual(self.state_changes(), [
+            ["comment", "t_1", REPLY_COMMENT], ["assign", "t_1", "none"], ["unblock", "t_1"],
+        ])
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("ready", None))
+
+        code, out = self.reply()
+        self.assertEqual((code, out), (0, {"action": "none", "post": None, "status": "ready"}))
+        self.assertEqual(len(self.state_changes()), 3)
+
+    def test_the_same_reply_again_writes_nothing_and_releases_nothing(self):
+        self.given("scheduled", comments=["Asked a question.", REPLY_COMMENT, "Asked again."], events=[park(3)])
+        code, out = self.reply(f"  {REPLY}\n")
+        self.assertEqual((code, out), (0, {"action": "none", "post": None, "status": "scheduled"}))
+        self.assertEqual(self.state_changes(), [])
+
+    def test_a_rerun_after_a_crash_between_the_steps_finishes_the_move(self):
+        self.given("scheduled", events=[park(0)])
+        self.state["fail"]["unblock"] = 1
+        self.assertEqual(self.reply()[0], 1)
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("scheduled", None))
+
+        code, out = self.reply()
+        self.assertEqual((code, out["action"]), (0, "unblocked"))
+        self.assertEqual(self.state["comments"], [REPLY_COMMENT])
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("ready", None))
+
+    def test_a_card_the_sweep_already_released_is_not_an_error(self):
+        self.given("scheduled", events=[park(0)], released_before="unblock")
+        code, out = self.reply()
+        self.assertEqual((code, out), (0, {"action": "unblocked", "post": None, "pull_request": False}))
+        self.assertEqual(self.state["task"]["status"], "ready")
+
+    def test_an_empty_reply_changes_nothing(self):
+        self.given("scheduled", events=[park(0)])
+        code, out = self.reply("  \n")
+        self.assertEqual((code, out), (1, {"error": "triage-reply needs the reply's text on standard input"}))
+        self.assertEqual(self.calls(), [])
+
+
+class ReleaseRuleTest(CardTransitionTest):
+    def reply(self, comments: list[str], events: list[dict], comment_at: list[int] | None = None) -> dict:
+        self.given("scheduled", comments=comments, events=events, comment_at=comment_at or [])
+        return self.transition("--board", "triage", "triage-reply", "t_1", reply="Again.")[1]
+
+    def released(self, comments: list[str], events: list[dict], comment_at: list[int] | None = None) -> bool:
+        """The rule as the replayed reply sees it: the newest comment is already this reply, so nothing is written."""
+        out = self.reply([*comments, "Linear reply: Again."], events, comment_at)
+        self.assertNotIn(["comment", "t_1", "Linear reply: Again."], self.calls())
+        return out["action"] == "unblocked"
+
+    def test_a_reply_past_the_count_releases_the_card(self):
+        self.assertTrue(self.released(["Asked."], [park(1)]))
+
+    def test_a_reply_that_landed_mid_round_releases_the_card_though_it_is_older_than_the_park(self):
+        self.assertTrue(self.released(["Asked."], [park(1, created_at=5000)]))
+
+    def test_a_reply_within_the_count_does_not(self):
+        self.assertFalse(self.released(["Asked."], [park(2)]))
+
+    def test_a_comment_that_is_not_a_reply_past_the_count_does_not(self):
+        out = self.reply(["Linear reply: Again.", "SCHEDULED: Needs input: which screen?", "stopped"], [park(1)])
+        self.assertEqual(out["action"], "none")
+
+    def test_the_newest_park_sets_the_count(self):
+        self.assertFalse(self.released(["Asked."], [park(1), park(2)]))
+
+    def test_a_park_without_a_marker_is_released_only_by_a_reply_written_after_it(self):
+        self.assertFalse(self.released([], [park(None, created_at=500)], comment_at=[400]))
+        self.assertTrue(self.released([], [park(None, created_at=500)], comment_at=[600]))
+
+    def test_a_card_with_no_park_event_is_released_by_any_reply(self):
+        self.assertTrue(self.released([], []))
+
+
+class ParkWaitingTest(CardTransitionTest):
+    def board(self, block_kind: str) -> None:
+        path = self.state["db_path"]
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT, status TEXT, block_kind TEXT)")
+            db.execute("DELETE FROM tasks")
+            db.execute("INSERT INTO tasks VALUES ('t_1', ?, ?)", (self.state["task"]["status"], block_kind))
+        db.close()
+
+    def park_waiting(self) -> tuple[int, dict]:
+        return self.transition("--board", "triage", "park-waiting")
+
+    def test_a_card_blocked_for_input_is_scheduled_with_a_count_that_leaves_out_the_schedule_comment(self):
+        self.given("blocked", comments=["Asked.", "Linear reply: answered an earlier round."])
+        self.board("needs_input")
+
+        self.assertEqual(self.park_waiting(), (0, {"parked": ["t_1"]}))
+
+        reason = "Needs input: waits for a reply, parked from blocked by park-waiting\n\ncomments_seen: 2"
+        self.assertEqual(self.state_changes(), [["schedule", "t_1", reason]])
+        self.assertEqual(self.state["task"]["status"], "scheduled")
+        self.assertEqual(self.state["comments"][2], f"SCHEDULED: {reason}")
+
+    def test_a_card_parked_in_triage_for_input_leaves_triage_then_is_scheduled(self):
+        self.given("triage", specify_to="ready")
+        self.board("needs_input")
+
+        self.assertEqual(self.park_waiting(), (0, {"parked": ["t_1"]}))
+
+        self.assertEqual([call[0] for call in self.state_changes()], ["assign", "specify", "edit", "schedule"])
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("scheduled", None))
+        self.assertEqual(self.state["task"]["title"], TITLE)
+
+    def test_a_capability_block_and_a_real_loop_are_left_alone(self):
+        for status, kind in (("blocked", "capability"), ("triage", "transient")):
+            with self.subTest(status):
+                self.given(status, calls=[])
+                self.board(kind)
+
+                self.assertEqual(self.park_waiting(), (0, {"parked": []}))
+                self.assertEqual(self.state_changes(), [])
+
+    def test_a_second_run_changes_nothing(self):
+        self.given("blocked")
+        self.board("needs_input")
+        self.park_waiting()
+        self.state["calls"] = []
+
+        self.assertEqual(self.park_waiting(), (0, {"parked": []}))
         self.assertEqual(self.state_changes(), [])
 
 
@@ -314,6 +484,17 @@ class ReopenAndStopTest(CardTransitionTest):
                 code, out = self.transition("stop", "t_1")
                 self.assertEqual((code, out), (0, {"action": "stopped", "post": None, "status": "blocked"}))
                 self.assertEqual(self.state_changes(), [["block", "t_1", "stopped"]])
+
+    def test_stop_leaves_a_scheduled_card_waiting_unassigned_and_a_later_reply_releases_it(self):
+        self.given("scheduled", comments=["Asked."], events=[park(1)])
+        code, out = self.transition("--board", "triage", "stop", "t_1")
+        self.assertEqual((code, out), (0, {"action": "stopped", "post": None, "status": "scheduled"}))
+        self.assertEqual(self.state_changes(), [["assign", "t_1", "none"], ["comment", "t_1", "stopped"]])
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("scheduled", None))
+
+        code, out = self.transition("--board", "triage", "triage-reply", "t_1", reply="Carry on.")
+        self.assertEqual((code, out["action"]), (0, "unblocked"))
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("ready", None))
 
     def test_stop_leaves_a_blocked_card_as_it_is(self):
         self.given("blocked")

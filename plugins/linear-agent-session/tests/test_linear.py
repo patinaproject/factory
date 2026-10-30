@@ -199,6 +199,63 @@ class ActivityTest(unittest.TestCase):
             make_client(fake).create_activity("session-1", {"type": "thought", "body": "x"})
 
 
+class SessionThreadTest(unittest.TestCase):
+    @staticmethod
+    def node(activity_id, created, content, user=None, ephemeral=False):
+        return {"id": activity_id, "createdAt": created, "ephemeral": ephemeral, "user": user, "content": content}
+
+    def read(self, nodes):
+        data = {"data": {"agentSession": {"activities": {"nodes": nodes}}}}
+        fake = FakeLinear([(200, data)])
+        return fake, make_client(fake).session_thread("session-1")
+
+    def test_the_thread_is_oldest_first_with_each_activitys_type_author_time_and_body(self):
+        newest_first = [
+            self.node("a3", "2026-10-28T10:03:00.000Z", {"__typename": "AgentActivityPromptContent", "body": "All of them"}, {"name": "Ted"}),
+            self.node("a2", "2026-10-28T10:02:00.000Z", {"__typename": "AgentActivityElicitationContent", "body": "Which one: 1, 2?"}),
+            self.node("a1", "2026-10-28T10:01:00.000Z", {"__typename": "AgentActivityThoughtContent", "body": "Reading"}),
+        ]
+        fake, thread = self.read(newest_first)
+        self.assertEqual(
+            thread,
+            [
+                {"id": "a1", "type": "thought", "author": None, "created_at": "2026-10-28T10:01:00.000Z", "body": "Reading"},
+                {"id": "a2", "type": "elicitation", "author": None, "created_at": "2026-10-28T10:02:00.000Z", "body": "Which one: 1, 2?"},
+                {"id": "a3", "type": "prompt", "author": "Ted", "created_at": "2026-10-28T10:03:00.000Z", "body": "All of them"},
+            ],
+        )
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1"})
+        self.assertIn("activities(first: 30, orderBy: createdAt)", fake.graphql_requests[0]["query"])
+
+    def test_ephemeral_activities_are_skipped(self):
+        body = {"__typename": "AgentActivityThoughtContent", "body": "Working"}
+        _, thread = self.read([self.node("a1", "2026-10-28T10:01:00.000Z", body, ephemeral=True)])
+        self.assertEqual(thread, [])
+
+    def test_an_action_reads_as_its_action_parameter_and_result(self):
+        action = {"__typename": "AgentActivityActionContent", "action": "Searching", "parameter": "checkout", "result": "3 issues"}
+        bare = {"__typename": "AgentActivityActionContent", "action": "Reading", "parameter": "PAT-1", "result": None}
+        _, thread = self.read(
+            [self.node("a2", "2026-10-28T10:02:00.000Z", bare), self.node("a1", "2026-10-28T10:01:00.000Z", action)]
+        )
+        self.assertEqual([(t["type"], t["body"]) for t in thread], [("action", "Searching checkout -> 3 issues"), ("action", "Reading PAT-1")])
+
+    def test_a_long_body_is_cut_and_marked(self):
+        body = {"__typename": "AgentActivityResponseContent", "body": "x" * 2001}
+        _, thread = self.read([self.node("a1", "2026-10-28T10:01:00.000Z", body)])
+        self.assertEqual(thread[0]["body"], "x" * 2000 + "... [truncated]")
+
+    def test_a_body_at_the_limit_is_kept_whole(self):
+        body = {"__typename": "AgentActivityErrorContent", "body": "y" * 2000}
+        _, thread = self.read([self.node("a1", "2026-10-28T10:01:00.000Z", body)])
+        self.assertEqual((thread[0]["type"], thread[0]["body"]), ("error", "y" * 2000))
+
+    def test_a_session_the_app_cannot_read_is_an_error(self):
+        fake = FakeLinear([(200, {"data": {"agentSession": None}})])
+        with self.assertRaises(linear.LinearError):
+            make_client(fake).session_thread("session-1")
+
+
 class TokenTest(unittest.TestCase):
     def test_token_request_uses_client_credentials(self):
         fake = FakeLinear([activity_ok()])
@@ -667,6 +724,7 @@ class IssueTest(unittest.TestCase):
                 "id": "2f9a6f0e-0000-4000-8000-000000000001",
                 "identifier": "ABC-123",
                 "title": "Fix checkout",
+                "cardTitle": "ABC-123: Fix checkout",
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "gitBranchName": "abc-123-fix-checkout",
                 "priority": 2,
@@ -1063,7 +1121,7 @@ class DelegatedIssuesTest(unittest.TestCase):
                 "attachments": [{"url": pr, "sourceType": "github"}],
             },
         )
-        open_filter = {"delegate": {"isMe": {"eq": True}}, "state": {"type": {"nin": ["completed", "canceled"]}}}
+        open_filter = {"delegate": {"isMe": {"eq": True}}, "state": {"type": {"nin": ["completed", "canceled", "duplicate"]}}}
         self.assertEqual(
             [r["variables"] for r in fake.graphql_requests],
             [{"filter": open_filter, "after": None}, {"filter": open_filter, "after": "cursor-1"}],
@@ -1184,6 +1242,17 @@ class UndelegateTest(unittest.TestCase):
     def test_unsuccessful_update_is_an_error(self):
         _, output = self.run_undelegate([issue_delegate("app-user-1"), (200, {"data": {"issueUpdate": {"success": False}}})])
         self.assertEqual(output, {"error": "issueUpdate reported success: false"})
+
+
+class CardTitleTest(unittest.TestCase):
+    def test_unsafe_characters_are_removed_and_spaces_collapsed(self):
+        self.assertEqual(
+            linear.card_title("PAT-1", 'Fix "quoted" [bracket] title: it’s $(rm) — ok?'),
+            "PAT-1: Fix quoted bracket title its rm ok",
+        )
+
+    def test_dots_hyphens_and_digits_stay(self):
+        self.assertEqual(linear.card_title("PAT-2", "  v1.2 - re-run  "), "PAT-2: v1.2 - re-run")
 
 
 if __name__ == "__main__":

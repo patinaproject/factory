@@ -170,6 +170,8 @@ REMEDY_CLASSES = (
     ("kanban capacity", "", "manual"),
     ("stranded triage card", "", "advisory"),
     ("stranded triage card check", "", "advisory"),
+    ("waiting triage card", "", "manual"),
+    ("waiting triage card check", "", "advisory"),
     ("triage playbook", "", "manual"),
     ("source checkout", "", "install"),
     ("checkout", "does not exist", "manual"),
@@ -1325,12 +1327,13 @@ class CheckInstallTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as board:
             board.execute(f"CREATE TABLE tasks ({columns})")
-            board.execute("CREATE TABLE task_events (task_id, kind, created_at)")
+            board.execute("CREATE TABLE task_events (id, task_id, kind, payload, created_at)")
+            board.execute("CREATE TABLE task_comments (id, task_id, author, body, created_at)")
         board.close()
         return path
 
     def test_board_databases_that_hold_the_columns_the_blocker_check_reads_are_silent(self) -> None:
-        columns = "id, title, body, branch_name, status, assignee, claim_lock, created_at"
+        columns = "id, title, body, branch_name, status, block_kind, assignee, claim_lock, created_at"
         self.kanban_database(self.root / "kanban.db", columns)
         self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", columns)
 
@@ -1339,7 +1342,7 @@ class CheckInstallTest(unittest.TestCase):
     def test_a_triage_board_with_a_stranded_card_is_reported_by_the_full_check(self) -> None:
         board = self.kanban_database(
             self.root / "kanban" / "boards" / "triage" / "kanban.db",
-            "id, title, body, branch_name, status, assignee, claim_lock, created_at",
+            "id, title, body, branch_name, status, block_kind, assignee, claim_lock, created_at",
         )
         with sqlite3.connect(board) as db:
             db.execute(
@@ -1357,9 +1360,23 @@ class CheckInstallTest(unittest.TestCase):
         triage = self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", "id, title, body, state")
 
         self.assertEqual(self.check(), (1, (
-            f"kanban board database {triage}: has no tasks.branch_name, tasks.status, so a card cannot wait for "
-            "its blockers (part 15, check 29)\n"
+            f"kanban board database {triage}: has no tasks.branch_name, tasks.status, tasks.block_kind, so a card "
+            "cannot wait for its blockers or a reply (part 15, check 29)\n"
             f"stranded triage card check {triage}: cannot be read: no such column: t.created_at (part 10)\n"
+            f"waiting triage card check {triage}: cannot be read: no such column: status (part 15, check 27)\n"
+        )))
+
+    def test_a_board_database_missing_a_comment_or_event_column_the_release_reads(self) -> None:
+        board = self.root / "kanban.db"
+        with sqlite3.connect(board) as db:
+            db.execute("CREATE TABLE tasks (id, title, body, branch_name, status, block_kind)")
+            db.execute("CREATE TABLE task_events (id, task_id, kind, data, created_at)")
+            db.execute("CREATE TABLE task_comments (id, task_id, author, text, created_at)")
+        db.close()
+
+        self.assertEqual(self.check(), (1, (
+            f"kanban board database {board}: has no task_comments.body, task_events.payload, so a card cannot wait "
+            "for its blockers or a reply (part 15, check 29)\n"
         )))
 
     def test_a_board_database_that_cannot_be_read(self) -> None:
@@ -2276,9 +2293,10 @@ def install_fake_hermes(root: Path) -> Path:
     tools = tree / "tools"
     tools.mkdir(parents=True)
     for name, source in (("__init__", ""), ("registry", FAKE_REGISTRY), ("process_registry", ""),
-                         ("terminal_tool", FAKE_TERMINAL_TOOL)):
+                         ("terminal_tool", FAKE_TERMINAL_TOOL), ("kanban_tools", "")):
         (tools / f"{name}.py").write_text(source)
-    (tools / "registered.json").write_text(json.dumps({"terminal": "terminal", "process_manage": "terminal"}))
+    (tools / "registered.json").write_text(json.dumps(
+        {"terminal": "terminal", "process_manage": "terminal", "kanban_schedule": "kanban"}))
     python = root / "tools" / "python-9" / "bin"
     python.mkdir(parents=True)
     (python / "python3").symlink_to(sys.executable)
@@ -2291,13 +2309,83 @@ def install_fake_hermes(root: Path) -> Path:
     return tree
 
 
+class CheckWaitingTriageTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "hermes"
+        self.path = self.root / "kanban" / "boards" / "triage" / "kanban.db"
+        self.path.parent.mkdir(parents=True)
+        self.db = sqlite3.connect(self.path)
+        self.addCleanup(self.db.close)
+        self.db.execute("CREATE TABLE tasks (id, status, block_kind)")
+        self.db.execute("CREATE TABLE task_comments (id INTEGER PRIMARY KEY, task_id, author, body, created_at)")
+        self.db.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id, kind, payload, created_at)")
+        self.plugin = PLUGIN
+
+    def card(self, id: str, status: str, block_kind: str | None = None, comments=(), parks=()) -> None:
+        self.db.execute("INSERT INTO tasks VALUES (?, ?, ?)", (id, status, block_kind))
+        for body, at in comments:
+            self.db.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, 'claude-worker', ?, ?)",
+                            (id, body, at))
+        for at in parks:
+            self.db.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'scheduled', ?, ?)",
+                            (id, json.dumps({"reason": "Needs input: which?\n\ncomments_seen: 0"}), at))
+        self.db.commit()
+
+    def check(self) -> list:
+        return classified(self, check_install.check_waiting_triage(self.root, self.plugin))
+
+    def test_each_card_that_waits_for_input_the_old_way_is_reported(self) -> None:
+        self.card("t_blocked", "blocked", "needs_input")
+        self.card("t_parked", "triage", "needs_input")
+
+        self.assertEqual(self.check(), [
+            "waiting triage card t_blocked: is blocked with block kind needs_input, but a triage round waits for a "
+            "reply in scheduled (part 15, check 27)",
+            "waiting triage card t_parked: is triage with block kind needs_input, but a triage round waits for a "
+            "reply in scheduled (part 15, check 27)",
+        ])
+
+    def test_a_waiting_card_a_real_loop_and_another_block_are_silent(self) -> None:
+        self.card("t_waits", "scheduled", "needs_input", comments=[("Linear reply: earlier", 50)], parks=[100])
+        self.card("t_loop", "triage", "transient")
+        self.card("t_stuck", "blocked", "capability")
+
+        self.assertEqual(self.check(), [])
+
+    def test_a_round_not_posted_after_the_newest_park_is_reported(self) -> None:
+        self.card("t_failed", "scheduled", comments=[("Triage round not posted: failed: RuntimeError", 100)], parks=[100])
+        self.card("t_unknown", "scheduled", comments=[("Triage round not posted: unknown", 300)], parks=[100, 300])
+        self.card("t_reposted", "scheduled", comments=[("Triage round not posted: unknown", 100)], parks=[100, 400])
+
+        self.assertEqual(self.check(), [
+            "waiting triage card t_failed: waits in scheduled, but its round may never have reached Linear: "
+            "Triage round not posted: failed: RuntimeError (part 15, check 27)",
+            "waiting triage card t_unknown: waits in scheduled, but its round may never have reached Linear: "
+            "Triage round not posted: unknown (part 15, check 27)",
+        ])
+
+    def test_an_unreadable_board_gives_a_row(self) -> None:
+        self.db.execute("DROP TABLE task_comments")
+
+        [row] = self.check()
+        self.assertEqual(row, f"waiting triage card check {self.path}: cannot be read: no such table: task_comments (part 15, check 27)")
+
+    def test_without_a_triage_board_nothing_runs(self) -> None:
+        self.db.close()
+        self.path.unlink()
+
+        self.assertEqual(self.check(), [])
+
+
 class CheckHermesToolsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         self.root = self.tmp / "root"
         self.tree = install_fake_hermes(self.root)
-        self.register({"terminal": "terminal", "process_manage": "terminal", "read_file": "file"})
+        self.register({"terminal": "terminal", "process_manage": "terminal", "kanban_schedule": "kanban", "read_file": "file"})
         self.plugin = self.tmp / "worker" / "plugins" / "blocker-order" / "__init__.py"
         shutil.copytree(PLUGIN.parent, self.plugin.parent, ignore=shutil.ignore_patterns("tests", "__pycache__"))
 
@@ -2311,24 +2399,33 @@ class CheckHermesToolsTest(unittest.TestCase):
         self.assertEqual(self.check(), [])
 
     def test_the_legacy_process_name_alone_still_counts(self) -> None:
-        self.register({"terminal": "terminal", "process": "terminal"})
+        self.register({"terminal": "terminal", "process": "terminal", "kanban_schedule": "kanban"})
 
         self.assertEqual(self.check(), [])
 
     def test_a_renamed_process_tool_names_the_missing_tool(self) -> None:
-        self.register({"terminal": "terminal", "process_run": "terminal", "read_file": "file"})
+        self.register({"terminal": "terminal", "process_run": "terminal", "kanban_schedule": "kanban", "read_file": "file"})
 
         self.assertEqual(self.check(), [
             "hermes tool blocker-order: Hermes registers none of process_manage, process, which the plugin watches; "
-            "its terminal toolset registers process_run, terminal (PROCESS_TOOLS in plugins/blocker-order/__init__.py)",
+            "its terminal and kanban toolsets register kanban_schedule, process_run, terminal (PROCESS_TOOLS in plugins/blocker-order/__init__.py)",
         ])
 
     def test_a_missing_terminal_tool_is_named(self) -> None:
-        self.register({"process_manage": "terminal"})
+        self.register({"process_manage": "terminal", "kanban_schedule": "kanban"})
 
         self.assertEqual(self.check(), [
-            "hermes tool blocker-order: Hermes registers no terminal, which the plugin watches; "
-            "its terminal toolset registers process_manage (REQUIRED_TOOLS in plugins/blocker-order/__init__.py)",
+            "hermes tool blocker-order: Hermes registers no terminal, which the plugin needs; "
+            "its terminal and kanban toolsets register kanban_schedule, process_manage (REQUIRED_TOOLS in plugins/blocker-order/__init__.py)",
+        ])
+
+    def test_a_missing_kanban_schedule_tool_is_named(self) -> None:
+        self.register({"terminal": "terminal", "process_manage": "terminal", "kanban_block": "kanban"})
+
+        self.assertEqual(self.check(), [
+            "hermes tool blocker-order: Hermes registers no kanban_schedule, which the plugin needs; "
+            "its terminal and kanban toolsets register kanban_block, process_manage, terminal "
+            "(REQUIRED_TOOLS in plugins/blocker-order/__init__.py)",
         ])
 
     def test_the_probe_runs_in_a_scratch_home_and_writes_no_bytecode(self) -> None:

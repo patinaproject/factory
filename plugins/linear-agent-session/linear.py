@@ -62,6 +62,65 @@ SESSION_ACTIVITIES_QUERY = f"""query AgentSessionActivities($id: String!) {{
   agentSession(id: $id) {{ activities(first: 50, orderBy: createdAt) {{ nodes {{ {ACTIVITY_FIELDS} }} }} }}
 }}"""
 
+SESSION_READ_QUERY = """query AgentSessionRead($id: String!, $after: String) {
+  agentSession(id: $id) {
+    id status issue { identifier }
+    activities(first: 50, after: $after, orderBy: createdAt) {
+      nodes {
+        createdAt signal
+        content {
+          __typename
+          ... on AgentActivityThoughtContent { body }
+          ... on AgentActivityResponseContent { body }
+          ... on AgentActivityPromptContent { body }
+          ... on AgentActivityElicitationContent { body }
+          ... on AgentActivityErrorContent { body }
+          ... on AgentActivityActionContent { action parameter result }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
+
+SESSION_REFERENCE = re.compile(
+    r"^(?:https://linear\.app/[^/\s]+/agent-session/)?"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{13})/?(?:[?#]\S*)?$",
+    re.I,
+)
+
+# Linear returns the newest activities first with `first` and `orderBy: createdAt`, so the limit keeps the newest.
+THREAD_LIMIT = 30
+THREAD_BODY_LIMIT = 2000
+THREAD_TRUNCATED = "... [truncated]"
+THREAD_TYPES = {
+    "AgentActivityPromptContent": "prompt",
+    "AgentActivityResponseContent": "response",
+    "AgentActivityElicitationContent": "elicitation",
+    "AgentActivityThoughtContent": "thought",
+    "AgentActivityActionContent": "action",
+    "AgentActivityErrorContent": "error",
+}
+
+SESSION_HISTORY_QUERY = f"""query AgentSessionHistory($id: String!) {{
+  agentSession(id: $id) {{
+    activities(first: {THREAD_LIMIT}, orderBy: createdAt) {{
+      nodes {{
+        id createdAt ephemeral user {{ name }}
+        content {{
+          __typename
+          ... on AgentActivityPromptContent {{ body }}
+          ... on AgentActivityResponseContent {{ body }}
+          ... on AgentActivityElicitationContent {{ body }}
+          ... on AgentActivityThoughtContent {{ body }}
+          ... on AgentActivityErrorContent {{ body }}
+          ... on AgentActivityActionContent {{ action parameter result }}
+        }}
+      }}
+    }}
+  }}
+}}"""
+
 COMMENT_CREATE_MUTATION = """mutation CommentCreate($input: CommentCreateInput!) {
   commentCreate(input: $input) { success }
 }"""
@@ -194,7 +253,7 @@ ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdat
   issueUpdate(id: $id, input: $input) { success }
 }"""
 
-CLOSED_STATE_TYPES = ("completed", "canceled")
+CLOSED_STATE_TYPES = ("completed", "canceled", "duplicate")
 READY_STATE_NAME = "Todo"
 
 # The triage roles are the factory's own vocabulary; a workspace names each label as it likes.
@@ -229,6 +288,11 @@ def activity_content(
             raise LinearError(f"a {type} activity needs body")
         return {"type": type, "body": body}
     raise LinearError(f"unknown activity type {type!r}; expected one of {', '.join(ACTIVITY_TYPES)}")
+
+
+def card_title(identifier: str, title: str) -> str:
+    kept = re.sub(r"[^A-Za-z0-9 .-]", "", title)
+    return f"{identifier}: {' '.join(kept.split())}"
 
 
 class LinearClient:
@@ -325,6 +389,51 @@ class LinearClient:
                 }
         return {"found": False}
 
+    def read_session(self, session_reference: str) -> dict:
+        """A session by URL, UUID, or slugId, with every activity oldest first."""
+        match = SESSION_REFERENCE.match(session_reference.strip())
+        if not match:
+            raise LinearError(f"{session_reference!r} is not an agent session URL, UUID, or slugId")
+        session_id = match.group(1)
+        activities, after = [], None
+        while True:
+            try:
+                session = self._graphql(SESSION_READ_QUERY, {"id": session_id, "after": after})["agentSession"]
+            except LinearError as error:
+                raise LinearError(f"agent session {session_id}: {error}") from None
+            if session is None:
+                raise LinearError(f"agent session {session_id}: Entity not found: AgentSession")
+            page = session["activities"]
+            activities += page["nodes"]
+            if not page["pageInfo"]["hasNextPage"]:
+                break
+            after = page["pageInfo"]["endCursor"]
+        issue = session["issue"]
+        return {
+            "id": session["id"],
+            "issue": issue["identifier"] if issue else None,
+            "status": session["status"],
+            "activities": [_session_activity(node) for node in sorted(activities, key=lambda n: n["createdAt"])],
+        }
+
+    def session_thread(self, agent_session_id: str) -> list:
+        session = self._graphql(SESSION_HISTORY_QUERY, {"id": agent_session_id})["agentSession"]
+        if session is None:
+            raise LinearError(f"Linear has no agent session {agent_session_id} that the agent app can read")
+        nodes = sorted(
+            (n for n in session["activities"]["nodes"] if not n["ephemeral"]), key=lambda n: n["createdAt"]
+        )
+        return [
+            {
+                "id": n["id"],
+                "type": THREAD_TYPES[n["content"]["__typename"]],
+                "author": n["user"]["name"] if n["user"] else None,
+                "created_at": n["createdAt"],
+                "body": _bounded(_activity_text(n["content"])),
+            }
+            for n in nodes
+        ]
+
     def create_session_on_issue(self, id_or_identifier: str) -> str:
         payload = self._graphql(SESSION_CREATE_MUTATION, {"input": {"issueId": id_or_identifier}})[
             "agentSessionCreateOnIssue"
@@ -339,6 +448,7 @@ class LinearClient:
         priority_name, card_priority = PRIORITIES[priority]
         return {
             **_issue_summary(issue),
+            "cardTitle": card_title(issue["identifier"], issue["title"]),
             "priority": priority,
             "priorityName": priority_name,
             "cardPriority": card_priority,
@@ -757,9 +867,28 @@ class _Unauthorized(Exception):
     pass
 
 
+def _session_activity(node: dict) -> dict:
+    content = node["content"]
+    kind = content["__typename"].removeprefix("AgentActivity").removesuffix("Content").lower()
+    fields = ("action", "parameter", "result") if kind == "action" else ("body",)
+    signal = {"signal": node["signal"]} if node["signal"] else {}
+    return {"createdAt": node["createdAt"], "type": kind, **signal, **{f: content[f] for f in fields}}
+
+
 def _session_summary(title: str) -> str:
     """Linear accepts a session summary of 1 to 255 characters with no line breaks."""
     return " ".join(title.split())[:255].strip()
+
+
+def _activity_text(content: dict) -> str:
+    if "action" not in content:
+        return content["body"]
+    text = f"{content['action']} {content['parameter']}".strip()
+    return f"{text} -> {content['result']}" if content.get("result") else text
+
+
+def _bounded(text: str) -> str:
+    return text if len(text) <= THREAD_BODY_LIMIT else text[:THREAD_BODY_LIMIT] + THREAD_TRUNCATED
 
 
 def _issue_summary(issue: dict) -> dict:

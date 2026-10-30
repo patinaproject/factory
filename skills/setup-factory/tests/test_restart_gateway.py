@@ -116,10 +116,12 @@ def restart(
     paused: bool = False,
     timeout: float = 100,
     gateway_pid=lambda: GATEWAY_PID,
+    wait_only: bool = False,
 ) -> tuple[int, str, Clock]:
     clock, out = Clock(), io.StringIO()
     code = restart_gateway.restart(
-        hermes, lambda: paused, gateway_pid, processes, timeout=timeout, poll=30, clock=clock, sleep=clock.sleep, out=out
+        hermes, lambda: paused, gateway_pid, processes, timeout=timeout, poll=30, clock=clock, sleep=clock.sleep, out=out,
+        wait_only=wait_only,
     )
     return code, out.getvalue(), clock
 
@@ -202,6 +204,33 @@ class RestartGatewayTest(unittest.TestCase):
 
         self.assertEqual(restart(hermes, Tables(table()), paused=True)[0], 0)
         self.assertEqual(hermes.actions(), ["restart"])
+
+    def test_wait_only_waits_for_a_running_card_that_is_not_at_risk(self) -> None:
+        hermes = FakeHermes({"default": [[CARD], [], []]})
+
+        code, out, _ = restart(hermes, Tables(table(LATE)), wait_only=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(hermes.actions(), [])
+        self.assertIn("waiting for 1 running Kanban card(s)", out)
+        self.assertTrue(out.endswith("restart-gateway: no Kanban card is running\n"), out)
+
+    def test_wait_only_keeps_waiting_when_a_card_appears_at_the_recheck(self) -> None:
+        hermes = FakeHermes({"default": [[], [CARD], [CARD], [], []]})
+
+        code, _, _ = restart(hermes, Tables(table(LATE)), wait_only=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(hermes.actions(), [])
+
+    def test_wait_only_fails_with_the_card_list_when_the_wait_expires(self) -> None:
+        hermes = FakeHermes({"default": [[CARD]]})
+
+        code, out, _ = restart(hermes, Tables(table(LATE)), timeout=60, wait_only=True)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(hermes.actions(), [])
+        self.assertIn("1 running Kanban card(s) still running after 60s", out)
 
     def test_skips_archived_boards(self) -> None:
         hermes = FakeHermes({"default": [[]]}, archived=("old",))

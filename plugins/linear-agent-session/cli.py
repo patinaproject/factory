@@ -45,6 +45,9 @@ def main(argv: Optional[list] = None) -> int:
     issue = commands.add_parser("issue", help="read a Linear issue")
     issue.add_argument("issue")
 
+    session_read = commands.add_parser("session", help="read a Linear agent session and every activity in it")
+    session_read.add_argument("session", help="the session's URL, UUID, or slugId")
+
     session = commands.add_parser("session-create", help="open a new agent session on an issue")
     session.add_argument("issue")
     session.add_argument("--purpose", required=True, choices=["triage", "work"])
@@ -101,6 +104,8 @@ def main(argv: Optional[list] = None) -> int:
             "external_urls": [_external_url(value) for value in args.external_url],
         }
         output = plugin.tools.run_activity(plugin.linear.client_from_env, tool_args)
+    elif args.command == "session":
+        output = plugin.tools.run_session_read(plugin.linear.client_from_env, {"session": args.session})
     elif args.command == "session-create":
         output = plugin.tools.run_session_create(
             plugin.linear.client_from_env, {"issue": args.issue, "purpose": args.purpose}

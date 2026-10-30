@@ -11,7 +11,7 @@ while IFS= read -r dir; do
   component="$(dirname "$dir")"
   echo "== ${component#"$root"/}"
   "$python" -m unittest discover -s "$dir" -t "$component" || status=1
-done < <(find "$root/plugins" "$root/profiles" "$root/skills" "$root/templates" -type d -name tests -not -path '*/node_modules/*' 2>/dev/null | sort)
+done < <(find "$root/plugins" "$root/profiles" "$root/skills" "$root/templates" "$root/scripts" -type d -name tests -not -path '*/node_modules/*' 2>/dev/null | sort)
 
 if [ "$found" -eq 0 ]; then
   echo "No component tests found." >&2

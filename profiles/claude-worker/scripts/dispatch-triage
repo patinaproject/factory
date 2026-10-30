@@ -5,20 +5,26 @@ Hermes caps workers per host (`kanban.max_in_progress`) and per board
 (`kanban.max_spawn`), and this script adds the triage cap below `max_spawn`, so
 the default board cannot take triage's slots. Triage creates
 each triage card without an assignee, and the dispatcher skips it. Every minute
-a Hermes cron job runs this script. It counts the board's cards that are
-`running`, or `ready` with an assignee, and assigns `claude-worker` to waiting
-`ready` cards, highest priority and then oldest first, until that count reaches
-`triage.max_running` in the factory settings. It prints one `assigned <task id>`
-line per card. Exits 1 when a `hermes` call fails, or 2 when the settings or
-HERMES_HOME are wrong.
+a Hermes cron job runs this script. First it releases each `scheduled` card that
+`card_transition.py`'s release rule says has a reply its last round did not see,
+reading the board through `kanban_board` in one snapshot, and prints one
+`released <task id>` line per card. A released card is `ready` and unassigned.
+Then it counts the board's cards that are `running`, or `ready` with an
+assignee, and assigns `claude-worker` to waiting `ready` cards, highest priority
+and then oldest first, until that count reaches `triage.max_running` in the
+factory settings. A `scheduled` card uses no slot. It prints one
+`assigned <task id>` line per card. Exits 1 when a `hermes` call or a release
+fails, or 2 when the settings or HERMES_HOME are wrong.
 """
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 
+import card_transition
 import factory_settings
 
 TRIAGE_BOARD = "triage"
@@ -54,6 +60,20 @@ def to_assign(tasks: list, cap: int) -> list[str]:
     return [t["id"] for t in waiting[: max(cap - busy, 0)]]
 
 
+def release_waiting() -> bool:
+    """Release the waiting cards a reply answered; False when the board or a release failed."""
+    try:
+        swept = card_transition.sweep(TRIAGE_BOARD)
+    except (card_transition.Failed, sqlite3.Error) as exc:
+        print(f"dispatch-triage: cannot read the waiting cards: {exc}", file=sys.stderr)
+        return False
+    for task_id in swept["released"]:
+        print(f"released {task_id}")
+    for task_id, error in swept["failed"].items():
+        print(f"dispatch-triage: releasing {task_id} failed: {error}", file=sys.stderr)
+    return not swept["failed"]
+
+
 def main() -> int:
     if not os.environ.get("HERMES_HOME"):
         print("dispatch-triage: HERMES_HOME is not set; point it at the claude-worker profile home", file=sys.stderr)
@@ -61,10 +81,14 @@ def main() -> int:
     try:
         binary = factory_settings.find_hermes()
         cap = max_running(factory_settings.read(raw=False))
+        os.environ["HERMES_BIN"] = binary
+        released = release_waiting()
         tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
         for task_id in to_assign(tasks, cap):
             hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)
             print(f"assigned {task_id}")
+        if not released:
+            return 1
     except Refusal as exc:
         print(f"dispatch-triage: {exc}", file=sys.stderr)
         return exc.code

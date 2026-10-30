@@ -1193,10 +1193,10 @@ Hermes' `in_file` operator. `refresh-owned-refs` rewrites that file
 every minute from `hermes kanban list --json` with the `branch_name` and
 `github_issue_url` of every card not archived, in one atomic step. It also
 writes each card's `linear_issue_id`, a `done` card included. The `linear`
-route keeps a completed or canceled `Issue` update only when its issue id is
+route keeps a completed, canceled, or duplicate `Issue` update only when its issue id is
 listed, so triage never starts for a closed issue that has no card. Without the
 file the route drops every GitHub event except an `issue_comment` on the
-App's pull request, and every completed or canceled `Issue` update. `check-install` reports the file when it
+App's pull request, and every completed, canceled, or duplicate `Issue` update. `check-install` reports the file when it
 is missing or older than 5 minutes. Create the job when `cron list` has no
 `refresh-owned-refs` job:
 
@@ -1721,7 +1721,7 @@ each check. Report each result.
     card unassigned, with a comment that names the pull request, and no
     `assigned` event to `claude-worker` follows it.
 
-22. Block a card with `kanban_block` kind `needs_input`, then block a second
+22. On the `default` board, block a card with `kanban_block` kind `needs_input`, then block a second
     card twice in a row for the same reason so Hermes moves it to `triage`.
     The first card's Linear agent session gets an `elicitation` that says the
     card is blocked, and the second's gets an `elicitation` that says it is
@@ -1730,7 +1730,9 @@ each check. Report each result.
     this from Hermes' `kanban_task_blocked` hook, so both Hermes homes need
     the plugin at the current commit, and the gateway needs a restart after a
     reinstall. A failed post appears only in the log of the process that
-    blocked the card, as `reporting the block of card <id> failed`.
+    blocked the card, as `reporting the block of card <id> failed`. A triage
+    card's question never blocks it, so this hook posts no triage round. Check 27
+    covers that.
 
 23. Move a card to `blocked` with its pull request open, then submit a
     `changes_requested` review on the pull request as a person. In
@@ -1783,13 +1785,18 @@ each check. Report each result.
     implementation card on the same session and moves the issue to Todo when
     it is in Triage. Start a card by hand on an issue without the label:
     `claude-session` refuses it before Claude starts.
-27. Let a triage card block on a question. Its session gets one
+27. Let a triage card ask a question. The card moves to the Scheduled column,
+    never to Blocked or Triage. In `hermes kanban show <task id> --json`, its
+    newest `scheduled` event's reason ends with a `comments_seen: <n>` line,
+    and no `blocked` event follows the run. Its session gets one
     `elicitation` that starts with the AI-generated disclaimer, and one reply
     in the session's thread mentions each person the questions name. Each of
     them gets one Linear notification. A reply from a teammate
     who did not delegate the issue raises `prompted` on the session the
-    factory created, unblocks the card, and `dispatch-triage` assigns it
-    again.
+    factory created, adds one comment that starts `Linear reply:` to the card,
+    leaves the card `ready` and unassigned, and `dispatch-triage` assigns it
+    again. Send the same reply again: no second comment appears and the card
+    does not move. `check-install` reports no `waiting triage card` line.
 28. No more than `triage.max_running` cards on the `triage` board run at
     once, and the triage card's run never pushes a branch or opens a pull
     request.
@@ -1810,6 +1817,18 @@ each check. Report each result.
     decides. For two issues that block each other, the second card's run
     links nothing, its session gets one `thought` naming the cycle, and its
     Claude starts.
+30. Let one triage card ask two rounds of questions on the same issue, and
+    answer each. After each round the card is in Scheduled, never in Blocked
+    or Triage, and the issue keeps that one card. The second round's
+    elicitation and mention reply read like the first's, and its people get a
+    Linear notification.
+31. Reply in a triage card's session while its round still runs, before the
+    card parks. Once it parks, within a minute `dispatch-triage` prints
+    `released <task id>`, and the card runs again without a second reply.
+32. While a triage card waits in Scheduled, restart the gateway through
+    `restart-gateway` as this part describes. The card is still `scheduled`
+    after the restart, with no new event, and a reply then releases it as in
+    check 27.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate
@@ -1876,8 +1895,10 @@ memory file. They say that credentials live in the gateway, that `gh` acts as
 the App through `GH_CONFIG_DIR`, that Linear is reached through the
 `linear-agent-session` tools, and that a Slack message proves Slack works.
 
-**Block check.** The machine-wide block must equal its render. This prints
-`PASS`, or `FAIL` with a diff of the live block against the render:
+**Block check.** The machine-wide block must equal its render, and
+`~/.claude/settings.json` must hold the allow rules rendered from the same
+values. This prints `PASS`, or `FAIL` with a diff of the live block against
+the render or the name of each missing rule:
 
 ```sh
 python3 <repo>/skills/setup-factory/scripts/agent-block --values <values file>
@@ -1950,7 +1971,7 @@ install line and records each manual line, which `report-deploy` reports.
 Follow these steps by hand to fix a manual line, after a `FAILED`, `WAITING`,
 or `BLOCKED` report, or on a machine without `auto-deploy`. Before step 1,
 create `<root>/factory-gateway.lock` with your purpose and the time, so
-`auto-deploy` records `BLOCKED` instead of installing beside you. Step 7
+`auto-deploy` records `BLOCKED` instead of installing beside you. Step 9
 starts `auto-deploy` once, so it records the commit you deployed. This command
 starts it:
 
@@ -1967,18 +1988,33 @@ it at `<home>/bin/factory-secrets`. Hermes runs the new helper the next time a
 Hermes process starts. The new helper also writes
 `<home>/logs/factory-secrets.log`, which needs no gateway restart.
 
-1. Find the source checkout. It is the checkout `<worker>/distribution.yaml`
+1. Pause the board and let running cards finish before anything changes. A
+   run that starts while the scripts and plugins come from two commits
+   refuses as `transient`, and a card that is running keeps the old scripts it
+   loaded. `hermes pause` holds only new cards, so run it and then wait until
+   no board has a running card:
+
+   ```sh
+   hermes pause --reason "factory deploy"
+   python3 <repo>/skills/setup-factory/scripts/restart-gateway --wait-only
+   ```
+
+   Run the second command again until it exits `0`. It pauses, restarts, and
+   resumes nothing. It exits `1` and lists the running cards when its
+   `--timeout` expires. The pause stays until the last step, and a
+   `restart-gateway` run during the deploy leaves it in place.
+2. Find the source checkout. It is the checkout `<worker>/distribution.yaml`
    points at, and this command prints it:
 
    ```sh
    HERMES_HOME=<worker> python3 <worker>/scripts/check-install --print-source
    ```
 
-   Fast-forward only that checkout to `origin/HEAD`. It must be on the default
+   Only now fast-forward that checkout to `origin/HEAD`. It must be on the default
    branch with no uncommitted changes. Never touch the worker-owned
    checkouts, which are the configured repository checkouts the worker profile
    uses. They change only through a Kanban card or `refresh-checkouts`.
-2. List what is out of date. Run the copy in the source checkout, not the
+3. List what is out of date. Run the copy in the source checkout, not the
    installed one. The installed copy predates the change, so it cannot report
    a board, config key, or cron job that the change adds:
 
@@ -1986,7 +2022,7 @@ Hermes process starts. The new helper also writes
    HERMES_HOME=<worker> python3 <source checkout>/profiles/claude-worker/scripts/check-install
    ```
 
-3. Install each item it names in the order of the `Step` enum in
+4. Install each item it names in the order of the `Step` enum in
    `profiles/claude-worker/scripts/install_plan.py`. Its docstring gives the
    reason for the order. `check-install --json` prints each line with its
    remedy: an `install` command and its step, a `manual` action, or
@@ -2044,14 +2080,13 @@ Hermes process starts. The new helper also writes
      before the gateway runs the new broker gets each token request refused.
      The worker's `factory-secret-names` before its new scripts makes the old
      `claude-session` lose `CLAUDE_PROXY_TOKEN` and refuse the run. Deploy in
-     this order. First, install the root home's plugins and run
-     `restart-gateway`, then confirm that `{"op":"status"}` reports
-     `linear_ready` and `proxy_token_present` true. Second, run `hermes pause`.
-     Update the profile, install the worker's `linear-agent-session` and
-     `factory-secret-names`, and set the worker's `terminal.env_passthrough`
+     this order, with the board already paused by step 1. First, install the
+     root home's plugins and run `restart-gateway`, then confirm that
+     `{"op":"status"}` reports `linear_ready` and `proxy_token_present` true.
+     Second, update the profile, install the worker's `linear-agent-session`
+     and `factory-secret-names`, and set the worker's `terminal.env_passthrough`
      to `[]`, all together. Third, retire the worker's identity as the next
-     line says, run `check-install` until it is clean, and then run
-     `hermes resume`.
+     line says and run `check-install` until it is clean.
    - A `secret <name> in <worker>/.env` line: the worker holds a secret only
      the gateway may hold. Follow
      [Retire the worker's identity](references/infisical.md#retire-the-workers-identity),
@@ -2080,6 +2115,25 @@ Hermes process starts. The new helper also writes
      profile as in part 12.
    - A `cron job dispatch-triage` line: after the profile update, create the
      job with the part 12 `cron create` command.
+   - A `waiting triage card <task id>: is blocked with block kind needs_input`
+     or `is triage with block kind needs_input` line: the card waits for a
+     reply the way triage cards waited before a round parked in `scheduled`.
+     After the profile update, while step 1's pause holds dispatch, run this
+     once:
+
+     ```sh
+     HERMES_HOME=<root> python3 <root>/profiles/claude-worker/scripts/card_transition.py --board triage park-waiting
+     ```
+
+     It moves every such card to `scheduled` and posts nothing, so nobody is
+     notified again, and the card's next reply releases it. A card in
+     `triage` leaves it through one `specify` call. Running it again changes
+     nothing.
+   - A `waiting triage card <task id>: waits in scheduled, but its round may
+     never have reached Linear` line: open the card's Linear agent session.
+     When the questions are missing, post them as an `elicitation` from the
+     card's newest `scheduled` reason. The line clears when the card parks
+     again after a reply.
    - A `cron job report-deploy` line, a `script <root>/scripts/auto-deploy`
      or `<root>/scripts/report-deploy` line, or a `service auto deploy` line:
      follow the part 12 "Auto deploy" steps.
@@ -2125,8 +2179,8 @@ Hermes process starts. The new helper also writes
      the named part produces. If the runbook is right, run that part again.
      If the machine is right, change the part and its row in `check-install`
      in one pull request, as the replicability rule in `docs/rules.md` requires.
-4. Run `check-install` again. It prints nothing.
-5. Check that the worker home's factory settings match the root home's:
+5. Run `check-install` again. It prints nothing.
+6. Check that the worker home's factory settings match the root home's:
 
    ```sh
    python3 <source checkout>/skills/setup-factory/scripts/check-settings
@@ -2141,7 +2195,7 @@ Hermes process starts. The new helper also writes
    check against the settings file does. When it prints a line, find which
    home is right with the operator, and set that home's settings in the other
    as in part 10.
-6. If step 3 changed a plugin, a webhook config key, or a work skills setting:
+7. If step 4 changed a plugin, a webhook config key, or a work skills setting:
 
    > **HUMAN CHECKPOINT.** Ask the operator to restart the gateway with
    > `python3 <repo>/skills/setup-factory/scripts/restart-gateway` from a shell outside Hermes, as part 15 describes.
@@ -2150,7 +2204,12 @@ Hermes process starts. The new helper also writes
    > that
    > `~/.hermes/logs/gateway.log` shows a startup after the install.
 
-7. Remove the lock and start `auto-deploy` once with the `launchctl kickstart`
+8. Run `hermes resume`, only after `check-install` from the source checkout
+   reports no `profile` line and no `plugin` line, and after any gateway
+   restart that step 7 calls for. Until then a worker run on a half-installed
+   home refuses as `transient`. `auto-deploy` records `BLOCKED` while an
+   operator's pause is engaged, so resume before the next step.
+9. Remove the lock and start `auto-deploy` once with the `launchctl kickstart`
    command above. Record the deployed commit in the private configuration record.
 
 ## Report

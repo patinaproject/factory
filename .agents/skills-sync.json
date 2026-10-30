@@ -1,0 +1,12 @@
+{
+  "source": "patinaproject/skills",
+  "plugins": [
+    "code"
+  ],
+  "skills": [
+    "retro",
+    "to-spec",
+    "to-tickets",
+    "triage"
+  ]
+}

@@ -67,7 +67,7 @@ def linear_filters(app_user_id: str) -> list:
                 {
                     "all": [
                         {"field": "updatedFrom.stateId", "exists": True},
-                        {"field": "data.state.type", "in": ["completed", "canceled"]},
+                        {"field": "data.state.type", "in": ["completed", "canceled", "duplicate"]},
                         owned("data.id"),
                     ]
                 },
