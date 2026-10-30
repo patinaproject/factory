@@ -200,7 +200,9 @@ class WatchTest(InboxCase):
             clock.now += 60
             watch.tick()
 
-        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts, [
+            (SESSION, "The run is still working on the card, and it has your reply. It has run for 35 minutes."),
+        ])
 
     def test_a_session_id_found_after_the_start_gets_the_first_keepalive(self) -> None:
         clock, posts = Clock(1000.0), []
