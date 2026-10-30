@@ -293,6 +293,9 @@ question the reply answers. Create no card and stop.
      next step and answers in this session.
    - Any other status: the reply is on the card for its worker.
 
+   In every case, never quote or summarize an earlier run's result, heartbeat,
+   or card comment as the card's current status.
+
 ### `triage_card_reply`
 
 Any teammate's reply resumes a triage card that is not `done`, whoever

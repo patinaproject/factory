@@ -49,11 +49,22 @@ UNANSWERED_STOP_INTRO = (
 )
 CUT_NOTICE = "Text was cut to fit. Each long reply shows only its start."
 DROPPED_NOTICE = " {dropped} older reply(ies) are left out."
-KEEPALIVE_TEXT = "The run is still working on the card, and it has your reply."
+KEEPALIVE_WORKING = "The run is still working on the card. It has run for {minutes} minutes."
+KEEPALIVE_WITH_REPLY = "The run is still working on the card, and it has your reply. It has run for {minutes} minutes."
+AWAITING_ANSWER = (PENDING, DELIVERED, ASKED)
 
 
 def empty(answer_command: str = "", session_id: str | None = None) -> dict:
-    return {"session_id": session_id, "activity_at": None, "answer_command": answer_command, "replies": []}
+    return {
+        "session_id": session_id, "started_at": None, "activity_at": None,
+        "answer_command": answer_command, "replies": [],
+    }
+
+
+def keepalive_text(inbox: dict, now: float) -> str:
+    minutes = int((now - inbox["started_at"]) // 60)
+    awaiting = any(r["state"] in AWAITING_ANSWER for r in inbox["replies"])
+    return (KEEPALIVE_WITH_REPLY if awaiting else KEEPALIVE_WORKING).format(minutes=minutes)
 
 
 @contextlib.contextmanager
@@ -113,8 +124,7 @@ def add(inbox: dict, replies: list[dict], session_id: str | None, now: float) ->
     for reply in replies:
         if reply["key"] not in known:
             inbox["replies"].append({**reply, "state": PENDING})
-            if inbox["activity_at"] is None:
-                inbox["activity_at"] = now
+            inbox["activity_at"] = now if inbox["activity_at"] is None else max(inbox["activity_at"], now)
 
 
 def render(inbox: dict, replies: list[dict], intro: str) -> str:
@@ -208,6 +218,14 @@ class Watch:
         self.thread = threading.Thread(target=self.loop, daemon=True)
 
     def __enter__(self) -> "Watch":
+        started = self.clock()
+
+        def start(inbox: dict) -> None:
+            inbox["started_at"] = started
+            if inbox["activity_at"] is None:
+                inbox["activity_at"] = started
+
+        update(self.inbox, start)
         self.thread.start()
         return self
 
@@ -238,12 +256,13 @@ class Watch:
 
     def keep_alive(self) -> None:
         inbox = load(self.inbox)
-        if not inbox["replies"] or not inbox["session_id"] or self.stopped.is_set():
+        if not inbox["session_id"] or self.stopped.is_set() or inbox["started_at"] is None:
             return
-        if self.clock() - inbox["activity_at"] < self.keepalive_seconds:
+        now = self.clock()
+        if now - inbox["activity_at"] < self.keepalive_seconds:
             return
         try:
-            self.post(inbox["session_id"], KEEPALIVE_TEXT)
+            self.post(inbox["session_id"], keepalive_text(inbox, now))
         except Exception as error:
             print(f"claude-session: the keepalive thought failed: {type(error).__name__}: {error}", file=sys.stderr)
             return

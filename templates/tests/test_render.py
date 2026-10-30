@@ -313,6 +313,14 @@ class ReplyPrefixContractTest(unittest.TestCase):
 
         self.assertIn(f"`{reply_inbox.REPLY_PREFIX}`", prompt)
 
+    def test_the_linear_prompt_forbids_reporting_an_earlier_run_as_the_cards_current_status(self):
+        prompt = " ".join(render.build_routes(SETTINGS)["linear"]["prompt"].split())
+
+        self.assertIn(
+            "never quote or summarize an earlier run's result, heartbeat, or card comment as the card's current status.",
+            prompt,
+        )
+
 
 class PromptSubstitutionTest(unittest.TestCase):
     def setUp(self):
