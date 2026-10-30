@@ -17,7 +17,8 @@ A posted activity is logged as `activity`, with the session's issue holding no o
 Its blockers come from its `blocked_by` list of {id, identifier, gitBranchName, stateType, delegate}, none
 when unset, and `blockers_error` fails the read.
 Its title comes from `issue_title`, "Fix checkout" when unset. An AgentSessionUpdate is logged as
-`session_update` with its variables, and `session_update_error` makes it fail.
+`session_update` with its variables, and `session_update_error` makes it fail. The session's
+links are its `session_urls` list, which an update's `addedExternalUrls` extends, and `session_urls_error` fails the read.
 The app's own user id is app-user.
 """
 from __future__ import annotations
@@ -66,8 +67,16 @@ def _fake_urlopen(request, timeout=None):
             response = _Response(200, {"data": {"issue": issue}})
         elif "AgentSessionUpdate" in query and state.get("session_update_error"):
             response = _Response(200, {"errors": [{"message": state["session_update_error"]}]})
+        elif "AgentSessionUrls" in query and state.get("session_urls_error"):
+            response = _Response(200, {"errors": [{"message": state["session_urls_error"]}]})
+        elif "AgentSessionUrls" in query:
+            urls = [{"url": url} for url in state.get("session_urls", [])]
+            response = _Response(200, {"data": {"agentSession": {"externalUrls": urls}}})
         elif "AgentSessionUpdate" in query:
             entry["session_update"] = body["variables"]
+            added = body["variables"]["input"].get("addedExternalUrls", [])
+            state["session_urls"] = [*state.get("session_urls", []), *(u["url"] for u in added)]
+            state_path.write_text(json.dumps(state))
             response = _Response(200, {"data": {"agentSessionUpdate": {"success": True}}})
         elif "IssueRoleLabels" in query:
             def nodes(names):

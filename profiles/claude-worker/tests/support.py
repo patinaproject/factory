@@ -50,7 +50,9 @@ if "--settings" in argv:
             subprocess.run(hook["command"], shell=True, check=True)
     settings["exists_after_start"] = os.path.exists(path)
 with open(options["log"] + ".tmp", "w") as log:
-    json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings, "pid": os.getpid()}, log)
+    linear_log = options.get("linear_log")
+    seen = open(linear_log).read() if linear_log and os.path.exists(linear_log) else ""
+    json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings, "pid": os.getpid(), "linear_log": seen}, log)
 os.rename(options["log"] + ".tmp", options["log"])
 for step in options.get("steps", []):
     import subprocess, time
@@ -64,7 +66,7 @@ for step in options.get("steps", []):
         deadline = time.time() + 20
         while True:
             outputs = [
-                subprocess.run(hook["command"], shell=True, capture_output=True, text=True, input=json.dumps(step.get("event", {})))
+                subprocess.run(hook["command"], shell=True, capture_output=True, text=True, input=json.dumps(step.get("event", {})), env={**os.environ, **settings["content"]["env"]})
                 for group in settings["content"]["hooks"].get(step["hook"], []) for hook in group["hooks"]
             ]
             printed = [o.stdout for o in outputs if o.stdout]

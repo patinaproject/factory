@@ -57,6 +57,7 @@ import gh_login
 import install_drift
 import kanban_board
 import reply_inbox
+import session_links
 
 DEFAULT_WORKER_ENTRY = (
     "Work Linear issue {issue_identifier} ({issue_url}) in {repo} on branch {branch}. "
@@ -169,6 +170,7 @@ CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
 COMMIT_CLOSES_GUARD = Path(__file__).resolve().with_name("guard-commit-closes")
 REPLY_HOOK = Path(__file__).resolve().with_name("reply-hook")
 SESSION_REPLY = Path(__file__).resolve().with_name("session-reply")
+LINK_PR_HOOK = Path(__file__).resolve().with_name("link-pr-hook")
 PROXY_TOKEN_HELPER = Path(__file__).resolve().with_name("proxy-token")
 MCP_HEADERS_HELPER = Path(__file__).resolve().with_name("mcp-headers")
 TRIAGE_DOCUMENTS = ("Triage notes", "Agent brief")
@@ -764,6 +766,12 @@ def title_agent_session(client, session_id: str | None, issue_id: str, triage: b
         return {"error": f"titling the agent session failed: {error}"}
 
 
+def link_pull_requests(client, session_id: str, report: dict, links: list[dict]) -> dict:
+    """Adds to the card's agent session and folds the outcome into the run's `session_links`. Never raises."""
+    linear = plugin_module("linear-agent-session", "linear")
+    return session_links.combine(report, session_links.add(linear, client, session_id, links))
+
+
 def triage_mentions(client, issue_id: str, identifier: str) -> str:
     """Resolved here, not by the model, because a team can list several triage people and the model picked one."""
     linear = plugin_module("linear-agent-session", "linear")
@@ -878,7 +886,10 @@ def publish_denials() -> list[str]:
     ]
 
 
-def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = False, inbox: Path | None = None) -> dict:
+def claude_settings(
+    transport: dict, api_key: str, path: Path, triage: bool = False, inbox: Path | None = None,
+    session_id: str | None = None,
+) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
     # Claude Code sends every MCP schema inline when ANTHROPIC_BASE_URL is not Anthropic's,
@@ -906,6 +917,10 @@ def claude_settings(transport: dict, api_key: str, path: Path, triage: bool = Fa
         for event, mode in (("PostToolUse", "post-tool-use"), ("Stop", "stop")):
             command = f"{shlex.quote(sys.executable)} {shlex.quote(str(REPLY_HOOK))} {mode} --inbox {shlex.quote(str(inbox))}"
             settings["hooks"][event] = [{"hooks": [{"type": "command", "command": command}]}]
+    if session_id and not triage:
+        # Adds the pull request to the card's Linear session when `gh pr create` succeeds; see link-pr-hook.
+        link = {"type": "command", "command": f"{helper_command(LINK_PR_HOOK)} --session-id {shlex.quote(session_id)}"}
+        settings["hooks"].setdefault("PostToolUse", []).append({"matcher": "Bash", "hooks": [link]})
     if transport.get("auth_token_env"):
         settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)
     disabled = factory_settings.disabled_mcp_servers(transport)
@@ -1224,6 +1239,12 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         seen = json.loads(seen_path.read_text()) if seen_path.exists() else []
         card_session_id = reply_inbox.session_id_of(card["task"]["body"])
         session_title = title_agent_session(client, card_session_id, args.issue_id, triage)
+        link_report = None
+        if card_session_id and not triage:
+            link_report = {"added": [], "action": "unchanged"}
+            if args.takeover_pr:
+                takeover = session_links.pull_link(args.takeover_pr, "Taken-over pull request")
+                link_report = link_pull_requests(client, card_session_id, link_report, [takeover])
         inbox = None if triage else lock_path.with_name(INBOX_NAME)
         if inbox:
             answer_command = f"{helper_command(SESSION_REPLY)} --inbox {shlex.quote(str(inbox))}"
@@ -1248,7 +1269,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         offset = plan.previous.stat().st_size if plan.resumed else 0
         before = worktree_state(worktree)
         try:
-            write_private(settings_path, claude_settings(transport, api_key, settings_path, triage, inbox))
+            write_private(settings_path, claude_settings(transport, api_key, settings_path, triage, inbox, card_session_id))
             with reply_watch(inbox, client, args, comments, own):
                 output, exit_code, detail = run_claude(command, worktree)
         finally:
@@ -1264,6 +1285,10 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 links = link_issues(
                     args.repo, branch, login, args.issue_identifier, args.issue_url, github_issue_url(card)
                 )
+                if link_report and "pr" in links:
+                    link_report = link_pull_requests(
+                        client, card_session_id, link_report, [session_links.pull_link(links["pr"])]
+                    )
             documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
             first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
         except Exception as error:
@@ -1274,6 +1299,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
             session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
             progress=progress, comments_seen=len(comments), adopted=adopted._asdict() if adopted else None,
             superseded=superseded, issue_links=links, triage_documents=documents, session_title=session_title,
+            session_links=link_report,
         )
         if output is None:
             error = f"claude exited {exit_code} without JSON output: {detail}"

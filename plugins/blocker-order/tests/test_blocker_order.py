@@ -312,7 +312,7 @@ class HookTest(Hooked):
 
 SESSION = result_line.Session(
     session_id="s", resumed=True, reason="resumed", worktree="/w", branch="abc-1-fix", progress=True, comments_seen=2,
-    adopted=None, superseded=None, issue_links=None, triage_documents=None, session_title=None,
+    adopted=None, superseded=None, issue_links=None, triage_documents=None, session_title=None, session_links=None,
 )
 
 

@@ -16,8 +16,8 @@ is enough, and the card stays as it is.
 3. It prints one JSON line. Read `linear_agent_session_id` from the card body
    and act on the line's `post`:
    - `response`: post a `response` on that session with
-     `linear_agent_activity`, saying the pull request merged. Set
-     `external_urls` to one link labeled `Pull request` whose URL is the pull
+     `linear_agent_activity`, saying the pull request merged. Add one
+     link with `external_urls`, labeled `Pull request`, whose URL is the pull
      request URL.
    - `elicitation`: post an `elicitation` on that session whose body is the
      line's `reason`, verbatim.
