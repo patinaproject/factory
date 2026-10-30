@@ -221,6 +221,17 @@ ISSUE_EDIT_QUERY = """query IssueEdit($id: String!) {
   issueLabels(first: 250, filter: { team: { null: true } }) { nodes { id name isGroup parent { id } } }
 }"""
 
+TEAM_CREATE_QUERY = """query TeamForCreate($key: String!) {
+  teams(filter: { key: { eq: $key } }) {
+    nodes { id key labels(first: 250) { nodes { id name isGroup parent { id } } } }
+  }
+  issueLabels(first: 250, filter: { team: { null: true } }) { nodes { id name isGroup parent { id } } }
+}"""
+
+ISSUE_CREATE_MUTATION = """mutation IssueCreate($input: IssueCreateInput!) {
+  issueCreate(input: $input) { success issue { identifier url } }
+}"""
+
 ISSUE_RELATIONS_QUERY = """query IssueRelations($a: String!, $b: String!) {
   a: issue(id: $a) { ...RelationFields }
   b: issue(id: $b) { ...RelationFields }
@@ -586,9 +597,7 @@ class LinearClient:
             for label_id in [i for i, n in labels.items() if role_key(n["name"]) == role_key(name)]:
                 del labels[label_id]
         for name in add_labels:
-            label = _by_name(known.values(), name, "label")
-            if label["isGroup"]:
-                raise LinearError(f"{label['name']} is a label group; name one of its labels")
+            label = _label_named(known.values(), name)
             group = (label["parent"] or {}).get("id")
             if group:
                 labels = {i: n for i, n in labels.items() if (n["parent"] or {}).get("id") != group}
@@ -614,6 +623,22 @@ class LinearClient:
             "labels": sorted(n["name"] for n in labels.values()),
             "state": target["name"] if target else issue["state"]["name"],
         }
+
+    def create_issue(self, team_key: str, title: str, description: str = "", labels: list = ()) -> dict:
+        """Create an issue in the team with that key. It sends no status, so Linear applies the team's default."""
+        data = self._graphql(TEAM_CREATE_QUERY, {"key": team_key})
+        if not data["teams"]["nodes"]:
+            raise LinearError(f"Linear has no team with the key {team_key!r} that the agent app can read")
+        team = data["teams"]["nodes"][0]
+        known = team["labels"]["nodes"] + data["issueLabels"]["nodes"]
+        label_ids = sorted({_label_named(known, name)["id"] for name in labels})
+        issue_input: dict = {"teamId": team["id"], "title": title, "description": description}
+        if label_ids:
+            issue_input["labelIds"] = label_ids
+        payload = self._graphql(ISSUE_CREATE_MUTATION, {"input": issue_input})["issueCreate"]
+        if not payload["success"]:
+            raise LinearError("issueCreate reported success: false")
+        return {"identifier": payload["issue"]["identifier"], "url": payload["issue"]["url"]}
 
     def relate_issues(self, id_or_identifier: str, other: str, kind: str) -> dict:
         """Make `issue` a duplicate of `other` (kind `duplicate`), or make `other` block it (kind `blocks`).
@@ -974,6 +999,13 @@ def _by_name(nodes, name: str, kind: str) -> dict:
         raise LinearError(f"more than one {kind} matches {name!r}: " + ", ".join(sorted(n["name"] for n in matches)))
     names = ", ".join(sorted({n["name"] for n in nodes if not n.get("isGroup")}))
     raise LinearError(f"no {kind} named {name!r}; the issue's team has: {names}")
+
+
+def _label_named(nodes, name: str) -> dict:
+    label = _by_name(nodes, name, "label")
+    if label["isGroup"]:
+        raise LinearError(f"{label['name']} is a label group; name one of its labels")
+    return label
 
 
 def _label_names(issue: dict) -> list:

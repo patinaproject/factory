@@ -122,6 +122,13 @@ def register(ctx: Any) -> None:
         description=tools.RELATE_SCHEMA["description"],
     )
     ctx.register_tool(
+        name="linear_issue_create",
+        toolset=TOOLSET,
+        schema=tools.CREATE_SCHEMA,
+        handler=lambda args, **_: tools.run_create(get_client, lambda: ctx.get_config("default_team", default=""), args),
+        description=tools.CREATE_SCHEMA["description"],
+    )
+    ctx.register_tool(
         name="linear_issue_search",
         toolset=TOOLSET,
         schema=tools.SEARCH_SCHEMA,

@@ -190,6 +190,25 @@ RELATE_SCHEMA = {
     },
 }
 
+CREATE_SCHEMA = {
+    "name": "linear_issue_create",
+    "description": (
+        "Create a Linear issue as the agent app: title (required), description in Markdown, team (a team key "
+        "such as ABC, else the configured default team), and labels by name, matched whatever their case and "
+        "punctuation. Sends no status, so Linear applies the team's default for new issues. Creates no label "
+        "and never sets assignee or delegate. Returns identifier and url."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "Required. The issue's title."},
+            "description": {"type": "string", "description": "The issue's description, in Markdown."},
+            "team": {"type": "string", "description": "Team key, such as ABC. Defaults to the configured default team."},
+            "labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to apply."},
+        },
+    },
+}
+
 GITHUB_EDIT_SCHEMA = {
     "name": "github_issue_edit",
     "description": (
@@ -347,6 +366,22 @@ def run_relate(client_factory: ClientFactory, args: dict) -> str:
             raise LinearError("pass exactly one of duplicate_of or blocked_by")
         ((kind, other),) = asked.items()
         return client_factory().relate_issues(issue, other, kind)
+
+    return _tool_result_or_error(run)
+
+
+def run_create(client_factory: ClientFactory, default_team: Callable[[], str], args: dict) -> str:
+    def run() -> dict:
+        _refuse_people(args)
+        title = _title(args)
+        if not title:
+            raise LinearError("pass title, the new issue's title")
+        team = (args.get("team") or default_team() or "").strip()
+        if not team:
+            raise LinearError("pass team, a Linear team key, or set the default_team setting")
+        return client_factory().create_issue(
+            team, title, args.get("description") or "", labels=_names(args.get("labels"))
+        )
 
     return _tool_result_or_error(run)
 

@@ -430,6 +430,7 @@ class RegisterTest(unittest.TestCase):
                 "linear_agent_session_create",
                 "linear_delegated_issues",
                 "linear_issue",
+                "linear_issue_create",
                 "linear_issue_edit",
                 "linear_issue_relate",
                 "linear_issue_search",
