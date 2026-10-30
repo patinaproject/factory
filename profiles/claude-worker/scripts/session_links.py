@@ -1,10 +1,3 @@
-"""Links from a card's Linear agent session to its pull requests.
-
-`link-pr-hook` adds the pull request that Claude opens, and `claude-session` adds a takeover pull request
-and, after each turn, the factory's pull request on the branch. Each add keeps the links the session holds.
-`claude-session` reports the outcome as the run's `session_links`.
-"""
-
 from __future__ import annotations
 
 import re

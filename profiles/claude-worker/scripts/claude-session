@@ -918,7 +918,6 @@ def claude_settings(
             command = f"{shlex.quote(sys.executable)} {shlex.quote(str(REPLY_HOOK))} {mode} --inbox {shlex.quote(str(inbox))}"
             settings["hooks"][event] = [{"hooks": [{"type": "command", "command": command}]}]
     if session_id and not triage:
-        # Adds the pull request to the card's Linear session when `gh pr create` succeeds; see link-pr-hook.
         link = {"type": "command", "command": f"{helper_command(LINK_PR_HOOK)} --session-id {shlex.quote(session_id)}"}
         settings["hooks"].setdefault("PostToolUse", []).append({"matcher": "Bash", "hooks": [link]})
     if transport.get("auth_token_env"):
