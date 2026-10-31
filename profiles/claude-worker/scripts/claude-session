@@ -241,6 +241,8 @@ GITHUB_ISSUE_LINE = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
 
 # The `precondition` value of a refusal that waits for the worker's gh login; `blocker-order` parks the card on it.
 GH_LOGIN = "gh_login"
+# The `precondition` of a refusal that waits for a factory deploy to make the install match the deployed commit.
+INSTALL_SKEW = "install_skew"
 
 
 class Refusal(Exception):
@@ -696,22 +698,55 @@ def plugin_module(plugin: str, name: str):
     return importlib.import_module(name)
 
 
-def install_skew() -> str | None:
+class Skew(NamedTuple):
+    message: str
+    # True while auto-deploy has neither failed nor been blocked, so a deploy that records the install's commit is
+    # still to come and the card can wait for it instead of being blocked.
+    waits: bool
+
+
+FINISH_DEPLOY = (
+    'Run check-install from the source checkout and finish the deploy steps of "Deploy a merged factory change" in '
+    "skills/setup-factory/SKILL.md"
+)
+
+
+def install_skew() -> Skew | None:
     try:
         home = Path(os.environ["HERMES_HOME"])
         repo = factory_source.checkout(home)
-        differing = install_drift.skew(home, repo)
+        state = install_drift.deploy_state(home)
+        deployed = install_drift.deployed(state)
+        differing = install_drift.skew(home, repo, deployed)
+    except install_drift.MissingCommit as error:
+        return Skew(f"{error}, so the install cannot be compared with it. {FINISH_DEPLOY}", waits=False)
     except (KeyError, OSError, factory_source.SourceError, install_drift.GitError) as error:
         print(f"claude-session: could not compare the install with the factory checkout: {error}", file=sys.stderr)
         return None
     if not differing:
         return None
     parts = " and ".join("the profile scripts" if name == "profile" else f"the {name} plugin" for name in differing)
-    return (
-        f"{parts} in {home} differ from the factory checkout at {repo}, so a factory deploy is in progress or was "
-        'left unfinished. Run check-install from the source checkout and finish the deploy steps of "Deploy a '
-        'merged factory change" in skills/setup-factory/SKILL.md'
+    against = f"the deployed commit {deployed[:12]}" if deployed else "the factory checkout"
+    return Skew(
+        f"{parts} in {home} differ from {against} at {repo}, so a factory deploy is in progress or was left "
+        f"unfinished. {FINISH_DEPLOY}",
+        waits=not state.get("failed") and not state.get("blocked"),
     )
+
+
+def skew_line(skew: Skew) -> dict:
+    """The refusal, written by hand because a skewed home's result_line is the module that cannot be trusted. Only
+    a `blocker-order` whose result_line declares INSTALL_SKEW parks on the precondition; an older one reads a line
+    with an unknown key as no report at all."""
+    line = {"error": skew.message, "transient": True}
+    module = Path(os.environ["HERMES_HOME"]) / "plugins" / "blocker-order" / "result_line.py"
+    try:
+        declared = re.search(rf'^INSTALL_SKEW = "{INSTALL_SKEW}"$', module.read_text(), re.MULTILINE)
+    except OSError:
+        declared = None
+    if skew.waits and declared:
+        line["precondition"] = INSTALL_SKEW
+    return line
 
 
 def linear_access() -> tuple:
@@ -1456,8 +1491,7 @@ def main() -> int:
             parser.error("the following arguments are required: " + ", ".join(f"--{f.replace('_', '-')}" for f in missing))
     skew = None if args.mcp_status else install_skew()
     if skew:
-        # The line is written by hand because a skewed home's result_line is the module that cannot be trusted.
-        print(json.dumps({"error": skew, "transient": True}))
+        print(json.dumps(skew_line(skew)))
         return 2
     try:
         result_line = plugin_module("blocker-order", "result_line")

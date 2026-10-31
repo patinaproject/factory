@@ -1954,12 +1954,78 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session()
 
         self.assertEqual(status, 2)
-        self.assertEqual(set(report), {"error", "transient"})
-        self.assertTrue(report["transient"])
+        self.assertEqual(set(report), {"error", "transient", "precondition"})
+        self.assertEqual((report["transient"], report["precondition"]), (True, "install_skew"))
         self.assertIn("the blocker-order plugin", report["error"])
         self.assertNotIn("linear-agent-session", report["error"])
+        self.assertIn("differ from the factory checkout", report["error"])
         self.assertIn("a factory deploy is in progress or was left unfinished", report["error"])
-        self.assertEqual(RESULT_LINE.last(json.dumps(report)), RESULT_LINE.Refused(report["error"], transient=True))
+        self.assertEqual(RESULT_LINE.last(json.dumps(report)), RESULT_LINE.Refused(report["error"], True, "install_skew"))
+        self.assertFalse(self.log.exists())
+
+    def record_deploy(self, **state) -> None:
+        (self.hermes_home.parent.parent / "auto-deploy.json").write_text(json.dumps({"failed": None, "blocked": None, **state}))
+
+    def test_a_checkout_ahead_of_the_deployed_commit_runs_when_the_install_matches_that_commit(self) -> None:
+        checkout = self.deploy(**{"plugins/blocker-order/result_line.py": "# the next commit\n"})
+        self.record_deploy(deployed=git(checkout, "rev-parse", "HEAD~1"))
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["session_id"]), (0, SESSION_ID))
+        self.assertTrue(self.log.exists())
+
+    def test_an_install_that_differs_from_the_deployed_commit_waits_unless_a_deploy_failed_or_was_blocked(self) -> None:
+        checkout = self.deploy(**{"plugins/blocker-order/result_line.py": "# the next commit\n"})
+        deployed = git(checkout, "rev-parse", "HEAD")
+        for fields, precondition in (
+            ({}, "install_skew"),
+            ({"outcome": "WAITING", "events": [{"outcome": "FAILED", "commit": None}]}, "install_skew"),
+            ({"failed": "a" * 40}, None),
+            ({"blocked": "b" * 40}, None),
+        ):
+            with self.subTest(fields):
+                self.record_deploy(deployed=deployed, **fields)
+
+                status, report = self.run_session()
+
+                self.assertEqual(status, 2)
+                self.assertTrue(report["transient"])
+                self.assertEqual(report.get("precondition"), precondition)
+                self.assertIn(f"differ from the deployed commit {deployed[:12]}", report["error"])
+                self.assertFalse(self.log.exists())
+
+    def test_an_installed_result_line_without_the_constant_gets_todays_line(self) -> None:
+        self.deploy()
+        module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
+        text = module.read_text()
+        module.unlink()
+        module.write_text(text.replace('INSTALL_SKEW = "install_skew"\n', ""))
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(set(report), {"error", "transient"})
+        self.assertIn("the blocker-order plugin", report["error"])
+
+    def test_a_null_deployed_commit_compares_with_head(self) -> None:
+        self.deploy(**{"plugins/blocker-order/result_line.py": "# the next commit\n"})
+        self.record_deploy(deployed=None)
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["precondition"]), (2, "install_skew"))
+        self.assertIn("differ from the factory checkout", report["error"])
+
+    def test_a_deployed_commit_the_checkout_lacks_refuses_and_names_it(self) -> None:
+        self.deploy()
+        self.record_deploy(deployed="f" * 40)
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(set(report), {"error", "transient"})
+        self.assertIn(f"the deployed commit {'f' * 12} is not in the factory checkout", report["error"])
         self.assertFalse(self.log.exists())
 
     def test_scripts_that_differ_from_the_checkout_refuse_and_name_the_profile(self) -> None:

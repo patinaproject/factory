@@ -29,7 +29,10 @@ A report with `"precondition": "gh_login"` is a refusal because the worker's gh 
 every board the hook parks the card in `scheduled` with a reason that starts with `result_line.GH_LOGIN_PARK`,
 which never starts with `Needs input:`, so no reply releases it and no triage round posts it. The hook blocks
 nothing, makes no Linear activity call, and writes no `NOT_POSTED` comment. `card_transition.py` releases the
-card once the login has at least 15 minutes left. Hermes refuses to schedule a `goal_mode` card, and that
+card once the login has at least 15 minutes left. A report with `"precondition": "install_skew"` is a refusal
+because the install differs from the commit auto-deploy recorded as deployed. The hook parks it the same way,
+with a reason that starts with `result_line.INSTALL_SKEW_PARK`, and `card_transition.py` releases the card
+once the install matches that commit. Hermes refuses to schedule a `goal_mode` card, and that
 card keeps the transient block the worker's prompt gives a `"transient": true` refusal.
 
 After any successful park on the `triage` board whose reason starts with `Needs input:`, its own or one the
@@ -106,9 +109,24 @@ def block_for_input(reason: str, dispatch: Dispatch) -> dict:
     )}
 
 
-def park_for_login(error: str, dispatch: Dispatch) -> Optional[dict]:
+# The result key and the worker's instruction for each precondition's park.
+PRECONDITION_PARKED = {
+    result_line.GH_LOGIN: (
+        "gh_login_park",
+        "The worker's gh login is missing or stale, so this card waits in scheduled and goes back to the queue "
+        "once the login is fresh.",
+    ),
+    result_line.INSTALL_SKEW: (
+        "install_skew_park",
+        "The factory's install differs from the deployed commit, so this card waits in scheduled for a factory "
+        "deploy and goes back to the queue once the install matches.",
+    ),
+}
+
+
+def park_for_precondition(precondition: str, error: str, dispatch: Dispatch) -> Optional[dict]:
     """None when Hermes refuses to schedule a `goal_mode` card, which the worker blocks as it always did."""
-    reason = f"{result_line.GH_LOGIN_PARK} {error}"
+    reason = f"{result_line.PRECONDITION_PARKS[precondition]} {error}"
     answer = _call(dispatch, SCHEDULE_TOOL, {"reason": reason})
     if not answer.get("ok"):
         if GOAL_MODE_REFUSAL in str(answer.get("error")):
@@ -120,9 +138,8 @@ def park_for_login(error: str, dispatch: Dispatch) -> Optional[dict]:
         )}
     os.environ[STOP_NUDGE] = "off"
     return {"parked": True, "instruction": (
-        "The worker's gh login is missing or stale, so this card waits in scheduled and goes back to the queue "
-        "once the login is fresh. Stop now: call no other tool, do not call kanban_block, do not post an "
-        "activity, and do not run claude-session again."
+        f"{PRECONDITION_PARKED[precondition][1]} Stop now: call no other tool, do not call kanban_block, do not "
+        "post an activity, and do not run claude-session again."
     )}
 
 
@@ -172,7 +189,7 @@ def worker_park(task: str, run: Optional[str], args: Any, result: Any, dispatch:
     reason = args.get("reason") if isinstance(args, dict) else None
     if not isinstance(reason, str):
         return None
-    if reason.startswith(result_line.GH_LOGIN_PARK):
+    if reason.startswith(result_line.MACHINE_PARKS):
         if landed(result):
             os.environ[STOP_NUDGE] = "off"
         return None
@@ -271,14 +288,14 @@ def make_hook(ctx: Any):
             elif key not in _handled:
                 _handled[key] = json.dumps({**payload, "needs_input_block": block_for_input(reason, ctx.dispatch_tool)})
             return _handled[key]
-        error = result_line.gh_login_refusal(report)
-        if error is not None:
-            key = (task, run, error)
+        refusal = result_line.precondition_refusal(report)
+        if refusal is not None:
+            key = (task, run, refusal.error)
             if key not in _handled:
-                parked = park_for_login(error, ctx.dispatch_tool)
+                parked = park_for_precondition(refusal.precondition, refusal.error, ctx.dispatch_tool)
                 if parked is None:
                     return None
-                _handled[key] = json.dumps({**payload, "gh_login_park": parked})
+                _handled[key] = json.dumps({**payload, PRECONDITION_PARKED[refusal.precondition][0]: parked})
             return _handled[key]
         cards = result_line.waiting_on(report)
         if cards is None:

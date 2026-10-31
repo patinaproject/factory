@@ -2,11 +2,14 @@
 
 check-install reports the comparison as drift. claude-session asks `skew` before it starts Claude, because
 a deploy that moved the scripts before the plugins they import leaves a home whose parts come from two
-commits, and a run on such a home can crash after Claude has worked for minutes.
+commits, and a run on such a home can crash after Claude has worked for minutes. It compares with the commit
+auto-deploy recorded as deployed, not the checkout's HEAD, because the checkout moves ahead of the install
+whenever a merge is fetched before the next deploy.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 from typing import NamedTuple
@@ -14,10 +17,29 @@ from typing import NamedTuple
 PROFILE = "profiles/claude-worker"
 SCRIPTS = f"{PROFILE}/scripts"
 IMPORTED_PLUGINS = ("blocker-order", "linear-agent-session")
+DEPLOY_STATE = "auto-deploy.json"
 
 
 class GitError(Exception):
     pass
+
+
+class MissingCommit(Exception):
+    pass
+
+
+def deploy_state(home: Path) -> dict:
+    """auto-deploy's state file in the root home above the worker home, or {} when it is missing or unreadable."""
+    try:
+        state = json.loads((home.parent.parent / DEPLOY_STATE).read_text())
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def deployed(state: dict) -> str | None:
+    commit = state.get("deployed")
+    return commit if isinstance(commit, str) and commit else None
 
 
 def git(repo: Path, *args: str) -> str:
@@ -68,8 +90,16 @@ def compare_files(commit: Commit, files: dict, strip: str, home: Path) -> list:
     return details
 
 
-def skew(home: Path, repo: Path) -> list:
-    commit = Commit(repo, git(repo, "rev-parse", "--verify", "HEAD^{commit}").strip(), "HEAD")
+def skew(home: Path, repo: Path, sha: str | None) -> list:
+    """The parts of `home` that differ from commit `sha` of `repo`, or from its HEAD when `sha` is None."""
+    if sha is None:
+        commit = Commit(repo, git(repo, "rev-parse", "--verify", "HEAD^{commit}").strip(), "HEAD")
+    else:
+        git(repo, "rev-parse", "--git-dir")
+        try:
+            commit = Commit(repo, git(repo, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}").strip(), "the deployed commit")
+        except GitError:
+            raise MissingCommit(f"the deployed commit {sha[:12]} is not in the factory checkout at {repo}") from None
     differing = []
     if compare_files(commit, commit.files(SCRIPTS), f"{PROFILE}/", home):
         differing.append("profile")

@@ -13,6 +13,8 @@ It then releases, on every board, each card parked for the worker's gh login onc
 `$HERMES_HOME/gh/token-expiry.json` has the 15 minutes a run needs (see
 `card_transition.sweep_login`), with the same line. On `triage` that card is unassigned
 and the next step assigns it; on any other board it lands `ready` and assigned.
+It releases each card parked for a factory deploy the same way once the install
+matches the commit auto-deploy recorded as deployed (`card_transition.sweep_deploy`).
 Then it counts the board's cards that are `running`, or `ready` with an
 assignee, and assigns `claude-worker` to waiting `ready` cards, highest priority
 and then oldest first, until that count reaches `triage.max_running` in the
@@ -78,17 +80,17 @@ def release_waiting() -> bool:
     return not swept["failed"]
 
 
-def release_login_parked() -> bool:
-    """Release the cards parked for the worker's gh login once it is fresh; False when a board or a release failed."""
+def release_parked(sweep, waits_for: str) -> bool:
+    """Release the cards a machine condition parked once it holds; False when a board or a release failed."""
     try:
-        swept = card_transition.sweep_login()
+        swept = sweep()
     except (card_transition.Failed, sqlite3.Error, ValueError) as exc:
-        print(f"dispatch-triage: cannot read the cards waiting for the gh login: {exc}", file=sys.stderr)
+        print(f"dispatch-triage: cannot read the cards waiting for {waits_for}: {exc}", file=sys.stderr)
         return False
     for task_id in swept["released"]:
         print(f"released {task_id}")
     for task_id, error in swept["failed"].items():
-        print(f"dispatch-triage: releasing {task_id} for the gh login failed: {error}", file=sys.stderr)
+        print(f"dispatch-triage: releasing {task_id} for {waits_for} failed: {error}", file=sys.stderr)
     return not swept["failed"]
 
 
@@ -101,7 +103,8 @@ def main() -> int:
         cap = max_running(factory_settings.read(raw=False))
         os.environ["HERMES_BIN"] = binary
         released = release_waiting()
-        released = release_login_parked() and released
+        released = release_parked(card_transition.sweep_login, "the gh login") and released
+        released = release_parked(card_transition.sweep_deploy, "a factory deploy") and released
         tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
         for task_id in to_assign(tasks, cap):
             hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)

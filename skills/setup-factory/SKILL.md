@@ -1468,18 +1468,26 @@ deploys itself. GitHub sends a `push` delivery, which needs the App's Push
 subscription from [`references/github.md`](references/github.md). The `github`
 route keeps a push only to the `factory_repository` branch from part 10, from
 any sender, the App included. The `factory-deploy` plugin from part 5 then
-starts the `auto-deploy` launchd job and runs no agent turn. A lost delivery
-deploys nothing until the next push, which deploys every commit since the
-last deployed one. One run does this:
+starts the `auto-deploy` launchd job and runs no agent turn. The job also runs
+every 300 seconds, so a lost delivery, or an App without the Push
+subscription, delays a deploy by one interval at most. A run with nothing to
+deploy exits after its fetch. A run deploys every commit since the last
+deployed one, and only at a break, when no card is running. The board keeps
+accepting cards while a deploy is pending. One run does this:
 
-1. It holds new cards. It records the hold in `<root>/auto-deploy.json`, then
-   sets `kanban.dispatch_profiles` to an empty list in the root home's
-   `config.yaml`. Hermes' dispatcher then claims no card on any board, `ready`
-   or `review`. Chat, webhook, and cron turns keep running, and no assignee
-   changes.
-2. It waits up to 3600 seconds for no running card. When cards still run, it
-   releases the hold, records `WAITING`, and installs nothing. The next push
-   tries again.
+1. It reads the running cards on every board. When a card runs, it holds
+   nothing, records `WAITING`, and exits. The next interval run tries again.
+   On a board that never has a break the commit stays pending, and
+   `report-deploy` reports its `WAITING` once.
+2. When no card runs, it holds new cards. It records the hold in
+   `<root>/auto-deploy.json`, then sets `kanban.dispatch_profiles` to an empty
+   list in the root home's `config.yaml`. Hermes' dispatcher then claims no
+   card on any board, `ready` or `review`. Chat, webhook, and cron turns keep
+   running, and no assignee changes. A card that becomes ready stays `ready`
+   and dispatches when the hold is released. The run waits one dispatcher
+   tick (`--poll`, 60 seconds), because Hermes reads the key only on its next
+   tick, then reads the running cards again. When a card started in between,
+   it releases the hold, records `WAITING`, and installs nothing.
 3. It writes its pid to `<root>/factory-gateway.lock`, resets the source
    checkout to `origin/<default>`, and runs that checkout's copy of
    `auto-deploy`, so a change to the script deploys itself.
@@ -1504,15 +1512,41 @@ last deployed one. One run does this:
 5. It checks that `check-install` reports no install line and that
    `check-settings` passes. It records `DEPLOYED` or `FAILED`, lifts its pause,
    unsets `kanban.dispatch_profiles`, and removes its gateway lock. It deploys
-   again when the branch moved during the run.
+   again when the branch moved during the run. `--timeout` bounds the install
+   and the gateway restart, 3600 seconds by default.
+
+A run records no event when an event since the last `DEPLOYED` already has the
+same outcome, commit, and detail, so an interval run that hits the same
+operator pause, fetch failure, or gateway lock reports it once. A `WAITING`
+event matches on outcome and commit only, because its detail lists the
+running cards. The next `DEPLOYED` resets the match. When the running cards
+cannot be read, the run records `FAILED` with no commit, which does not stop
+later runs from trying the same commit.
+
+Cards keep running while a deploy is pending, because `claude-session`
+compares the install with the commit `auto-deploy` recorded as `deployed`, not
+with the source checkout's `HEAD`. A merge, or a pull of the source checkout,
+does not refuse a run by itself. When the install differs from the `deployed`
+commit, for example after a deploy left half-finished or a manual deploy not
+yet recorded, the run refuses with `"precondition": "install_skew"`, and the
+`blocker-order` hook parks the card in `scheduled`. Its park reason starts
+with `Waiting for a factory deploy:`. The card counts no failure, gets no
+blocked notice, and its Linear issue stays `In Progress`. `dispatch-triage`
+returns it to the queue once the install matches the `deployed` commit. A
+person's `stopped` comment, or an unassigned card, keeps it parked. When
+`auto-deploy.json` records a `failed` or `blocked` commit, no deploy is coming
+by itself. The run is then refused as `transient` and the card is blocked,
+which tells a person. A card already waiting is released then, so its next
+run is blocked the same way.
 
 `auto-deploy` is the second automatic gateway restarter, beside
 `watch-gateway`. It never lifts a pause or unsets a key that it did not set.
 Under an operator's `hermes pause` it changes nothing and records `BLOCKED`. It
 records `BLOCKED` too when a person already set `kanban.dispatch_profiles` or
 holds the gateway lock. A run first releases what a dead run recorded as its
-own, so a crash or a reboot never leaves the cards held. The job runs at load,
-so a reboot also deploys a push that arrived while the machine was down. A
+own, so a crash or a reboot never leaves the cards held. The job runs at load
+and on its interval, so a reboot also deploys a push that arrived while the
+machine was down. launchd never starts a second copy while one runs. A
 `FAILED` commit, or a commit blocked by a run-gating line, is not tried again
 until the branch moves, or until a person runs `auto-deploy --retry`. `--status` prints the state file, and `--dry-run`
 prints the plan for the source checkout as it is and changes nothing:
@@ -1529,8 +1563,11 @@ run once, the first `DEPLOYED` of each commit once, a run-gating `BLOCKED`
 once per commit, and each manual line once while the line stays. A quiet run prints nothing, so Hermes delivers nothing.
 
 Install the scripts, the launchd job, and the cron job from the factory
-checkout. The plist sets `HERMES_HOME`, a `PATH` with `~/.local/bin`, and
-`GH_CONFIG_DIR`, and holds no secret:
+checkout. The plist sets `StartInterval` to 300, `HERMES_HOME`, a `PATH` with
+`~/.local/bin`, and `GH_CONFIG_DIR`, and holds no secret. A plist from before
+the interval is reported as `service auto deploy: does not run every 300
+seconds`. Install it again with these steps, after `launchctl bootout
+gui/$(id -u)/ai.patinaproject.factory.auto-deploy`:
 
 ```sh
 install -d <root>/scripts
@@ -2054,8 +2091,11 @@ Follow these steps by hand to fix a manual line, after a `FAILED`, `WAITING`,
 or `BLOCKED` report, or on a machine without `auto-deploy`. Before step 1,
 create `<root>/factory-gateway.lock` with your purpose and the time, so
 `auto-deploy` records `BLOCKED` instead of installing beside you. Step 9
-starts `auto-deploy` once, so it records the commit you deployed. This command
-starts it:
+starts `auto-deploy` once, so it records the commit you deployed. While cards
+run, that run records `WAITING`, and the next interval run at a break records
+the commit. Until then, a card whose run finds the install ahead of the
+`deployed` commit waits in `scheduled` and goes back to the queue once the
+commit is recorded. This command starts it:
 
 ```sh
 launchctl kickstart gui/$(id -u)/ai.patinaproject.factory.auto-deploy
@@ -2072,8 +2112,8 @@ Hermes process starts. The new helper also writes
 
 1. Pause the board and let running cards finish before anything changes. A
    run that starts while the scripts and plugins come from two commits
-   refuses as `transient`, and a card that is running keeps the old scripts it
-   loaded. `hermes pause` holds only new cards, so run it and then wait until
+   waits in `scheduled` for the deploy, and a card that is running keeps the
+   old scripts it loaded. `hermes pause` holds only new cards, so run it and then wait until
    no board has a running card:
 
    ```sh

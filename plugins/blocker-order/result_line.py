@@ -21,6 +21,13 @@ GH_LOGIN = "gh_login"
 # A park whose reason starts with this waits for the worker's gh login, not for a person. It never starts with
 # `Needs input:`, so no reply rule and no triage round treats it as a question.
 GH_LOGIN_PARK = "Waiting for the worker's gh login:"
+# claude-session reads this line from the installed copy of this file, without importing it, to tell whether the
+# installed blocker-order parks on it.
+INSTALL_SKEW = "install_skew"
+INSTALL_SKEW_PARK = "Waiting for a factory deploy:"
+# The park reason prefix of each machine condition a refusal can wait for. No reply releases such a park.
+PRECONDITION_PARKS = {GH_LOGIN: GH_LOGIN_PARK, INSTALL_SKEW: INSTALL_SKEW_PARK}
+MACHINE_PARKS = tuple(PRECONDITION_PARKS.values())
 _COMMENTS_SEEN_LINE = re.compile(r"\s*^" + COMMENTS_SEEN + r"[ \t]*(\d+)[ \t]*\Z", re.MULTILINE)
 
 
@@ -98,7 +105,8 @@ class Failed:
 class Refused:
     """`claude-session` stopped without a Claude session, on a refusal or an unexpected error. A transient
     one goes back to the queue. `precondition` names a machine condition that, once met, lets the card run:
-    `gh_login` parks the card until the worker's gh login is fresh."""
+    `gh_login` parks the card until the worker's gh login is fresh, and `install_skew` until the install matches
+    the commit auto-deploy recorded as deployed."""
 
     error: str
     transient: bool = False
@@ -117,10 +125,10 @@ Report = Union[Waiting, Done, Failed, Refused, Crashed]
 VARIANTS = (Waiting, Done, Failed, Refused, Crashed)
 
 
-def gh_login_refusal(report: Optional[Report]) -> Optional[str]:
-    """The error of a refusal that waits for the worker's gh login."""
-    if isinstance(report, Refused) and report.precondition == GH_LOGIN:
-        return report.error
+def precondition_refusal(report: Optional[Report]) -> Optional[Refused]:
+    """A refusal that waits for a machine condition, which parks the card instead of blocking it."""
+    if isinstance(report, Refused) and report.precondition in PRECONDITION_PARKS:
+        return report
     return None
 
 
