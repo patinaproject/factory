@@ -132,6 +132,12 @@ class Machine:
     def manual(where: str) -> dict:
         return {"kind": "config", "where": where, "detail": "is not declared", "remedy": {"type": "manual", "action": f"set {where} in the private record"}}
 
+    @staticmethod
+    def gating(where: str) -> dict:
+        record = Machine.manual(where)
+        record["remedy"]["gates_runs"] = True
+        return record
+
     def env(self, **extra: str) -> dict:
         return {
             **os.environ, **GIT_ENV, "PATH": f"{self.hermes.parent}{os.pathsep}{os.environ['PATH']}",
@@ -304,6 +310,35 @@ class AutoDeployTest(unittest.TestCase):
         ])
         self.assertEqual(self.m.report(), "")
         self.assertEqual(stat.S_IMODE((self.m.root / "report-deploy.json").stat().st_mode), 0o600)
+
+    def test_a_run_gating_manual_line_installs_nothing_restarts_nothing_and_records_blocked(self) -> None:
+        plugin = self.m.install("plugins", "install", "file://repo#plugins/blocker-order", restarts=True)
+        self.m.drifts([self.m.gating("service gh login refresh"), plugin])
+
+        self.deploy()
+
+        self.assertEqual(self.m.state()["outcome"], "BLOCKED")
+        self.assertIn("config service gh login refresh: is not declared", self.m.state()["detail"])
+        self.assertEqual(self.m.state()["deployed"], None)
+        self.assertNotIn(["plugins", "install", "file://repo#plugins/blocker-order"], self.m.changes())
+        self.assertEqual(self.m.calls("restart-gateway"), [])
+        self.assertTrue(self.m.released())
+
+    def test_a_target_blocked_by_a_run_gating_line_is_not_tried_again_until_origin_moves(self) -> None:
+        self.m.drifts([self.m.gating("service gh login refresh")])
+        self.deploy()
+        self.assertEqual(self.m.state()["outcome"], "BLOCKED")
+        events = self.m.state()["events"]
+        before = len(self.m.hermes_argv())
+
+        self.deploy()
+
+        self.assertEqual(self.m.hermes_argv()[before:], [])
+        self.assertEqual(self.m.state()["events"], events)
+        self.m.drifts([])
+        self.m.push("B")
+        self.deploy()
+        self.assertEqual(self.m.state()["deployed"], self.m.head)
 
     def test_cards_still_running_at_the_bound_wait_installs_nothing_and_release_the_hold(self) -> None:
         self.m.drifts([self.m.install("profile", "update", "claude-worker", "-y", step="PROFILE")])
@@ -649,6 +684,13 @@ class ReportDeployTest(unittest.TestCase):
         events += [("DEPLOYED", a, ""), ("BLOCKED", b, "a person is deploying"), ("FAILED", b, "boom")]
         self.write(events)
         self.assertEqual(self.report(), [f"auto-deploy BLOCKED at {b[:12]}: a person is deploying", f"auto-deploy FAILED at {b[:12]}: boom"])
+
+    def test_a_run_gating_blocked_outcome_is_reported_once_per_target(self) -> None:
+        a = "a" * 40
+        events = [("BLOCKED", a, "run-gating line"), ("BLOCKED", a, "run-gating line")]
+        state = {"events": [{"seq": i + 1, "outcome": o, "commit": c, "detail": d, "gates_runs": True} for i, (o, c, d) in enumerate(events)]}
+        (self.root / "auto-deploy.json").write_text(json.dumps(state))
+        self.assertEqual(self.report(), [f"auto-deploy BLOCKED at {a[:12]}: run-gating line"])
 
     def test_a_manual_line_is_reported_once_while_it_stays_and_again_when_it_returns(self) -> None:
         line = {"line": "secret X in root: is missing", "action": "ask the operator"}
