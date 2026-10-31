@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -798,11 +799,55 @@ class OwnerReviewTest(unittest.TestCase):
             [([gate.sys.executable, "/home/worker/plugins/linear-agent-session/cli.py", "review-owner", "--issue", "issue-uuid-1"], WORKSPACE)],
         )
 
+    def test_the_gates_own_command_runs_review_owner_in_a_child_without_hermes(self):
+        shim = f"""
+import json, runpy, sys, urllib.request
+
+sys.modules["hermes_cli"] = None
+
+
+class Response:
+    status = 200
+
+    def __init__(self, body):
+        self.body = json.dumps(body).encode()
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+
+def urlopen(request, timeout=None):
+    if request.full_url.endswith("/oauth/token"):
+        return Response({{"access_token": "t", "token_type": "Bearer", "expires_in": 3600, "scope": "read"}})
+    assert json.loads(request.data)["variables"] == {{"id": "issue-uuid-1"}}
+    return Response({{"data": {{"issue": {{"assignee": {{"name": "Luke", "gitHubUserId": "9"}}, "team": {{"triageResponsibility": None}}}}}}}})
+
+
+urllib.request.urlopen = urlopen
+runpy.run_path({str(Path(__file__).resolve().parents[2] / "linear-agent-session" / "cli.py")!r}, run_name="__main__")
+"""
+        modules, _ = self.read_card("```text\nlinear_issue_id: issue-uuid-1\n```")
+        with tempfile.TemporaryDirectory() as home:
+            cli = Path(home) / gate.LINEAR_CLI
+            cli.parent.mkdir(parents=True)
+            cli.write_text(shim)
+            env = {"HERMES_HOME": home, "LINEAR_CLIENT_ID": "client-id", "LINEAR_CLIENT_SECRET": "client-secret"}
+            with mock.patch.dict(os.environ, env, clear=True), modules:
+                owner = gate.linear_owner("t_1", home, gate.time.monotonic() + 20)
+        self.assertEqual(owner, {"name": "Luke", "gitHubUserId": "9"})
+
     def test_a_card_with_no_linear_issue_is_named_in_the_reason(self):
-        modules, _ = self.read_card("repo: o/r")
-        with mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), modules:
-            with self.assertRaisesRegex(gate.GateError, "^card t_1 names no linear_issue_id$"):
-                gate.linear_owner("t_1", WORKSPACE, gate.time.monotonic() + 20)
+        for body in ("repo: o/r", "note: linear_issue_id: other\nrepo: o/r"):
+            modules, _ = self.read_card(body)
+            with self.subTest(body=body), mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), modules:
+                with self.assertRaisesRegex(gate.GateError, "^card t_1 names no linear_issue_id$"):
+                    gate.linear_owner("t_1", WORKSPACE, gate.time.monotonic() + 20)
 
     def test_a_card_that_cannot_be_read_is_named_in_the_reason(self):
         for modules, reason in (
