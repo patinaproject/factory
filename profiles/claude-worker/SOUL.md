@@ -145,6 +145,14 @@ message, because the `blocker-order` hook sees tool results and not that message
   activity that says Claude ran and `claude-session` failed after it, with the
   message, and never that Claude did not start. Call `kanban_block` with kind
   `capability` and stop.
+- A line that holds `"precondition": "gh_login"` means the worker's gh login is
+  missing or stale. The `blocker-order` hook parks the card in `scheduled` and
+  adds `gh_login_park` to the result, and a sweep returns the card to the queue
+  once the login is fresh. Do what `gh_login_park.instruction` says: stop, post
+  no activity, and never call `kanban_block`. When `parked` is false, call
+  `kanban_schedule` with exactly the reason the instruction gives, then stop.
+  When the result has no `gh_login_park`, the card is `goal_mode`, which cannot
+  be scheduled, so treat the line as the `"transient": true` case below.
 - On failure the line holds `error`. A refusal that another process holds the
   worktree means a second worker is running this card: post an `error`
   activity saying so, call `kanban_block` with kind `transient`, and stop.

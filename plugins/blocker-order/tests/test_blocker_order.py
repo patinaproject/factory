@@ -42,6 +42,8 @@ class FakeBoard:
         self.rounds: list[dict] = []
         self.round_outcome: dict = {"outcome": "posted"}
         self.comments: list[tuple[str, str]] = []
+        self.goal_mode: set[str] = set()
+        self.reasons: dict[str, str] = {}
 
     def add(self, task: str, status: str = "ready", title: str = "") -> None:
         self.status[task] = status
@@ -112,9 +114,12 @@ class FakeBoard:
             self.block_kind[worker] = kind
             return json.dumps({"ok": True, "task_id": worker, "status": self.status[worker], "block_kind": kind})
         if name == "kanban_schedule":
+            if worker in self.goal_mode:
+                return json.dumps({"error": "goal_mode tasks cannot be scheduled: use kanban_block"})
             if self.status[worker] not in ("todo", "ready", "running", "blocked"):
                 return json.dumps({"error": f"could not schedule {worker} (unknown id or not in todo/ready/running/blocked)"})
             self.status[worker] = "scheduled"
+            self.reasons[worker] = args["reason"]
             return json.dumps({"ok": True, "task_id": worker, "status": "scheduled", "reason": args["reason"]})
         if name == order.ROUND_TOOL:
             self.rounds.append({**args, "status": self.status[args["task_id"]]})
@@ -336,11 +341,27 @@ class ResultLineTest(unittest.TestCase):
             "failed": result_line.Failed("claude run ended with error_during_execution (exit 0)", SESSION, outcome(None)),
             "refused": result_line.Refused("another claude-session holds /w"),
             "refused, transient": result_line.Refused("Linear token: the broker is busy", transient=True),
+            "refused, waiting for the gh login": result_line.Refused(
+                "the worker's gh login is stale", transient=True, precondition="gh_login"
+            ),
             "crashed": result_line.Crashed("TypeError: unexpected keyword argument 'progress'", "s-1"),
         }
         for name, written in reports.items():
             with self.subTest(name):
                 self.assertEqual(result_line.last(f"log line\n{result_line.line(written)}\n"), written)
+
+    def test_a_refusal_without_a_precondition_writes_no_such_key(self):
+        written = result_line.Refused("Linear token: busy", transient=True)
+        self.assertEqual(json.loads(result_line.line(written)), {"error": "Linear token: busy", "transient": True})
+        self.assertEqual(
+            json.loads(result_line.line(result_line.Refused("stale", True, "gh_login"))),
+            {"error": "stale", "transient": True, "precondition": "gh_login"},
+        )
+        self.assertIsNone(result_line.gh_login_refusal(written))
+        self.assertEqual(result_line.gh_login_refusal(result_line.Refused("stale", True, "gh_login")), "stale")
+
+    def test_a_gh_login_park_never_starts_with_needs_input(self):
+        self.assertFalse(result_line.GH_LOGIN_PARK.startswith(result_line.NEEDS_INPUT))
 
     def test_a_crashed_line_is_neither_refused_nor_failed(self):
         written = result_line.Crashed("OSError: boom", "s-1")
@@ -608,6 +629,88 @@ class TriageRoundTest(Hooked):
 def blocker(identifier: str, state: str = "started") -> dict:
     return {"id": f"uuid-{identifier}", "identifier": identifier, "gitBranchName": f"{identifier.lower()}-work",
             "stateType": state, "delegate": "app-user", "delegatedToSelf": True}
+
+
+class GhLoginTest(Hooked):
+    STOPPED = (
+        "The worker's gh login is missing or stale, so this card waits in scheduled and goes back to the queue "
+        "once the login is fresh. Stop now: call no other tool, do not call kanban_block, do not post an "
+        "activity, and do not run claude-session again."
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.error = "the worker's gh login: /gh/token-expiry.json cannot be read (FileNotFoundError)"
+        self.line = result_line.line(result_line.Refused(self.error, True, "gh_login"))
+        self.reason = f"{result_line.GH_LOGIN_PARK} {self.error}"
+
+    def refuse(self, task: str, board: str) -> dict | None:
+        os.environ["HERMES_KANBAN_BOARD"] = board
+        self.board.add(task, "ready")
+        self.board.start(task)
+        rewritten = self.call(process_result(self.line), task=task)
+        return None if rewritten is None else json.loads(rewritten)
+
+    def test_cards_on_every_board_are_parked_and_none_is_blocked_or_reported_to_linear(self):
+        for task, board in (("t_1", "triage"), ("t_2", "default"), ("t_3", "other")):
+            outcome = self.refuse(task, board)
+            self.assertEqual(outcome["gh_login_park"], {"parked": True, "instruction": self.STOPPED})
+            self.assertEqual(outcome["output"], f"{self.line}\n")
+            self.assertEqual(self.board.status[task], "scheduled")
+            self.assertEqual(self.board.reasons[task], self.reason)
+        self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule"] * 3)
+        self.assertEqual((self.board.rounds, self.board.comments), ([], []))
+        self.assertEqual(os.environ[order.STOP_NUDGE], "off")
+
+    def test_the_same_line_read_twice_parks_once(self):
+        self.refuse("t_1", "default")
+        self.call(process_result(self.line), task="t_1")
+        self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule"])
+
+    def test_a_failed_park_tells_the_worker_to_schedule_and_never_block(self):
+        self.board.fail["kanban_schedule"] = "could not schedule t_1"
+
+        outcome = self.refuse("t_1", "default")["gh_login_park"]
+
+        self.assertEqual(outcome["parked"], False)
+        self.assertEqual(outcome["instruction"], (
+            "The blocker-order hook could not park this card: could not schedule t_1. Call kanban_schedule with "
+            f"exactly this reason, then stop: {json.dumps(self.reason)}. Do not call kanban_block and do not run "
+            "claude-session again."
+        ))
+        self.assertEqual(self.board.status["t_1"], "running")
+        self.assertNotIn(order.STOP_NUDGE, os.environ)
+
+    def test_a_goal_mode_card_is_left_to_the_workers_transient_block(self):
+        self.board.goal_mode.add("t_1")
+
+        self.assertIsNone(self.refuse("t_1", "default"))
+
+        self.assertEqual(self.board.status["t_1"], "running")
+        self.assertNotIn(order.STOP_NUDGE, os.environ)
+
+    def test_a_refusal_without_the_precondition_is_left_to_the_worker(self):
+        self.line = result_line.line(result_line.Refused("Linear token: busy", transient=True))
+        self.assertIsNone(self.refuse("t_1", "default"))
+        self.assertEqual(self.board.calls, [])
+
+    def test_the_workers_own_park_after_a_failed_one_stops_the_nudge_and_posts_nothing(self):
+        hooks = []
+
+        class Ctx:
+            dispatch_tool = self.board.dispatch_tool
+
+            def register_hook(_, name, callback):
+                hooks.append(callback)
+
+        order.register(Ctx())
+        os.environ["HERMES_KANBAN_BOARD"] = "triage"
+        ok = json.dumps({"ok": True, "task_id": "t_1", "status": "scheduled"})
+
+        self.assertIsNone(hooks[0](tool_name="kanban_schedule", args={"reason": self.reason}, result=ok))
+
+        self.assertEqual(os.environ[order.STOP_NUDGE], "off")
+        self.assertEqual((self.board.calls, self.board.rounds, self.board.comments), ([], [], []))
 
 
 class Factory(Hooked):

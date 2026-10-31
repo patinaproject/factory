@@ -384,6 +384,18 @@ class ReleaseRuleTest(CardTransitionTest):
     def test_a_card_with_no_park_event_is_released_by_any_reply(self):
         self.assertTrue(self.released([], []))
 
+    def test_a_reply_never_releases_a_park_that_waits_for_the_gh_login(self):
+        login = {"kind": "scheduled", "created_at": 500, "run_id": 1,
+                 "payload": {"reason": "Waiting for the worker's gh login: the login is stale"}}
+        self.assertFalse(self.released(["Asked."], [login]))
+        self.assertFalse(self.released(["Asked."], [park(0), login]))
+        self.assertEqual(self.state_changes(), [])
+
+    def test_a_question_parked_after_a_login_park_is_released_by_a_reply_again(self):
+        login = {"kind": "scheduled", "created_at": 100, "run_id": 1,
+                 "payload": {"reason": "Waiting for the worker's gh login: the login is stale"}}
+        self.assertTrue(self.released(["Asked."], [login, park(1)]))
+
 
 class ParkWaitingTest(CardTransitionTest):
     def board(self, block_kind: str) -> None:

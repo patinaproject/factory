@@ -25,6 +25,13 @@ differ by run, so no step of its prompt is what makes that change happen: the to
 - On every other board it blocks the card with kind `needs_input` and that result as the reason, and adds
   `needs_input_block`.
 
+A report with `"precondition": "gh_login"` is a refusal because the worker's gh login is missing or stale. On
+every board the hook parks the card in `scheduled` with a reason that starts with `result_line.GH_LOGIN_PARK`,
+which never starts with `Needs input:`, so no reply releases it and no triage round posts it. The hook blocks
+nothing, makes no Linear activity call, and writes no `NOT_POSTED` comment. `card_transition.py` releases the
+card once the login has at least 15 minutes left. Hermes refuses to schedule a `goal_mode` card, and that
+card keeps the transient block the worker's prompt gives a `"transient": true` refusal.
+
 After any successful park on the `triage` board whose reason starts with `Needs input:`, its own or one the
 worker made with `kanban_schedule`, the hook posts the round once per task and run through
 `linear-agent-session`'s `linear_triage_round` tool, which no model sees. It posts after the park, so nobody is
@@ -54,6 +61,7 @@ POSTED, FAILED, UNKNOWN = "posted", "failed", "unknown"
 # `check-install` reports a waiting triage card with a comment that starts with this after its newest park.
 NOT_POSTED = "Triage round not posted:"
 CYCLE_REFUSAL = "would create a cycle"
+GOAL_MODE_REFUSAL = "goal_mode tasks cannot be scheduled"
 # Hermes' turn-end guard looks for a kanban_block call in the transcript, not on the board. Without this,
 # it would push the worker to block a card that this hook already moved to todo.
 STOP_NUDGE = "HERMES_KANBAN_STOP_NUDGE"
@@ -95,6 +103,26 @@ def block_for_input(reason: str, dispatch: Dispatch) -> dict:
     return {"blocked": True, "instruction": (
         "Claude needs input, so the blocker-order hook blocked this card with kind needs_input and the whole "
         "result as the reason. Stop now: call no other tool and do not run claude-session again."
+    )}
+
+
+def park_for_login(error: str, dispatch: Dispatch) -> Optional[dict]:
+    """None when Hermes refuses to schedule a `goal_mode` card, which the worker blocks as it always did."""
+    reason = f"{result_line.GH_LOGIN_PARK} {error}"
+    answer = _call(dispatch, SCHEDULE_TOOL, {"reason": reason})
+    if not answer.get("ok"):
+        if GOAL_MODE_REFUSAL in str(answer.get("error")):
+            return None
+        return {"parked": False, "instruction": (
+            f"The blocker-order hook could not park this card: {answer.get('error')}. Call kanban_schedule with "
+            f"exactly this reason, then stop: {json.dumps(reason)}. Do not call kanban_block and do not run "
+            "claude-session again."
+        )}
+    os.environ[STOP_NUDGE] = "off"
+    return {"parked": True, "instruction": (
+        "The worker's gh login is missing or stale, so this card waits in scheduled and goes back to the queue "
+        "once the login is fresh. Stop now: call no other tool, do not call kanban_block, do not post an "
+        "activity, and do not run claude-session again."
     )}
 
 
@@ -142,18 +170,30 @@ def post_round(task: str, run: Optional[str], reason: str, dispatch: Dispatch) -
 def worker_park(task: str, run: Optional[str], args: Any, result: Any, dispatch: Dispatch) -> Optional[str]:
     """The worker's own `kanban_schedule` of a triage round, which the hook told it to make when its park failed."""
     reason = args.get("reason") if isinstance(args, dict) else None
-    if os.environ.get("HERMES_KANBAN_BOARD") != TRIAGE_BOARD or not isinstance(reason, str):
+    if not isinstance(reason, str):
+        return None
+    if reason.startswith(result_line.GH_LOGIN_PARK):
+        if landed(result):
+            os.environ[STOP_NUDGE] = "off"
+        return None
+    if os.environ.get("HERMES_KANBAN_BOARD") != TRIAGE_BOARD:
         return None
     if not reason.lstrip().startswith(result_line.NEEDS_INPUT):
         return None
+    answer = landed(result)
+    if answer is None:
+        return None
+    os.environ[STOP_NUDGE] = "off"
+    return json.dumps({**answer, "triage_round": parked(post_round(task, run, reason, dispatch))})
+
+
+def landed(result: Any) -> Optional[dict]:
+    """A tool result that answered `ok`."""
     try:
         answer = json.loads(result)
     except (TypeError, ValueError):
         return None
-    if not isinstance(answer, dict) or not answer.get("ok"):
-        return None
-    os.environ[STOP_NUDGE] = "off"
-    return json.dumps({**answer, "triage_round": parked(post_round(task, run, reason, dispatch))})
+    return answer if isinstance(answer, dict) and answer.get("ok") else None
 
 
 def _call(dispatch: Dispatch, tool: str, args: dict) -> dict:
@@ -230,6 +270,15 @@ def make_hook(ctx: Any):
                 _handled[key] = json.dumps({**payload, "triage_round": park_round(task, run, marked, ctx.dispatch_tool)})
             elif key not in _handled:
                 _handled[key] = json.dumps({**payload, "needs_input_block": block_for_input(reason, ctx.dispatch_tool)})
+            return _handled[key]
+        error = result_line.gh_login_refusal(report)
+        if error is not None:
+            key = (task, run, error)
+            if key not in _handled:
+                parked = park_for_login(error, ctx.dispatch_tool)
+                if parked is None:
+                    return None
+                _handled[key] = json.dumps({**payload, "gh_login_park": parked})
             return _handled[key]
         cards = result_line.waiting_on(report)
         if cards is None:
