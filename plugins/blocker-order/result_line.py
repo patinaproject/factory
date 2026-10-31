@@ -25,8 +25,11 @@ GH_LOGIN_PARK = "Waiting for the worker's gh login:"
 # installed blocker-order parks on it.
 INSTALL_SKEW = "install_skew"
 INSTALL_SKEW_PARK = "Waiting for a factory deploy:"
+NEEDS_BRIEF = "needs_brief"
+NEEDS_BRIEF_PARK = "Waiting for triage:"
 # The park reason prefix of each machine condition a refusal can wait for. No reply releases such a park.
-PRECONDITION_PARKS = {GH_LOGIN: GH_LOGIN_PARK, INSTALL_SKEW: INSTALL_SKEW_PARK}
+# claude-session sends a precondition only when its key is here, so an older copy blocks no card on a new key.
+PRECONDITION_PARKS = {GH_LOGIN: GH_LOGIN_PARK, INSTALL_SKEW: INSTALL_SKEW_PARK, NEEDS_BRIEF: NEEDS_BRIEF_PARK}
 MACHINE_PARKS = tuple(PRECONDITION_PARKS.values())
 _COMMENTS_SEEN_LINE = re.compile(r"\s*^" + COMMENTS_SEEN + r"[ \t]*(\d+)[ \t]*\Z", re.MULTILINE)
 
@@ -105,8 +108,8 @@ class Failed:
 class Refused:
     """`claude-session` stopped without a Claude session, on a refusal or an unexpected error. A transient
     one goes back to the queue. `precondition` names a machine condition that, once met, lets the card run:
-    `gh_login` parks the card until the worker's gh login is fresh, and `install_skew` until the install matches
-    the commit auto-deploy recorded as deployed."""
+    `gh_login` parks the card until the worker's gh login is fresh, `install_skew` until the install matches
+    the commit auto-deploy recorded as deployed, and `needs_brief` until triage writes the issue's Agent brief."""
 
     error: str
     transient: bool = False

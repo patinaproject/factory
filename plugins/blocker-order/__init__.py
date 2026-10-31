@@ -32,8 +32,12 @@ nothing, makes no Linear activity call, and writes no `NOT_POSTED` comment. `car
 card once the login has at least 15 minutes left. A report with `"precondition": "install_skew"` is a refusal
 because the install differs from the commit auto-deploy recorded as deployed. The hook parks it the same way,
 with a reason that starts with `result_line.INSTALL_SKEW_PARK`, and `card_transition.py` releases the card
-once the install matches that commit. Hermes refuses to schedule a `goal_mode` card, and that
-card keeps the transient block the worker's prompt gives a `"transient": true` refusal.
+once the install matches that commit. A report with `"precondition": "needs_brief"` is a refusal because the
+issue carries `ready-for-agent` but has no `<ID> Agent brief` Document. The hook parks it with a reason that
+starts with `result_line.NEEDS_BRIEF_PARK`, and `card_transition.py` queues one triage card for the issue and
+releases the card once the brief exists or the issue no longer carries the label. Hermes refuses to schedule a
+`goal_mode` card, and that card keeps the transient block the worker's prompt gives a `"transient": true`
+refusal.
 
 After any successful park on the `triage` board whose reason starts with `Needs input:`, its own or one the
 worker made with `kanban_schedule`, the hook posts the round once per task and run through
@@ -120,6 +124,11 @@ PRECONDITION_PARKED = {
         "install_skew_park",
         "The factory's install differs from the deployed commit, so this card waits in scheduled for a factory "
         "deploy and goes back to the queue once the install matches.",
+    ),
+    result_line.NEEDS_BRIEF: (
+        "needs_brief_park",
+        "The issue has no Agent brief yet, so this card waits in scheduled while triage writes it and goes back to "
+        "the queue once the brief exists.",
     ),
 }
 
