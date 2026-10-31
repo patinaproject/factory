@@ -6,7 +6,8 @@ harness; only the model endpoint changes. Hermes' own agent loop can use the
 same proxy through the proxy provider in part 4 of the skill. The endpoint is
 optional. An operator with a Console API key and no proxy can instead put
 Claude Code and Hermes on `api.anthropic.com` with the Anthropic API provider
-in part 4. That case leaves `base_url` empty and sets `auth_token_env`. When
+in part 4. That case leaves `base_url` empty and sets `auth_token_env`, so
+Claude Code runs on the Console API key instead of its own login. When
 `claude_session` is empty, Claude Code uses whatever its user configuration
 says, which is its own login unless `~/.claude/settings.json` has an `env`
 block.
