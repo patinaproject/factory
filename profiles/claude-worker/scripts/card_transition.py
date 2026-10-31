@@ -556,12 +556,13 @@ def wait_for_issue(card: Card, board: str, show: dict, url: str, closed: Callabl
     park = [event for event in show["events"] if event["kind"] == "scheduled"][-1]
     after = [comment["body"] for comment in show["comments"] if comment["created_at"] >= park["created_at"]]
     why = "a person replied" if any(reply_inbox.is_reply(body) for body in after) else closed(url)
+    noted = f"{plugin_module('blocker-order', 'result_line').ISSUE_NOTED} {url}"
     if why is not None:
-        note = f"{why[0].upper()}{why[1:]} while this card waited for {url}."
+        # The note starts with the marker, so a run released on the first pass still sees it parked here once.
+        note = f"{noted}, and {why}."
         if note not in after:
             card.comment(note)
         return "released" if release_parked(card, board) else "waiting"
-    noted = f"{plugin_module('blocker-order', 'result_line').ISSUE_NOTED} {url}"
     if not any(body.startswith(noted) for body in after):
         card.comment(f"{noted}. This card continues once the issue closes or a person replies.")
         post(card_field(task["body"], "linear_agent_session_id"),

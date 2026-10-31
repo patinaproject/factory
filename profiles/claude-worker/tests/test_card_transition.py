@@ -891,7 +891,7 @@ class IssueWaitTest(BriefHarness):
         self.assertEqual(swept, {"released": ["t_default", "t_triage"], "failed": {}})
         self.assertEqual(self.statuses()["t_default"], ("ready", "claude-worker"))
         self.assertEqual(self.statuses()["t_triage"], ("ready", None))
-        note = f"{reason} while this card waited for {ISSUE}."
+        note = f"Parked on issue {ISSUE}, and {reason}."
         self.assertEqual(self.comments(), [["default", "comment", "t_default", note], ["triage", "comment", "t_triage", note]])
 
     def test_an_open_issue_keeps_the_card_parked_and_posts_one_thought_across_sweeps(self) -> None:
@@ -926,18 +926,18 @@ class IssueWaitTest(BriefHarness):
 
     def test_an_issue_closed_as_completed_releases_the_card_on_both_boards(self) -> None:
         self.read_issue({"state": "CLOSED", "stateReason": "COMPLETED"})
-        self.assert_released_on_both_boards("The issue closed as completed")
+        self.assert_released_on_both_boards("the issue closed as completed")
 
     def test_an_issue_closed_as_not_planned_releases_the_card(self) -> None:
         self.read_issue({"state": "CLOSED", "stateReason": "NOT_PLANNED"})
-        self.assert_released_on_both_boards("The issue closed as not planned")
+        self.assert_released_on_both_boards("the issue closed as not planned")
 
     def test_an_issue_that_is_not_found_releases_the_card(self) -> None:
         self.read_issue(NOT_FOUND)
-        self.assert_released_on_both_boards("The issue was not found")
+        self.assert_released_on_both_boards("the issue was not found")
 
     def test_a_reply_newer_than_the_park_releases_the_card_with_an_open_issue(self) -> None:
-        self.assert_released_on_both_boards("A person replied", comments=("Linear reply: go on without it",))
+        self.assert_released_on_both_boards("a person replied", comments=("Linear reply: go on without it",))
         self.assertEqual(self.gh_calls(), [])
 
     def test_a_reply_older_than_the_park_does_not_release_the_card(self) -> None:
