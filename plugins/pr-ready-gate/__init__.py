@@ -291,10 +291,15 @@ def re_request_reviews(pr: dict, workspace: str, deadline: float) -> tuple[list[
 
 
 def linear_owner(task_id: str, workspace: str, deadline: float) -> Optional[dict]:
-    from hermes_cli import kanban_db, kanban_db_connect
+    try:
+        from hermes_cli import kanban_db, kanban_db_connect
 
-    with kanban_db_connect.connect_closing(board=os.environ.get("HERMES_KANBAN_BOARD")) as conn:
-        task = kanban_db.get_task(conn, task_id)
+        with kanban_db_connect.connect_closing(board=os.environ.get("HERMES_KANBAN_BOARD")) as conn:
+            task = kanban_db.get_task(conn, task_id)
+    except Exception as exc:
+        raise GateError(f"could not read card {task_id}: {type(exc).__name__}: {exc}")
+    if task is None:
+        raise GateError(f"card {task_id} is not on the board")
     match = ISSUE_LINE.search(task.body or "")
     if match is None:
         raise GateError(f"card {task_id} names no linear_issue_id")

@@ -761,7 +761,7 @@ class OwnerReviewTest(unittest.TestCase):
         self.assertEqual((lookups, self.posts(shell), result), ([], [], None))
 
     def read_card(self, body):
-        task = types.SimpleNamespace(body=body)
+        task = None if body is None else types.SimpleNamespace(body=body)
         seen = []
 
         class Connection:
@@ -803,6 +803,15 @@ class OwnerReviewTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), modules:
             with self.assertRaisesRegex(gate.GateError, "^card t_1 names no linear_issue_id$"):
                 gate.linear_owner("t_1", WORKSPACE, gate.time.monotonic() + 20)
+
+    def test_a_card_that_cannot_be_read_is_named_in_the_reason(self):
+        for modules, reason in (
+            (mock.patch.dict(sys.modules, {"hermes_cli": None}), "^could not read card t_1: ModuleNotFoundError: "),
+            (self.read_card(None)[0], "^card t_1 is not on the board$"),
+        ):
+            with self.subTest(reason=reason), mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), modules:
+                with self.assertRaisesRegex(gate.GateError, reason):
+                    gate.linear_owner("t_1", WORKSPACE, gate.time.monotonic() + 20)
 
     def test_a_cli_error_reaches_the_reason(self):
         def run(cmd, **_):
