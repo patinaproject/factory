@@ -65,7 +65,8 @@ class InboxFileTest(InboxCase):
 
         self.assertEqual(stat.S_IMODE(self.inbox.stat().st_mode), 0o600)
         self.assertEqual(reply_inbox.load(self.inbox), {
-            "session_id": "next-session", "activity_at": None, "answer_command": COMMAND, "replies": [],
+            "session_id": "next-session", "started_at": None, "activity_at": None,
+            "answer_command": COMMAND, "replies": [],
         })
 
     def test_parallel_writers_lose_no_update(self) -> None:
@@ -140,44 +141,91 @@ class WatchTest(InboxCase):
         working.tick()
         self.assertEqual(self.states(), ["pending"])
 
-    def test_keepalive_posts_20_minutes_after_the_reply_and_not_before(self) -> None:
-        clock, posts = Clock(1000.0), []
-        watch = self.watch(self.card(comment(300, "default", "Linear reply: hi")), posts, clock)
+    def test_starting_the_watch_records_the_start_time_and_the_first_activity(self) -> None:
+        with self.watch(self.card(), [], Clock(1000.0)):
+            inbox = reply_inbox.load(self.inbox)
 
-        watch.tick()
-        clock.now += 19 * 60
-        watch.tick()
-        self.assertEqual(posts, [])
-        clock.now += 60
-        watch.tick()
-        self.assertEqual(len(posts), 1)
-        self.assertEqual(posts[0][0], SESSION)
-        clock.now += 19 * 60
-        watch.tick()
-        self.assertEqual(len(posts), 1)
-        clock.now += 60
-        watch.tick()
-        self.assertEqual(len(posts), 2)
+        self.assertEqual((inbox["started_at"], inbox["activity_at"]), (1000.0, 1000.0))
+
+    def test_a_run_with_no_reply_posts_a_keepalive_after_20_minutes_and_not_before(self) -> None:
+        clock, posts = Clock(1000.0), []
+        with self.watch(self.card(), posts, clock) as watch:
+            clock.now += 19 * 60
+            watch.tick()
+            self.assertEqual(posts, [])
+            clock.now += 60
+            watch.tick()
+            self.assertEqual(posts, [(SESSION, "The run is still working on the card. It has run for 20 minutes.")])
+            clock.now += 19 * 60
+            watch.tick()
+            self.assertEqual(len(posts), 1)
+            clock.now += 60
+            watch.tick()
+            self.assertEqual(posts[1][1], "The run is still working on the card. It has run for 40 minutes.")
+
+    def test_the_keepalive_states_whole_minutes_rounded_down(self) -> None:
+        clock, posts = Clock(1000.0), []
+        with self.watch(self.card(), posts, clock) as watch:
+            clock.now += 20 * 60 + 59
+            watch.tick()
+
+        self.assertEqual(posts[0][1], "The run is still working on the card. It has run for 20 minutes.")
+
+    def test_a_reply_awaiting_an_answer_changes_the_keepalive_until_it_is_answered(self) -> None:
+        clock, posts = Clock(1000.0), []
+        with self.watch(self.card(comment(300, "default", "Linear reply: hi")), posts, clock) as watch:
+            watch.tick()
+            clock.now += 20 * 60
+            watch.tick()
+            reply_inbox.update(self.inbox, reply_inbox.deliver)
+            reply_inbox.update(self.inbox, lambda inbox: reply_inbox.answered(inbox, clock.now))
+            clock.now += 20 * 60
+            watch.tick()
+
+        self.assertEqual(posts, [
+            (SESSION, "The run is still working on the card, and it has your reply. It has run for 20 minutes."),
+            (SESSION, "The run is still working on the card. It has run for 40 minutes."),
+        ])
+
+    def test_a_new_reply_restarts_the_20_minute_count(self) -> None:
+        clock, posts = Clock(1000.0), []
+        card = self.card()
+        with self.watch(card, posts, clock) as watch:
+            clock.now += 15 * 60
+            card["comments"].append(comment(300, "default", "Linear reply: hi"))
+            watch.tick()
+            clock.now += 19 * 60
+            watch.tick()
+            self.assertEqual(posts, [])
+            clock.now += 60
+            watch.tick()
+
+        self.assertEqual(posts, [
+            (SESSION, "The run is still working on the card, and it has your reply. It has run for 35 minutes."),
+        ])
+
+    def test_a_session_id_found_after_the_start_gets_the_first_keepalive(self) -> None:
+        clock, posts = Clock(1000.0), []
+        card = self.card(body="no session yet")
+        reply_inbox.reset(self.inbox, COMMAND, None)
+        with self.watch(card, posts, clock) as watch:
+            clock.now += 21 * 60
+            watch.tick()
+            self.assertEqual(posts, [])
+            card["task"]["body"] = "linear_agent_session_id: found"
+            watch.tick()
+
+        self.assertEqual(posts, [("found", "The run is still working on the card. It has run for 21 minutes.")])
 
     def test_an_answer_resets_the_keepalive_clock(self) -> None:
         clock, posts = Clock(1000.0), []
-        watch = self.watch(self.card(comment(300, "default", "Linear reply: hi")), posts, clock)
-        watch.tick()
-        clock.now += 15 * 60
-        reply_inbox.update(self.inbox, lambda inbox: reply_inbox.answered(inbox, clock.now))
+        with self.watch(self.card(comment(300, "default", "Linear reply: hi")), posts, clock) as watch:
+            watch.tick()
+            clock.now += 15 * 60
+            reply_inbox.update(self.inbox, lambda inbox: reply_inbox.answered(inbox, clock.now))
 
-        clock.now += 19 * 60
-        watch.tick()
-
-        self.assertEqual(posts, [])
-
-    def test_a_run_with_no_reply_posts_no_keepalive(self) -> None:
-        clock, posts = Clock(), []
-        watch = self.watch(self.card(), posts, clock)
-
-        watch.tick()
-        clock.now += 3 * 3600
-        watch.tick()
+            clock.now += 19 * 60
+            watch.tick()
 
         self.assertEqual(posts, [])
 
@@ -195,11 +243,12 @@ class WatchTest(InboxCase):
             self.inbox, lambda: self.card(comment(300, "default", "Linear reply: hi")), post, key,
             start_keys=[], own="x", clock=clock,
         )
-        watch.tick()
-        clock.now += 20 * 60
+        with watch:
+            watch.tick()
+            clock.now += 20 * 60
 
-        watch.tick()
-        watch.tick()
+            watch.tick()
+            watch.tick()
 
         self.assertEqual(len(posts), 1)
 
