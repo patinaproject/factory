@@ -793,6 +793,7 @@ def require_ready(client, issue_id: str, identifier: str) -> None:
     except linear.CLIENT_ERRORS as error:
         raise Refusal(f"reading the labels of Linear issue {identifier} failed: {error}") from None
     if linear.role_key(READY_LABEL) in map(linear.role_key, labels):
+        require_brief(client, issue_id, identifier)
         return
     try:
         live = client.role_labels(issue_id).get(READY_LABEL)
@@ -803,6 +804,30 @@ def require_ready(client, issue_id: str, identifier: str) -> None:
         f"Linear issue {identifier} does not carry {wanted}, so its implementation card does not start; "
         "it starts once the issue passes the readiness check"
     )
+
+
+def require_brief(client, issue_id: str, identifier: str) -> None:
+    linear = plugin_module("linear-agent-session", "linear")
+
+    try:
+        titles = [document["title"] for document in client.issue_documents(issue_id)["documents"]]
+    except (*linear.CLIENT_ERRORS, OSError) as error:
+        raise Refusal(f"reading the Documents of Linear issue {identifier} failed: {error}") from None
+    brief = f"{identifier} Agent brief"
+    if brief not in titles:
+        raise Refusal(
+            f"Linear issue {identifier} has no Document titled `{brief}`, so its implementation card does not "
+            "start; it starts after triage writes the brief"
+        )
+
+
+def issue_state_type(client, issue_id: str, identifier: str) -> str:
+    linear = plugin_module("linear-agent-session", "linear")
+
+    try:
+        return client.get_issue(issue_id)["stateType"]
+    except (*linear.CLIENT_ERRORS, OSError) as error:
+        raise Refusal(f"reading the status of Linear issue {identifier} failed: {error}") from None
 
 
 def triage_activity(client, issue_id: str, result: str | None) -> str | None:
@@ -1189,6 +1214,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         require_mcp_tokens(servers)
         mcp = mcp_config(servers)
         if triage:
+            started_in_triage = issue_state_type(client, args.issue_id, args.issue_identifier) == "triage"
             system_prompt = TRIAGE_SYSTEM_PROMPT.format(
                 identifier=args.issue_identifier,
                 triage_playbook=triage_playbook(),
@@ -1287,7 +1313,12 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
             return 1, result_line.Failed(error, session, outcome, blocker_error)
         if not triage:
             return 0, result_line.Done(session, outcome, blocker_error)
-        return 0, result_line.Done(session, outcome, blocker_error, triage_activity(client, args.issue_id, outcome.result))
+        activity = triage_activity(client, args.issue_id, outcome.result)
+        # An issue that started in Triage reaches its card through the move to Todo the triage run makes.
+        # Any other issue sees no event, so a new session makes Linear send the app one.
+        if activity == "thought" and not started_in_triage:
+            client.create_session_on_issue(args.issue_id)
+        return 0, result_line.Done(session, outcome, blocker_error, activity)
     except Exception as error:
         raise AfterClaude(error, session_id) from error
 

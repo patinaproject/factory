@@ -16,8 +16,8 @@ the gate, or read the reply yourself. Its fields:
 - `issue`: the issue's `id`, `identifier`, and `state_type`.
 - `delegated`: whether the issue is delegated to the agent app user
   `<<app_user_id>>`.
-- `gate`: `pass`, `ready-for-human`, or `not-ready`. The `action` already
-  applies it.
+- `gate`: `pass`, `ready-for-human`, `needs-brief`, or `not-ready`. The
+  `action` already applies it.
 - `card`: the issue's implementation card with its `id` and `status`, or null.
 - `triage_card`: the issue's live triage card with its `id` and `status`, or
   null.

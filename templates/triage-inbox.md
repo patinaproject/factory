@@ -9,11 +9,15 @@ Run every `hermes kanban` command for a triage card with `--board triage`
 right after `kanban`, and pass `board: triage` to `kanban_comment`.
 
 1. The issue's triage card is the intent's `triage_card`.
-2. If the issue's `state_type` is not `triage`, it left Triage: a person
-   moved it or closed it, or its own triage card passed it and moved it to
-   Todo. When a triage card exists and its status is not `running`, archive
-   it with `<<archive_card>> --board triage <task id>`. Leave a `running`
-   card to its worker, which ends it. Then stop this section.
+2. If the issue's `state_type` is not `triage` and this event changed its
+   status (the previous status above is not a dotted name in braces), it left
+   Triage: a person moved it or closed it, or its own triage card passed it
+   and moved it to Todo. When a triage card exists and its status is not
+   `running`, archive it with `<<archive_card>> --board triage <task id>`.
+   Leave a `running` card to its worker, which ends it. Then stop this
+   section. On any other event for an issue outside Triage, leave its triage
+   card alone, because the delegation gate can create one there, and stop this
+   section.
 3. If a triage card exists and its status is `done`, the issue is back in
    Triage after an earlier triage. Archive that card as step 2 says and
    continue at step 4. If a triage card exists with any other status, the
