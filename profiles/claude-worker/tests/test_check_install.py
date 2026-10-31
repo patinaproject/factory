@@ -170,6 +170,7 @@ REMEDY_CLASSES = (
     ("kanban capacity", "", "manual"),
     ("stranded triage card", "", "advisory"),
     ("stranded triage card check", "", "advisory"),
+    ("gh login", "", "manual"),
     ("guarded card", "", "manual"),
     ("guarded card check", "", "advisory"),
     ("waiting triage card", "", "manual"),
@@ -259,6 +260,7 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, "plugins/work/__init__.py", "# work\n")
         self.install(self.root, "plugins/webhook-retry/__init__.py", "# retry\n")
         self.install(self.worker, "SOUL.md", "soul\n")
+        self.expiry(time.time() + 3600)
         self.install(self.worker, "scripts/x", "#!/bin/sh\n")
         self.install(self.worker, "config.yaml", "model: local\n")
         self.install(
@@ -319,6 +321,13 @@ class CheckInstallTest(unittest.TestCase):
         self_hosted = {"issuer": self.issuer.as_uri() if issuer is None else issuer, "client_id": "cid", **self_hosted}
         config = {"public_url": public_url, "oauth": {"client_id": "", "self_hosted": self_hosted}}
         self.install(self.root, "installed-dashboard.json", json.dumps(config))
+
+    def expiry(self, expires_at: float | str | None) -> None:
+        path = self.worker / "gh" / "token-expiry.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)
+        if expires_at is not None:
+            path.write_text(expires_at if isinstance(expires_at, str) else json.dumps({"expires_at": expires_at}))
 
     def run_check(self, *args: str) -> subprocess.CompletedProcess:
         env = {**os.environ, **self.launchd.env, "HERMES_HOME": str(self.worker), "HERMES_BIN": str(self.hermes)}
@@ -397,9 +406,35 @@ class CheckInstallTest(unittest.TestCase):
                 "remedy": {
                     "type": "manual",
                     "action": "ask the operator to store the heartbeat URL, mode 600, as part 12's checkpoint describes",
+                    "gates_runs": False,
                 },
             },
         ])
+
+    def test_a_missing_login_job_gates_runs_and_a_stale_expiry_does_not(self) -> None:
+        self.launchd.gh_login.unlink()
+        self.expiry(time.time() + 60)
+
+        self.check()
+
+        records = {record["kind"]: record["remedy"] for record in json.loads(self.raw)}
+        self.assertEqual(set(records), {"service"})
+        self.assertTrue(records["service"]["gates_runs"])
+
+        self.launchd.plist(
+            f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/{GH_LOGIN_LABEL}.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS,
+        )
+        for expiry in (None, "{not json", time.time() + 60, time.time() - 60):
+            with self.subTest(expiry=expiry):
+                self.expiry(expiry)
+                self.check()
+                [record] = json.loads(self.raw)
+                self.assertEqual(record["kind"], "gh login")
+                self.assertEqual(record["where"], str(self.worker / "gh"))
+                self.assertEqual(record["remedy"]["type"], "manual")
+                self.assertFalse(record["remedy"]["gates_runs"])
+        self.expiry(time.time() + 3600)
+        self.assertEqual(self.check(), (0, ""))
 
     def test_a_differing_cron_job_is_edited_in_place(self) -> None:
         self.cron(self.worker, [

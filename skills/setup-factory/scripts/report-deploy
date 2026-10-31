@@ -32,6 +32,7 @@ def report(state: dict, reported: dict) -> tuple:
     events = [event for event in state.get("events") or [] if isinstance(event, dict) and isinstance(event.get("seq"), int)]
     seen = reported["seq"] if events and reported["seq"] <= events[-1]["seq"] else 0
     deployed = list(reported["deployed"])
+    blocked = list(reported["blocked"])
     lines = []
     for event in events:
         if event["seq"] <= seen:
@@ -41,6 +42,10 @@ def report(state: dict, reported: dict) -> tuple:
             if commit not in deployed:
                 lines.append(f"auto-deploy deployed {short(commit)}")
                 deployed.append(commit)
+        elif event.get("gates_runs"):
+            if commit not in blocked:
+                lines.append(f"auto-deploy {outcome} at {short(commit)}: {detail}" if detail else f"auto-deploy {outcome} at {short(commit)}")
+                blocked.append(commit)
         elif outcome in ("FAILED", "WAITING", "BLOCKED"):
             lines.append(f"auto-deploy {outcome} at {short(commit)}: {detail}" if detail else f"auto-deploy {outcome} at {short(commit)}")
     current = [f"{item.get('line')}: {item.get('action')}" for item in state.get("manual") or [] if isinstance(item, dict)]
@@ -48,6 +53,7 @@ def report(state: dict, reported: dict) -> tuple:
     record = {
         "seq": events[-1]["seq"] if events else reported["seq"],
         "deployed": deployed[-DEPLOYED_KEPT:],
+        "blocked": blocked[-DEPLOYED_KEPT:],
         "manual": current,
     }
     return lines, record
@@ -60,7 +66,7 @@ def main() -> int:
         return 0
     path = root / "report-deploy.json"
     saved = read_json(path)
-    reported = {"seq": 0, "deployed": [], "manual": []}
+    reported = {"seq": 0, "deployed": [], "blocked": [], "manual": []}
     if isinstance(saved, dict):
         reported.update({key: saved[key] for key in reported if isinstance(saved.get(key), type(reported[key]))})
     lines, record = report(state, reported)

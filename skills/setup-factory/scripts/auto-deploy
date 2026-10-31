@@ -98,7 +98,7 @@ def write_private(path: Path, data: dict) -> None:
 
 def fresh_state() -> dict:
     return {
-        "deployed": None, "attempted": None, "failed": None, "outcome": None, "detail": "", "manual": [],
+        "deployed": None, "attempted": None, "failed": None, "blocked": None, "outcome": None, "detail": "", "manual": [],
         "restarted": None, "restart_pending": None, "hold": None, "events": [], "updated_at": None,
     }
 
@@ -162,7 +162,7 @@ class Deploy:
         self.state["updated_at"] = now()
         write_private(self.state_path, self.state)
 
-    def record(self, outcome: str, commit: Optional[str], detail: str, manual=None) -> str:
+    def record(self, outcome: str, commit: Optional[str], detail: str, manual=None, gates_runs: bool = False) -> str:
         detail = self.redact(detail)
         events = self.state["events"]
         seq = (events[-1]["seq"] if events else 0) + 1
@@ -172,11 +172,17 @@ class Deploy:
         if outcome == DEPLOYED:
             self.state["deployed"] = commit
             self.state["failed"] = None
+            self.state["blocked"] = None
         elif outcome == FAILED and commit:
             self.state["failed"] = commit
+        elif outcome == BLOCKED and gates_runs:
+            self.state["blocked"] = commit
         if manual is not None:
             self.state["manual"] = [{"line": self.redact(m.line), "action": self.redact(m.action)} for m in manual]
-        self.state["events"] = (events + [{"seq": seq, "outcome": outcome, "commit": commit, "detail": detail, "at": now()}])[-EVENTS_KEPT:]
+        event = {"seq": seq, "outcome": outcome, "commit": commit, "detail": detail, "at": now()}
+        if gates_runs:
+            event["gates_runs"] = True
+        self.state["events"] = (events + [event])[-EVENTS_KEPT:]
         self.save()
         self.log(f"{outcome} {short(commit)}: {detail}" if detail else f"{outcome} {short(commit)}")
         return outcome
@@ -339,6 +345,10 @@ class Deploy:
                 self.log(f"retrying {short(self.state['failed'])}, which failed before")
                 self.state["failed"] = None
                 self.save()
+            if self.args.retry and self.state["blocked"]:
+                self.log(f"retrying {short(self.state['blocked'])}, which a run-gating line blocked before")
+                self.state["blocked"] = None
+                self.save()
             if self.operator_paused():
                 self.record(BLOCKED, None, "an operator's hermes pause is engaged; nothing changed")
                 return 0
@@ -361,6 +371,9 @@ class Deploy:
                 return 0
             if target == self.state["failed"]:
                 self.log(f"{short(target)} failed; waiting for origin/{self.branch} to move")
+                return 0
+            if target == self.state["blocked"]:
+                self.log(f"{short(target)} is blocked by a run-gating manual line; waiting for origin/{self.branch} to move or a person to deploy it")
                 return 0
             try:
                 held = self.hold_key_present()
@@ -426,6 +439,10 @@ class Deploy:
 
     def install(self, target: str, deadline: float) -> str:
         plan = self.plan()
+        gating = [m for m in plan.manual if m.gates_runs]
+        if gating:
+            lines = "; ".join(f"{m.line}: {m.action}" for m in gating)
+            return self.record(BLOCKED, target, f"the new code refuses every run until a person does this, so nothing was installed: {lines}", gates_runs=True)
         self.log(f"{len(plan.installs)} install(s) and {len(plan.manual)} manual line(s) for {short(target)}")
         if plan.restarts_gateway:
             if self.state["restarted"] == target:
@@ -488,6 +505,8 @@ class Deploy:
             print("already deployed; a run changes nothing")
         elif target == self.state["failed"]:
             print("failed before; a run waits for the branch to move")
+        elif target == self.state["blocked"]:
+            print("blocked by a run-gating manual line before; a run waits for the branch to move")
         if self.hold_key_present():
             print(f"{HOLD_KEY} is set in the root home; a run would record BLOCKED")
         plan = self.plan()
@@ -497,7 +516,7 @@ class Deploy:
         if plan.restarts_gateway or self.state["restart_pending"]:
             print("  then restart the gateway through restart-gateway")
         for line in plan.manual:
-            print(self.redact(f"  manual {line.line}: {line.action}"))
+            print(self.redact(f"  manual{' (gates runs)' if line.gates_runs else ''} {line.line}: {line.action}"))
         if not plan.installs and not plan.manual:
             print("  nothing to install")
         return 0
