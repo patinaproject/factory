@@ -56,7 +56,7 @@ ISSUE_SESSIONS_QUERY = """query AgentSessionSiblings($id: String!) {
 # An awaitingInput session never goes stale and may hold questions a person has yet to answer.
 OPEN_SESSION_STATUSES = ("pending", "active", "stale")
 
-ACTIVITY_FIELDS = "id createdAt signal content { __typename ... on AgentActivityPromptContent { body } }"
+ACTIVITY_FIELDS = "id createdAt signal promptAuthor { id } content { __typename ... on AgentActivityPromptContent { body } }"
 
 ACTIVITY_QUERY = f"""query AgentActivity($id: String!) {{
   agentActivity(id: $id) {{ {ACTIVITY_FIELDS} }}
@@ -141,6 +141,7 @@ ISSUE_QUERY = """query Issue($id: String!) {
     id identifier title description url branchName priority
     state { name type }
     delegate { id }
+    assignee { id name gitHubUserId app }
     labels { nodes { name } }
     attachments { nodes { url sourceType } }
     agentSessions(first: 20) { nodes { id status createdAt appUser { id } creator { id } } }
@@ -310,6 +311,18 @@ def card_title(identifier: str, title: str) -> str:
     return f"{identifier}: {' '.join(kept.split())}"
 
 
+def authority(assignee: Optional[dict], sender_id: Optional[str], key: str) -> tuple[bool, Optional[str]]:
+    if assignee is None:
+        return False, "no_assignee"
+    if assignee["app"]:
+        return False, "app_assignee"
+    if assignee[key] is None:
+        return False, "no_github_id"
+    if sender_id is None:
+        return False, "no_author"
+    return str(assignee[key]) == str(sender_id), None
+
+
 class LinearClient:
     def __init__(
         self,
@@ -412,6 +425,7 @@ class LinearClient:
                     "createdAt": node["createdAt"],
                     "signal": node["signal"],
                     "body": node["content"]["body"],
+                    "authorId": node["promptAuthor"]["id"] if node["promptAuthor"] else None,
                 }
         return {"found": False}
 
@@ -481,6 +495,7 @@ class LinearClient:
             "description": issue["description"] or "",
             "githubIssues": [a["url"] for a in issue["attachments"]["nodes"] if GITHUB_ISSUE_URL.fullmatch(a["url"])],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
+            "assignee": issue["assignee"],
             "labels": _label_names(issue),
             "blockedBy": _blocking_issues(issue["inverseRelations"]),
             "agentSessions": sorted(

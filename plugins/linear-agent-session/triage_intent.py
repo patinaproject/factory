@@ -29,7 +29,8 @@ ACTIONS = {
     "foreign_cards": "cards the factory did not create work the issue; create no card",
     "create_card": "create the issue's implementation card",
     "reuse_card": "the issue has a card; move it to this session and handle its status",
-    "card_reply": "a reply on an issue with a card",
+    "card_reply": "the issue's assignee replied on an issue with a card",
+    "card_reply_not_assignee": "someone other than the issue's assignee replied on an issue with a card; wake no card",
     "triage_card_reply": "a reply on an issue whose triage card is live",
     "answer_reply": "a reply on an undelegated issue with no card; answer once",
     "stop_triage_card": "stop the live triage card",
@@ -53,6 +54,7 @@ SESSION_ACTIONS = ("use_session", "open_session")
 class Reply(NamedTuple):
     text: Optional[str]
     source: Optional[str]
+    author_id: Optional[str] = None
 
 
 NO_REPLY = Reply(None, None)
@@ -80,6 +82,10 @@ class Intent:
     then: Optional[str] = None
     reply: Optional[str] = None
     reply_source: Optional[str] = None
+    reply_author_id: Optional[str] = None
+    assignee: Optional[dict] = None
+    from_assignee: Optional[bool] = None
+    not_assignee_reason: Optional[str] = None
     thread: Optional[list] = None
     thread_source: Optional[str] = None
     error: Optional[str] = None
@@ -158,7 +164,7 @@ def _session_prompted(facts: Intent, stop: bool) -> str:
     if facts.triage_card and facts.triage_card["status"] != "done":
         return "triage_card_reply"
     if facts.card:
-        return "card_reply"
+        return "card_reply" if facts.from_assignee else "card_reply_not_assignee"
     return _delegated(facts) if facts.delegated else "answer_reply"
 
 
@@ -210,10 +216,23 @@ def decide(
     session = payload["agentSession"]["id"]
     if payload["action"] == "created":
         action = _session_created(facts, payload["agentSession"].get("creatorId"))
+    elif (payload.get("agentActivity") or {}).get("signal") == "stop":
+        action = _session_prompted(facts, stop=True)
     else:
-        stop = (payload.get("agentActivity") or {}).get("signal") == "stop"
-        action = _session_prompted(facts, stop)
+        facts = _with_authority(facts, issue["assignee"], reply.author_id)
+        action = _session_prompted(facts, stop=False)
     return replace(facts, action=action, agent_session_id=session)
+
+
+def _with_authority(facts: Intent, assignee: Optional[dict], author_id: Optional[str]) -> Intent:
+    from_assignee, reason = linear.authority(assignee, author_id, "id")
+    return replace(
+        facts,
+        reply_author_id=author_id,
+        assignee={key: assignee[key] for key in ("id", "name", "gitHubUserId")} if assignee else None,
+        from_assignee=from_assignee,
+        not_assignee_reason=reason,
+    )
 
 
 def carries_no_reply(payload: Mapping[str, Any]) -> bool:
@@ -229,16 +248,20 @@ def resolve_reply(payload: Mapping[str, Any], client: Any) -> Reply:
         return NO_REPLY
     activity = payload.get("agentActivity") or {}
     body = (activity.get("content") or {}).get("body")
-    if isinstance(body, str):
-        return Reply(body, "payload")
+    author = activity.get("userId")
+    if isinstance(body, str) and author:
+        return Reply(body, "payload", author)
     try:
         found = client.read_prompt(
             agent_activity_id=activity.get("id"),
             agent_session_id=None if activity.get("id") else payload["agentSession"]["id"],
         )
     except Exception:
-        return Reply(None, "missing")
-    return Reply(found["body"], "linear") if found.get("found") else Reply(None, "missing")
+        found = {"found": False}
+    author = author or found.get("authorId")
+    if isinstance(body, str):
+        return Reply(body, "payload", author)
+    return Reply(found["body"], "linear", author) if found.get("found") else Reply(None, "missing", author)
 
 
 def resolve_thread(payload: Mapping[str, Any], client: Any) -> Thread:

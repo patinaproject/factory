@@ -115,6 +115,16 @@ class WatchTest(InboxCase):
 
         self.assertEqual([r["key"] for r in reply_inbox.load(self.inbox)["replies"]], [key(reply)])
 
+    def test_a_comment_not_from_the_assignee_is_never_a_reply_and_allows_the_stop(self) -> None:
+        marked = comment(300, "default", f"{reply_inbox.NOT_ASSIGNEE_MARKER} Linear reply: rename the button.")
+        watch = self.watch(self.card(marked), [])
+
+        watch.collect()
+        stop = self.hook("stop", {"stop_hook_active": False})
+
+        self.assertEqual(reply_inbox.load(self.inbox)["replies"], [])
+        self.assertEqual((stop.returncode, stop.stdout), (0, ""))
+
     def test_a_comment_in_the_start_snapshot_is_never_a_reply(self) -> None:
         old = comment(100, "operator", "Linear reply: from before the run")
         watch = reply_inbox.Watch(

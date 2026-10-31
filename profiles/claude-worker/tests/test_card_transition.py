@@ -375,6 +375,14 @@ class ReleaseRuleTest(CardTransitionTest):
         out = self.reply(["Linear reply: Again.", "SCHEDULED: Needs input: which screen?", "stopped"], [park(1)])
         self.assertEqual(out["action"], "none")
 
+    def test_a_comment_not_from_the_assignee_past_the_count_does_not(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import reply_inbox
+
+        marked = f"{reply_inbox.NOT_ASSIGNEE_MARKER} Linear reply: rename the button."
+        out = self.reply(["Linear reply: Again.", marked], [park(1)])
+        self.assertEqual(out["action"], "none")
+
     def test_the_newest_park_sets_the_count(self):
         self.assertFalse(self.released(["Asked."], [park(1), park(2)]))
 

@@ -612,17 +612,24 @@ class IssueArgumentTest(unittest.TestCase):
                 self.assertIn("`issue`", schema["description"][:60])
 
 
-def prompt_node(activity_id, created_at, body, signal=None):
+def prompt_node(activity_id, created_at, body, signal=None, author="user-1"):
     return {
         "id": activity_id,
         "createdAt": created_at,
         "signal": signal,
+        "promptAuthor": {"id": author} if author else None,
         "content": {"__typename": "AgentActivityPromptContent", "body": body},
     }
 
 
 def thought_node(activity_id, created_at):
-    return {"id": activity_id, "createdAt": created_at, "signal": None, "content": {"__typename": "AgentActivityThoughtContent"}}
+    return {
+        "id": activity_id,
+        "createdAt": created_at,
+        "signal": None,
+        "promptAuthor": None,
+        "content": {"__typename": "AgentActivityThoughtContent"},
+    }
 
 
 def session_activities(*nodes):
@@ -639,7 +646,8 @@ class ActivityReadTest(unittest.TestCase):
         fake, output = self.read([(200, {"data": {"agentActivity": node}})], {"agent_activity_id": "activity-1"})
         self.assertEqual(
             output,
-            {"found": True, "id": "activity-1", "createdAt": "2026-10-18T16:57:29.889Z", "signal": None, "body": "yes"},
+            {"found": True, "id": "activity-1", "createdAt": "2026-10-18T16:57:29.889Z", "signal": None, "body": "yes",
+             "authorId": "user-1"},
         )
         self.assertIn("agentActivity(id: $id)", fake.graphql_requests[0]["query"])
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "activity-1"})
@@ -664,7 +672,9 @@ class ActivityReadTest(unittest.TestCase):
             {"agent_session_id": "session-1"},
         )
         self.assertEqual(
-            output, {"found": True, "id": "activity-2", "createdAt": "2026-10-18T16:57:29Z", "signal": None, "body": "yes"}
+            output,
+            {"found": True, "id": "activity-2", "createdAt": "2026-10-18T16:57:29Z", "signal": None, "body": "yes",
+             "authorId": "user-1"},
         )
         self.assertIn("agentSession(id: $id)", fake.graphql_requests[0]["query"])
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1"})
@@ -719,6 +729,7 @@ class IssueTest(unittest.TestCase):
                 "priority": 2.0,
                 "state": {"name": "Todo", "type": "unstarted"},
                 "delegate": {"id": "app-user-1"},
+                "assignee": {"id": "user-1", "name": "Ted Example", "gitHubUserId": "1001", "app": False},
                 "labels": {"nodes": [{"name": "ready-for-agent"}, {"name": "bug"}]},
                 "attachments": {
                     "nodes": [
@@ -766,6 +777,7 @@ class IssueTest(unittest.TestCase):
                 "description": "Checkout fails.",
                 "githubIssues": ["https://github.com/example-org/example-repo/issues/9"],
                 "delegate": "app-user-1",
+                "assignee": {"id": "user-1", "name": "Ted Example", "gitHubUserId": "1001", "app": False},
                 "labels": ["bug", "ready-for-agent"],
                 "role_labels": {"ready-for-agent": "Ready for agent"},
                 "attachments": [
@@ -1319,6 +1331,40 @@ class ReviewOwnerTest(unittest.TestCase):
         fake = FakeLinear([(200, {"data": {"issue": None}})])
         output = json.loads(tools.run_review_owner(lambda: make_client(fake), {"issue": "ABC-1"}))
         self.assertIn("no issue ABC-1", output["error"])
+
+
+class PrAuthorityTest(unittest.TestCase):
+    ANN = {"id": "user-ann", "name": "Ann", "gitHubUserId": "4242", "app": False}
+    CARD = "Work on it.\n```text\nlinear_issue_id: ABC-1\n```\n"
+
+    def authority(self, assignee, sender_id, body=CARD):
+        response = json.loads(json.dumps(IssueTest.RESPONSE))
+        response["data"]["issue"]["assignee"] = assignee
+        fake = FakeLinear([(200, response)])
+        output = tools.run_pr_authority(lambda: make_client(fake), {"t_work": body}.__getitem__, {"task": "t_work", "sender_id": sender_id})
+        return fake, json.loads(output)
+
+    def test_only_the_assignees_github_id_is_the_assignee(self):
+        for sender_id, from_assignee in (("4242", True), ("4243", False), ("0", False)):
+            with self.subTest(sender_id):
+                fake, output = self.authority(self.ANN, sender_id)
+                self.assertEqual(output, {"from_assignee": from_assignee, "assignee": "Ann", "reason": None})
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
+
+    def test_an_issue_with_no_one_to_ask_says_why(self):
+        cases = {
+            "no_assignee": (None, None),
+            "app_assignee": ({**self.ANN, "name": "Some agent", "app": True}, "Some agent"),
+            "no_github_id": ({**self.ANN, "gitHubUserId": None}, "Ann"),
+        }
+        for reason, (assignee, name) in cases.items():
+            with self.subTest(reason):
+                _, output = self.authority(assignee, "4242")
+                self.assertEqual(output, {"from_assignee": False, "assignee": name, "reason": reason})
+
+    def test_a_card_that_names_no_issue_is_an_error(self):
+        _, output = self.authority(self.ANN, "4242", body="Work on it.")
+        self.assertEqual(output, {"error": "card t_work names no linear_issue_id"})
 
 
 class UndelegateTest(unittest.TestCase):

@@ -4,8 +4,8 @@ import json
 import logging
 from typing import Callable, Optional
 
-from . import github_issue
-from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, SESSION_VERBS, LinearClient, LinearError, activity_content
+from . import github_issue, triage_exit
+from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, SESSION_VERBS, LinearClient, LinearError, activity_content, authority
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +326,18 @@ def run_issue(client_factory: ClientFactory, args: dict) -> str:
 
 def run_review_owner(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(lambda: {"owner": client_factory().review_owner(_issue_argument(args))})
+
+
+def run_pr_authority(client_factory: ClientFactory, card_body: Callable[[str], str], args: dict) -> str:
+    def run() -> dict:
+        match = triage_exit.LINEAR_ISSUE_ID.search(card_body(args["task"]))
+        if match is None:
+            raise LinearError(f"card {args['task']} names no linear_issue_id")
+        assignee = client_factory().get_issue(match.group(1))["assignee"]
+        from_assignee, reason = authority(assignee, args["sender_id"], "gitHubUserId")
+        return {"from_assignee": from_assignee, "assignee": assignee["name"] if assignee else None, "reason": reason}
+
+    return _tool_result_or_error(run)
 
 
 def run_delegated_issues(client_factory: ClientFactory, args: dict) -> str:
