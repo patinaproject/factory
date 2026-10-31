@@ -352,6 +352,19 @@ their cards are. A reply from a bot or an integration changes nothing.
    When `reply` is null, or asks for no title, description, label, status, or
    relation change on any issue, skip this section and handle the `action`.
    A reply that asks only for a relation is a request, not a reason to skip.
+
+   A reply can instead approve follow-ups that an earlier activity listed,
+   such as "do this yourself", "handle it", or "review A and B". When
+   `triage_card` is not null, skip this section for that part: the resumed
+   triage run applies the follow-ups. Otherwise read the newest `Needs input:`
+   or triage-outcome activity in `thread`, never an earlier round, and apply
+   its recommendation for each item through steps 2 to 7. Cancel is the canceled status, or a
+   GitHub close as not planned, plus one appended description line that names
+   the superseding issue. Narrow is an edited description. When it
+   named two options with no preference, apply exactly one, the less
+   destructive, and name it and why in the `response`. Ask nothing. When
+   `thread_source` is `missing`, or the thread holds no recommendation, change
+   nothing and say so.
 2. Find the target issue. With no other issue named, it is the event's
    issue. An identifier or a Linear URL names the issue. For a
    GitHub issue URL, read its title with `gh issue view <url> --json title`,
@@ -391,8 +404,8 @@ their cards are. A reply from a bot or an integration changes nothing.
 6. In Linear, make the change with one `linear_issue_edit` call on the
    target: `title`, `description`, `add_labels` and `remove_labels` with the
    label names, and `state` with the status name. Use only the names the
-   reply gives or plainly means: "cancel" is the team's canceled status, and
-   "done" or "close" is its completed one.
+   reply or the recommendation it approves gives or plainly means: "cancel"
+   is the team's canceled status, and "done" or "close" is its completed one.
 
    For a relation request, find both issues as step 2 says, and read both
    with `linear_issue`. Relations exist only on Linear-tracked issues. When

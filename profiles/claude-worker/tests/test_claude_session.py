@@ -403,6 +403,9 @@ class ClaudeSessionTest(GitFixture):
                                 f"patina-mode's triage playbook at `{playbook}`", "`## Priority rubric`",
                                 "`Priority: <value>, set by triage`", "`Priority: none`",
                                 "Never change the issue's status, assignee, or delegate",
+                                "`blockedBy`", "dependencies/blocked_by", "`gh issue create`",
+                                "Never change any issue's assignee or delegate",
+                                "never cancel, close, or narrow another issue",
                                 "Title them exactly `ABC-123 Triage notes` and `ABC-123 Agent brief`"):
             self.assertIn(triage_contract, system)
         self.assertTrue(playbook.is_absolute() and playbook.is_file())
