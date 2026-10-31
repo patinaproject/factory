@@ -411,8 +411,22 @@ their cards are. A reply from a bot or an integration changes nothing.
    summary of a new description. For a relation, name both issues, the
    relation, and the first issue's resulting status. Say when the relation
    already existed. When the reply also asks for an issue comment, say
-   that you cannot post comments.
-8. Stop when the reply asks for nothing but the change. Also stop when the
+   that you cannot post comments. When step 8 stops because the event's
+   issue is closed, the same `response` answers any question that the
+   issue and `thread` answer, names each other part of the reply that was
+   not done, except an issue comment, and says why: the issue is closed,
+   so no worker acts on the rest of the reply, because closing archives
+   the issue's card or leaves it only to finish its open pull request. Say
+   that the person can reopen the issue and send that part again, or ask
+   for it on the issue it is about.
+8. Stop when the reply asks for nothing but the change. Also stop when,
+   after the change, the event's issue is in a completed or canceled
+   status, whether the change moved it there, as "cancel", "done", or a
+   duplicate relation do, or it already was, and the reply asks for
+   anything else: the rest of the reply would be lost on the card. Do not
+   comment the reply on a card or pass it to `triage-reply`, do not
+   unblock, reopen, or resume a card, and do not say that a worker will
+   pick the reply up. Also stop when the
    change touched this issue's labels and the `action` is `create_card`,
    `foreign_cards`, or a gate action: the intent read the labels before the
    change, and the label change sends an `Issue` event that applies the gate
