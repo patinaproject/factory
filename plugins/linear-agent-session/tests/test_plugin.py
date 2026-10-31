@@ -6,6 +6,7 @@ import enum
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -17,6 +18,7 @@ from unittest import mock
 
 from tests import (
     BUSY,
+    PLUGIN_DIR,
     FakeBroker,
     FakeLinear,
     activity_ok,
@@ -564,25 +566,48 @@ class CliTest(unittest.TestCase):
             code = cli.main(argv)
         return code, json.loads(out.getvalue())
 
-    def test_review_owner_reads_the_cards_issue_and_names_its_owner(self):
-        fake = FakeLinear([(200, {"data": {"issue": {"assignee": {"name": "Ted", "gitHubUserId": "7"}, "team": {"triageResponsibility": None}}}})])
-        cards = []
+    def test_review_owner_runs_in_an_interpreter_that_cannot_see_hermes(self):
+        cli_path = Path(PLUGIN_DIR) / "cli.py"
+        wrapper = """
+import io, json, runpy, sys, urllib.request
 
-        def load_card(task_id, board):
-            cards.append((task_id, board))
-            return plugin.blocks.Card("running", None, "```text\nlinear_issue_id: issue-uuid-1\n```")
+sys.modules["hermes_cli"] = None
 
-        with mock.patch.dict(os.environ, {"HERMES_KANBAN_BOARD": "default"}), mock.patch.object(plugin.blocks, "load_card", load_card):
-            code, output = self.run_cli(["review-owner", "--task", "t_1"], fake)
-        self.assertEqual((code, output), (0, {"owner": {"name": "Ted", "gitHubUserId": "7"}}))
-        self.assertEqual(cards, [("t_1", "default")])
-        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "issue-uuid-1"})
 
-    def test_review_owner_of_a_card_with_no_linear_issue_is_an_error(self):
-        empty = lambda task_id, board: plugin.blocks.Card("running", None, "repo: o/r")
-        with mock.patch.object(plugin.blocks, "load_card", empty):
-            code, output = self.run_cli(["review-owner", "--task", "t_1"], FakeLinear([]))
-        self.assertEqual((code, output), (1, {"error": "card t_1 names no linear_issue_id"}))
+class Response:
+    def __init__(self, body):
+        self._body = json.dumps(body).encode()
+        self.status = 200
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+
+def urlopen(request, timeout=None):
+    if request.full_url == "https://api.linear.app/oauth/token":
+        return Response({"access_token": "t", "token_type": "Bearer", "expires_in": 3600, "scope": "read"})
+    return Response({"data": {"issue": {"assignee": {"name": "Ted", "gitHubUserId": "7"}, "team": {"triageResponsibility": None}}}})
+
+
+urllib.request.urlopen = urlopen
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [sys.executable, "-I", "-c", wrapper, str(cli_path), "review-owner", "--issue", "issue-uuid-1"],
+                capture_output=True,
+                text=True,
+                env={"LINEAR_CLIENT_ID": "client-id", "LINEAR_CLIENT_SECRET": "client-secret", "HERMES_HOME": tmp},
+            )
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertEqual(json.loads(proc.stdout), {"owner": {"name": "Ted", "gitHubUserId": "7"}})
 
     def test_a_worker_command_waits_out_a_busy_broker(self):
         fake = FakeLinear([(200, {"data": {"issue": None}})])

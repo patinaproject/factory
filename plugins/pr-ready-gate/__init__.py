@@ -29,6 +29,7 @@ GH_TIMEOUT_SECONDS = 15
 GH_EXTRA_TIMEOUT_SECONDS = 6
 MIN_CALL_SECONDS = 1
 LINEAR_TIMEOUT_SECONDS = 12
+ISSUE_LINE = re.compile(r"^linear_issue_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 LINEAR_CLI = Path("plugins") / "linear-agent-session" / "cli.py"
 # Rules whose only effect on a pull request is a merge-time or review-time requirement the gate checks or does not need.
 REVIEW_HANDOFF_RULES = frozenset(
@@ -248,7 +249,10 @@ def _run(cmd: list[str], cwd: str, cap: float, deadline: float) -> str:
     except OSError as exc:
         raise GateError(f"`{shown}` could not run: {exc}")
     if proc.returncode != 0:
-        raise GateError(f"`{shown}` exited {proc.returncode}: {proc.stderr.strip() or proc.stdout.strip()}")
+        detail = proc.stderr.strip()
+        if detail.startswith("Traceback"):
+            detail = detail.splitlines()[-1]
+        raise GateError(f"`{shown}` exited {proc.returncode}: {detail or proc.stdout.strip()}")
     return proc.stdout.strip()
 
 
@@ -287,8 +291,20 @@ def re_request_reviews(pr: dict, workspace: str, deadline: float) -> tuple[list[
 
 
 def linear_owner(task_id: str, workspace: str, deadline: float) -> Optional[dict]:
+    try:
+        from hermes_cli import kanban_db, kanban_db_connect
+
+        with kanban_db_connect.connect_closing(board=os.environ.get("HERMES_KANBAN_BOARD")) as conn:
+            task = kanban_db.get_task(conn, task_id)
+    except Exception as exc:
+        raise GateError(f"could not read card {task_id}: {type(exc).__name__}: {exc}")
+    if task is None:
+        raise GateError(f"card {task_id} is not on the board")
+    match = ISSUE_LINE.search(task.body or "")
+    if match is None:
+        raise GateError(f"card {task_id} names no linear_issue_id")
     cli = Path(os.environ.get("HERMES_HOME", "")) / LINEAR_CLI
-    out = _run([sys.executable, str(cli), "review-owner", "--task", task_id], workspace, LINEAR_TIMEOUT_SECONDS, deadline)
+    out = _run([sys.executable, str(cli), "review-owner", "--issue", match.group(1)], workspace, LINEAR_TIMEOUT_SECONDS, deadline)
     try:
         return json.loads(out)["owner"]
     except (ValueError, KeyError, TypeError):
