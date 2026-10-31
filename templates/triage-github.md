@@ -100,27 +100,28 @@ event keep the steps below unchanged.
 2. For `pull_request` action `closed` with merged `True`, complete the card as
    "Complete a card whose pull request merged" says, whatever its status.
 3. For `pull_request_review` action `submitted` with review state
-   `changes_requested`, act on the card's status:
+   `changes_requested`, from a bot or from the assignee, act on the card's
+   status:
    - `review`: run
      `<<card_transition>> reopen <task id> --reason 'changes requested on GitHub; see the card comments'`.
      Hermes returns the card to its worker, which reads the comments and
      addresses them.
    - `triage`: resume it as "Resume a parked card" says, after step 1 has
      commented on the card, so the worker finds the review there.
-   - `blocked`, when the sender is a person (not a bot): unblock it as
+   - `blocked`, when the sender is the assignee: unblock it as
      "Unblock a card" says, with the reason
      `changes requested on GitHub; see the card comments`, after step 1 has
      commented on the card, so the worker finds the review there.
    - Any other status: the comment from step 1 is enough.
 4. For `pull_request_review` action `submitted` with review state `approved`,
-   when the sender is a person (not a bot) and the card's status is `triage`,
+   when the sender is the assignee and the card's status is `triage`,
    resume it as "Resume a parked card" says, after step 1 has commented on the
    card, so the worker hands the approved pull request off. When the sender is
-   a bot, or the card is in any other status, the comment from step 1 is
+   anyone else, or the card is in any other status, the comment from step 1 is
    enough.
 5. For a `pull_request_review` submitted as a comment, a `pull_request_review_comment`,
-   or an `issue_comment` on a pull request, when the sender is a person (not a
-   bot) and the text asks for a change or reports a defect, act on the card's
+   or an `issue_comment` on a pull request, when the sender is the assignee and
+   the text asks for a change or reports a defect, act on the card's
    status, after step 1 has commented on the card:
    - `triage`: resume it as "Resume a parked card" says.
    - `blocked`: unblock it as "Unblock a card" says, with the reason

@@ -37,7 +37,7 @@ the gate, or read the reply yourself. Its fields:
   reply cannot be the assignee's: `no_assignee` when the issue has none,
   `app_assignee` when an agent app holds it, and `no_author` when the author
   could not be read. It is null when a person who is not the assignee replied.
-  All four are null on other events.
+  All four are null on an event that carries no reply, such as a stop.
 - `thread` and `thread_source`: on a `prompted` event, the session's earlier
   activities, oldest first, without the reply itself. Each has `id`, `type`
   (`prompt`, `response`, `elicitation`, `thought`, `action`, or `error`),

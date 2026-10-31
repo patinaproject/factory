@@ -399,10 +399,10 @@ class PromptSubstitutionTest(unittest.TestCase):
         self.assertIn("`feedback on GitHub; see the card comments`", rules)
         flat = " ".join(rules.split())
         review_rule, comment_rule = flat.split("5. For a", 1)
-        self.assertIn("`blocked`, when the sender is a person (not a bot): unblock", review_rule)
-        self.assertIn("when the sender is a person (not a bot) and the text asks for a change", comment_rule)
+        self.assertIn("`blocked`, when the sender is the assignee: unblock", review_rule)
+        self.assertIn("when the sender is the assignee and the text asks for a change", comment_rule)
         self.assertIn(
-            "`blocked`, when the sender is a person (not a bot): unblock it as "
+            "`blocked`, when the sender is the assignee: unblock it as "
             '"Unblock a card" says, with the reason '
             "`changes requested on GitHub; see the card comments`, "
             "after step 1 has commented on the card",
@@ -419,11 +419,11 @@ class PromptSubstitutionTest(unittest.TestCase):
         approval_rule = flat.split("4. For", 1)[1].split("5. For", 1)[0]
         self.assertIn("with review state `approved`", approval_rule)
         self.assertIn(
-            "when the sender is a person (not a bot) and the card's status is `triage`, "
+            "when the sender is the assignee and the card's status is `triage`, "
             'resume it as "Resume a parked card" says, after step 1 has commented on the card',
             approval_rule,
         )
-        self.assertIn("When the sender is a bot, or the card is in any other status, the comment from step 1 is enough.", approval_rule)
+        self.assertIn("When the sender is anyone else, or the card is in any other status, the comment from step 1 is enough.", approval_rule)
         self.assertNotIn("unblock", approval_rule)
         self.assertNotIn("reopen-review", approval_rule)
 
