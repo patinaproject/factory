@@ -86,7 +86,8 @@ your task notes, not in the repository.
 | --- | --- |
 | Hermes home directory (default `~/.hermes`) and install checkout | Every part |
 | Hermes release tag to pin, `v0.21.4` or later | Hermes |
-| Model alias for Hermes' own agent loop, for example `sonnet` | Model provider |
+| Model alias for Hermes' own agent loop, for example `sonnet`, or a full model id with the Anthropic API provider | Model provider |
+| Whether Hermes and Claude Code run on a Console API key with no proxy, the Anthropic API provider. The operator enters the key in their own terminal, never in chat | Model provider |
 | Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
 | `kanban.max_in_progress`, how many workers may run at once on the host | Kanban |
 | `kanban.max_spawn`, how many workers the default board may run at once | Kanban |
@@ -119,7 +120,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>/.env` |
 | `GH_CONFIG_DIR` | `<home>/.env` and `<worker>/.env`, both set to `<worker>/gh`. The directory holds the worker's `gh` login as the GitHub App, which the `refresh-gh-app-login` launchd job renews. Hermes' own agent uses it too, such as when it answers in Slack |
 | GitHub App private key | The file that `github.private_key_path` names, mode `0600`, outside every repository. With the broker user, `/Library/Application Support/factory-broker/home/github-app.pem` instead, and neither home sets `github.private_key_path`. The broker mints the worker's installation tokens from it |
-| `CLAUDE_PROXY_TOKEN`, the proxy's token that `claude_session.auth_token_env` names | `<home>/.env`. The worker's `worker-secrets` asks the gateway's broker for it when a worker process starts, because the worker's own agent loop sends it to the proxy, and Claude Code gets it through `apiKeyHelper`. Never store it in `<worker>/.env`, and never name it `ANTHROPIC_*` |
+| `CLAUDE_PROXY_TOKEN`, the variable that `claude_session.auth_token_env` names. It holds the proxy's token or a Console API key | `<home>/.env`. The worker's `worker-secrets` asks the gateway's broker for it when a worker process starts, because the worker's own agent loop sends it to the proxy or the Anthropic API, and Claude Code gets it through `apiKeyHelper`. Never store it in `<worker>/.env`, and never name it `ANTHROPIC_*` |
 | Each MCP server token that `claude_session.mcp_servers.<name>.token_env` names, such as `SENTRY_ACCESS_TOKEN` | `<home>/.env`. The run's server of that name gets it through `mcp-headers`, which asks the gateway's broker. Never store it in `<worker>/.env`. See [MCP server identities](references/mcp-identities.md) |
 | `FACTORY_INFISICAL_CLIENT_ID` and `FACTORY_INFISICAL_CLIENT_SECRET`, when the factory uses Infisical | `<home>/.env` only. The worker has no Infisical identity. Claude Code never receives it: `claude-session` starts it from an allowlist of variable names |
 | The factory's secret names that Hermes strips from every process a home starts | `plugins/factory-secret-names/plugin.yaml`, installed in both homes |
@@ -137,7 +138,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | The `default` and `triage` boards' `default_workdir` | Kanban board metadata, not `config.yaml` |
 
 When the factory uses Infisical, part 14 moves the Linear credentials, both
-webhook secrets, and the proxy token from `.env` into one Infisical folder. On
+webhook secrets, and the proxy token or Console API key from `.env` into one Infisical folder. On
 a new machine, earlier parts still write them to `.env` first. When the folder
 already exists, such as on a re-run, write each of those values straight into
 the folder with `infisical_set` below, in place of `env_set`. A part's
@@ -284,9 +285,12 @@ the worker uses.
 
 ## 3. Claude Code transport
 
-This part is optional. Without a proxy, `claude-session` uses the CLI's own
-login from part 2. To set up a local Anthropic-compatible proxy, follow
-[`references/claude-transport.md`](references/claude-transport.md).
+This part is optional. Without a proxy or the Anthropic API provider from part
+4, `claude-session` uses the CLI's own login from part 2. To set up a local Anthropic-compatible proxy, follow
+[`references/claude-transport.md`](references/claude-transport.md). Give the
+proxy a Console API key or a supported cloud provider as its upstream
+credential, never Claude subscription accounts. An operator with a Console API
+key and no proxy can use the Anthropic API provider in part 4 instead.
 
 ## 4. Model provider
 
@@ -295,10 +299,12 @@ configure the same one in the default home and in the worker profile:
 
 | Provider | `model.provider` | Use it when |
 | --- | --- | --- |
-| DirectSDK | `claude-subscription-directsdk-experimental` | No proxy, or the operator wants only Claude Code on the proxy |
+| DirectSDK | `claude-subscription-directsdk-experimental` | Hermes runs on the Claude subscription, or the operator wants only Claude Code on the proxy |
 | Proxy | `custom:<proxy provider>` | Part 3 set up a proxy and the operator wants Hermes on it too |
+| Anthropic API | `custom:<api provider>` | The operator wants Hermes and Claude Code on a Console API key |
 
-`<proxy provider>` is a name the operator picks, such as `proxy`.
+`<proxy provider>` and `<api provider>` are names the operator picks, such as
+`proxy` and `anthropic`.
 `check-install` reports any other `model.provider`, and a value that differs
 between the two homes.
 
@@ -356,20 +362,22 @@ object in place of the reply means the home's `.env` lacks
 
 The provider sends Hermes' own agent loop to the proxy from part 3, through a
 Hermes custom provider. It needs the proxy port and, when the proxy requires a
-token, the token variable from part 3.
+token, the token variable from part 3. The proxy's upstream credential is a
+Console API key or a supported cloud provider, as step 3 of
+[Install the proxy](references/claude-transport.md#install-the-proxy) sets out.
 
 **Check**, for each home (`hermes` and `hermes -p claude-worker`):
 
 ```sh
 hermes config get model.provider                        # custom:<proxy provider>
-hermes config get model.default                         # an alias the proxy lists
+hermes config get model.default                         # a model id the endpoint serves
 hermes config get providers.<proxy provider>.api        # http://127.0.0.1:<proxy port>
 hermes config get providers.<proxy provider>.transport  # anthropic_messages
 hermes config get providers.<proxy provider>.key_env    # <token variable>
 ```
 
-Every `model` in `platforms.slack.channel_overrides` is also an alias the proxy
-lists (see [Slack](references/slack.md#choose-the-conversation-model)).
+Every `model` in `platforms.slack.channel_overrides` is also a model id the
+endpoint serves (see [Slack](references/slack.md#choose-the-conversation-model)).
 
 When the proxy requires a token, `<token variable>` is `CLAUDE_PROXY_TOKEN`,
 and `env_has <home>/.env CLAUDE_PROXY_TOKEN` prints `1` or the Infisical folder
@@ -383,19 +391,71 @@ hermes config set providers.<proxy provider>.api http://127.0.0.1:<proxy port>
 hermes config set providers.<proxy provider>.transport anthropic_messages
 hermes config set providers.<proxy provider>.key_env <token variable>
 hermes config set model.provider custom:<proxy provider>
-hermes config set model.default <alias>
+hermes config set model.default <model id>
 ```
 
 Skip the `key_env` line when the proxy needs no token. Part 3 stores the token
 in `<home>/.env` or the Infisical folder, never in `<worker>/.env`.
 
 **Verify** with the same `PONG` chats and `sqlite3` queries as DirectSDK. Each
-latest session names the alias and the billing provider `custom`, with non-zero
-token counts.
+latest session names the model id and the billing provider `custom`, with
+non-zero token counts.
+
+### Anthropic API
+
+The provider sends Hermes' own agent loop to `api.anthropic.com` with a Console
+API key, through a Hermes custom provider, and no proxy. The key is stored as
+`CLAUDE_PROXY_TOKEN`, the one name the gateway's broker serves. The same
+setting also moves the worker's Claude Code off its `/login` onto the key,
+because `claude_session.auth_token_env` makes `claude-session` set Claude Code's
+`apiKeyHelper` and `base_url` stays empty. Use a Console API key
+(`sk-ant-api...`). A token that looks like a Claude OAuth token
+(`sk-ant-oat...`) is sent as a Claude Code login and runs on a subscription.
+
+**Check**, for each home (`hermes` and `hermes -p claude-worker`):
+
+```sh
+hermes config get model.provider                        # custom:<api provider>
+hermes config get model.default                         # a full model id the Anthropic API accepts
+hermes config get providers.<api provider>.api          # https://api.anthropic.com
+hermes config get providers.<api provider>.transport    # anthropic_messages
+hermes config get providers.<api provider>.key_env      # CLAUDE_PROXY_TOKEN
+```
+
+Hermes resolves a short alias such as `sonnet` only for the `/model` command,
+so write a full model id in `model.default` and in every `model` in
+`platforms.slack.channel_overrides`. In both homes,
+`plugins.entries.linear-agent-session.settings.claude_session.auth_token_env`
+is `CLAUDE_PROXY_TOKEN` and `base_url` is empty. `env_has <home>/.env
+CLAUDE_PROXY_TOKEN` prints `1` or the Infisical folder holds it, and
+`env_has <worker>/.env CLAUDE_PROXY_TOKEN` prints `0`. The worker home reads
+the key through `worker-secrets`, which gets it from the gateway's broker when
+a worker process starts, as part 5 sets up.
+
+**Configure** whatever the check found missing, in each home:
+
+```sh
+hermes config set providers.<api provider>.api https://api.anthropic.com
+hermes config set providers.<api provider>.transport anthropic_messages
+hermes config set providers.<api provider>.key_env CLAUDE_PROXY_TOKEN
+hermes config set model.provider custom:<api provider>
+hermes config set model.default <full model id>
+```
+
+Set `claude_session.auth_token_env` to `CLAUDE_PROXY_TOKEN` in both homes, as
+part 10 sets the rest of `claude_session`. Store the key the way step 6 of
+[Install the proxy](references/claude-transport.md#install-the-proxy) stores a
+token. Use `env_set` in `<home>/.env`, or `infisical_set` when the Infisical
+folder already exists. Never store it in `<worker>/.env`. The operator enters
+the key in their own terminal, never in chat.
+
+**Verify** with the same `PONG` chats and `sqlite3` queries as DirectSDK. Each
+latest session names the full model id and the billing provider `custom`, with
+non-zero token counts.
 
 ### Keep `ANTHROPIC_*` out of the gateway
 
-This applies to either provider. The DirectSDK provider refuses to start when
+This applies to every provider. The DirectSDK provider refuses to start when
 the environment holds `ANTHROPIC_AUTH_TOKEN` or another native override. Only
 `claude-session` sets `ANTHROPIC_*` variables, and only for the Claude Code
 process it starts. This check must print nothing:
@@ -470,8 +530,8 @@ hermes -p claude-worker plugins install "file://<repo>#plugins/factory-secret-na
 secret variables, and Hermes strips each one from every process the home
 starts: a terminal command, a background process, a cron script, or a
 `claude-session` run. Without it, any process on the machine could read the
-Linear client secret, the webhook secrets, or the proxy token from such a
-process's environment with `ps eww`. Hermes reads the manifest at each spawn,
+Linear client secret, the webhook secrets, or the proxy token or Console API
+key from such a process's environment with `ps eww`. Hermes reads the manifest at each spawn,
 so it takes effect without a restart. The broker serves a worker only a name
 this manifest declares, less the gateway-only ones. The gateway reads its home's
 copy, and the broker user's `setup-broker-user` installs a root-owned copy.
@@ -489,7 +549,8 @@ only to reinstall a plugin at a newer commit.
 **Gateway broker, root home only.** The `factory-uploads` plugin runs inside
 the gateway. Its broker uploads evidence images with `GITHUB_UPLOAD_TOKEN`, and
 it gives the worker the two credentials the worker may use: a Linear access
-token, minted with the gateway's Linear app credentials, and the proxy token.
+token, minted with the gateway's Linear app credentials, and the proxy token or
+Console API key.
 The worker home holds no factory secret of its own. Install the plugin in the
 root home and never in the worker's home. `check-install` reports an install
 in the worker home.
@@ -746,9 +807,10 @@ It stays under the 420 second limit Hermes puts on every tool call:
 hermes -p claude-worker config set terminal.timeout 400 </dev/null
 ```
 
-When the proxy needs a token, point the worker home at the gateway's copy.
-`worker-secrets` asks the broker for the token that `auth_token_env` names and
-prints it to Hermes, so the worker's own agent loop can reach the proxy. It
+When the proxy needs a token, or part 4 uses the Anthropic API provider, point
+the worker home at the gateway's copy. `worker-secrets` asks the broker for the
+value that `auth_token_env` names and prints it to Hermes, so the worker's own
+agent loop can reach the proxy or the Anthropic API. It
 reads no Infisical folder and holds no identity. The broker answers in
 milliseconds and the helper gives up after 30 seconds:
 
@@ -854,10 +916,12 @@ key file but does not contain the key.
 ```
 
 Exactly one repository has `routing: default`. Leave
-`claude_session.base_url`, `model`, and `auth_token_env` empty unless part 3
-set up a proxy. With a proxy, set `tier_models` to the Sonnet, Haiku, and Fable
-ids from the operator's input, so subagents run on cheaper models while the
-worker's main agent stays on `model`. `worker_entry` is a prefix, such as `/patina-mode`, that
+`claude_session.base_url`, `model`, and `auth_token_env` empty when the factory
+uses neither a proxy from part 3 nor the Anthropic API provider from part 4.
+With the Anthropic API provider, leave `base_url` empty and set
+`auth_token_env` to `CLAUDE_PROXY_TOKEN`. With a proxy, set
+`tier_models` to the Sonnet, Haiku, and Fable ids from the operator's input,
+so subagents run on cheaper models while the worker's main agent stays on `model`. `worker_entry` is a prefix, such as `/patina-mode`, that
 `claude-session` puts before the built-in task prompt. The task prompt names
 the issue, its URL, the repository, and the branch, and is always sent. An
 empty `worker_entry` sends the task prompt alone. `claude-session` refuses a `worker_entry` that

@@ -79,7 +79,7 @@ By default the agent answers in Slack with `model.default`. The operator may
 choose a different model for Slack conversations. Ask whether to use one. If
 so, ask for:
 
-- a model alias, `<alias>`;
+- a model id, `<model id>`;
 - optionally a provider, `<provider>`, in the form of `model.provider`, for
   example `custom:<proxy provider>`;
 - the channels it covers, defaulting to the home channel.
@@ -100,14 +100,14 @@ For each channel `<channel id>` that lacks the choice, set it. Set `provider`
 only when the operator gave one:
 
 ```sh
-hermes config set platforms.slack.channel_overrides.<channel id>.model <alias> </dev/null
+hermes config set platforms.slack.channel_overrides.<channel id>.model <model id> </dev/null
 hermes config set platforms.slack.channel_overrides.<channel id>.provider <provider> </dev/null
 ```
 
 `hermes config set` splits the key at each `.`, and a channel ID has no dot.
 Leave existing entries and their other keys, such as `system_prompt`, as they
-are. Each `model` must be an alias the transport serves (part 4). Record the
-alias, the provider, and the channel IDs in the private record only, so a fresh
+are. Each `model` must be a model id the endpoint serves (part 4). Record the
+model id, the provider, and the channel IDs in the private record only, so a fresh
 install can reproduce the choice.
 
 Hermes silently ignores an entry that is not a mapping. A top-level `slack:`
