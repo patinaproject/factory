@@ -391,6 +391,13 @@ class ReleaseRuleTest(CardTransitionTest):
         self.assertFalse(self.released(["Asked."], [park(0), login]))
         self.assertEqual(self.state_changes(), [])
 
+    def test_a_reply_never_releases_a_park_that_waits_for_a_factory_deploy(self):
+        deploy = {"kind": "scheduled", "created_at": 500, "run_id": 1,
+                  "payload": {"reason": "Waiting for a factory deploy: the profile scripts differ"}}
+        self.assertFalse(self.released(["Asked."], [deploy]))
+        self.assertFalse(self.released(["Asked."], [park(0), deploy]))
+        self.assertEqual(self.state_changes(), [])
+
     def test_a_question_parked_after_a_login_park_is_released_by_a_reply_again(self):
         login = {"kind": "scheduled", "created_at": 100, "run_id": 1,
                  "payload": {"reason": "Waiting for the worker's gh login: the login is stale"}}

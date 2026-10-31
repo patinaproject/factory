@@ -4,6 +4,7 @@ import ast
 import importlib.machinery
 import importlib.util
 import atexit
+import io
 import json
 import os
 import plistlib
@@ -186,6 +187,7 @@ REMEDY_CLASSES = (
     ("root mcp", "", "manual"),
     ("hermes tool", "cannot read", "advisory"),
     ("hermes tool", "", "manual"),
+    ("github app", "", "manual"),
 )
 
 
@@ -347,6 +349,34 @@ class CheckInstallTest(unittest.TestCase):
     def test_matching_install_is_silent(self) -> None:
         self.assertEqual(self.check(), (0, ""))
         self.assertEqual(json.loads(self.raw), [])
+
+    def test_an_app_without_the_push_event_adds_one_manual_line_and_nothing_else(self) -> None:
+        settings = {**SETTINGS, "github": {"login": "example-app[bot]"}}
+        for home, config in ((self.root, ROOT_CONFIG), (self.worker, WORKER_CONFIG)):
+            self.config(home, {**config, "plugins.entries.linear-agent-session.settings": settings})
+        app = self.tmp / "app.json"
+        self.install(self.tmp, "bin/gh", with_interpreter(
+            "#!/usr/bin/env python3\nimport sys\nassert sys.argv[1:] == ['api', 'apps/example-app']\n"
+            f"print(open({str(app)!r}).read())\n"
+        ))
+        os.chmod(self.tmp / "bin" / "gh", 0o755)
+        app.write_text(json.dumps({"events": ["issues", "pull_request"], "permissions": {"contents": "read"}}))
+        env = {"GH_BIN": str(self.tmp / "bin" / "gh")}
+
+        with mock.patch.dict(os.environ, env):
+            code, out = self.check()
+        records = json.loads(self.raw)
+        app.write_text(json.dumps({"events": ["issues", "push"], "permissions": {}}))
+        with mock.patch.dict(os.environ, env):
+            subscribed = self.check()
+
+        self.assertEqual((code, out), (1, 'github app example-app: does not subscribe to the "Push" event, so no merge '
+                                          "starts auto-deploy until its next interval run\n"))
+        self.assertEqual([record["remedy"] for record in records], [{
+            "type": "manual", "action": 'in the App\'s GitHub settings, under Permissions & events, subscribe to "Push"',
+            "gates_runs": False,
+        }])
+        self.assertEqual(subscribed, (0, ""))
 
     def test_the_text_output_is_the_lines_of_the_json_records(self) -> None:
         self.install(self.worker, "SOUL.md", "stale\n")
@@ -1807,6 +1837,45 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual((proc.returncode, proc.stdout), (2, ""))
 
 
+class CheckAppEventsTest(unittest.TestCase):
+    SETTINGS = {"github": {"login": "example-app[bot]"}}
+
+    def check(self, fetch, settings=SETTINGS) -> tuple:
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            lines = classified(self, check_install.check_app_events(settings, fetch))
+        return lines, stderr.getvalue()
+
+    def test_only_a_missing_push_event_adds_a_line(self) -> None:
+        asked = []
+
+        def fetch(slug: str) -> dict:
+            asked.append(slug)
+            return {"events": ["issues"], "permissions": {}}
+
+        self.assertEqual(self.check(fetch), (
+            ['github app example-app: does not subscribe to the "Push" event, so no merge starts auto-deploy until its next interval run'], "",
+        ))
+        self.assertEqual(asked, ["example-app"])
+        self.assertEqual(self.check(lambda slug: {"events": ["push"], "permissions": {"contents": "none"}}), ([], ""))
+
+    def test_a_failed_lookup_adds_no_line_and_one_note(self) -> None:
+        def fetch(slug: str) -> dict:
+            raise check_install.app_events.AppLookupError("gh api apps/example-app exited 1: HTTP 502")
+
+        lines, stderr = self.check(fetch)
+
+        self.assertEqual(lines, [])
+        self.assertEqual(stderr.count("\n"), 1)
+        self.assertIn("HTTP 502", stderr)
+
+    def test_no_app_login_makes_no_lookup(self) -> None:
+        def fetch(slug: str) -> dict:
+            raise AssertionError("looked up an App")
+
+        self.assertEqual(self.check(fetch, {"github": {}}), ([], ""))
+        self.assertEqual(self.check(fetch, None), ([], ""))
+
+
 class CheckTriageCapacityTest(unittest.TestCase):
     def rows(self, max_spawn, max_in_progress, max_running) -> list:
         return classified(self, check_install.check_triage_capacity(max_spawn, max_in_progress, max_running))
@@ -2019,7 +2088,9 @@ GH_LOGIN_FIELDS = {
     "StartInterval": 900, "EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/w"},
 }
 AUTO_DEPLOY_LABEL = "ai.patinaproject.factory.auto-deploy"
-AUTO_DEPLOY_FIELDS = {"EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/h", "PATH": "/h/.local/bin:/usr/bin"}}
+AUTO_DEPLOY_FIELDS = {
+    "StartInterval": 300, "EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/h", "PATH": "/h/.local/bin:/usr/bin"},
+}
 class CheckAutoDeployTest(unittest.TestCase):
     NOW = 2_000_000.0
     SHA = "c" * 40
@@ -2164,6 +2235,7 @@ class CheckAutoDeployTest(unittest.TestCase):
         self.assertEqual((Path(service.plist).name, check_install.HOLD_KEY), (f"{deploy.LABEL}.plist", deploy.HOLD_KEY))
         printed = plistlib.loads(deploy.plist(Path("/h"), Path("/h/profiles/claude-worker")))
         self.assertEqual(sorted(printed["EnvironmentVariables"]), sorted(service.env))
+        self.assertEqual((printed["StartInterval"], service.interval), (300, 300))
         self.assertEqual(hook.LABEL, deploy.LABEL)
         self.assertIn("factory-deploy", check_install.ROOT_ONLY_PLUGINS)
 
@@ -2776,12 +2848,18 @@ class CheckServicesTest(unittest.TestCase):
         )
         self.launchd.states({**states, f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running"})
         not_at_load = self.check()
+        self.launchd.plist(
+            f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
+            "ai.patinaproject.factory.auto-deploy", EnvironmentVariables=AUTO_DEPLOY_FIELDS["EnvironmentVariables"],
+        )
+        no_interval = self.check()
         self.launchd.deploy.unlink()
 
-        self.assertEqual((running, unloaded, not_at_load, self.check()), (
+        self.assertEqual((running, unloaded, not_at_load, no_interval, self.check()), (
             [],
             ["service auto deploy: is not loaded in launchd (part 12)"],
             ["service auto deploy: does not run at load (part 12)"],
+            ["service auto deploy: does not run every 300 seconds (part 12)"],
             ["service auto deploy: no plist matches ~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist (part 12)"],
         ))
 
@@ -2789,7 +2867,7 @@ class CheckServicesTest(unittest.TestCase):
         uid = os.getuid()
         self.launchd.plist(
             f"{str(self.launchd.home).lstrip('/')}/Library/LaunchAgents/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL,
-            EnvironmentVariables={"HERMES_HOME": "/h", "TOKEN": "s3cr3t"},
+            StartInterval=300, EnvironmentVariables={"HERMES_HOME": "/h", "TOKEN": "s3cr3t"},
         )
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",

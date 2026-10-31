@@ -87,7 +87,7 @@ class CheckGithubAccessTest(unittest.TestCase):
         plugin.mkdir(parents=True)
         (plugin / "broker_client.py").symlink_to(CHECKOUT / "plugins" / "linear-agent-session" / "broker_client.py")
         (self.worker / "scripts").mkdir()
-        for name in ("check-github-access", "factory_settings.py"):
+        for name in ("check-github-access", "factory_settings.py", "app_events.py"):
             shutil.copy(SCRIPTS / name, self.worker / "scripts" / name)
         self.broker_path = root / "factory-uploads.sock"
         self.installation = dict(ALL_PERMISSIONS)

@@ -28,7 +28,7 @@ def write(root: Path, files: dict) -> None:
         (root / name).write_text(text)
 
 
-class InstallDriftTest(unittest.TestCase):
+class DriftFixture(unittest.TestCase):
     object_format = "sha1"
 
     def setUp(self) -> None:
@@ -50,34 +50,36 @@ class InstallDriftTest(unittest.TestCase):
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-q", "-m", "change")
 
+
+class InstallDriftTest(DriftFixture):
     def test_an_install_that_matches_head_has_no_skew(self) -> None:
-        self.assertEqual(install_drift.skew(self.home, self.repo), [])
+        self.assertEqual(install_drift.skew(self.home, self.repo, None), [])
 
     def test_each_differing_part_is_named(self) -> None:
         (self.home / "plugins/blocker-order/result_line.py").write_text("LINE = 0\n")
-        self.assertEqual(install_drift.skew(self.home, self.repo), ["blocker-order"])
+        self.assertEqual(install_drift.skew(self.home, self.repo, None), ["blocker-order"])
         (self.home / "scripts/tool.py").unlink()
         (self.home / "plugins/linear-agent-session/linear.py").write_text("LINEAR = 0\n")
-        self.assertEqual(install_drift.skew(self.home, self.repo), ["profile", "blocker-order", "linear-agent-session"])
+        self.assertEqual(install_drift.skew(self.home, self.repo, None), ["profile", "blocker-order", "linear-agent-session"])
 
     def test_a_commit_that_the_home_lacks_is_skew(self) -> None:
         self.commit({"plugins/linear-agent-session/broker_client.py": "BROKER = 1\n"})
-        self.assertEqual(install_drift.skew(self.home, self.repo), ["linear-agent-session"])
+        self.assertEqual(install_drift.skew(self.home, self.repo, None), ["linear-agent-session"])
 
     def test_tests_and_other_plugins_are_not_compared(self) -> None:
         self.commit({"plugins/blocker-order/tests/test_line.py": "TEST = 2\n", "plugins/work/__init__.py": "WORK = 2\n"})
-        self.assertEqual(install_drift.skew(self.home, self.repo), [])
+        self.assertEqual(install_drift.skew(self.home, self.repo, None), [])
 
     def test_skew_compares_the_local_head_and_never_a_remote_ref(self) -> None:
         git(self.repo, "checkout", "-q", "-b", "next")
         self.commit({"plugins/blocker-order/result_line.py": "LINE = 2\n"})
         git(self.repo, "update-ref", "refs/remotes/origin/main", "next")
         git(self.repo, "checkout", "-q", "main")
-        self.assertEqual(install_drift.skew(self.home, self.repo), [])
+        self.assertEqual(install_drift.skew(self.home, self.repo, None), [])
 
     def test_a_directory_that_is_no_checkout_raises_the_modules_error(self) -> None:
         with self.assertRaises(install_drift.GitError):
-            install_drift.skew(self.home, self.tmp / "home")
+            install_drift.skew(self.home, self.tmp / "home", None)
 
     def test_compare_files_reports_a_missing_and_a_different_file(self) -> None:
         commit = install_drift.Commit(self.repo, git(self.repo, "rev-parse", "HEAD"), "main")
@@ -115,3 +117,34 @@ class Sha256InstallDriftTest(InstallDriftTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeployedCommitTest(DriftFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.deployed = git(self.repo, "rev-parse", "HEAD")
+        self.commit({"plugins/blocker-order/result_line.py": "LINE = 2\n"})
+
+    def test_a_checkout_ahead_of_the_deployed_commit_has_no_skew_against_it(self) -> None:
+        self.assertEqual(install_drift.skew(self.home, self.repo, self.deployed), [])
+        self.assertEqual(install_drift.skew(self.home, self.repo, None), ["blocker-order"])
+
+    def test_an_install_that_differs_from_the_deployed_commit_is_skew(self) -> None:
+        (self.home / "scripts/tool.py").write_text("TOOL = 0\n")
+        self.assertEqual(install_drift.skew(self.home, self.repo, self.deployed), ["profile"])
+
+    def test_a_deployed_commit_the_checkout_lacks_raises_and_names_it(self) -> None:
+        with self.assertRaises(install_drift.MissingCommit) as raised:
+            install_drift.skew(self.home, self.repo, "f" * 40)
+        self.assertIn("f" * 12, str(raised.exception))
+
+    def test_the_state_file_beside_the_profiles_directory_names_the_deployed_commit(self) -> None:
+        worker = self.tmp / "root" / "profiles" / "claude-worker"
+        worker.mkdir(parents=True)
+        self.assertEqual(install_drift.deploy_state(worker), {})
+        (self.tmp / "root" / "auto-deploy.json").write_text("{")
+        self.assertEqual(install_drift.deploy_state(worker), {})
+        (self.tmp / "root" / "auto-deploy.json").write_text('{"deployed": null}')
+        self.assertIsNone(install_drift.deployed(install_drift.deploy_state(worker)))
+        (self.tmp / "root" / "auto-deploy.json").write_text(f'{{"deployed": "{self.deployed}"}}')
+        self.assertEqual(install_drift.deployed(install_drift.deploy_state(worker)), self.deployed)

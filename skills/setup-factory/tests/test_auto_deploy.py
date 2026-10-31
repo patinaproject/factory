@@ -195,11 +195,10 @@ class AutoDeployTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         return proc
 
-    def test_install_only_drift_deploys_after_the_cards_drain_and_restarts_once(self) -> None:
+    def test_install_only_drift_deploys_at_a_break_under_the_hold_and_restarts_once(self) -> None:
         plugin = self.m.install("plugins", "install", "file://repo#plugins/blocker-order", restarts=True)
         profile = self.m.install("profile", "update", "claude-worker", "-y", step="PROFILE")
         self.m.drifts([plugin, profile])
-        self.m.update_hermes(running={"default": [[{"id": "t_1", "title": "PAT-1"}], [{"id": "t_1", "title": "PAT-1"}], []], "triage": [[]]})
 
         self.deploy()
 
@@ -271,13 +270,17 @@ class AutoDeployTest(unittest.TestCase):
         (self.m.source / "README.md").write_text("uncommitted\n")
         diverged = git("rev-parse", "HEAD", cwd=self.m.source)
         commit = self.m.push("B")
-        self.m.update_hermes(running={"default": [[{"id": "t_1", "title": "PAT-1"}], []], "triage": [[]]})
+        self.m.update_hermes(running={"default": [[{"id": "t_1", "title": "PAT-1"}]], "triage": [[]]})
 
         self.deploy()
 
-        waiting = [call for call in self.m.calls("hermes") if call["running"]]
-        self.assertTrue(waiting)
-        self.assertTrue(all(call["source_head"] == diverged and call["dirty"] for call in waiting))
+        self.assertEqual(self.m.outcomes(), [("WAITING", commit)])
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.m.source), diverged)
+        self.assertNotEqual(git("status", "--porcelain", "--untracked-files=no", cwd=self.m.source), "")
+
+        self.m.update_hermes(running={"default": [[]], "triage": [[]]})
+        self.deploy()
+
         self.assertEqual(git("rev-parse", "HEAD", cwd=self.m.source), commit)
         self.assertEqual(git("status", "--porcelain", "--untracked-files=no", cwd=self.m.source), "")
         self.assertEqual(self.m.state()["deployed"], commit)
@@ -340,20 +343,142 @@ class AutoDeployTest(unittest.TestCase):
         self.deploy()
         self.assertEqual(self.m.state()["deployed"], self.m.head)
 
-    def test_cards_still_running_at_the_bound_wait_installs_nothing_and_release_the_hold(self) -> None:
+    def test_a_running_card_holds_nothing_installs_nothing_and_records_waiting_once(self) -> None:
         self.m.drifts([self.m.install("profile", "update", "claude-worker", "-y", step="PROFILE")])
         self.m.update_hermes(running={"default": [[{"id": "t_1", "title": "PAT-1"}]], "triage": [[]]})
 
-        self.deploy("--timeout", "0.3")
+        self.deploy()
 
         self.assertEqual(self.m.outcomes(), [("WAITING", self.m.head)])
         self.assertIn("default/t_1 PAT-1", self.m.state()["detail"])
-        self.assertEqual(self.m.changes(), [list(auto_deploy.HOLD), list(auto_deploy.RELEASE)])
-        self.assertFalse(any(call["paused"] for call in self.m.calls("hermes")))
-        self.assertTrue(all(call["held"] for call in self.m.calls("hermes") if call["argv"][:2] == ["kanban", "--board"]))
+        self.assertEqual(self.m.changes(), [])
         self.assertEqual(self.m.calls("check-install"), [])
         self.assertTrue(self.m.released())
-        self.assertEqual(self.m.report(), f"auto-deploy WAITING at {self.m.head[:12]}: {self.m.state()['detail']}\n")
+        first = self.m.state()["detail"]
+
+        self.m.update_hermes(running={"default": [[{"id": "t_2", "title": "PAT-2"}]], "triage": [[{"id": "t_3", "title": "PAT-3"}]]})
+        self.deploy()
+
+        self.assertEqual(self.m.outcomes(), [("WAITING", self.m.head)])
+        self.assertEqual(self.m.changes(), [])
+        self.assertEqual(self.m.report(), f"auto-deploy WAITING at {self.m.head[:12]}: {first}\n")
+        self.assertEqual(self.m.report(), "")
+
+    def test_with_no_card_running_the_run_holds_installs_records_deployed_and_releases(self) -> None:
+        commit = self.m.push("B")
+        self.m.drifts([self.m.install("profile", "update", "claude-worker", "-y", step="PROFILE")])
+
+        self.deploy()
+
+        self.assertEqual(self.m.outcomes(), [("DEPLOYED", commit)])
+        install = next(call for call in self.m.calls("hermes") if call["argv"][0] == "profile")
+        self.assertTrue(install["held"])
+        changes = self.m.changes()
+        self.assertEqual((changes[0], changes[-1]), (list(auto_deploy.HOLD), list(auto_deploy.RELEASE)))
+        self.assertTrue(self.m.released())
+
+    def in_process(self, sleep) -> "auto_deploy.Deploy":
+        args = argparse.Namespace(root=str(self.m.root), worker=str(self.m.worker), retry=False, timeout=3600.0, poll=7.0)
+        env = mock.patch.dict(os.environ, self.m.env())
+        env.start()
+        self.addCleanup(env.stop)
+        return auto_deploy.Deploy(args, str(self.m.hermes), auto_deploy.Redactor({}), clock=lambda: 0.0, sleep=sleep)
+
+    def test_a_card_claimed_before_the_hold_took_effect_stops_the_install(self) -> None:
+        self.m.drifts([self.m.install("profile", "update", "claude-worker", "-y", step="PROFILE")])
+        slept = []
+
+        def sleep(seconds: float) -> None:
+            if slept:
+                raise AssertionError("the run slept twice")
+            slept.append((seconds, self.m.hermes_state()["key"]))
+            self.m.update_hermes(running={"default": [[{"id": "t_9", "title": "PAT-9"}]], "triage": [[]]})
+
+        self.assertEqual(self.in_process(sleep).deploy(None, 0.0), 0)
+
+        self.assertEqual(slept, [(7.0, True)])
+        self.assertEqual(self.m.outcomes(), [("WAITING", self.m.head)])
+        self.assertIn("default/t_9 PAT-9", self.m.state()["detail"])
+        self.assertEqual(self.m.changes(), [list(auto_deploy.HOLD), list(auto_deploy.RELEASE)])
+        self.assertEqual(self.m.calls("check-install"), [])
+        self.assertTrue(self.m.released())
+
+    def test_a_run_that_cannot_read_the_running_cards_records_failed_without_a_commit_and_the_next_run_deploys(self) -> None:
+        self.m.update_hermes(fail=[{"argv": ["kanban", "boards", "list", "--json"], "stderr": "board busy"}])
+
+        self.deploy()
+
+        self.assertEqual(self.m.outcomes(), [("FAILED", None)])
+        self.assertIsNone(self.m.state()["failed"])
+        self.assertEqual(self.m.changes(), [])
+
+        self.m.update_hermes(fail=[])
+        self.deploy()
+
+        self.assertEqual(self.m.state()["deployed"], self.m.head)
+
+    def break_origin(self) -> str:
+        url = git("remote", "get-url", "origin", cwd=self.m.source)
+        git("remote", "set-url", "origin", str(self.m.tmp / "nowhere.git"), cwd=self.m.source)
+        return url
+
+    def test_a_result_repeated_by_the_next_run_is_recorded_and_reported_once(self) -> None:
+        estop = self.m.root / "ESTOP"
+        lock = self.m.root / "factory-gateway.lock"
+
+        def pause():
+            estop.write_text(json.dumps({"reason": "operator maintenance"}))
+            return estop.unlink
+
+        def gateway_lock():
+            lock.write_text("a person deploying\n")
+            return lock.unlink
+
+        def hold_key():
+            self.m.update_hermes(fail=[{"argv": ["kanban", "diagnostics", "--json"], "stderr": "config unreadable"}])
+            return lambda: self.m.update_hermes(fail=[])
+
+        def fetch():
+            url = self.break_origin()
+            return lambda: git("remote", "set-url", "origin", url, cwd=self.m.source)
+
+        for name, cause in (("pause", pause), ("gateway_lock", gateway_lock), ("hold key", hold_key), ("fetch", fetch)):
+            with self.subTest(name):
+                before = len(self.m.state()["events"]) if (self.m.root / "auto-deploy.json").exists() else 0
+                undo = cause()
+                self.deploy()
+                self.deploy()
+                undo()
+
+                events = self.m.state()["events"][before:]
+                self.assertEqual(len(events), 1, events)
+                self.assertIn(events[0]["outcome"], ("BLOCKED", "FAILED"))
+                self.assertEqual(len(self.m.report().splitlines()), 1)
+
+    def test_waiting_then_a_fetch_failure_then_waiting_again_records_the_wait_once(self) -> None:
+        self.m.update_hermes(running={"default": [[{"id": "t_1", "title": "PAT-1"}]], "triage": [[]]})
+        self.deploy()
+        url = self.break_origin()
+        self.deploy()
+        git("remote", "set-url", "origin", url, cwd=self.m.source)
+
+        self.deploy()
+
+        self.assertEqual(self.m.outcomes(), [("WAITING", self.m.head), ("FAILED", None)])
+        self.assertEqual(len(self.m.report().splitlines()), 2)
+
+    def test_a_deployed_event_lets_the_same_result_report_again(self) -> None:
+        self.break_origin()
+        self.deploy()
+        self.deploy()
+        git("remote", "set-url", "origin", str(self.m.origin), cwd=self.m.source)
+        self.deploy()
+        self.m.push("B")
+        self.break_origin()
+
+        self.deploy()
+
+        self.assertEqual([outcome for outcome, _ in self.m.outcomes()], ["FAILED", "DEPLOYED", "FAILED"])
 
     def test_every_failure_releases_what_the_run_engaged(self) -> None:
         self.m.drifts([self.m.install("plugins", "install", "x", restarts=True)])
@@ -417,7 +542,7 @@ class AutoDeployTest(unittest.TestCase):
         self.assertEqual(self.m.outcomes(), [("FAILED", self.m.head), ("DEPLOYED", self.m.head)])
         self.assertEqual((self.m.state()["deployed"], self.m.state()["failed"]), (self.m.head, None))
 
-    def test_the_plist_runs_the_installed_script_at_load_and_on_demand_with_no_secret(self) -> None:
+    def test_the_plist_runs_the_installed_script_at_load_on_its_interval_and_on_demand_with_no_secret(self) -> None:
         proc = subprocess.run(
             [PYTHON, str(AUTO_DEPLOY), "--print-plist", "--root", "/h"],
             env={**self.m.env(), "HOME": "/home/op", "GITHUB_TOKEN": SECRET}, capture_output=True, timeout=60,
@@ -428,6 +553,7 @@ class AutoDeployTest(unittest.TestCase):
             "Label": "ai.patinaproject.factory.auto-deploy",
             "ProgramArguments": ["/usr/bin/python3", "/h/scripts/auto-deploy", "--root", "/h"],
             "RunAtLoad": True,
+            "StartInterval": 300,
             "EnvironmentVariables": {
                 "HERMES_HOME": "/h", "PATH": "/home/op/.local/bin:/usr/local/bin:/usr/bin:/bin",
                 "GH_CONFIG_DIR": "/h/profiles/claude-worker/gh",

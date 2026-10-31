@@ -12,7 +12,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from tests.support import REPO, SCRIPTS, with_interpreter
+from tests.support import REPO, SCRIPTS, git, with_interpreter
 from tests.test_kanban_board import COMMENTS_AND_EVENTS, TASKS
 
 FAKE_HERMES = """#!/usr/bin/env python3
@@ -61,8 +61,9 @@ class Harness(unittest.TestCase):
         self.hermes.write_text(with_interpreter(FAKE_HERMES))
         os.chmod(self.hermes, 0o755)
         self.state_path = self.tmp / "state.json"
-        (self.tmp / "home" / "plugins").mkdir(parents=True)
-        (self.tmp / "home" / "plugins" / "blocker-order").symlink_to(REPO / "plugins" / "blocker-order")
+        self.home = self.tmp / "home"
+        (self.home / "plugins").mkdir(parents=True)
+        (self.home / "plugins" / "blocker-order").symlink_to(REPO / "plugins" / "blocker-order")
         self.board = self.tmp / "triage.db"
         with closing(sqlite3.connect(self.board)) as db:
             db.execute(TASKS)
@@ -73,7 +74,7 @@ class Harness(unittest.TestCase):
         state = {"default_tasks": [], "tasks": tasks, "settings": settings, "db_path": str(self.board), **state}
         self.state_path.write_text(json.dumps(state))
         env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path),
-               "HERMES_HOME": str(self.tmp / "home")}
+               "HERMES_HOME": str(self.home)}
         return subprocess.run([sys.executable, str(SCRIPTS / "dispatch-triage")], env=env, capture_output=True, text=True)
 
     def assignees(self) -> dict:
@@ -176,20 +177,13 @@ class DispatchTriageTest(Harness):
 PARKED = "Waiting for the worker's gh login: the worker's gh login has 3 minutes left"
 
 
-class LoginReleaseTest(Harness):
+class ParkedHarness(Harness):
     def setUp(self) -> None:
         super().setUp()
         self.default_board = self.tmp / "default.db"
         with closing(sqlite3.connect(self.default_board)) as db:
             db.execute(TASKS)
             db.executescript(COMMENTS_AND_EVENTS)
-
-    def login(self, seconds_left: float | None) -> None:
-        gh = self.tmp / "home" / "gh"
-        gh.mkdir(exist_ok=True)
-        (gh / "token-expiry.json").unlink(missing_ok=True)
-        if seconds_left is not None:
-            (gh / "token-expiry.json").write_text(json.dumps({"expires_at": time.time() + seconds_left}))
 
     def park(self, board: Path, task_id: str, reason: str = PARKED, assignee: str | None = "claude-worker",
              comments: tuple = ()) -> None:
@@ -208,6 +202,15 @@ class LoginReleaseTest(Harness):
     def statuses(self) -> dict:
         state = json.loads(self.state_path.read_text())
         return {t["id"]: (t["status"], t["assignee"]) for t in state["tasks"] + state["default_tasks"]}
+
+
+class LoginReleaseTest(ParkedHarness):
+    def login(self, seconds_left: float | None) -> None:
+        gh = self.tmp / "home" / "gh"
+        gh.mkdir(exist_ok=True)
+        (gh / "token-expiry.json").unlink(missing_ok=True)
+        if seconds_left is not None:
+            (gh / "token-expiry.json").write_text(json.dumps({"expires_at": time.time() + seconds_left}))
 
     def test_a_fresh_login_releases_a_default_card_ready_and_assigned_and_a_triage_card_unassigned(self) -> None:
         self.login(15 * 60 + 30)
@@ -311,3 +314,99 @@ class LoginReleaseTest(Harness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+DEPLOY_PARKED = "Waiting for a factory deploy: the profile scripts in /w differ from the deployed commit 0123456789ab at /src"
+
+
+class DeployReleaseTest(ParkedHarness):
+    def setUp(self) -> None:
+        super().setUp()
+        root = self.tmp / "root"
+        self.home = root / "profiles" / "claude-worker"
+        self.source = self.tmp / "source"
+        self.source.mkdir()
+        git(self.source, "init", "-q", "-b", "main")
+        for path in (REPO / "plugins" / "blocker-order").glob("*.py"):
+            for target in (self.source / "plugins" / "blocker-order", self.home / "plugins" / "blocker-order"):
+                target.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target / path.name)
+        self.commit("TOOL = 1\n")
+        self.deployed = git(self.source, "rev-parse", "HEAD")
+        (self.home / "scripts").mkdir()
+        (self.home / "scripts" / "tool.py").write_text("TOOL = 1\n")
+        (self.home / "distribution.yaml").write_text(f"name: claude-worker\nsource: {self.source}/profiles/claude-worker\n")
+        self.state_file = root / "auto-deploy.json"
+        self.record(self.deployed)
+
+    def commit(self, tool: str) -> str:
+        path = self.source / "profiles" / "claude-worker" / "scripts" / "tool.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(tool)
+        git(self.source, "add", "-A")
+        git(self.source, "commit", "-q", "-m", "change")
+        return git(self.source, "rev-parse", "HEAD")
+
+    def record(self, deployed: str) -> None:
+        self.state_file.write_text(json.dumps({"deployed": deployed, "failed": None, "blocked": None}))
+
+    def park(self, board: Path, task_id: str, reason: str = DEPLOY_PARKED, **fields) -> None:
+        super().park(board, task_id, reason, **fields)
+
+    def test_an_install_that_matches_the_deployed_commit_releases_on_every_board(self) -> None:
+        self.park(self.default_board, "t_default")
+        self.park(self.board, "t_triage")
+
+        proc = self.sweep([task("t_triage", "scheduled", "claude-worker")], [task("t_default", "scheduled", "claude-worker")])
+
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertEqual(sorted(proc.stdout.splitlines()), ["assigned t_triage", "released t_default", "released t_triage"])
+        self.assertEqual(self.statuses()["t_default"], ("ready", "claude-worker"))
+        self.assertEqual(self.statuses()["t_triage"], ("ready", "claude-worker"))
+        calls = [json.loads(line) for line in Path(f"{self.state_path}.log").read_text().splitlines()]
+        self.assertIn(["kanban", "--board", "triage", "assign", "t_triage", "none"], calls)
+
+    def test_a_checkout_ahead_of_the_deployed_commit_still_releases(self) -> None:
+        self.commit("TOOL = 2\n")
+        self.park(self.default_board, "t_default")
+
+        proc = self.sweep([], [task("t_default", "scheduled", "claude-worker")])
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "released t_default\n", ""))
+
+    def test_an_install_that_differs_from_the_deployed_commit_releases_nothing(self) -> None:
+        self.record(self.commit("TOOL = 2\n"))
+        self.park(self.default_board, "t_default")
+        self.park(self.board, "t_triage")
+
+        proc = self.sweep([task("t_triage", "scheduled", "claude-worker")], [task("t_default", "scheduled", "claude-worker")])
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, ""))
+        self.assertEqual({status for status, _ in self.statuses().values()}, {"scheduled"})
+
+    def test_a_deployed_commit_the_checkout_lacks_releases_nothing(self) -> None:
+        self.record("f" * 40)
+        self.park(self.default_board, "t_default")
+
+        proc = self.sweep([], [task("t_default", "scheduled", "claude-worker")])
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, ""))
+        self.assertEqual(self.statuses()["t_default"], ("scheduled", "claude-worker"))
+
+    def test_a_card_a_person_stopped_or_unassigned_after_the_park_stays_parked(self) -> None:
+        self.park(self.default_board, "t_stopped", comments=("stopped",))
+        self.park(self.default_board, "t_unassigned", assignee=None)
+
+        proc = self.sweep([], [task("t_stopped", "scheduled", "claude-worker"), task("t_unassigned", "scheduled", None)])
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, ""))
+        self.assertEqual({status for status, _ in self.statuses().values()}, {"scheduled"})
+
+    def test_a_reply_never_releases_a_deploy_park(self) -> None:
+        self.record(self.commit("TOOL = 2\n"))
+        self.park(self.board, "t_deploy", comments=("Linear reply: any news?",))
+
+        proc = self.sweep([task("t_deploy", "scheduled", "claude-worker")], [])
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, ""))
+        self.assertEqual(self.statuses()["t_deploy"], ("scheduled", "claude-worker"))

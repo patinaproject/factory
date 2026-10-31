@@ -357,11 +357,15 @@ class ResultLineTest(unittest.TestCase):
             json.loads(result_line.line(result_line.Refused("stale", True, "gh_login"))),
             {"error": "stale", "transient": True, "precondition": "gh_login"},
         )
-        self.assertIsNone(result_line.gh_login_refusal(written))
-        self.assertEqual(result_line.gh_login_refusal(result_line.Refused("stale", True, "gh_login")), "stale")
+        self.assertIsNone(result_line.precondition_refusal(written))
+        for precondition in ("gh_login", "install_skew"):
+            refusal = result_line.Refused("stale", True, precondition)
+            self.assertEqual(result_line.precondition_refusal(refusal), refusal)
+        self.assertIsNone(result_line.precondition_refusal(result_line.Refused("stale", True, "unknown")))
 
-    def test_a_gh_login_park_never_starts_with_needs_input(self):
-        self.assertFalse(result_line.GH_LOGIN_PARK.startswith(result_line.NEEDS_INPUT))
+    def test_a_machine_park_never_starts_with_needs_input(self):
+        for park in (result_line.GH_LOGIN_PARK, result_line.INSTALL_SKEW_PARK):
+            self.assertFalse(park.startswith(result_line.NEEDS_INPUT))
 
     def test_a_crashed_line_is_neither_refused_nor_failed(self):
         written = result_line.Crashed("OSError: boom", "s-1")
@@ -637,12 +641,14 @@ class GhLoginTest(Hooked):
         "once the login is fresh. Stop now: call no other tool, do not call kanban_block, do not post an "
         "activity, and do not run claude-session again."
     )
+    PRECONDITION, PARK, KEY = "gh_login", result_line.GH_LOGIN_PARK, "gh_login_park"
+    ERROR = "the worker's gh login: /gh/token-expiry.json cannot be read (FileNotFoundError)"
 
     def setUp(self) -> None:
         super().setUp()
-        self.error = "the worker's gh login: /gh/token-expiry.json cannot be read (FileNotFoundError)"
-        self.line = result_line.line(result_line.Refused(self.error, True, "gh_login"))
-        self.reason = f"{result_line.GH_LOGIN_PARK} {self.error}"
+        self.error = self.ERROR
+        self.line = result_line.line(result_line.Refused(self.error, True, self.PRECONDITION))
+        self.reason = f"{self.PARK} {self.error}"
 
     def refuse(self, task: str, board: str) -> dict | None:
         os.environ["HERMES_KANBAN_BOARD"] = board
@@ -654,7 +660,7 @@ class GhLoginTest(Hooked):
     def test_cards_on_every_board_are_parked_and_none_is_blocked_or_reported_to_linear(self):
         for task, board in (("t_1", "triage"), ("t_2", "default"), ("t_3", "other")):
             outcome = self.refuse(task, board)
-            self.assertEqual(outcome["gh_login_park"], {"parked": True, "instruction": self.STOPPED})
+            self.assertEqual(outcome[self.KEY], {"parked": True, "instruction": self.STOPPED})
             self.assertEqual(outcome["output"], f"{self.line}\n")
             self.assertEqual(self.board.status[task], "scheduled")
             self.assertEqual(self.board.reasons[task], self.reason)
@@ -670,7 +676,7 @@ class GhLoginTest(Hooked):
     def test_a_failed_park_tells_the_worker_to_schedule_and_never_block(self):
         self.board.fail["kanban_schedule"] = "could not schedule t_1"
 
-        outcome = self.refuse("t_1", "default")["gh_login_park"]
+        outcome = self.refuse("t_1", "default")[self.KEY]
 
         self.assertEqual(outcome["parked"], False)
         self.assertEqual(outcome["instruction"], (
@@ -711,6 +717,27 @@ class GhLoginTest(Hooked):
 
         self.assertEqual(os.environ[order.STOP_NUDGE], "off")
         self.assertEqual((self.board.calls, self.board.rounds, self.board.comments), ([], [], []))
+
+
+class InstallSkewTest(GhLoginTest):
+    STOPPED = (
+        "The factory's install differs from the deployed commit, so this card waits in scheduled for a factory "
+        "deploy and goes back to the queue once the install matches. Stop now: call no other tool, do not call "
+        "kanban_block, do not post an activity, and do not run claude-session again."
+    )
+    PRECONDITION, PARK, KEY = "install_skew", "Waiting for a factory deploy:", "install_skew_park"
+    ERROR = "the blocker-order plugin in /w differs from the deployed commit 0123456789ab at /src"
+
+    def test_the_line_claude_session_writes_by_hand_parks_and_reaches_no_linear_tool(self):
+        self.line = json.dumps({"error": self.error, "transient": True, "precondition": "install_skew"})
+
+        outcome = self.refuse("t_1", "triage")
+
+        self.assertTrue(outcome[self.KEY]["parked"])
+        self.assertEqual((self.board.status["t_1"], self.board.reasons["t_1"]), ("scheduled", self.reason))
+        names = [name for name, _ in self.board.calls]
+        self.assertEqual(names, ["kanban_schedule"])
+        self.assertFalse(any(name.startswith("linear") or name == "kanban_block" for name in names))
 
 
 class Factory(Hooked):
