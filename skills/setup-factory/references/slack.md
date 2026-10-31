@@ -17,7 +17,8 @@ All of these must hold:
 - `streaming.enabled` and `platforms.slack.extra.native_task_cards` are `true`
   in `<home>/config.yaml` (see [Show progress](#show-progress)).
 - When the operator chose a conversation model, `platforms.slack.channel_overrides`
-  holds an entry for each channel they named (see
+  holds an entry for each channel they named, with the chosen `model` and,
+  when they gave one, `provider` (see
   [Choose the conversation model](#choose-the-conversation-model)).
 - A message round-trip works (see [Verify](#verify)).
 
@@ -105,7 +106,9 @@ hermes config set platforms.slack.channel_overrides.<channel id>.provider <provi
 
 `hermes config set` splits the key at each `.`, and a channel ID has no dot.
 Leave existing entries and their other keys, such as `system_prompt`, as they
-are. Each `model` must be an alias the transport serves (part 4).
+are. Each `model` must be an alias the transport serves (part 4). Record the
+alias, the provider, and the channel IDs in the private record only, so a fresh
+install can reproduce the choice.
 
 Hermes silently ignores an entry that is not a mapping. A top-level `slack:`
 block in `<home>/config.yaml` replaces `platforms.slack` and hides the

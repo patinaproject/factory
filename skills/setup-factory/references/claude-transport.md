@@ -29,10 +29,10 @@ The file is deleted when the run ends. Never put an `ANTHROPIC_*` variable in a
 `.env` file or in the gateway's service unit. The DirectSDK provider refuses to
 start when it finds one.
 
-`model`, `model.default`, and each `model` under
-`platforms.slack.channel_overrides` must be an alias the endpoint serves. A proxy answers
-`unknown provider for model ...` for any other model, and Claude Code retries
-until the run times out. Mapping every tier matters for the same reason:
+`claude_session.model`, `model.default`, and each `model` under
+`platforms.slack.channel_overrides` must be an alias the endpoint serves. A
+proxy answers `unknown provider for model ...` for any other model, and Claude
+Code retries until the run times out. Mapping every tier matters for the same reason:
 Claude Code sends background and subagent requests to its Haiku and subagent
 models. A tier with no `tier_models` entry falls back to `model`,
 which keeps a one-model proxy working but sends every subagent to the main
