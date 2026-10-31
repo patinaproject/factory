@@ -163,7 +163,7 @@ def _session_prompted(facts: Intent, stop: bool) -> str:
 
 
 def _issue_update(facts: Intent, labels_changed: bool) -> str:
-    if facts.issue["state_type"] in ("completed", "canceled", "duplicate"):
+    if facts.issue["state_type"] in triage_exit.CLOSED_STATE_TYPES:
         return "issue_closed"
     if not facts.delegated:
         return "undelegated"

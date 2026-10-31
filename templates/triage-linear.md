@@ -255,7 +255,10 @@ from the reply read in the context of `thread`, and the issue. When the thread
 makes the reply's target clear, act on it: "All of them" after a response that
 listed numbered options means every option. When the thread leaves it unclear,
 ask one question that names the options instead of saying you cannot tell which
-question the reply answers. Create no card and stop.
+question the reply answers. When the reply answers triage questions but the
+issue has no live triage card, say in that `response` that the person should
+move the issue back to Triage and send the answer again. Create no card and
+stop.
 
 ### `card_reply`
 
@@ -319,7 +322,10 @@ delegated the issue.
    card, which waits for this reply, unblocks a `blocked` one, or resumes a
    `triage` one, and leaves it unassigned, because `dispatch-triage` assigns it
    again when fewer triage cards run than the factory's cap.
-3. Post one `thought` on `agent_session_id` that names the triage card's
+3. When `card` is not null and the command did not print `error`, comment the
+   reply on that implementation card once, as `card_reply` step 2 says,
+   starting `Linear reply:`.
+4. Post one `thought` on `agent_session_id` that names the triage card's
    task id and says that triage resumes with the reply when the line's
    `action` is `unblocked` or `resumed`, or, for `none`, that the reply is on
    the card for its worker. When it prints `error`, post that error as the

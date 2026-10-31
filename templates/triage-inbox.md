@@ -13,8 +13,11 @@ right after `kanban`, and pass `board: triage` to `kanban_comment`.
    status (the previous status above is not a dotted name in braces), it left
    Triage: a person moved it or closed it, or its own triage card passed it
    and moved it to Todo. When a triage card exists and its status is not
-   `running`, archive it with `<<archive_card>> --board triage <task id>`.
-   Leave a `running` card to its worker, which ends it. Then stop this
+   `running`, archive it with `<<archive_card>> --board triage <task id>`,
+   except a `scheduled` card while the issue's `state_type` is not
+   `completed`, `canceled`, or `duplicate`: that card waits for a person's
+   answer to its questions, so leave it. Leave a `running` card to its
+   worker, which ends it. Then stop this
    section. On any other event for an issue outside Triage, leave its triage
    card alone, because the delegation gate can create one there, and stop this
    section.

@@ -186,6 +186,36 @@ class TriageExitTest(Harness):
         )
         self.assertEqual(self.archived(), [])
 
+    def test_a_scheduled_triage_card_is_kept_when_the_issue_leaves_triage_open(self):
+        self.boards["triage"] = [card("t_triage", "scheduled")]
+
+        result = self.dispatch(issue_update("unstarted"))
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "left scheduled triage card t_triage waiting for a reply: PAT-1 left Triage"},
+        )
+        self.assertEqual(self.archived(), [])
+
+    def test_a_scheduled_triage_card_is_archived_when_the_issue_is_closed(self):
+        self.boards["triage"] = [card("t_triage", "scheduled")]
+        for state_type in ("completed", "canceled", "duplicate"):
+            with self.subTest(state_type):
+                self.linear.graphql_responses = [live_issue(state_type)]
+                self.assertEqual(
+                    self.dispatch(issue_update(state_type)),
+                    {"action": "skip", "reason": "archived triage card t_triage: PAT-1 left Triage"},
+                )
+        self.assertEqual(self.archived(), [["--board", "triage", "t_triage"]] * 3)
+
+    def test_a_done_triage_card_is_archived_when_the_issue_leaves_triage_open(self):
+        self.boards["triage"] = [card("t_triage", "done")]
+
+        result = self.dispatch(issue_update("unstarted"))
+
+        self.assertEqual(result, {"action": "skip", "reason": "archived triage card t_triage: PAT-1 left Triage"})
+        self.assertEqual(self.archived(), [["--board", "triage", "t_triage"]])
+
     def test_an_issue_delegated_to_the_agent_app_reaches_triage(self):
         self.boards["triage"] = [card("t_triage", "todo")]
 
