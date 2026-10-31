@@ -322,8 +322,9 @@ delegated the issue.
    card, which waits for this reply, unblocks a `blocked` one, or resumes a
    `triage` one, and leaves it unassigned, because `dispatch-triage` assigns it
    again when fewer triage cards run than the factory's cap.
-3. When `card` is not null, comment the reply on that implementation card once,
-   as `card_reply` step 2 says, starting `Linear reply:`.
+3. When `card` is not null and the command did not print `error`, comment the
+   reply on that implementation card once, as `card_reply` step 2 says,
+   starting `Linear reply:`.
 4. Post one `thought` on `agent_session_id` that names the triage card's
    task id and says that triage resumes with the reply when the line's
    `action` is `unblocked` or `resumed`, or, for `none`, that the reply is on
