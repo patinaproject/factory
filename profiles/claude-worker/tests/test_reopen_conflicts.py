@@ -712,12 +712,12 @@ class ReopenConflictsTest(unittest.TestCase):
         self.assertEqual(self.writes(), [[
             "kanban", "comment", "t_1",
             f"Pull request {REPO}#7 conflicts with main. The card stays parked. When a person replies and the card "
-            f"resumes, the worker merges origin/main first.\n\nconflict_head: {HEAD}",
+            f"resumes, the worker merges origin/main first.\n\nparked: notice only\nconflict_head: {HEAD}",
         ]])
         self.assertEqual(self.gh_calls()[1:], self.triage_calls())
 
     def test_a_triage_card_that_holds_the_head_is_left_alone(self) -> None:
-        self.state["comments"] = {"t_1": [{"body": f"earlier\nconflict_head: {HEAD}"}]}
+        self.state["comments"] = {"t_1": [{"body": f"earlier\nparked: notice only\nconflict_head: {HEAD}"}]}
 
         proc = self.triage_case()
 
@@ -778,6 +778,35 @@ class ReopenConflictsTest(unittest.TestCase):
         self.run_script()
 
         self.assertTrue(self.cli_calls()[0][6].endswith("Conflicting files:\nThe list of conflicting files is unavailable."))
+
+    def test_a_compare_github_refuses_still_tells_the_session_the_list_is_unavailable(self) -> None:
+        self.state["tasks"] = [card("t_1", "triage", "abc-1", session=SESSION)]
+        self.state["pulls"][REPO] = [pull(7, "abc-1")]
+        self.state["compare"] = {}
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, f"t_1 https://github.com/{REPO}/pull/7 notified\n"))
+        self.assertTrue(self.cli_calls()[0][6].endswith("Conflicting files:\nThe list of conflicting files is unavailable."))
+        self.assertEqual([call[:3] for call in self.writes()], [["kanban", "comment", "t_1"]])
+
+    def test_a_parked_notice_does_not_stand_for_a_handback_when_the_card_leaves_triage(self) -> None:
+        self.state["tasks"] = [card("t_1", "blocked", "abc-1"), card("t_2", "review", "abc-2")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1"), pull(8, "abc-2")]
+        notice = {"body": f"parked\n\nparked: notice only\nconflict_head: {HEAD}"}
+        self.state["comments"] = {"t_1": [notice], "t_2": [notice]}
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, f"t_1 https://github.com/{REPO}/pull/7\nt_2 https://github.com/{REPO}/pull/8\n"))
+        self.assertEqual(self.writes(), [
+            ["kanban", "unblock", "t_1"],
+            ["kanban", "request-review", "t_1"],
+            ["kanban", "comment", "t_1", self.comment(7)],
+            ["kanban", "reopen-review", "t_1", "--reason", "merge conflict with the base branch; see the card comments"],
+            ["kanban", "comment", "t_2", self.comment(8)],
+            ["kanban", "reopen-review", "t_2", "--reason", "merge conflict with the base branch; see the card comments"],
+        ])
 
     def test_a_home_that_is_not_a_profile_home_exits_2(self) -> None:
         proc = self.run_script(home=self.dir)
