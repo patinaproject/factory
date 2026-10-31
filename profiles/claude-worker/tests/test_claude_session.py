@@ -108,6 +108,9 @@ TRIAGE_ENTRY = (
     "Do not implement it."
 )
 TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
+TAKEOVER_REVIEW = "https://linear.review/Example-Org/example-repo/pull/7"
+REVIEW_PULL_9 = f"https://linear.review/{REPO}/pull/9"
+REVIEW_PULL_42 = f"https://linear.review/{REPO}/pull/42"
 LINEAR_URL = "https://linear.app/example/issue/ABC-123"
 CARD_BODY = f"```text\nlinear_issue_identifier: ABC-123\n```\ngithub_issue_url: https://github.com/{REPO}/issues/12"
 CLOSING_LINE = f"Closes #12, closes [ABC-123]({LINEAR_URL})"
@@ -766,15 +769,15 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session()
 
-        self.assertEqual((status, report["session_links"]), (0, {"added": [pull], "action": "linked"}))
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", pull))])
+        self.assertEqual((status, report["session_links"]), (0, {"added": [REVIEW_PULL_9], "action": "linked"}))
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
         urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
-        self.assertEqual(urls, ["https://kanban.test/t_1", pull])
+        self.assertEqual(urls, ["https://kanban.test/t_1", REVIEW_PULL_9])
 
     def test_a_pull_request_the_session_already_holds_is_not_added_again(self) -> None:
         self.set_comments(body=SESSION_BODY)
         pull = self.factory_pull()
-        self.set_linear_state(session_urls=[pull])
+        self.set_linear_state(session_urls=[REVIEW_PULL_9])
 
         status, report = self.run_session()
 
@@ -794,10 +797,10 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
-        self.assertEqual((status, report["session_links"]), (0, {"added": [TAKEOVER_PR], "action": "linked"}))
+        self.assertEqual((status, report["session_links"]), (0, {"added": [TAKEOVER_REVIEW], "action": "linked"}))
         started = [json.loads(line) for line in self.claude_call()["linear_log"].splitlines()]
         before = [e["session_update"]["input"] for e in started if "session_update" in e]
-        self.assertIn(self.linked(("Taken-over pull request #7", TAKEOVER_PR)), before)
+        self.assertIn(self.linked(("Taken-over pull request #7", TAKEOVER_REVIEW)), before)
 
     def test_a_takeover_and_the_replacement_pull_request_both_stay_on_the_session(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -807,13 +810,13 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
         self.assertEqual(
-            (status, report["session_links"]), (0, {"added": [TAKEOVER_PR, replacement], "action": "linked"})
+            (status, report["session_links"]), (0, {"added": [TAKEOVER_REVIEW, REVIEW_PULL_9], "action": "linked"})
         )
         self.assertEqual(self.link_updates(), [
-            self.linked(("Taken-over pull request #7", TAKEOVER_PR)), self.linked(("Pull request #9", replacement)),
+            self.linked(("Taken-over pull request #7", TAKEOVER_REVIEW)), self.linked(("Pull request #9", REVIEW_PULL_9)),
         ])
         urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
-        self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_PR, replacement])
+        self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_REVIEW, REVIEW_PULL_9])
 
     def test_a_failed_session_link_is_reported_without_changing_the_run(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -874,7 +877,7 @@ class ClaudeSessionTest(GitFixture):
         self.reply_run({"hook": "PostToolUse", "event": event})
 
         self.assertEqual(self.hook_log()[0]["codes"], [0, 0])
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #42", pull))])
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #42", REVIEW_PULL_42))])
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(
