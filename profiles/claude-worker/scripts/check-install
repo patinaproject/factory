@@ -364,7 +364,8 @@ def check_routes(commit: Commit, homes: Homes) -> list:
     root, hermes = homes.root, homes.hermes
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        for path, blob_id in commit.files("templates").items():
+        rendered_from = {**commit.files("templates"), **commit.files("profiles/claude-worker/scripts/reply_inbox.py")}
+        for path, blob_id in rendered_from.items():
             target = work / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(commit.blob(blob_id))

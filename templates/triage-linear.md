@@ -30,6 +30,14 @@ the gate, or read the reply yourself. Its fields:
 - `reply` and `reply_source`: the person's reply on a `prompted` event, verbatim
   however short, and where it came from. A null `reply` means it arrived without
   text.
+- `reply_author_id`, `assignee`, `from_assignee`, and `not_assignee_reason`: on
+  a reply, the Linear user id of its author, the issue's assignee with its `id`,
+  `name`, and `gitHubUserId`, and whether the author is that assignee. Only the
+  assignee's reply starts work on the card. `not_assignee_reason` says why the
+  reply cannot be the assignee's: `no_assignee` when the issue has none,
+  `app_assignee` when an agent app holds it, and `no_author` when the author
+  could not be read. It is null when a person who is not the assignee replied.
+  All four are null on other events.
 - `thread` and `thread_source`: on a `prompted` event, the session's earlier
   activities, oldest first, without the reply itself. Each has `id`, `type`
   (`prompt`, `response`, `elicitation`, `thought`, `action`, or `error`),
@@ -230,9 +238,9 @@ Actions `create_card`, `foreign_cards`, and `reuse_card`, and the `then` of
 
 ## Prompt
 
-Actions `card_reply`, `triage_card_reply`, and `answer_reply`: a human replied
-in the agent session. A null `reply` means the reply arrived without its text,
-which the steps below handle.
+Actions `card_reply`, `card_reply_not_assignee`, `triage_card_reply`, and
+`answer_reply`: a human replied in the agent session. A null `reply` means the
+reply arrived without its text, which the steps below handle.
 
 A reply can refer to an earlier message, as "All of them" refers to a list of
 options and "the resolution" refers to a triage outcome. Read the reply in the
@@ -299,6 +307,29 @@ stop.
    In every case, never quote or summarize an earlier run's result, heartbeat,
    or card comment as the card's current status.
 
+### `card_reply_not_assignee`
+
+Someone other than the issue's assignee replied on an issue with a card. Only
+the assignee's reply starts work on the card, so this reply wakes no card and
+changes nothing on the branch. The card keeps it as context.
+
+1. When `reply` is null, post a `thought` on `agent_session_id` asking the
+   human to send the reply again, and stop.
+2. Comment on the card once with the reply, attributed to Linear. Start the
+   comment with `<<not_assignee_marker>>`, never with `Linear reply:`, and
+   replace each pull request URL as `card_reply` step 2 says. Do not unblock,
+   reopen, resume, or otherwise change the card.
+3. Post one `response` on `agent_session_id`. Say that the reply is on the card
+   as context, and that the worker changes the work for it only when the
+   assignee asks. Name the assignee by `assignee.name`. When
+   `not_assignee_reason` is set, say why instead:
+   - `no_assignee`: the issue has no assignee, so no one can ask for the change
+     until a person is assigned.
+   - `app_assignee`: an agent app is assigned, so no one can ask for the change
+     until a person is assigned.
+   - `no_author`: the factory could not tell who sent the reply. Name the
+     assignee, who must ask for the change.
+
 ### `triage_card_reply`
 
 Any teammate's reply resumes a triage card that is not `done`, whoever
@@ -323,8 +354,9 @@ delegated the issue.
    `triage` one, and leaves it unassigned, because `dispatch-triage` assigns it
    again when fewer triage cards run than the factory's cap.
 3. When `card` is not null and the command did not print `error`, comment the
-   reply on that implementation card once, as `card_reply` step 2 says,
-   starting `Linear reply:`.
+   reply on that implementation card once, as `card_reply` step 2 says. When
+   `from_assignee` is true, start it `Linear reply:`. Otherwise start it
+   `<<not_assignee_marker>>`, so the card's worker keeps it as context only.
 4. Post one `thought` on `agent_session_id` that names the triage card's
    task id and says that triage resumes with the reply when the line's
    `action` is `unblocked` or `resumed`, or, for `none`, that the reply is on

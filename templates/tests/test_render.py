@@ -313,6 +313,20 @@ class ReplyPrefixContractTest(unittest.TestCase):
 
         self.assertIn(f"`{reply_inbox.REPLY_PREFIX}`", prompt)
 
+    def test_both_prompts_mark_an_event_not_from_the_assignee_with_the_workers_marker(self):
+        routes = render.build_routes(SETTINGS)
+
+        for name in ("linear", "github"):
+            with self.subTest(name):
+                self.assertIn(f"`{reply_inbox.NOT_ASSIGNEE_MARKER}`", routes[name]["prompt"])
+                self.assertFalse(reply_inbox.NOT_ASSIGNEE_MARKER.startswith(reply_inbox.REPLY_PREFIX))
+
+    def test_the_github_prompt_runs_pr_authority_from_the_gateways_plugin(self):
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
+            prompt = render.build_routes(SETTINGS)["github"]["prompt"]
+
+        self.assertIn("python3 /srv/hermes/plugins/linear-agent-session/cli.py pr-authority --task", prompt)
+
     def test_the_linear_prompt_forbids_reporting_an_earlier_run_as_the_cards_current_status(self):
         prompt = " ".join(render.build_routes(SETTINGS)["linear"]["prompt"].split())
 

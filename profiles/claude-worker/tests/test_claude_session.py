@@ -971,6 +971,26 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(self.prompt(), f"{COMMENTS_HEADING}\n\noperator wrote:\n> Next.")
 
+    def test_comments_not_from_the_assignee_come_in_their_own_context_only_block(self) -> None:
+        module = self.session_module()
+        marked = f"{module.reply_inbox.NOT_ASSIGNEE_MARKER} Rename the button."
+        self.set_comments((100, "default", marked), (101, "operator", "Use the branch head."))
+
+        self.run_session()
+
+        self.assertEqual(self.prompt(), (
+            f"{DEFAULT_ENTRY}\n\n{COMMENTS_HEADING}\n\noperator wrote:\n> Use the branch head.\n\n"
+            f"{module.NOT_ASSIGNEE_INTRO}\n\ndefault wrote:\n> {marked}"
+        ))
+
+    def test_only_comments_not_from_the_assignee_leave_the_usual_block_out(self) -> None:
+        module = self.session_module()
+        marked = f"{module.reply_inbox.NOT_ASSIGNEE_MARKER} Rename the button."
+
+        text = module.unseen_comments([{"created_at": 100, "author": "default", "body": marked}], [], "claude-worker")
+
+        self.assertEqual(text, f"{module.NOT_ASSIGNEE_INTRO}\n\ndefault wrote:\n> {marked}")
+
     def hook_log(self) -> list[dict]:
         return [json.loads(line) for line in Path(f"{self.log}.hooks").read_text().splitlines()]
 
