@@ -37,6 +37,10 @@ unassigns the card and comments `stopped`, and either one keeps the card parked.
 `assign none` and `unblock`, so `dispatch-triage` assigns it within its cap, and on any other board the card
 lands `ready` and still assigned.
 
+The deploy release rule is the same for a card whose newest park reason starts with
+`result_line.INSTALL_SKEW_PARK`, which waits for a factory deploy: `sweep_deploy` releases it once the install
+matches the commit auto-deploy recorded as deployed, compared the way `claude-session` compares it.
+
 - `unblock --repo <r> --branch <b> --reason <text>`: unblock a card. When the branch has a pull
   request, Hermes holds the `ready` card for 24 hours after a comment that names it, and only the
   review reopen lifts the hold, so the card is unblocked, sent to review, and reopened.
@@ -87,7 +91,9 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 import factory_settings
+import factory_source
 import gh_login
+import install_drift
 import kanban_board
 import merged_checks
 import reply_inbox
@@ -195,19 +201,19 @@ def resume(card: Card, assign: bool = True) -> dict:
     return result("resumed", assigned=assign)
 
 
-def login_parked(show: dict) -> bool:
-    """Whether the card's newest park waits for the worker's gh login."""
-    result_line = plugin_module("blocker-order", "result_line")
+def parked_for(show: dict, *prefixes: str) -> bool:
+    """Whether the card's newest park reason starts with one of `prefixes`."""
     parks = [event for event in show["events"] if event["kind"] == "scheduled"]
     reason = (parks[-1]["payload"] or {}).get("reason") if parks else None
-    return isinstance(reason, str) and reason.startswith(result_line.GH_LOGIN_PARK)
+    return isinstance(reason, str) and reason.startswith(prefixes)
 
 
 def replied(show: dict) -> bool:
     """The release rule, for a `scheduled` card as `hermes kanban show --json` gives it."""
-    if login_parked(show):
-        return False
     result_line = plugin_module("blocker-order", "result_line")
+    # A deploy can install these scripts before the plugin, so the installed result_line may predate MACHINE_PARKS.
+    if parked_for(show, *getattr(result_line, "MACHINE_PARKS", (result_line.GH_LOGIN_PARK,))):
+        return False
     parks = [event for event in show["events"] if event["kind"] == "scheduled"]
     # Hermes writes a `scheduled` event with every park; without one, any reply counts as after it.
     park = parks[-1] if parks else {"payload": None, "created_at": 0}
@@ -281,15 +287,15 @@ def sweep(board: str) -> dict:
     return {"released": released, "failed": failed}
 
 
-def login_wait_over(show: dict) -> bool:
-    """A login-parked card that no person stopped after the park."""
-    if not login_parked(show):
+def wait_over(show: dict, prefix: str) -> bool:
+    """A card parked with `prefix` that no person stopped after the park."""
+    if not parked_for(show, prefix):
         return False
     park = [event for event in show["events"] if event["kind"] == "scheduled"][-1]
     return not any(comment["body"] == STOPPED and comment["created_at"] >= park["created_at"] for comment in show["comments"])
 
 
-def release_for_login(card: Card, board: str) -> bool:
+def release_parked(card: Card, board: str) -> bool:
     """False, releasing nothing, when the card is no longer assigned to the worker: a person unassigned it."""
     if card.show()["task"]["assignee"] != WORKER:
         return False
@@ -311,9 +317,36 @@ def release_for_login(card: Card, board: str) -> bool:
 def sweep_login() -> dict:
     """Release every card parked for the worker's gh login, on every board, once the login is fresh enough to
     start a run. `dispatch-triage` runs it each minute."""
-    released, failed = [], {}
     if not gh_login.is_fresh(Path(os.environ["HERMES_HOME"]) / "gh", time.time()):
-        return {"released": released, "failed": failed}
+        return {"released": [], "failed": {}}
+    return sweep_parked(plugin_module("blocker-order", "result_line").GH_LOGIN_PARK, lambda: True)
+
+
+def install_matches() -> bool:
+    """claude-session's comparison: whether its skew check would let a run start."""
+    home = Path(os.environ["HERMES_HOME"])
+    try:
+        repo = factory_source.checkout(home)
+        return not install_drift.skew(home, repo, install_drift.deployed(install_drift.deploy_state(home)))
+    except install_drift.MissingCommit:
+        return False
+    except (OSError, factory_source.SourceError, install_drift.GitError):
+        return True
+
+
+def sweep_deploy() -> dict:
+    """Release every card parked for a factory deploy, on every board, once the install matches the deployed
+    commit. `dispatch-triage` runs it each minute."""
+    prefix = getattr(plugin_module("blocker-order", "result_line"), "INSTALL_SKEW_PARK", None)
+    if prefix is None:
+        return {"released": [], "failed": {}}
+    return sweep_parked(prefix, install_matches)
+
+
+def sweep_parked(prefix: str, ready: Callable[[], bool]) -> dict:
+    """Release each card parked with `prefix` once `ready`, which is asked only when such a card waits."""
+    released, failed = [], {}
+    answer = None
     for each in boards():
         slug, path = each["slug"], each["db_path"]
         if not os.path.exists(path):
@@ -324,10 +357,14 @@ def sweep_login() -> dict:
             failed[slug] = f"cannot read the board: {failure}"
             continue
         for task_id, show in sorted(waiting.items()):
-            if not login_wait_over(show):
+            if not wait_over(show, prefix):
                 continue
+            if answer is None:
+                answer = ready()
+            if not answer:
+                return {"released": released, "failed": failed}
             try:
-                if release_for_login(Card(slug, task_id), slug):
+                if release_parked(Card(slug, task_id), slug):
                     released.append(task_id)
             except Failed as failure:
                 failed[task_id] = str(failure)

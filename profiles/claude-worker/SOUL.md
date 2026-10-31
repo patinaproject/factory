@@ -153,6 +153,13 @@ message, because the `blocker-order` hook sees tool results and not that message
   `kanban_schedule` with exactly the reason the instruction gives, then stop.
   When the result has no `gh_login_park`, the card is `goal_mode`, which cannot
   be scheduled, so treat the line as the `"transient": true` case below.
+- A line that holds `"precondition": "install_skew"` means the factory's
+  install differs from the commit `auto-deploy` recorded as deployed, so a
+  factory deploy is pending. The `blocker-order` hook parks the card the same
+  way and adds `install_skew_park` to the result, and a sweep returns the card
+  to the queue once the install matches. Follow `install_skew_park` exactly as
+  `gh_login_park` above: stop, post no activity, never call `kanban_block`, and
+  treat a result without it as the `"transient": true` case below.
 - On failure the line holds `error`. A refusal that another process holds the
   worktree means a second worker is running this card: post an `error`
   activity saying so, call `kanban_block` with kind `transient`, and stop.

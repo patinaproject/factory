@@ -98,6 +98,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+import app_events
 import factory_settings
 import factory_source
 import gh_login
@@ -278,6 +279,7 @@ CRON = (
 LAUNCHD_JOBS = ("refresh-gh-app-login",)
 OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
 
+AUTO_DEPLOY_INTERVAL_SECONDS = 300  # equals auto-deploy's INTERVAL_SECONDS
 # macOS only. `plist` is a glob; the runbook lets the operator name the cloudflared plist.
 SERVICES = (
     Service(7, "cloudflared tunnel", "daemon", "/Library/LaunchDaemons/*cloudflared*.plist"),
@@ -289,7 +291,7 @@ SERVICES = (
     ),
     Service(
         12, "auto deploy", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
-        scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME", "PATH"),
+        scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME", "PATH"), interval=AUTO_DEPLOY_INTERVAL_SECONDS,
     ),
 )
 # watch-gateway's own files in the root home. WATCH_INTERVAL and RESTARTS_PER_HOUR equal the script's.
@@ -1564,6 +1566,27 @@ def check_model_tiers(settings, worker: Path) -> list:
     )]
 
 
+def check_app_events(settings, fetch: Callable[[str], dict] = app_events.fetch_app) -> list:
+    """Only the event lines; check-github-access stays the access check. auto-deploy runs this on every tick, so a
+    failed lookup adds no line, which would churn report-deploy's text-keyed de-duplication."""
+    login = ((settings.get("github") if isinstance(settings, dict) else None) or {}).get("login")
+    if not isinstance(login, str) or not login.endswith("[bot]"):
+        return []
+    slug = login[: -len("[bot]")]
+    try:
+        app = fetch(slug)
+    except app_events.AppLookupError as error:
+        print(f"check-install: cannot read the event subscriptions of App {slug}: {error}", file=sys.stderr)
+        return []
+    return [
+        Drift(
+            "github app", slug, f'does not subscribe to the "{label}" event, so no merge starts auto-deploy until its next interval run',
+            Manual(f'in the App\'s GitHub settings, under Permissions & events, subscribe to "{label}"'),
+        )
+        for label in app_events.missing_events(app)
+    ]
+
+
 def check_settings(settings, worker: Path) -> list:
     """Report each settings value that makes claude-session refuse a run, with the text of its refusal."""
     if not isinstance(settings, dict):
@@ -1984,6 +2007,7 @@ def main() -> int:
                 config_value(root, hermes, "plugins.entries.work.settings.allow"),
             ),
             *check_settings(settings, worker),
+            *check_app_events(settings),
             *check_model_tiers(settings, worker),
             *check_mcp_servers(settings, worker),
             *check_root_mcp_servers(root, hermes),

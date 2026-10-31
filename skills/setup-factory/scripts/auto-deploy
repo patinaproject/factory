@@ -25,6 +25,7 @@ HOLD = ("config", "set", HOLD_KEY, "[]")
 RELEASE = ("config", "unset", HOLD_KEY)
 WORKER = "claude-worker"
 LABEL = "ai.patinaproject.factory.auto-deploy"
+INTERVAL_SECONDS = 300
 MAX_POLL_SECONDS = 60.0  # the dispatcher's default tick
 COMMAND_SECONDS = 900
 EVENTS_KEPT = 20
@@ -162,9 +163,21 @@ class Deploy:
         self.state["updated_at"] = now()
         write_private(self.state_path, self.state)
 
+    def repeats(self, outcome: str, commit: Optional[str], detail: str) -> bool:
+        """Whether an event since the last DEPLOYED already says this, so an interval tick reports it once."""
+        for event in reversed(self.state["events"]):
+            if event.get("outcome") == DEPLOYED:
+                return False
+            if (event.get("outcome"), event.get("commit")) == (outcome, commit) and (outcome == WAITING or event.get("detail") == detail):
+                return True
+        return False
+
     def record(self, outcome: str, commit: Optional[str], detail: str, manual=None, gates_runs: bool = False) -> str:
         detail = self.redact(detail)
         events = self.state["events"]
+        if outcome != DEPLOYED and self.repeats(outcome, commit, detail):
+            self.log(f"{outcome} {short(commit)} again; recorded before")
+            return outcome
         seq = (events[-1]["seq"] if events else 0) + 1
         self.state["outcome"] = outcome
         self.state["detail"] = detail
@@ -383,8 +396,16 @@ class Deploy:
             if held:
                 self.record(BLOCKED, target, f"{HOLD_KEY} is already set in the root home; a person set it, so the run holds no card")
                 return 0
-            outcome = self.attempt(target, lambda: self.drain_and_install(target, continued))
-            if outcome not in (DEPLOYED, FAILED):
+            try:
+                cards = self.running_cards()
+            except DeployError as error:
+                self.record(FAILED, None, str(error))
+                return 0
+            if cards:
+                self.record(WAITING, target, self.waiting(cards))
+                return 0
+            outcome = self.attempt(target, lambda: self.hold_and_install(target, continued))
+            if outcome != DEPLOYED and self.state["failed"] != target:
                 return 0
 
     def attempt(self, target: str, body: Callable[[], str]) -> str:
@@ -395,14 +416,22 @@ class Deploy:
         finally:
             self.release_logged()
 
-    def drain_and_install(self, target: str, continued: Optional[str]) -> str:
+    @staticmethod
+    def waiting(cards: List[str]) -> str:
+        return f"{len(cards)} card(s) running; deploying at the next break: " + "; ".join(cards)
+
+    def hold_and_install(self, target: str, continued: Optional[str]) -> str:
         self.state["hold"] = {"pid": self.pid, "commit": target, "dispatch_profiles": True, "pause": None, "gateway_lock": False}
         self.save()
         self.hermes_cli(*HOLD)
-        deadline = self.clock() + self.args.timeout
-        cards = self.drain(deadline)
+        self.sleep(self.args.poll)
+        try:
+            cards = self.running_cards()
+        except DeployError as error:
+            return self.record(FAILED, None, str(error))
         if cards:
-            return self.record(WAITING, target, f"{len(cards)} card(s) still running after {self.args.timeout:g}s: " + "; ".join(cards))
+            return self.record(WAITING, target, self.waiting(cards))
+        deadline = self.clock() + self.args.timeout
         if self.operator_paused():
             return self.record(BLOCKED, target, "an operator's hermes pause is engaged; nothing installed")
         self.set_hold(gateway_lock=True)
@@ -412,17 +441,6 @@ class Deploy:
         self.git("checkout", "--quiet", "--force", "-B", self.branch, target)
         self.run_source_copy(target, deadline, continued)
         return self.install(target, deadline)
-
-    def drain(self, deadline: float) -> List[str]:
-        last = None
-        while True:
-            cards = self.running_cards()
-            if not cards or self.clock() >= deadline:
-                return cards
-            if cards != last:
-                self.log(f"holding new cards; waiting for {len(cards)} running card(s): " + "; ".join(cards))
-                last = cards
-            self.sleep(min(self.args.poll, max(deadline - self.clock(), 0)))
 
     def run_source_copy(self, target: str, deadline: float, continued: Optional[str]) -> None:
         script = self.source / "skills" / "setup-factory" / "scripts" / "auto-deploy"
@@ -528,6 +546,7 @@ def plist(root: Path, worker: Path) -> bytes:
         "Label": LABEL,
         "ProgramArguments": ["/usr/bin/python3", str(root / "scripts" / "auto-deploy"), "--root", str(root)],
         "RunAtLoad": True,
+        "StartInterval": INTERVAL_SECONDS,
         "EnvironmentVariables": {
             "HERMES_HOME": str(root),
             "PATH": f"{Path.home() / '.local' / 'bin'}:/usr/local/bin:/usr/bin:/bin",
@@ -554,8 +573,8 @@ def main(argv=None) -> int:
     parser.add_argument("--root", help="root Hermes home (default: HERMES_HOME, else ~/.hermes)")
     parser.add_argument("--worker", help=f"worker home (default: <root>/profiles/{WORKER})")
     parser.add_argument("--hermes", help="the Hermes CLI (default: HERMES_BIN, hermes on PATH, or ~/.local/bin/hermes)")
-    parser.add_argument("--timeout", type=float, default=3600, help="seconds to wait for running cards, restart included (default 3600)")
-    parser.add_argument("--poll", type=positive_poll, default=MAX_POLL_SECONDS, help="seconds between board checks (default 60)")
+    parser.add_argument("--timeout", type=float, default=3600, help="seconds the install and any gateway restart may take (default 3600)")
+    parser.add_argument("--poll", type=positive_poll, default=MAX_POLL_SECONDS, help="seconds to hold new cards before the second running-card read, and between restart checks (default 60)")
     parser.add_argument("--continue", dest="continued", help=argparse.SUPPRESS)
     parser.add_argument("--remaining", type=float, default=0.0, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
