@@ -19,6 +19,7 @@ REPO = "example-org/example-repo"
 OTHER_REPO = "example-org/other-repo"
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
+MERGE_BASE = "c" * 40
 # Hermes' `_RESPAWN_GUARD_PR_URL_RE`: a match in a card comment holds the reopened card from its worker.
 HERMES_PULL_URL = re.compile(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+", re.IGNORECASE)
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
@@ -49,6 +50,9 @@ state = json.load(open(os.environ["FAKE_STATE"]))
 argv = sys.argv[1:]
 with open(os.environ["FAKE_STATE"] + ".gh", "a") as log:
     log.write(json.dumps(argv) + "\\n")
+if argv[0] == "api" and "/compare/" in argv[1]:
+    print(json.dumps(state["compare"][argv[1].split("?")[0]]))
+    sys.exit(0)
 if argv[:2] == ["api", "graphql"]:
     number = next(a.split("=", 1)[1] for a in argv if a.startswith("number="))
     print(json.dumps(state["graphql"][number]))
@@ -672,6 +676,108 @@ class ReopenConflictsTest(unittest.TestCase):
         self.assertEqual([call for call in self.gh_calls() if call[0] == "api"], [
             self.RULES_CALL, ["api", f"repos/{REPO}/rules/branches/release%2F1?per_page=100"],
         ])
+
+    INCOMPLETE_NOTE = "GitHub listed only the first 300 changed files, so more files may conflict."
+
+    def compare_state(self, head_files: list, base_files: list) -> None:
+        self.state["compare"] = {
+            f"repos/{REPO}/compare/main...{HEAD}": {
+                "merge_base_commit": {"sha": MERGE_BASE}, "files": [{"filename": name} for name in head_files],
+            },
+            f"repos/{REPO}/compare/{MERGE_BASE}...main": {"files": [{"filename": name} for name in base_files]},
+        }
+
+    def triage_case(self, *, session: str | None = SESSION, **pull_kwargs) -> subprocess.CompletedProcess:
+        self.state["tasks"] = [card("t_1", "triage", "abc-1", session=session)]
+        self.state["pulls"][REPO] = [pull(7, "abc-1", **pull_kwargs)]
+        self.compare_state(["a.py", "b.py", "only_head.py"], ["b.py", "a.py", "only_base.py"])
+        return self.run_script()
+
+    def triage_calls(self) -> list:
+        return [["api", f"repos/{REPO}/compare/main...{HEAD}?per_page=1"],
+                ["api", f"repos/{REPO}/compare/{MERGE_BASE}...main?per_page=1"]]
+
+    def test_a_conflicting_triage_card_tells_its_session_then_comments_and_never_moves(self) -> None:
+        proc = self.triage_case()
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, f"t_1 https://github.com/{REPO}/pull/7 notified\n", ""))
+        self.assertEqual(self.cli_calls(), [[
+            "activity", "--agent-session-id", SESSION, "--type", "elicitation",
+            "--body", (
+                f"Pull request {REPO}#7 conflicts with its base main. This card stays parked, and the worker merges "
+                "main into the branch first once someone replies. Conflicting files:\n- `a.py`\n- `b.py`"
+            ),
+            "--external-url", f"Pull request=https://github.com/{REPO}/pull/7",
+        ]])
+        self.assertEqual(self.writes(), [[
+            "kanban", "comment", "t_1",
+            f"Pull request {REPO}#7 conflicts with main. The card stays parked. When a person replies and the card "
+            f"resumes, the worker merges origin/main first.\n\nconflict_head: {HEAD}",
+        ]])
+        self.assertEqual(self.gh_calls()[1:], self.triage_calls())
+
+    def test_a_triage_card_that_holds_the_head_is_left_alone(self) -> None:
+        self.state["comments"] = {"t_1": [{"body": f"earlier\nconflict_head: {HEAD}"}]}
+
+        proc = self.triage_case()
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+        self.assertEqual((self.cli_calls(), self.writes()), ([], []))
+        self.assertEqual(len(self.gh_calls()), 1)
+
+    def test_a_triage_card_is_left_alone_unless_the_pull_request_conflicts(self) -> None:
+        for mergeable in ("MERGEABLE", "UNKNOWN"):
+            with self.subTest(mergeable=mergeable):
+                proc = self.triage_case(mergeable=mergeable, reviewDecision="CHANGES_REQUESTED", checks=[check_run("lint")])
+
+                self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+                self.assertEqual((self.cli_calls(), self.writes()), ([], []))
+                self.assertEqual(len(self.gh_calls()), 1)
+                for suffix in (".gh", ".cli", ".hermes"):
+                    Path(str(self.state_path) + suffix).unlink(missing_ok=True)
+
+    def test_a_triage_card_whose_pull_request_is_from_a_person_or_has_no_branch_is_left_alone(self) -> None:
+        proc = self.triage_case(author="person")
+        self.assertEqual((proc.stdout, self.writes(), self.cli_calls()), ("", [], []))
+
+        self.state["tasks"] = [{"id": "t_1", "status": "triage", "branch_name": None, "body": f"repo: {REPO}\n"}]
+        self.state["pulls"][REPO] = [pull(7, "abc-1")]
+        proc = self.run_script()
+        self.assertEqual((proc.stdout, self.writes(), self.cli_calls()), ("", [], []))
+
+    def test_a_triage_card_without_a_session_gets_the_comment_and_fails_while_others_still_run(self) -> None:
+        self.state["tasks"] = [card("t_1", "triage", "abc-1"), card("t_2", "review", "abc-2")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1"), pull(8, "abc-2")]
+        self.compare_state(["a.py"], ["a.py"])
+
+        proc = self.run_script()
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stderr, "reopen-conflicts: t_1: the card has no linear_agent_session_id line\n")
+        self.assertEqual(proc.stdout, f"t_2 https://github.com/{REPO}/pull/8\n")
+        self.assertEqual(self.cli_calls(), [])
+        self.assertEqual([call[:3] for call in self.writes()], [
+            ["kanban", "comment", "t_1"], ["kanban", "comment", "t_2"], ["kanban", "reopen-review", "t_2"],
+        ])
+
+    def test_a_truncated_compare_says_the_file_list_may_be_incomplete(self) -> None:
+        self.state["tasks"] = [card("t_1", "triage", "abc-1", session=SESSION)]
+        self.state["pulls"][REPO] = [pull(7, "abc-1")]
+        self.compare_state(["a.py"], [f"f{n}.py" for n in range(299)] + ["a.py"])
+
+        proc = self.run_script()
+
+        self.assertEqual(proc.returncode, 0)
+        self.assertTrue(self.cli_calls()[0][6].endswith(f"Conflicting files:\n- `a.py`\n{self.INCOMPLETE_NOTE}"))
+
+    def test_an_empty_intersection_says_the_file_list_is_unavailable(self) -> None:
+        self.state["tasks"] = [card("t_1", "triage", "abc-1", session=SESSION)]
+        self.state["pulls"][REPO] = [pull(7, "abc-1")]
+        self.compare_state(["a.py"], ["b.py"])
+
+        self.run_script()
+
+        self.assertTrue(self.cli_calls()[0][6].endswith("Conflicting files:\nThe list of conflicting files is unavailable."))
 
     def test_a_home_that_is_not_a_profile_home_exits_2(self) -> None:
         proc = self.run_script(home=self.dir)
