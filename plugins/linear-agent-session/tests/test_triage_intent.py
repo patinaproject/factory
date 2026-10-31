@@ -17,6 +17,8 @@ Thread = intent_module.Thread
 
 APP = "app-user-1"
 PERSON = "user-ted"
+ASSIGNEE = "user-assignee"
+OTHER = "user-other"
 ISSUE_ID = "issue-uuid-1"
 BRANCH = "pat-1-fix-it"
 NOW = dt.datetime(2026, 10, 27, 12, 0, tzinfo=dt.timezone.utc)
@@ -33,6 +35,7 @@ def issue(**overrides):
         "gitBranchName": BRANCH,
         "stateType": "backlog",
         "delegate": APP,
+        "assignee": {"id": ASSIGNEE, "name": "Ann Assignee", "gitHubUserId": "1001", "app": False},
         "labels": ["Ready for agent"],
         "agentSessions": [],
     }
@@ -51,10 +54,10 @@ def id_line(issue_id=ISSUE_ID):
     return f"```text\nlinear_issue_id: {issue_id}\n```\n"
 
 
-def session_event(action, creator=PERSON, signal=None, body=None):
+def session_event(action, creator=PERSON, signal=None, body=None, author=ASSIGNEE):
     payload = {"type": "AgentSessionEvent", "action": action, "agentSession": {"id": "session-1", "creatorId": creator, "issue": {"id": ISSUE_ID}}}
     if action == "prompted":
-        payload["agentActivity"] = {"id": "activity-1", "signal": signal, "content": {"body": body}}
+        payload["agentActivity"] = {"id": "activity-1", "signal": signal, "content": {"body": body}, "userId": author}
     return payload
 
 
@@ -290,6 +293,11 @@ class SessionPromptedTest(unittest.TestCase):
                 reply_source="payload",
             ),
         )
+
+    def test_only_the_assignees_reply_is_a_card_reply(self):
+        work = [card("t_work", status="review", branch=BRANCH)]
+        self.assertEqual(self.prompted(work=work, author=OTHER).action, "card_reply_not_assignee")
+        self.assertEqual(self.prompted(work=work, author=ASSIGNEE).action, "card_reply")
 
     def test_a_reply_on_an_undelegated_issue_with_no_card_is_answered(self):
         self.assertEqual(
