@@ -412,6 +412,8 @@ class CheckInstallTest(unittest.TestCase):
         ])
 
     def test_a_missing_login_job_gates_runs_and_a_stale_expiry_does_not(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("the gh login refresh job is a launchd job")
         self.launchd.gh_login.unlink()
         self.expiry(time.time() + 60)
 
