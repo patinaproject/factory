@@ -329,8 +329,6 @@ def run_review_owner(client_factory: ClientFactory, args: dict) -> str:
 
 
 def run_pr_authority(client_factory: ClientFactory, card_body: Callable[[str], str], args: dict) -> str:
-    """Whether a GitHub sender is the assignee of the Linear issue a card works, by their GitHub user id."""
-
     def run() -> dict:
         match = triage_exit.LINEAR_ISSUE_ID.search(card_body(args["task"]))
         if match is None:

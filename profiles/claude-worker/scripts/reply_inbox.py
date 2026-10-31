@@ -23,9 +23,6 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 REPLY_PREFIX = "Linear reply:"
-# Starts a card comment that records a Linear reply or a GitHub review or comment from someone other than the
-# issue's assignee. It must not start with REPLY_PREFIX, so no running worker answers it and no wait ends on it.
-# `templates/render.py` writes it into both triage prompts.
 NOT_ASSIGNEE_MARKER = "Context only, not from the assignee:"
 PENDING, DELIVERED, ASKED, ANSWERED = "pending", "delivered", "asked", "answered"
 TEXT_LIMIT = 8000

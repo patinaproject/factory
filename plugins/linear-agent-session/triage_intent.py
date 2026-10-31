@@ -216,7 +216,7 @@ def decide(
     session = payload["agentSession"]["id"]
     if payload["action"] == "created":
         action = _session_created(facts, payload["agentSession"].get("creatorId"))
-    elif carries_no_reply(payload):
+    elif (payload.get("agentActivity") or {}).get("signal") == "stop":
         action = _session_prompted(facts, stop=True)
     else:
         facts = _with_authority(facts, issue["assignee"], reply.author_id)

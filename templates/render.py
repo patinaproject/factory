@@ -21,7 +21,6 @@ RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
 # redelivers.
 RATE_LIMIT = 1200
 TEMPLATE_DIR = Path(__file__).resolve().parent
-# The worker script that owns the card comment markers. check-install renders from a copy of `templates/` and this file.
 REPLY_INBOX = Path("profiles") / "claude-worker" / "scripts" / "reply_inbox.py"
 GITHUB_ROUTE = "github"
 ROUTINGS = ("default", "synced_github")

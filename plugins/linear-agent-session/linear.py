@@ -312,11 +312,6 @@ def card_title(identifier: str, title: str) -> str:
 
 
 def authority(assignee: Optional[dict], sender_id: Optional[str], key: str) -> tuple[bool, Optional[str]]:
-    """Whether `sender_id` is the issue's assignee, compared on the assignee's `key` as text.
-
-    The second value names why no one can be the assignee, or that the sender is unknown; it is None when the
-    sender is a person who is not the assignee, and when the sender is the assignee.
-    """
     if assignee is None:
         return False, "no_assignee"
     if assignee["app"]:
