@@ -43,7 +43,7 @@ THIRD_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}:
 TRIAGE_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-triage:{ISSUE_ID}"))
 TRIAGE_ENV = {"HERMES_KANBAN_BOARD": "triage"}
 HOUR = 3600
-SYSTEM_PROMPT = (
+TODAYS_SYSTEM_PROMPT = (
     f"Publish commits only by running {(SCRIPTS / 'push-signed').resolve()} from the worktree, never `git push`. "
     "It creates commits that the GitHub App signs, which repositories requiring verified signatures need. "
     "To bring in the base branch, run `gh pr update-branch`. When GitHub reports the pull request as "
@@ -83,6 +83,27 @@ SYSTEM_PROMPT = (
     "check failed, and 3 means checks are still running, so run it again. A hook refuses `gh pr checks "
     "--watch`, `gh run watch`, and any sleep or polling loop that waits longer."
 )
+ISSUE_ENDING = (
+    "When a re-run fails again, do not block the card: file or find the issue that tracks the flaky check. "
+    "Name the failing check and the test or step, and build the marker line `Failing check: <check name> / "
+    "<test or step>`. Search the pull request's base repository, the `--repo` you pass to `gh`, for issues open "
+    "or closed with `gh issue list --repo <owner/repo> --state all --search '\"<marker line>\" in:body' --json "
+    "number,url,state,stateReason,body`, and keep only issues whose body contains that exact line. When one is "
+    "open, link it and file nothing. When none is open and none closed as completed, run `gh issue create --repo "
+    "<owner/repo>` with a body that holds the marker line, both run URLs, and the first actionable error. When "
+    "one closed as completed, run `gh pr update-branch <number>` first, since the fix may be on the base "
+    "branch, wait for the new run with `wait-for-checks`, and judge it; only a failure after that counts as a "
+    "second failure. Then run `gh pr comment <number> --body <issue url>` and make the first line of your final "
+    "message `Waiting for issue: <issue url>`. The worker reads that line and parks the card until the issue closes. "
+    "Make the first line `Needs input:` followed by both attempts' URLs instead when a card comment starts "
+    "`Parked on issue <issue url>`, because this card already parked on that issue once, or when the matching issue "
+    "closed as not planned."
+)
+TODAYS_ENDING = (
+    "When a re-run fails again, stop, "
+    "and make the first line of your final message `Needs input:` followed by both attempts' URLs."
+)
+SYSTEM_PROMPT = TODAYS_SYSTEM_PROMPT.replace(TODAYS_ENDING, ISSUE_ENDING)
 REPO = "example-org/example-repo"
 LINEAR_MCP_CONFIG = (
     '{"mcpServers": {"linear": {"type": "http", "url": "https://mcp.linear.app/mcp", '
@@ -596,6 +617,22 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual((status, report), (2, {"error": NO_BRIEF, "transient": True}))
         self.assertFalse(self.log.exists())
+
+    def test_a_blocker_order_copy_without_the_issue_park_keeps_the_needs_input_ending(self) -> None:
+        module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
+        text = module.read_text()
+        self.assertIn('ISSUE_PARK = "Waiting for an issue:"\n', text)
+        self.assertIn("(*PRECONDITION_PARKS.values(), ISSUE_PARK)", text)
+        module.unlink()
+        module.write_text(text.replace('ISSUE_PARK = "Waiting for an issue:"\n', "").replace(
+            "(*PRECONDITION_PARKS.values(), ISSUE_PARK)", "tuple(PRECONDITION_PARKS.values())"))
+        self.set_documents(("d1", "ABC-123 Agent brief", "someone-else"))
+
+        status, _ = self.run_session()
+
+        self.assertEqual(status, 0)
+        argv = self.claude_call()["argv"]
+        self.assertEqual(argv[argv.index("--append-system-prompt") + 1], TODAYS_SYSTEM_PROMPT)
 
     def test_an_implementation_card_with_the_agent_brief_starts(self) -> None:
         self.set_documents(("d1", "ABC-123 Agent brief", "someone-else"))

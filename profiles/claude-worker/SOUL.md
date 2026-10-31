@@ -131,6 +131,13 @@ message, because the `blocker-order` hook sees tool results and not that message
   steps 4 and 5. A `wait` result that has `output_cut` holds only the last
   2000 characters, so a long result loses its start: call the process tool's
   `log` action to read the whole line first.
+- When the `result` starts with `Waiting for issue:`, Claude filed or found the
+  issue that tracks a flaky required check. The `blocker-order` hook parks the
+  card in `scheduled` and adds `issue_park` to the tool result, or, when the URL
+  is not an issue's or Hermes refuses the park, blocks the card and adds
+  `needs_input_block`. Follow its `instruction`: stop, and do not run
+  `claude-session` again. The sweep returns the card once the issue closes or a
+  person replies. Skip steps 4 and 5.
 - A line of only `waiting_on`, a list of card ids, means that cards of the
   issue's blockers are still open, so Claude did not start. The
   `blocker-order` hook adds `blocker_order` to the tool result. Follow its

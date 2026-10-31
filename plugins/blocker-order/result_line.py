@@ -27,10 +27,19 @@ INSTALL_SKEW = "install_skew"
 INSTALL_SKEW_PARK = "Waiting for a factory deploy:"
 NEEDS_BRIEF = "needs_brief"
 NEEDS_BRIEF_PARK = "Waiting for triage:"
+# A finished implementation run that waits for a GitHub issue ends with this first line, then the issue's URL.
+# The hook parks the card with a reason that starts with ISSUE_PARK and the URL, which `card_transition.py` reads
+# back. It is not a `Refused` precondition, so it is in MACHINE_PARKS but not in PRECONDITION_PARKS.
+WAITING_FOR_ISSUE = "Waiting for issue:"
+ISSUE_PARK = "Waiting for an issue:"
+# A card comment that starts with this and the URL records the sweep's first pass, and tells a resumed run that
+# the card already parked on that issue.
+ISSUE_NOTED = "Parked on issue"
+_ISSUE_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/issues/[0-9]+")
 # The park reason prefix of each machine condition a refusal can wait for. No reply releases such a park.
 # claude-session sends a precondition only when its key is here, so an older copy blocks no card on a new key.
 PRECONDITION_PARKS = {GH_LOGIN: GH_LOGIN_PARK, INSTALL_SKEW: INSTALL_SKEW_PARK, NEEDS_BRIEF: NEEDS_BRIEF_PARK}
-MACHINE_PARKS = tuple(PRECONDITION_PARKS.values())
+MACHINE_PARKS = (*PRECONDITION_PARKS.values(), ISSUE_PARK)
 _COMMENTS_SEEN_LINE = re.compile(r"\s*^" + COMMENTS_SEEN + r"[ \t]*(\d+)[ \t]*\Z", re.MULTILINE)
 
 
@@ -145,6 +154,20 @@ def needs_input(report: Optional[Report]) -> Optional[str]:
     outcome = getattr(report, "outcome", None)
     text = outcome.result if outcome is not None else None
     return text if isinstance(text, str) and text.startswith(NEEDS_INPUT) else None
+
+
+def waiting_for_issue(report: Optional[Report]) -> Optional[str]:
+    """The run's `result` when a finished run starts it with `Waiting for issue:`."""
+    text = report.outcome.result if isinstance(report, Done) else None
+    return text if isinstance(text, str) and text.startswith(WAITING_FOR_ISSUE) else None
+
+
+def issue_url(result: str) -> Optional[str]:
+    """The GitHub issue URL that alone follows `Waiting for issue:` on its line, or None when the line holds
+    anything else, such as a pull request URL. A URL in angle brackets counts."""
+    first = result[len(WAITING_FOR_ISSUE):].split("\n", 1)[0].strip()
+    first = first[1:-1] if first.startswith("<") and first.endswith(">") else first
+    return first if _ISSUE_URL.fullmatch(first) else None
 
 
 def mark_comments_seen(result: str, count: int) -> str:

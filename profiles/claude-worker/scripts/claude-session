@@ -131,13 +131,34 @@ LINEAR_RULE = (
     "run. Never mint a Linear token yourself and never run a secrets helper: a token request with another scope "
     "set revokes the factory's tokens."
 )
-CHECKS_RULE = (
+CHECKS_START = (
     "A finished check never runs again by itself. When a check failed on a head that is behind the base "
     "branch, or a person says the cause of a failure is fixed, run `gh pr update-branch <number>` so every "
     "check runs again on a new head. When a required check failed in a test or step the pull request does "
     "not change, such as a timeout, run `gh run rerun <run-id> --failed` once for that run. Wait for the "
-    "new run with `wait-for-checks` before you judge the ready gate. When a re-run fails again, stop, "
+    "new run with `wait-for-checks` before you judge the ready gate. "
+)
+CHECKS_RULE = CHECKS_START + (
+    "When a re-run fails again, stop, "
     "and make the first line of your final message `Needs input:` followed by both attempts' URLs."
+)
+# Used only when the installed blocker-order parks a card on `Waiting for issue:`; otherwise a failure after the
+# re-run ends the run with `Needs input:` as CHECKS_RULE says.
+CHECKS_ISSUE_ENDING = (
+    "When a re-run fails again, do not block the card: file or find the issue that tracks the flaky check. "
+    "Name the failing check and the test or step, and build the marker line `Failing check: <check name> / "
+    "<test or step>`. Search the pull request's base repository, the `--repo` you pass to `gh`, for issues open "
+    "or closed with `gh issue list --repo <owner/repo> --state all --search '\"<marker line>\" in:body' --json "
+    "number,url,state,stateReason,body`, and keep only issues whose body contains that exact line. When one is "
+    "open, link it and file nothing. When none is open and none closed as completed, run `gh issue create --repo "
+    "<owner/repo>` with a body that holds the marker line, both run URLs, and the first actionable error. When "
+    "one closed as completed, run `gh pr update-branch <number>` first, since the fix may be on the base "
+    "branch, wait for the new run with `wait-for-checks`, and judge it; only a failure after that counts as a "
+    "second failure. Then run `gh pr comment <number> --body <issue url>` and make the first line of your final "
+    "message `{waiting} <issue url>`. The worker reads that line and parks the card until the issue closes. "
+    "Make the first line `Needs input:` followed by both attempts' URLs instead when a card comment starts "
+    "`{noted} <issue url>`, because this card already parked on that issue once, or when the matching issue "
+    "closed as not planned."
 )
 CLOSING_RULE = (
     "A commit message closes an issue when its type is `fix` (`fix: #12 ...`) or it says `Closes #12`, and a "
@@ -208,6 +229,15 @@ TRIAGE_RULE = (
 )
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{CLOSING_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 TRIAGE_SYSTEM_PROMPT = f"{TRIAGE_RULE}\n\n{LINEAR_RULE}\n\n{STOP_RULE}"
+
+
+def implementation_prompt(result_line) -> str:
+    """SYSTEM_PROMPT, with the checks rule that files an issue when the installed `blocker-order` parks a card on
+    one. A deploy can install these scripts before the plugin, so an older `result_line` keeps `Needs input:`."""
+    if not hasattr(result_line, "ISSUE_PARK"):
+        return SYSTEM_PROMPT
+    ending = CHECKS_ISSUE_ENDING.format(waiting=result_line.WAITING_FOR_ISSUE, noted=result_line.ISSUE_NOTED)
+    return SYSTEM_PROMPT.replace(CHECKS_RULE, CHECKS_START + ending)
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
 LINEAR_MCP_SERVER = {
@@ -1284,7 +1314,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
             )
         else:
             require_ready(client, args.issue_id, args.issue_identifier)
-            system_prompt = SYSTEM_PROMPT.format(
+            system_prompt = implementation_prompt(result_line).format(
                 push_signed=Path(__file__).resolve().with_name("push-signed"),
                 upload_image=Path(__file__).resolve().with_name("github-upload-image"),
                 wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
