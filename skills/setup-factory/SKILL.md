@@ -1249,8 +1249,10 @@ is sent back once per pull request head and reason, so a worker that blocks on
 the same head stays blocked. The same job re-requests a reviewer whose changes
 request is on an older head once every required check passes. A changes
 request on the current head, or the reviewer's unresolved review thread, sends
-the card back once per head instead. Create the job when `cron list` has no
-`reopen-conflicts` job:
+the card back once per head instead. A `triage` card that Hermes parked is
+never moved. When its pull request conflicts, the job tells the card's Linear
+agent session once per head, lists the conflicting files, and comments on the
+card. Create the job when `cron list` has no `reopen-conflicts` job:
 
 ```sh
 hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null

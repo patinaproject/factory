@@ -7,6 +7,7 @@ off, so a card in `review` or `blocked` waits forever. A Hermes cron job runs
 this script every few minutes. It lists the App's open pull requests that belong
 to a `review` or `blocked` card and, for each one with a reason below, comments
 on the card and hands it back to its worker. A conflict wins over a failed check.
+A `triage` card is only told, as the last paragraph says.
 
 - GitHub reports the pull request as `CONFLICTING`. `UNKNOWN` mergeability
   changes nothing, because GitHub resolves it on a later run.
@@ -41,9 +42,21 @@ card back once per head with the line `review_head: <sha>`. Otherwise, once
 every required check passed, each reviewer whose changes request is on an older
 head and who is not requested now is requested again, and the card's Linear
 agent session gets an activity that names them. That line is `<task id> <pull
-request url> re-requested <login>,<login>`. A review is never dismissed. Exits 1 when any
-failed, or 2 when HERMES_HOME is not a profile home or the factory settings
-cannot be read.
+request url> re-requested <login>,<login>`. A review is never dismissed.
+
+A `triage` card is one Hermes parked after its block-loop breaker tripped, and
+this script never moves it. When the App's pull request for the card is
+`CONFLICTING`, the card's Linear agent session gets one activity that names the
+pull request, says the card stays parked, and lists the files both the branch
+and its base changed since they split, read from GitHub's compare API without a
+checkout, or says the list is unavailable when GitHub cannot compare them.
+Then the card gets a comment that ends with the lines `parked: notice only` and
+`conflict_head: <sha>`, and a card that holds that notice for the current head
+is skipped. A handback ignores a notice, so a card that leaves `triage` and
+blocks on the same head is still sent back once. Any other mergeability, check, or review state changes nothing. A card
+with no session line gets the comment and then fails. That line is `<task id>
+<pull request url> notified`. Exits 1 when any failed, or 2 when HERMES_HOME is
+not a profile home or the factory settings cannot be read.
 """
 from __future__ import annotations
 
@@ -71,6 +84,8 @@ REVIEW_MARKER = "review_head: "
 CONFLICT_REASON = "merge conflict with the base branch; see the card comments"
 FAILED_CHECK_REASON = "a required check failed; see the card comments"
 REVIEW_REASON = "changes-requested review still needs work; see the card comments"
+COMPARE_LIMIT = 300
+PARKED_LINE = "parked: notice only"
 PR_FIELDS = "number,url,headRefName,headRefOid,baseRefName,author,mergeable,reviewDecision"
 
 
@@ -124,7 +139,7 @@ def candidates(tasks: list) -> dict:
     by_repo: dict = {}
     for task in tasks:
         repo = REPO_LINE.search(task.get("body") or "")
-        if task.get("status") in ("review", "blocked") and task.get("branch_name") and repo:
+        if task.get("status") in ("review", "blocked", "triage") and task.get("branch_name") and repo:
             by_repo.setdefault(repo.group(1), []).append(task)
     return by_repo
 
@@ -166,11 +181,14 @@ def failed_required_checks(pull: dict, newest: dict, repo: str, cache: dict) -> 
     return failures
 
 
-def already_sent(hermes: str, task_id: str, marker: str) -> bool:
+def already_sent(hermes: str, task_id: str, marker: str, parked: bool = False) -> bool:
+    """A parked notice and a handback carry the same marker, so each counts only its own kind."""
     shown = json.loads(run(hermes, "kanban", "show", task_id, "--json"))
-    return any(
-        line.strip() == marker for comment in shown.get("comments") or [] for line in (comment.get("body") or "").splitlines()
-    )
+    for comment in shown.get("comments") or []:
+        lines = [line.strip() for line in (comment.get("body") or "").splitlines()]
+        if marker in lines and (PARKED_LINE in lines) == parked:
+            return True
+    return False
 
 
 def conflict_handback(pull: dict) -> Handback:
@@ -262,6 +280,56 @@ def send_back(hermes: str, task: dict, handback: Handback, sent: bool) -> None:
     run(hermes, "kanban", "reopen-review", task_id, "--reason", handback.reason)
 
 
+def compare(repo: str, spec: str) -> dict:
+    return json.loads(run(os.environ.get("GH_BIN", "gh"), "api", f"repos/{repo}/compare/{spec}?per_page=1"))
+
+
+def conflicting_files(repo: str, pull: dict) -> tuple[list, bool]:
+    """Files both the branch and its base changed since they split, and whether GitHub's 300 file cap may hide more."""
+    base = quote(pull["baseRefName"])
+    head_side = compare(repo, f"{base}...{pull['headRefOid']}")
+    base_side = compare(repo, f"{head_side['merge_base_commit']['sha']}...{base}")
+    names = [{file["filename"] for file in side["files"]} for side in (head_side, base_side)]
+    truncated = any(len(side["files"]) >= COMPARE_LIMIT for side in (head_side, base_side))
+    return sorted(names[0] & names[1]), truncated
+
+
+def notify_triage(hermes: str, repo: str, task: dict, pull: dict) -> bool:
+    """Tells a parked card's session about a conflict once per head; never changes the card's state."""
+    if pull["mergeable"] != "CONFLICTING":
+        return False
+    base = pull["baseRefName"]
+    marker = f"{CONFLICT_MARKER}{pull['headRefOid']}"
+    if already_sent(hermes, task["id"], marker, parked=True):
+        return False
+    try:
+        files, truncated = conflicting_files(repo, pull)
+    except (Failed, ValueError, KeyError, TypeError):
+        files, truncated = [], False
+    listed = "\n".join(f"- `{name}`" for name in files) if files else "The list of conflicting files is unavailable."
+    note = f"\nGitHub listed only the first {COMPARE_LIMIT} changed files, so more files may conflict." if truncated else ""
+    reference = pull_ref(pull["url"])
+    body = (
+        f"Pull request {reference} conflicts with its base {base}. This card stays parked, and the worker merges "
+        f"{base} into the branch first once someone replies. Conflicting files:\n{listed}{note}"
+    )
+    session = SESSION_LINE.search(task.get("body") or "")
+    if session is not None:
+        cli = Path(os.environ["HERMES_HOME"]) / "plugins" / "linear-agent-session" / "cli.py"
+        run(
+            sys.executable, str(cli), "activity", "--agent-session-id", session.group(1), "--type", "elicitation",
+            "--body", body, "--external-url", f"Pull request={pull['url']}",
+        )
+    comment = (
+        f"Pull request {reference} conflicts with {base}. The card stays parked. When a person replies and the card "
+        f"resumes, the worker merges origin/{base} first.\n\n{PARKED_LINE}\n{marker}"
+    )
+    run(hermes, "kanban", "comment", task["id"], pull_ref(comment))
+    if session is None:
+        raise Failed("the card has no linear_agent_session_id line")
+    return True
+
+
 def main() -> int:
     argparse.ArgumentParser(description=__doc__.splitlines()[0]).parse_args()
     failed = False
@@ -295,6 +363,10 @@ def main() -> int:
             if pull is None:
                 continue
             try:
+                if task["status"] == "triage":
+                    if notify_triage(hermes, repo, task, pull):
+                        print(f"{task['id']} {pull['url']} notified")
+                    continue
                 handback = handback_for(pull, task, repo, rules)
                 if handback is None:
                     continue
