@@ -19,7 +19,7 @@ fails the read, and `people_timeout` times it out.
 A posted activity is logged as `activity`, with the session's issue holding no other session.
 Its blockers come from its `blocked_by` list of {id, identifier, gitBranchName, stateType, delegate}, none
 when unset, and `blockers_error` fails the read.
-Its title comes from `issue_title`, "Fix checkout" when unset. An AgentSessionUpdate is logged as
+Its title comes from `issue_title`, "Fix checkout" when unset, and its priority from `priority`, 0 when unset. An AgentSessionUpdate is logged as
 `session_update` with its variables, and `session_update_error` makes it fail. The session's
 links are its `session_urls` list, which an update's `addedExternalUrls` extends, and `session_urls_error` fails the read.
 The app's own user id is app-user.
@@ -69,7 +69,7 @@ def _fake_urlopen(request, timeout=None):
             issue = {
                 "id": "issue-uuid", "identifier": "ABC-123", "title": state.get("issue_title", "Fix checkout"),
                 "description": None, "url": "https://linear.app/example/issue/ABC-123", "branchName": "abc-123-fix",
-                "priority": 0, "state": {"name": "Todo", "type": state_type},
+                "priority": state.get("priority", 0), "state": {"name": "Todo", "type": state_type},
                 "delegate": {"id": state["delegate"]} if state.get("delegate") else None,
                 "labels": {"nodes": []}, "attachments": {"nodes": []}, "agentSessions": {"nodes": []},
                 "inverseRelations": {"nodes": []},

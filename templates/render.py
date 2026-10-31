@@ -274,7 +274,9 @@ def validate(settings: Any) -> dict:
     }
 
 
-def _workspace_flag(repo: dict) -> str:
+def workspace_flag(repo: dict) -> str:
+    """A triage card's flags for the repository; `card_transition.py` loads this file from the factory checkout to
+    create a triage card the way the gateway's prompt does."""
     # The `default` repository's worktrees anchor at the board's default_workdir.
     return "--workspace worktree" if repo["routing"] == "default" else f"--workspace worktree:{repo['path']}"
 
@@ -299,7 +301,7 @@ def archive_card_command(home: Path) -> str:
 
 
 def triage_card_flags(repositories: list) -> str:
-    return "\n".join(f"- `{repo['full_name']}`: `{_workspace_flag(repo)}`" for repo in repositories)
+    return "\n".join(f"- `{repo['full_name']}`: `{workspace_flag(repo)}`" for repo in repositories)
 
 
 def card_transition_command(home: Path) -> str:
@@ -323,7 +325,7 @@ def events_that_matter(table) -> str:
 def repository_lines(repositories: list) -> str:
     return "\n".join(
         f"- `{repo['full_name']}`: routing `{repo['routing']}`, checkout `{repo['path']}`, "
-        f"card flags `{_workspace_flag(repo)} --completion-contract {repo['full_name']}`"
+        f"card flags `{workspace_flag(repo)} --completion-contract {repo['full_name']}`"
         for repo in repositories
     )
 

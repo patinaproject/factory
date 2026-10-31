@@ -14,6 +14,7 @@ import sys
 import time
 import unittest
 import uuid
+from unittest import mock
 from pathlib import Path
 
 from tests.support import BOT_LOGIN, REPO as FACTORY, SCRIPTS, FakeBroker, FakeGithub, GitFixture, git, granted
@@ -24,6 +25,13 @@ _result_line_spec = importlib.util.spec_from_file_location(
 RESULT_LINE = importlib.util.module_from_spec(_result_line_spec)
 sys.modules[_result_line_spec.name] = RESULT_LINE
 _result_line_spec.loader.exec_module(RESULT_LINE)
+_blocker_order_spec = importlib.util.spec_from_file_location(
+    "blocker_order", FACTORY / "plugins" / "blocker-order" / "__init__.py",
+    submodule_search_locations=[str(FACTORY / "plugins" / "blocker-order")],
+)
+BLOCKER_ORDER = importlib.util.module_from_spec(_blocker_order_spec)
+sys.modules[_blocker_order_spec.name] = BLOCKER_ORDER
+_blocker_order_spec.loader.exec_module(BLOCKER_ORDER)
 
 BUSY = {"ok": False, "state": "busy", "message": "The upload broker is busy. Try again in a moment."}
 
@@ -144,6 +152,10 @@ TAKEOVER_RULES = (
 TAKEOVER_ENTRY = f"{TAKEOVER_INTRO} This branch starts from its head. {TAKEOVER_RULES}"
 FACTORY_BRANCH_TAKEOVER_ENTRY = (
     f"{TAKEOVER_INTRO} This branch holds the factory's own earlier commits, not that pull request's. {TAKEOVER_RULES}"
+)
+NO_BRIEF = (
+    "Linear issue ABC-123 has no Document titled `ABC-123 Agent brief`, so its implementation card does not start; "
+    "it starts after triage writes the brief"
 )
 PERSON_BRANCH_REFUSAL = (
     f"origin/abc-123-fix was not created by {BOT_LOGIN} according to GitHub's branch_creation record "
@@ -530,7 +542,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertNotEqual(status, 0)
         self.assertIn("no session today", json.dumps(report))
 
-    def test_an_implementation_card_without_the_agent_brief_is_refused(self) -> None:
+    def test_an_implementation_card_without_the_agent_brief_waits_for_triage(self) -> None:
         for documents in ((), (("d1", "ABC-123 Triage notes", "app-user"),), (("d1", "ABC-124 Agent brief", "app-user"),),
                           (("d1", "ABC-123 Agent brief draft", "app-user"),)):
             with self.subTest(documents=documents):
@@ -538,11 +550,52 @@ class ClaudeSessionTest(GitFixture):
                 status, report = self.run_session(env={"HERMES_KANBAN_BOARD": "default"})
 
                 self.assertEqual(status, 2)
-                self.assertEqual(report, {"error": (
-                    "Linear issue ABC-123 has no Document titled `ABC-123 Agent brief`, so its implementation card "
-                    "does not start; it starts after triage writes the brief"
-                )})
+                self.assertEqual(report, {"error": NO_BRIEF, "transient": True, "precondition": "needs_brief"})
+                self.assert_reads_back(report, RESULT_LINE.Refused)
                 self.assertFalse(self.log.exists())
+
+    def test_runs_before_the_brief_exists_park_the_card_each_time_and_never_block_it(self) -> None:
+        self.set_documents()
+        calls = []
+
+        class Ctx:
+            @staticmethod
+            def dispatch_tool(name: str, args: dict, **_) -> str:
+                calls.append((name, args))
+                return json.dumps({"ok": True, "task_id": TASK_ID, "status": "scheduled"})
+
+        hook = BLOCKER_ORDER.make_hook(Ctx())
+        for run in ("1", "2"):
+            status, report = self.run_session()
+            env = {"HERMES_KANBAN_TASK": TASK_ID, "HERMES_KANBAN_RUN_ID": run, "HERMES_KANBAN_BOARD": "default"}
+            with mock.patch.dict(os.environ, env):
+                rewritten = hook(tool_name="terminal", result=json.dumps({"output": json.dumps(report) + "\n"}))
+
+            self.assertEqual(status, 2)
+            self.assertTrue(json.loads(rewritten)["needs_brief_park"]["parked"])
+        self.assertEqual(calls, [("kanban_schedule", {"reason": f"Waiting for triage: {NO_BRIEF}"})] * 2)
+
+    def test_a_failed_read_of_the_documents_is_refused_as_before(self) -> None:
+        self.set_documents(error="Entity not found")
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {"error": "reading the Documents of Linear issue ABC-123 failed: Entity not found"})
+        self.assertFalse(self.log.exists())
+
+    def test_a_blocker_order_copy_that_does_not_park_on_the_brief_gets_the_plain_refusal(self) -> None:
+        module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
+        text = module.read_text()
+        self.assertIn(", NEEDS_BRIEF: NEEDS_BRIEF_PARK}", text)
+        module.unlink()
+        module.write_text(text.replace(", NEEDS_BRIEF: NEEDS_BRIEF_PARK}", "}"))
+        self.set_documents()
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report), (2, {"error": NO_BRIEF, "transient": True}))
+        self.assertFalse(self.log.exists())
 
     def test_an_implementation_card_with_the_agent_brief_starts(self) -> None:
         self.set_documents(("d1", "ABC-123 Agent brief", "someone-else"))

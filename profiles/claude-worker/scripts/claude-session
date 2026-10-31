@@ -243,6 +243,8 @@ GITHUB_ISSUE_LINE = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
 GH_LOGIN = "gh_login"
 # The `precondition` of a refusal that waits for a factory deploy to make the install match the deployed commit.
 INSTALL_SKEW = "install_skew"
+# The `precondition` of a refusal that waits for triage to write the issue's Agent brief.
+NEEDS_BRIEF = "needs_brief"
 
 
 class Refusal(Exception):
@@ -864,9 +866,11 @@ def require_brief(client, issue_id: str, identifier: str) -> None:
         raise Refusal(f"reading the Documents of Linear issue {identifier} failed: {error}") from None
     brief = f"{identifier} Agent brief"
     if brief not in titles:
+        # Transient, so a `goal_mode` card, which Hermes refuses to park, gets the transient block instead.
         raise Refusal(
             f"Linear issue {identifier} has no Document titled `{brief}`, so its implementation card does not "
-            "start; it starts after triage writes the brief"
+            "start; it starts after triage writes the brief",
+            transient=True, precondition=NEEDS_BRIEF,
         )
 
 
@@ -1459,10 +1463,13 @@ def mcp_status(args: argparse.Namespace) -> tuple[int, dict]:
 
 
 def refused(result_line, refusal: Refusal):
-    """The refusal's report. An installed `blocker-order` that predates `precondition` gets today's transient
-    refusal, which its hook blocks, because it would raise TypeError on the field."""
+    """The refusal's report. The precondition goes only to an installed `blocker-order` that parks on its key:
+    one that predates `precondition` would raise TypeError on the field, and one whose PRECONDITION_PARKS lacks
+    the key would leave the card to the worker's capability block. Either gets the refusal without it, which
+    its hook blocks. A copy older than PRECONDITION_PARKS parks only on `gh_login`."""
     declared = {each.name for each in dataclasses.fields(result_line.Refused)}
-    if refusal.precondition and "precondition" in declared:
+    parks = getattr(result_line, "PRECONDITION_PARKS", (GH_LOGIN,))
+    if refusal.precondition in parks and "precondition" in declared:
         return result_line.Refused(str(refusal), refusal.transient, refusal.precondition)
     return result_line.Refused(str(refusal), refusal.transient)
 

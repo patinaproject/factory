@@ -160,6 +160,14 @@ message, because the `blocker-order` hook sees tool results and not that message
   to the queue once the install matches. Follow `install_skew_park` exactly as
   `gh_login_park` above: stop, post no activity, never call `kanban_block`, and
   treat a result without it as the `"transient": true` case below.
+- A line that holds `"precondition": "needs_brief"` means the issue has no
+  Agent brief Document yet. The `blocker-order` hook parks the card the same
+  way and adds `needs_brief_park` to the result. A sweep queues one triage
+  card for the issue, posts the one note on the agent session, and returns
+  the card to the queue once the brief exists. Follow `needs_brief_park`
+  exactly as `gh_login_park` above: stop, post no activity, never call
+  `kanban_block`, and treat a result without it as the `"transient": true`
+  case below.
 - On failure the line holds `error`. A refusal that another process holds the
   worktree means a second worker is running this card: post an `error`
   activity saying so, call `kanban_block` with kind `transient`, and stop.

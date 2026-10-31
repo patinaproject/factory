@@ -358,13 +358,13 @@ class ResultLineTest(unittest.TestCase):
             {"error": "stale", "transient": True, "precondition": "gh_login"},
         )
         self.assertIsNone(result_line.precondition_refusal(written))
-        for precondition in ("gh_login", "install_skew"):
+        for precondition in ("gh_login", "install_skew", "needs_brief"):
             refusal = result_line.Refused("stale", True, precondition)
             self.assertEqual(result_line.precondition_refusal(refusal), refusal)
         self.assertIsNone(result_line.precondition_refusal(result_line.Refused("stale", True, "unknown")))
 
     def test_a_machine_park_never_starts_with_needs_input(self):
-        for park in (result_line.GH_LOGIN_PARK, result_line.INSTALL_SKEW_PARK):
+        for park in (result_line.GH_LOGIN_PARK, result_line.INSTALL_SKEW_PARK, result_line.NEEDS_BRIEF_PARK):
             self.assertFalse(park.startswith(result_line.NEEDS_INPUT))
 
     def test_a_crashed_line_is_neither_refused_nor_failed(self):
@@ -738,6 +738,28 @@ class InstallSkewTest(GhLoginTest):
         names = [name for name, _ in self.board.calls]
         self.assertEqual(names, ["kanban_schedule"])
         self.assertFalse(any(name.startswith("linear") or name == "kanban_block" for name in names))
+
+
+class NeedsBriefTest(GhLoginTest):
+    STOPPED = (
+        "The issue has no Agent brief yet, so this card waits in scheduled while triage writes it and goes back to "
+        "the queue once the brief exists. Stop now: call no other tool, do not call kanban_block, do not post an "
+        "activity, and do not run claude-session again."
+    )
+    PRECONDITION, PARK, KEY = "needs_brief", "Waiting for triage:", "needs_brief_park"
+    ERROR = (
+        "Linear issue ABC-123 has no Document titled `ABC-123 Agent brief`, so its implementation card does not "
+        "start; it starts after triage writes the brief"
+    )
+
+    def test_every_run_before_the_brief_exists_parks_again_and_never_blocks(self):
+        for run in ("r1", "r2", "r3"):
+            os.environ["HERMES_KANBAN_RUN_ID"] = run
+            outcome = self.refuse("t_1", "default")
+            self.assertTrue(outcome[self.KEY]["parked"])
+            self.board.unblock("t_1")
+        self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule"] * 3)
+        self.assertNotIn("t_1", self.board.block_kind)
 
 
 class Factory(Hooked):

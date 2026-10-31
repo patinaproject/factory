@@ -12,7 +12,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from tests.support import REPO, SCRIPTS, git, with_interpreter
+from tests.support import REPO, SCRIPTS, FakeBroker, git, granted, with_interpreter
 from tests.test_kanban_board import COMMENTS_AND_EVENTS, TASKS
 
 FAKE_HERMES = """#!/usr/bin/env python3
@@ -27,10 +27,30 @@ if argv[:2] == ["config", "get"]:
 elif argv == ["kanban", "boards", "list", "--json"]:
     print(json.dumps([{"slug": "default", "db_path": state.get("default_db", "/nowhere")},
                       {"slug": "triage", "db_path": state["db_path"]}]))
-elif argv[:2] == ["kanban", "--board"] and argv[3] in ("list", "assign", "unblock", "show"):
+elif argv[:2] == ["kanban", "--board"] and argv[3] in ("list", "assign", "unblock", "show", "create", "archive", "comment"):
     tasks = state["tasks"] if argv[2] == "triage" else state["default_tasks"]
     if argv[3] == "list":
-        print(json.dumps(tasks))
+        print(json.dumps([t for t in tasks if t["status"] != "archived"]))
+    elif argv[3] == "create":
+        option = lambda name: argv[argv.index(name) + 1]
+        key = option("--idempotency-key")
+        card = next((t for t in tasks if t.get("idempotency_key") == key and t["status"] != "archived"), None)
+        if card is None:
+            card = {"id": f"t_triage_{len(tasks) + 1}", "title": argv[4], "body": option("--body"), "status": "ready",
+                    "assignee": None, "priority": int(option("--priority")), "created_at": 500,
+                    "idempotency_key": key, "workspace": option("--workspace"), "workspace_kind": "scratch"}
+            tasks.append(card)
+            json.dump(state, open(path, "w"))
+        print(json.dumps(card))
+    elif argv[3] == "archive":
+        next(t for t in tasks if t["id"] == argv[4])["status"] = "archived"
+        json.dump(state, open(path, "w"))
+    elif argv[3] == "comment":
+        import sqlite3
+        db = sqlite3.connect(state["db_path"] if argv[2] == "triage" else state["default_db"])
+        db.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, 'claude-worker', ?, 1000)",
+                   (argv[4], argv[5]))
+        db.commit()
     elif argv[3] == "assign" and not state.get("assign_fails"):
         next(t for t in tasks if t["id"] == argv[4])["assignee"] = None if argv[5] == "none" else argv[5]
         json.dump(state, open(path, "w"))
@@ -426,3 +446,69 @@ class DeployReleaseTest(ParkedHarness):
 
         self.assertEqual((proc.returncode, proc.stdout), (0, ""))
         self.assertEqual(self.statuses()["t_deploy"], ("scheduled", "claude-worker"))
+
+
+
+NO_BRIEF_PARK = "Waiting for triage: Linear issue ABC-123 has no Document titled `ABC-123 Agent brief`"
+IMPLEMENTATION_BODY = (
+    "```text\nlinear_issue_id: issue-uuid\nlinear_issue_identifier: ABC-123\n"
+    "linear_issue_url: https://linear.app/example/issue/ABC-123\nlinear_agent_session_id: session-1\n"
+    "repo: example-org/app\nbranch: abc-123-fix\n```\n"
+)
+TRIAGE_BODY = (
+    "```text\ncard: triage\nlinear_issue_id: issue-uuid\nlinear_issue_identifier: ABC-123\n"
+    "linear_issue_url: https://linear.app/example/issue/ABC-123\nlinear_agent_session_id: session-1\n"
+    "repo: example-org/app\n```\n"
+)
+BRIEF_SETTINGS = {"triage": {"max_running": 2}, "repositories": [
+    {"full_name": "example-org/app", "path": "/repos/app", "routing": "synced_github"},
+]}
+QUEUED_NOTE = "No ABC-123 Agent brief yet, so triage runs first. Queued for triage as t_triage_1."
+
+
+class BriefHarness(ParkedHarness):
+    """A card parked for its Agent brief, the real Linear client on a fake Linear, and the factory checkout."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        plugin = self.home / "plugins" / "linear-agent-session"
+        plugin.mkdir()
+        (plugin / "linear.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "tests" / "staged_linear.py")
+        (plugin / "broker_client.py").symlink_to(REPO / "plugins" / "linear-agent-session" / "broker_client.py")
+        self.linear({"accepted": ["linear-token"], "priority": 3})
+        broker = FakeBroker(self.home / "factory-uploads.sock", linear_token=[granted("linear-token")])
+        self.addCleanup(broker.close)
+        (self.home / "distribution.yaml").write_text(f"name: claude-worker\nsource: {REPO}/profiles/claude-worker\n")
+        self.park(self.default_board, "t_impl", NO_BRIEF_PARK)
+        self.impl = {**task("t_impl", "scheduled", "claude-worker"), "body": IMPLEMENTATION_BODY}
+
+    def linear(self, state: dict) -> None:
+        path = self.home / "linear-fake.json"
+        current = json.loads(path.read_text()) if path.exists() else {}
+        path.write_text(json.dumps({**current, **state}))
+
+    def activities(self) -> list:
+        log = self.home / "linear-fake.log"
+        lines = log.read_text().splitlines() if log.exists() else []
+        return [entry["activity"] for entry in map(json.loads, lines) if "activity" in entry]
+
+
+class BriefDispatchTest(BriefHarness):
+    def test_dispatch_triage_queues_the_triage_card_and_assigns_it_in_the_same_run(self) -> None:
+        self.linear({"documents": []})
+
+        proc = self.run_script([], settings=BRIEF_SETTINGS, default_tasks=[self.impl], default_db=str(self.default_board))
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "queued t_triage_1 for t_impl\nassigned t_triage_1\n", ""))
+        self.assertEqual(self.statuses()["t_impl"], ("scheduled", "claude-worker"))
+        self.assertEqual([activity["content"]["body"] for activity in self.activities()], [QUEUED_NOTE])
+
+    def test_a_failed_linear_read_is_reported_and_exits_1(self) -> None:
+        self.linear({"documents_error": "Entity not found"})
+
+        proc = self.run_script([], settings=BRIEF_SETTINGS, default_tasks=[self.impl], default_db=str(self.default_board))
+
+        self.assertEqual((proc.returncode, proc.stdout), (1, ""))
+        self.assertIn("releasing t_impl for an Agent brief failed: reading Linear issue ABC-123 failed: Entity not found",
+                      proc.stderr)
+        self.assertEqual(self.statuses()["t_impl"], ("scheduled", "claude-worker"))

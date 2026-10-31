@@ -15,6 +15,9 @@ It then releases, on every board, each card parked for the worker's gh login onc
 and the next step assigns it; on any other board it lands `ready` and assigned.
 It releases each card parked for a factory deploy the same way once the install
 matches the commit auto-deploy recorded as deployed (`card_transition.sweep_deploy`).
+For each card parked for its issue's Agent brief it applies `card_transition.sweep_brief`:
+it releases the card with the same line, or queues the issue's triage card and prints
+`queued <triage task id> for <task id>`, so the next step can assign that triage card.
 Then it counts the board's cards that are `running`, or `ready` with an
 assignee, and assigns `claude-worker` to waiting `ready` cards, highest priority
 and then oldest first, until that count reaches `triage.max_running` in the
@@ -89,6 +92,8 @@ def release_parked(sweep, waits_for: str) -> bool:
         return False
     for task_id in swept["released"]:
         print(f"released {task_id}")
+    for task_id, triage_id in swept.get("queued", {}).items():
+        print(f"queued {triage_id} for {task_id}")
     for task_id, error in swept["failed"].items():
         print(f"dispatch-triage: releasing {task_id} for {waits_for} failed: {error}", file=sys.stderr)
     return not swept["failed"]
@@ -105,6 +110,7 @@ def main() -> int:
         released = release_waiting()
         released = release_parked(card_transition.sweep_login, "the gh login") and released
         released = release_parked(card_transition.sweep_deploy, "a factory deploy") and released
+        released = release_parked(card_transition.sweep_brief, "an Agent brief") and released
         tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
         for task_id in to_assign(tasks, cap):
             hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)

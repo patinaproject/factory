@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from tests.support import REPO, SCRIPTS, FakeBroker, granted, with_interpreter
+from tests.test_dispatch_triage import BRIEF_SETTINGS, NO_BRIEF_PARK, IMPLEMENTATION_BODY, QUEUED_NOTE, TRIAGE_BODY, BriefHarness, task
 
 FAKE_HERMES = """#!/usr/bin/env python3
 import json, os, sys
@@ -695,6 +696,110 @@ class RefusedMergeTest(CardTransitionTest):
         code, out = self.transition("merged", "t_1", "--pr", "https://github.com/example-org/app/issues/12", "--linear-state", "started")
         self.assertEqual((code, out), (1, {"error": "https://github.com/example-org/app/issues/12 is not a GitHub pull request URL"}))
         self.assertEqual(self.calls(), [])
+
+
+class BriefWaitTest(BriefHarness):
+    """`sweep_brief` against fake boards and the real Linear client on a fake Linear."""
+
+    def sweep_brief(self, triage_tasks: list | None = None) -> dict:
+        """One sweep; a second call keeps the boards the first one left."""
+        if triage_tasks is not None:
+            self.state_path.write_text(json.dumps({
+                "default_tasks": [self.impl], "tasks": triage_tasks, "settings": BRIEF_SETTINGS,
+                "db_path": str(self.board), "default_db": str(self.default_board),
+            }))
+        env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path),
+               "HERMES_HOME": str(self.home)}
+        proc = subprocess.run(
+            [sys.executable, "-c", "import json, card_transition; print(json.dumps(card_transition.sweep_brief()))"],
+            cwd=SCRIPTS, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def hermes_calls(self) -> list:
+        log = Path(f"{self.state_path}.log")
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return [call[2:] for call in calls if call[:2] == ["kanban", "--board"] and call[3] not in ("show", "list")]
+
+    def test_a_card_without_a_triage_card_queues_one_and_posts_one_note_once(self) -> None:
+        self.linear({"documents": []})
+
+        first = self.sweep_brief([])
+        second = self.sweep_brief()
+
+        self.assertEqual(first, {"released": [], "queued": {"t_impl": "t_triage_1"}, "failed": {}})
+        self.assertEqual(second, {"released": [], "queued": {}, "failed": {}})
+        self.assertEqual(self.hermes_calls(), [
+            ["triage", "create", "ABC-123: Fix checkout", "--priority", "2", "--workspace", "worktree:/repos/app",
+             "--idempotency-key", "linear-triage:issue-uuid", "--body", TRIAGE_BODY, "--json"],
+            ["default", "comment", "t_impl", "Queued for triage as t_triage_1"],
+        ])
+        self.assertEqual(self.activities(), [
+            {"agentSessionId": "session-1", "content": {"type": "thought", "body": QUEUED_NOTE}},
+        ])
+        self.assertEqual(self.statuses()["t_impl"], ("scheduled", "claude-worker"))
+        self.assertEqual(self.statuses()["t_triage_1"], ("ready", None))
+
+    def test_a_done_triage_card_is_archived_before_the_new_one_is_created(self) -> None:
+        self.linear({"documents": []})
+        done = {**task("t_old", "done"), "body": TRIAGE_BODY, "idempotency_key": "linear-triage:issue-uuid",
+                "workspace_kind": "scratch"}
+
+        swept = self.sweep_brief([done])
+
+        self.assertEqual(swept["queued"], {"t_impl": "t_triage_2"})
+        self.assertEqual([call[:3] for call in self.hermes_calls()], [
+            ["triage", "archive", "t_old"], ["triage", "create", "ABC-123: Fix checkout"],
+            ["default", "comment", "t_impl"],
+        ])
+        self.assertEqual(self.statuses()["t_old"], ("archived", None))
+        self.assertEqual(len(self.activities()), 1)
+
+    def test_a_brief_on_a_ready_issue_releases_the_card(self) -> None:
+        swept = self.sweep_brief([])
+
+        self.assertEqual(swept, {"released": ["t_impl"], "queued": {}, "failed": {}})
+        self.assertEqual(self.hermes_calls(), [["default", "unblock", "t_impl"]])
+        self.assertEqual(self.statuses()["t_impl"], ("ready", "claude-worker"))
+        self.assertEqual(self.activities(), [])
+
+    def test_an_issue_without_ready_for_agent_releases_the_card(self) -> None:
+        self.linear({"labels": ["Needs info"], "documents": []})
+
+        swept = self.sweep_brief([])
+
+        self.assertEqual(swept["released"], ["t_impl"])
+        self.assertEqual(self.statuses()["t_impl"], ("ready", "claude-worker"))
+        self.assertEqual(self.activities(), [])
+
+    def test_a_wait_whose_triage_card_ended_without_a_brief_queues_and_posts_nothing(self) -> None:
+        self.linear({"documents": []})
+        self.park(self.default_board, "t_queued", NO_BRIEF_PARK, comments=("Queued for triage as t_old",))
+        queued = {**task("t_queued", "scheduled", "claude-worker"), "body": IMPLEMENTATION_BODY}
+        self.impl = {**self.impl, "assignee": None}
+        done = {**task("t_old", "done"), "body": TRIAGE_BODY, "workspace_kind": "scratch"}
+        self.state_path.write_text(json.dumps({
+            "default_tasks": [self.impl, queued], "tasks": [done], "settings": BRIEF_SETTINGS,
+            "db_path": str(self.board), "default_db": str(self.default_board),
+        }))
+
+        swept = self.sweep_brief()
+
+        self.assertEqual(swept, {"released": [], "queued": {}, "failed": {}})
+        self.assertEqual((self.hermes_calls(), self.activities()), ([], []))
+        self.assertEqual(self.statuses()["t_queued"], ("scheduled", "claude-worker"))
+        self.assertEqual(self.statuses()["t_old"], ("done", None))
+
+    def test_a_failed_linear_read_leaves_the_card_parked_and_is_reported(self) -> None:
+        self.linear({"documents_error": "Entity not found"})
+
+        swept = self.sweep_brief([])
+
+        self.assertEqual(swept, {"released": [], "queued": {},
+                                 "failed": {"t_impl": "reading Linear issue ABC-123 failed: Entity not found"}})
+        self.assertEqual((self.hermes_calls(), self.activities()), ([], []))
+        self.assertEqual(self.statuses()["t_impl"], ("scheduled", "claude-worker"))
 
 
 if __name__ == "__main__":

@@ -41,6 +41,16 @@ The deploy release rule is the same for a card whose newest park reason starts w
 `result_line.INSTALL_SKEW_PARK`, which waits for a factory deploy: `sweep_deploy` releases it once the install
 matches the commit auto-deploy recorded as deployed, compared the way `claude-session` compares it.
 
+The brief release rule: a card whose newest park reason starts with `result_line.NEEDS_BRIEF_PARK` waits for its
+issue's `<ID> Agent brief` Document. `sweep_brief` reads the issue's labels and Documents for each such card still
+assigned to `claude-worker` that no `stopped` comment follows. It releases the card once the brief exists and the
+issue carries `ready-for-agent`, and also once the issue no longer carries that label, so the card's next run
+refuses and a person is told. Otherwise, unless a `Queued for triage as <task id>` comment follows the park, it
+creates the issue's triage card as "Triage inbox" step 7 does, archiving a `done` one first, comments that line
+on the parked card, and posts one `thought` on the card's agent session. A wait that already queued its triage
+card posts nothing more, even once that card ends without a brief. A failed Linear read leaves the card parked
+and is reported.
+
 - `unblock --repo <r> --branch <b> --reason <text>`: unblock a card. When the branch has a pull
   request, Hermes holds the `ready` card for 24 hours after a comment that names it, and only the
   review reopen lifts the hold, so the card is unblocked, sent to review, and reopened.
@@ -79,9 +89,11 @@ because Hermes treats a card whose comments hold a pull request URL as already h
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -102,6 +114,9 @@ from archive_card import Failed, archive, kanban_command, last_line, run, run_ka
 WORKER = "claude-worker"
 TRIAGE_BOARD = "triage"
 STOPPED = "stopped"
+READY_LABEL = "ready-for-agent"
+# The comment that records the triage card a brief wait queued, so a later sweep queues no second one.
+TRIAGE_QUEUED = "Queued for triage as"
 # Covers Hermes' _RESPAWN_GUARD_PR_URL_RE, which holds a `ready` card for a day after a comment that matches it.
 PULL_URL = re.compile(r"https?://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)(?:[/#?][^\s).,]*)?", re.IGNORECASE)
 NOT_REFUSED = frozenset({"success", "pending"})
@@ -373,6 +388,124 @@ def sweep_parked(prefix: str, ready: Callable[[], bool]) -> dict:
             except Failed as failure:
                 failed[task_id] = str(failure)
     return {"released": released, "failed": failed}
+
+
+def card_field(body: str, name: str) -> str:
+    match = re.search(rf"^{name}:[ \t]*(\S+)[ \t]*$", body or "", re.MULTILINE)
+    if match is None:
+        raise Failed(f"the card's body has no {name} line")
+    return match.group(1)
+
+
+def queued_after_park(show: dict) -> bool:
+    """Whether this wait already queued its triage card: a `TRIAGE_QUEUED` comment follows the newest park."""
+    park = [event for event in show["events"] if event["kind"] == "scheduled"][-1]
+    return any(comment["body"].startswith(TRIAGE_QUEUED) and comment["created_at"] >= park["created_at"]
+               for comment in show["comments"])
+
+
+def triage_flags(full_name: str) -> list[str]:
+    """The repository's triage card flags, by the rule `templates/render.py` renders into the gateway's prompt."""
+    repositories = factory_settings.read(raw=False).get("repositories") or []
+    repo = next((each for each in repositories if each["full_name"].lower() == full_name.lower()), None)
+    if repo is None:
+        raise Failed(f"repository {full_name} is not configured")
+    path = factory_source.checkout(Path(os.environ["HERMES_HOME"])) / "templates" / "render.py"
+    spec = importlib.util.spec_from_file_location("factory_render", path)
+    render = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(render)
+    return shlex.split(render.workspace_flag(repo))
+
+
+def queue_triage(body: str, client) -> str:
+    """Create the issue's triage card the way "Triage inbox" step 7 does, archiving a `done` one first, because
+    its idempotency key would otherwise return that card. A live one is returned as it is."""
+    issue_id = card_field(body, "linear_issue_id")
+    triage = kanban_command(TRIAGE_BOARD)
+    for each in json.loads(run_kanban(*triage, "list", "--json")):
+        if each["status"] == "done" and f"linear_issue_id: {issue_id}" in (each["body"] or "").splitlines():
+            archive(triage, each["id"])
+    issue = client.get_issue(issue_id)
+    repo = card_field(body, "repo")
+    fields = (
+        "card: triage",
+        *(f"{name}: {card_field(body, name)}" for name in (
+            "linear_issue_id", "linear_issue_identifier", "linear_issue_url", "linear_agent_session_id",
+        )),
+        f"repo: {repo}",
+    )
+    card_body = "```text\n" + "\n".join(fields) + "\n```\n"
+    created = run_kanban(
+        *triage, "create", issue["cardTitle"], "--priority", str(issue["cardPriority"]), *triage_flags(repo),
+        "--idempotency-key", f"linear-triage:{issue_id}", "--body", card_body, "--json",
+    )
+    return json.loads(created)["id"]
+
+
+def wait_for_brief(card: Card, board: str, show: dict, client, linear) -> tuple[str, str | None]:
+    """The brief release rule for one parked card: `released`, `queued` with the triage card, or `waiting`."""
+    task = card.show()["task"]
+    if task["assignee"] != WORKER:
+        return "waiting", None
+    issue_id, identifier = card_field(task["body"], "linear_issue_id"), card_field(task["body"], "linear_issue_identifier")
+    try:
+        labels = client.issue_labels(issue_id)
+        titles = [document["title"] for document in client.issue_documents(issue_id)["documents"]]
+    except (*linear.CLIENT_ERRORS, OSError) as error:
+        raise Failed(f"reading Linear issue {identifier} failed: {error}") from None
+    ready = linear.role_key(READY_LABEL) in map(linear.role_key, labels)
+    if not ready or f"{identifier} Agent brief" in titles:
+        return ("released" if release_parked(card, board) else "waiting"), None
+    if queued_after_park(show):
+        return "waiting", None
+    try:
+        triage_id = queue_triage(task["body"], client)
+    except (*linear.CLIENT_ERRORS, OSError) as error:
+        raise Failed(f"reading Linear issue {identifier} failed: {error}") from None
+    except (factory_settings.SettingsError, factory_source.SourceError, KeyError, ValueError) as error:
+        raise Failed(f"queueing a triage card for {identifier} failed: {error}") from None
+    card.call("comment", f"{TRIAGE_QUEUED} {triage_id}")
+    note = f"No {identifier} Agent brief yet, so triage runs first. {TRIAGE_QUEUED} {triage_id}."
+    try:
+        client.create_activity(card_field(task["body"], "linear_agent_session_id"), linear.activity_content("thought", note))
+    except (*linear.CLIENT_ERRORS, OSError) as error:
+        raise Failed(f"queued {triage_id}, but posting the note on Linear failed: {error}") from None
+    return "queued", triage_id
+
+
+def sweep_brief() -> dict:
+    """Apply the brief release rule to every card parked for its issue's Agent brief, on every board.
+    `dispatch-triage` runs it each minute. Linear is read only when such a card waits."""
+    prefix = getattr(plugin_module("blocker-order", "result_line"), "NEEDS_BRIEF_PARK", None)
+    released, queued, failed = [], {}, {}
+    if prefix is None:
+        return {"released": released, "queued": queued, "failed": failed}
+    linear = client = None
+    for each in boards():
+        slug, path = each["slug"], each["db_path"]
+        if not os.path.exists(path):
+            continue
+        try:
+            waiting = kanban_board.scheduled(path)
+        except sqlite3.Error as failure:
+            failed[slug] = f"cannot read the board: {failure}"
+            continue
+        for task_id, show in sorted(waiting.items()):
+            if not wait_over(show, prefix):
+                continue
+            try:
+                if client is None:
+                    linear = plugin_module("linear-agent-session", "linear")
+                    client = linear.client_from_env()
+                action, triage_id = wait_for_brief(Card(slug, task_id), slug, show, client, linear)
+            except Failed as failure:
+                failed[task_id] = str(failure)
+                continue
+            if action == "released":
+                released.append(task_id)
+            elif action == "queued":
+                queued[task_id] = triage_id
+    return {"released": released, "queued": queued, "failed": failed}
 
 
 def park_waiting(board: str | None) -> dict:
