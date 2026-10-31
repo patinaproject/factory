@@ -479,6 +479,76 @@ class ClaudeSessionTest(GitFixture):
         state = json.loads((self.hermes_home / "linear-fake.json").read_text())
         (self.hermes_home / "linear-fake.json").write_text(json.dumps({**state, **fields}))
 
+    def session_creates(self) -> list:
+        return [r["session_create"] for r in self.linear_requests(self.hermes_home) if "session_create" in r]
+
+    def test_a_ready_triage_of_a_delegated_issue_outside_triage_opens_a_session(self) -> None:
+        self.set_linear_issue(delegate="app-user", state_type="unstarted")
+        self.configure_fake_claude(result="Triage outcome: ready-for-agent\nReproduced.")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["activity"]), (0, "thought"))
+        self.assertEqual(self.session_creates(), [{"input": {"issueId": ISSUE_ID}}])
+
+    def test_a_triage_run_opens_no_session_when_the_issue_started_in_triage(self) -> None:
+        self.set_linear_issue(delegate="app-user", state_type="triage")
+        self.configure_fake_claude(result="Triage outcome: ready-for-agent")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertEqual((status, report["activity"]), (0, "thought"))
+        self.assertEqual(self.session_creates(), [])
+
+    def test_a_triage_run_opens_no_session_for_an_undelegated_issue_or_another_outcome(self) -> None:
+        cases = (
+            ("app-user", "Triage outcome: ready-for-human\nNeeds a call."),
+            ("app-user", "Needs input:\nWhich version?"),
+            ("app-user", "Triage outcome: wontfix"),
+            (None, "Triage outcome: ready-for-agent"),
+            ("another-agent", "Triage outcome: ready-for-agent"),
+        )
+        for delegate, result in cases:
+            with self.subTest(delegate=delegate, result=result):
+                self.set_linear_issue(delegate=delegate, state_type="unstarted")
+                self.configure_fake_claude(result=result)
+
+                status, _ = self.run_session(env=TRIAGE_ENV)
+
+                self.assertEqual(status, 0)
+                self.assertEqual(self.session_creates(), [])
+
+    def test_a_failed_hand_off_session_fails_the_run_visibly(self) -> None:
+        self.set_linear_issue(delegate="app-user", state_type="unstarted", session_create_error="no session today")
+        self.configure_fake_claude(result="Triage outcome: ready-for-agent")
+
+        status, report = self.run_session(env=TRIAGE_ENV)
+
+        self.assertNotEqual(status, 0)
+        self.assertIn("no session today", json.dumps(report))
+
+    def test_an_implementation_card_without_the_agent_brief_is_refused(self) -> None:
+        for documents in ((), (("d1", "ABC-123 Triage notes", "app-user"),), (("d1", "ABC-124 Agent brief", "app-user"),),
+                          (("d1", "ABC-123 Agent brief draft", "app-user"),)):
+            with self.subTest(documents=documents):
+                self.set_documents(*documents)
+                status, report = self.run_session(env={"HERMES_KANBAN_BOARD": "default"})
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": (
+                    "Linear issue ABC-123 has no Document titled `ABC-123 Agent brief`, so its implementation card "
+                    "does not start; it starts after triage writes the brief"
+                )})
+                self.assertFalse(self.log.exists())
+
+    def test_an_implementation_card_with_the_agent_brief_starts(self) -> None:
+        self.set_documents(("d1", "ABC-123 Agent brief", "someone-else"))
+
+        status, _ = self.run_session()
+
+        self.assertEqual(status, 0)
+        self.assertTrue(self.log.exists())
+
     def test_an_implementation_run_names_no_activity(self) -> None:
         status, report = self.run_session()
 

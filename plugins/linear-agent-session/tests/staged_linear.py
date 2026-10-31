@@ -7,7 +7,9 @@ request issues minted-<n>, which Linear then accepts unless reject_all is set.
 An issue's labels come from its `labels` list, `["ready-for-agent"]` when unset, and its delegate
 from `delegate`, none when unset; `hidden` makes Linear return no issue.
 The labels the issue can carry come from `team_labels` and `workspace_labels`, lists of names, none when unset.
-Its Documents come from its `documents` list of {id, title, creator}, and a
+Its state type comes from `state_type`, "unstarted" when unset, and an AgentSessionCreateOnIssue is logged as
+`session_create`, with `session_create_error` making it fail.
+Its Documents come from its `documents` list of {id, title, creator}, the Agent brief when unset, and a
 DocumentUpdate rewrites the title there, `documents_error` fails the read, and
 `documents_timeout` times it out.
 Its assignee and the team's current triage person are the profile URLs in `assignee` and `on_triage`, and
@@ -31,6 +33,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+BRIEF = {"id": "d-brief", "title": "ABC-123 Agent brief", "creator": "app-user"}
 _REAL = Path(__file__).resolve().parents[1] / "linear.py"
 _HOME = Path(os.environ["HERMES_HOME"])
 
@@ -59,11 +62,17 @@ def _fake_urlopen(request, timeout=None):
             issue = {
                 "id": "issue-uuid", "identifier": "ABC-123", "title": state.get("issue_title", "Fix checkout"),
                 "description": None, "url": "https://linear.app/example/issue/ABC-123", "branchName": "abc-123-fix",
-                "priority": 0, "state": {"name": "Todo", "type": "unstarted"}, "delegate": None,
+                "priority": 0, "state": {"name": "Todo", "type": state.get("state_type", "unstarted")},
+                "delegate": {"id": state["delegate"]} if state.get("delegate") else None,
                 "labels": {"nodes": []}, "attachments": {"nodes": []}, "agentSessions": {"nodes": []},
                 "inverseRelations": {"nodes": []},
             }
             response = _Response(200, {"data": {"issue": issue}})
+        elif "AgentSessionCreateOnIssue" in query and state.get("session_create_error"):
+            response = _Response(200, {"errors": [{"message": state["session_create_error"]}]})
+        elif "AgentSessionCreateOnIssue" in query:
+            entry["session_create"] = body["variables"]
+            response = _Response(200, {"data": {"agentSessionCreateOnIssue": {"success": True, "agentSession": {"id": "new-session"}}}})
         elif "AgentSessionUpdate" in query and state.get("session_update_error"):
             response = _Response(200, {"errors": [{"message": state["session_update_error"]}]})
         elif "AgentSessionUpdate" in query:
@@ -116,7 +125,7 @@ def _fake_urlopen(request, timeout=None):
         elif "IssueDocuments" in query and state.get("documents_error"):
             response = _Response(200, {"errors": [{"message": state["documents_error"]}]})
         elif "IssueDocuments" in query:
-            nodes = [{**d, "creator": {"id": d["creator"]}} for d in state.get("documents", [])]
+            nodes = [{**d, "creator": {"id": d["creator"]}} for d in state.get("documents", [BRIEF])]
             issue = {"identifier": "ABC-123", "documents": {"nodes": nodes}}
             response = _Response(200, {"data": {"viewer": {"id": "app-user"}, "issue": issue}})
         elif "DocumentUpdate" in query:
