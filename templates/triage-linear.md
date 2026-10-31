@@ -351,20 +351,27 @@ their cards are. A reply from a bot or an integration changes nothing.
    cannot see, change nothing and say you could not read the earlier thread.
    When `reply` is null, or asks for no title, description, label, status, or
    relation change on any issue, skip this section and handle the `action`.
-   A reply that asks only for a relation is a request, not a reason to skip.
+   A reply that asks only for a relation, or that approves listed
+   follow-ups, is a request, not a reason to skip.
 
-   A reply can instead approve follow-ups that an earlier activity listed,
-   such as "do this yourself", "handle it", or "review A and B". When
-   `triage_card` is not null, skip this section for that part: the resumed
+   A reply can approve the follow-ups that an earlier activity listed, such
+   as "do this yourself", "handle it", or "review A and B". When the `action`
+   is `triage_card_reply`, skip this section for that part: the resumed
    triage run applies the follow-ups. Otherwise read the newest `Needs input:`
    or triage-outcome activity in `thread`, never an earlier round, and apply
-   its recommendation for each item through steps 2 to 7. Cancel is the canceled status, or a
-   GitHub close as not planned, plus one appended description line that names
-   the superseding issue. Narrow is an edited description. When it
+   its recommendation for each item it lists. Take each item through steps 2
+   to 7 in turn. A step that stops ends only that item, and one `response` at
+   the end names each change and each item not done, with why. A cancel is
+   the canceled status, plus one appended description line that names the
+   superseding issue. A narrowing is an edited description. When an item
    named two options with no preference, apply exactly one, the less
-   destructive, and name it and why in the `response`. Ask nothing. When
-   `thread_source` is `missing`, or the thread holds no recommendation, change
-   nothing and say so.
+   destructive, so narrowing before canceling, and name it and why in the
+   `response`. An item that files a new issue is not done here: name it in
+   the `response`. Ask nothing. When `thread_source` is `missing`, or the
+   thread holds no recommendation, change nothing and say so. On a public
+   GitHub issue, the approved recommendation counts as the reply's text,
+   and the appended line names a superseding issue only when that issue is
+   itself a public GitHub issue.
 2. Find the target issue. With no other issue named, it is the event's
    issue. An identifier or a Linear URL names the issue. For a
    GitHub issue URL, read its title with `gh issue view <url> --json title`,
@@ -444,7 +451,8 @@ their cards are. A reply from a bot or an integration changes nothing.
    `foreign_cards`, or a gate action: the intent read the labels before the
    change, and the label change sends an `Issue` event that applies the gate
    again with the new labels. Otherwise handle the `action` for the rest of
-   the reply.
+   the reply. An approval of listed follow-ups is part of the change, not
+   the rest of the reply.
 
 ## Stop
 
