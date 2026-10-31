@@ -267,7 +267,8 @@ minimum:
 | `haiku` | 2.1.293 |
 
 The check uses the higher of `2.1.263` and the minimum for every alias the
-factory uses, in both `model.default` and `claude_session.model`.
+factory uses, in `model.default`, in `claude_session.model`, and in each
+`model` under `platforms.slack.channel_overrides`.
 
 **Install or upgrade.** Use the operator's install method, either Anthropic's
 native installer or the npm package. Run the check again.
@@ -365,6 +366,9 @@ hermes config get providers.<proxy provider>.api        # http://127.0.0.1:<prox
 hermes config get providers.<proxy provider>.transport  # anthropic_messages
 hermes config get providers.<proxy provider>.key_env    # <token variable>
 ```
+
+Every `model` in `platforms.slack.channel_overrides` is also an alias the proxy
+lists (see [Slack](references/slack.md#choose-the-conversation-model)).
 
 When the proxy requires a token, `<token variable>` is `CLAUDE_PROXY_TOKEN`,
 and `env_has <home>/.env CLAUDE_PROXY_TOKEN` prints `1` or the Infisical folder

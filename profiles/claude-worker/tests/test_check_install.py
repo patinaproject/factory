@@ -793,6 +793,52 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (0, ""))
 
+    def slack_overrides(self, value) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "platforms.slack.channel_overrides": value})
+
+    def test_slack_overrides_that_are_absent(self) -> None:
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_valid_slack_overrides(self) -> None:
+        self.slack_overrides({
+            "C0000000001": {"model": "example-model", "provider": "custom:example"},
+            "C0000000002": {"provider": "custom:example"},
+            "C0000000003": {"system_prompt": "Be brief."},
+        })
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_slack_overrides_that_are_not_a_mapping(self) -> None:
+        self.slack_overrides(["C0000000001"])
+
+        self.assertEqual(
+            self.check(), (1, f"config platforms.slack.channel_overrides in {self.root}: is not a mapping (part 13)\n")
+        )
+
+    def test_slack_override_entry_that_is_not_a_mapping(self) -> None:
+        self.slack_overrides({"C0000000001": "example-model", "C0000000002": {"model": "example-model"}})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config platforms.slack.channel_overrides.C0000000001 in {self.root}: is not a mapping (part 13)\n"),
+        )
+
+    def test_slack_override_with_an_empty_model(self) -> None:
+        self.slack_overrides({"C0000000001": {"model": ""}})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config platforms.slack.channel_overrides.C0000000001.model in {self.root}: is not a non-empty model alias (part 13)\n"),
+        )
+
+    def test_slack_override_with_a_model_that_is_not_a_string(self) -> None:
+        self.slack_overrides({"C0000000001": {"model": 5}})
+
+        self.assertEqual(
+            self.check(),
+            (1, f"config platforms.slack.channel_overrides.C0000000001.model in {self.root}: is not a non-empty model alias (part 13)\n"),
+        )
+
     def test_upload_platform_that_is_not_enabled(self) -> None:
         self.config(self.root, {**ROOT_CONFIG, "platforms.factory_uploads.enabled": False})
 
