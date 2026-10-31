@@ -225,8 +225,9 @@ The handoff payload is the same for every call in this step:
 - `metadata`: `session_id`, `worktree`, `branch`, and `published_pr`, the pull
   request URL. `pr-ready-gate` and the card's `completion_contract` read
   `published_pr`.
-- The Linear activity's `external_urls`:
-  `[{"label": "Pull request", "url": <published_pr>}]`.
+- The Linear activity's `external_urls`, which adds a link and keeps the ones
+  the session holds, among them the pull request link that `claude-session`
+  added: `[{"label": "Pull request", "url": <published_pr>}]`.
 
 Read the pull request's `state` from the step 4 `gh pr view` output, then make
 one call with the handoff payload:

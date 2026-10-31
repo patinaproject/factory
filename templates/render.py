@@ -282,7 +282,7 @@ def _workspace_flag(repo: dict) -> str:
 def queued_link_sentence(kanban_url) -> str:
     if kanban_url is None:
         return "Leave `external_urls` unset."
-    return f"Set `external_urls` to one link labeled `Kanban card <task id>` whose URL is `{kanban_url}`."
+    return f"Add one link with `external_urls`, labeled `Kanban card <task id>` whose URL is `{kanban_url}`."
 
 
 def hermes_home() -> Path:

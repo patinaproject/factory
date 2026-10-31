@@ -32,7 +32,7 @@ ACTIVITY_SCHEMA = {
             },
             "external_urls": {
                 "type": "array",
-                "description": "Replaces the session's external URLs, for example the Kanban card or pull request.",
+                "description": "Adds links to the session's external URLs and keeps the ones it holds, for example the Kanban card or pull request.",
                 "items": {
                     "type": "object",
                     "properties": {"label": {"type": "string"}, "url": {"type": "string"}},
@@ -259,7 +259,7 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
         activity_id = client.create_activity(session_id, content, ephemeral=bool(args.get("ephemeral")))
         result = {"ok": True, "agent_activity_id": activity_id}
         if args.get("external_urls"):
-            client.set_external_urls(session_id, args["external_urls"])
+            client.add_external_urls(session_id, args["external_urls"])
             result["external_urls"] = [u["url"] for u in args["external_urls"]]
         if not args.get("ephemeral"):
             try:

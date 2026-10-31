@@ -39,7 +39,7 @@ def main(argv: Optional[list] = None) -> int:
         action="append",
         default=[],
         metavar="LABEL=URL",
-        help="replace the session's external URLs; repeatable",
+        help="add to the session's external URLs; repeatable",
     )
 
     issue = commands.add_parser("issue", help="read a Linear issue")

@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Claude Code PostToolUse hook for a worker run: add the pull request Claude opens to the card's Linear session.
+
+`HERMES_HOME=<worker home> python3 link-pr-hook --session-id <id>` reads the hook event on stdin. When a Bash
+call ran `gh pr create` and printed a pull request URL, it adds `Pull request #<number>` with that URL to the
+agent session, with the run's LINEAR_API_KEY, keeping the links the session holds. A hook that exits 2 would
+block the run, so any error prints nothing and exits 0.
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+import os
+import sys
+from pathlib import Path
+
+import session_links
+
+
+def linear_module():
+    plugin = Path(os.environ["HERMES_HOME"]) / "plugins" / "linear-agent-session"
+    sys.path.insert(0, str(plugin))
+    return importlib.import_module("linear")
+
+
+def link_created_pull(linear, client, session_id: str, event: dict) -> dict | None:
+    url = session_links.created_pull_url(event)
+    if url is None:
+        return None
+    return session_links.add(linear, client, session_id, [session_links.pull_link(url)])
+
+
+def main() -> int:
+    try:
+        flag, session_id = sys.argv[1:3]
+        if flag != "--session-id":
+            return 0
+        linear = linear_module()
+        client = linear.TokenLinearClient(os.environ["LINEAR_API_KEY"])
+        link_created_pull(linear, client, session_id, json.load(sys.stdin))
+    except Exception:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

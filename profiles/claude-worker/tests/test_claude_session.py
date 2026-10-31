@@ -298,6 +298,7 @@ class ClaudeSessionTest(GitFixture):
             "issue_links": {"action": "waiting", "reason": f"no open pull request by {BOT_LOGIN} on abc-123-fix"},
             "triage_documents": None,
             "session_title": None,
+            "session_links": None,
             "result": "Opened the pull request.",
             "usage": None,
             "first_context_tokens": None,
@@ -693,6 +694,134 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual((status, report["session_title"]), (0, {"error": "titling the agent session failed: Entity not found"}))
         self.assertEqual(report["result"], "Opened the pull request.")
+
+    def link_updates(self) -> list:
+        return [u["input"] for u in self.session_updates() if "summary" not in u["input"]]
+
+    def linked(self, label_and_url: tuple[str, str]) -> dict:
+        label, url = label_and_url
+        return {"addedExternalUrls": [{"label": label, "url": url}]}
+
+    def factory_pull(self) -> str:
+        self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body="Adds the thing.")
+        return f"https://github.com/{REPO}/pull/9"
+
+    def test_the_factorys_pull_request_is_added_to_the_session_after_the_turn(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.set_linear_state(session_urls=["https://kanban.test/t_1"])
+        pull = self.factory_pull()
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["session_links"]), (0, {"added": [pull], "action": "linked"}))
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", pull))])
+        urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
+        self.assertEqual(urls, ["https://kanban.test/t_1", pull])
+
+    def test_a_pull_request_the_session_already_holds_is_not_added_again(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        pull = self.factory_pull()
+        self.set_linear_state(session_urls=[pull])
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["session_links"], self.link_updates()), (0, {"added": [], "action": "unchanged"}, []))
+
+    def test_a_turn_with_no_pull_request_adds_nothing(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["session_links"], self.link_updates()), (0, {"added": [], "action": "unchanged"}, []))
+
+    def test_a_takeover_pull_request_is_added_before_claude_starts(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.push_upstream_commit("pull", "refs/pull/7/head")
+        self.configure_fake_claude(linear_log=str(self.hermes_home / "linear-fake.log"))
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual((status, report["session_links"]), (0, {"added": [TAKEOVER_PR], "action": "linked"}))
+        started = [json.loads(line) for line in self.claude_call()["linear_log"].splitlines()]
+        before = [e["session_update"]["input"] for e in started if "session_update" in e]
+        self.assertIn(self.linked(("Taken-over pull request #7", TAKEOVER_PR)), before)
+
+    def test_a_takeover_and_the_replacement_pull_request_both_stay_on_the_session(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.set_linear_state(session_urls=["https://kanban.test/t_1"])
+        replacement = self.takeover_pair()
+
+        status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
+
+        self.assertEqual(
+            (status, report["session_links"]), (0, {"added": [TAKEOVER_PR, replacement], "action": "linked"})
+        )
+        self.assertEqual(self.link_updates(), [
+            self.linked(("Taken-over pull request #7", TAKEOVER_PR)), self.linked(("Pull request #9", replacement)),
+        ])
+        urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
+        self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_PR, replacement])
+
+    def test_a_failed_session_link_is_reported_without_changing_the_run(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.set_linear_state(session_update_error="Entity not found")
+        self.factory_pull()
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["subtype"], report["result"]), (0, "success", "Opened the pull request."))
+        self.assertEqual(report["session_links"], {
+            "added": [], "action": "failed", "error": "linking the agent session failed: Entity not found",
+        })
+
+    def test_triage_and_a_card_without_a_session_write_no_session_link(self) -> None:
+        self.push_upstream_commit("pull", "refs/pull/7/head")
+        cases = {
+            "triage with a session": (SESSION_BODY, TRIAGE_ENV),
+            "triage without a session": (CARD_BODY, TRIAGE_ENV),
+            "implementation without a session": (CARD_BODY, None),
+        }
+        for name, (body, env) in cases.items():
+            with self.subTest(name):
+                self.set_comments(body=body)
+
+                status, report = self.run_session("--takeover-pr", TAKEOVER_PR, env=env)
+
+                self.assertEqual((status, report["session_links"], self.link_updates()), (0, None, []))
+
+    def test_an_implementation_card_with_a_session_registers_the_pull_request_hook_after_the_reply_hook(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+
+        self.run_session()
+
+        command = f"HERMES_HOME={self.hermes_home} {sys.executable} {(SCRIPTS / 'link-pr-hook').resolve()} --session-id live-session"
+        post_tool_use = self.claude_call()["settings"]["content"]["hooks"]["PostToolUse"]
+        self.assertEqual(len(post_tool_use), 2)
+        self.assertNotIn("matcher", post_tool_use[0])
+        self.assertEqual(post_tool_use[1], {"matcher": "Bash", "hooks": [{"type": "command", "command": command}]})
+
+    def test_triage_and_a_card_without_a_session_register_no_pull_request_hook(self) -> None:
+        for body, env in ((SESSION_BODY, TRIAGE_ENV), (CARD_BODY, None)):
+            with self.subTest(triage=bool(env)):
+                self.set_comments(body=body)
+
+                self.run_session(env=env)
+
+                hooks = self.claude_call()["settings"]["content"]["hooks"]
+                commands = [h["command"] for group in hooks.get("PostToolUse", []) for h in group["hooks"]]
+                self.assertEqual([c for c in commands if "link-pr-hook" in c], [])
+
+    def test_a_pull_request_claude_opens_is_added_to_the_session_by_the_hook(self) -> None:
+        pull = f"https://github.com/{REPO}/pull/42"
+        event = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr create --fill"},
+            "tool_response": {"stdout": f"{pull}\n", "stderr": "", "interrupted": False},
+        }
+        self.reply_run({"hook": "PostToolUse", "event": event})
+
+        self.assertEqual(self.hook_log()[0]["codes"], [0, 0])
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #42", pull))])
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(

@@ -15,7 +15,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests import BUSY, FakeBroker, FakeLinear, activity_ok, linear_token, load_plugin, sessions_ok
+from tests import (
+    BUSY,
+    FakeBroker,
+    FakeLinear,
+    activity_ok,
+    linear_token,
+    load_plugin,
+    session_urls_ok,
+    sessions_ok,
+)
 
 plugin = load_plugin()
 
@@ -643,7 +652,9 @@ class CliTest(unittest.TestCase):
                 self.assertEqual((code, json.loads(out.getvalue())), (0, {"addressed": expected}))
 
     def test_activity_command(self):
-        fake = FakeLinear([activity_ok("activity-5"), (200, {"data": {"agentSessionUpdate": {"success": True}}})])
+        fake = FakeLinear(
+            [activity_ok("activity-5"), session_urls_ok(), (200, {"data": {"agentSessionUpdate": {"success": True}}})]
+        )
         code, output = self.run_cli(
             [
                 "activity", "--agent-session-id", "session-1", "--type", "action", "--action", "Queued",
@@ -666,8 +677,8 @@ class CliTest(unittest.TestCase):
             },
         )
         self.assertEqual(
-            fake.graphql_requests[1]["variables"],
-            {"id": "session-1", "input": {"externalUrls": [{"label": "Card", "url": "https://example.test/t_1"}]}},
+            fake.graphql_requests[2]["variables"],
+            {"id": "session-1", "input": {"addedExternalUrls": [{"label": "Card", "url": "https://example.test/t_1"}]}},
         )
 
     def test_issue_command_error_exits_non_zero(self):

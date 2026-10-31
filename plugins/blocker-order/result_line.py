@@ -33,7 +33,8 @@ UNSET: Any = _Unset()
 class Session:
     """The Claude session a run used, and what `claude-session` did around it. `progress` is true when the run
     changed the worktree's HEAD or its `git status --porcelain`. `comments_seen` is the number of card comments
-    in the snapshot the run read; a triage round's park records it, so a reply past it releases the card."""
+    in the snapshot the run read; a triage round's park records it, so a reply past it releases the card.
+    `session_links` reports the pull requests that `claude-session` added to the card's agent session."""
 
     session_id: str
     resumed: bool
@@ -47,6 +48,7 @@ class Session:
     issue_links: Optional[dict]
     triage_documents: Optional[dict]
     session_title: Optional[dict]
+    session_links: Optional[dict]
 
 
 @dataclass(frozen=True)

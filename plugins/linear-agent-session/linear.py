@@ -38,6 +38,10 @@ SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: A
   agentSessionUpdate(id: $id, input: $input) { success }
 }"""
 
+SESSION_URLS_QUERY = """query AgentSessionUrls($id: String!) {
+  agentSession(id: $id) { externalUrls { url } }
+}"""
+
 SESSION_THREAD_QUERY = """query AgentSessionThread($id: String!) {
   agentSession(id: $id) { comment { id } issue { id } }
 }"""
@@ -353,9 +357,20 @@ class LinearClient:
                 closed.append(other["id"])
         return closed
 
-    def set_external_urls(self, agent_session_id: str, urls: list) -> None:
-        external_urls = [{"label": u["label"], "url": u["url"]} for u in urls]
-        self._update_session(agent_session_id, {"externalUrls": external_urls})
+    def add_external_urls(self, agent_session_id: str, urls: list) -> list:
+        """Add the links the session lacks, matched by URL, and return the URLs added. Never replaces the list."""
+        try:
+            session = self._graphql(SESSION_URLS_QUERY, {"id": agent_session_id})["agentSession"]
+            held = {u["url"] for u in session["externalUrls"]}
+        except (*CLIENT_ERRORS, OSError):
+            held = set()
+        missing = {}
+        for u in urls:
+            if u["url"] not in held and u["url"] not in missing:
+                missing[u["url"]] = {"label": u["label"], "url": u["url"]}
+        if missing:
+            self._update_session(agent_session_id, {"addedExternalUrls": list(missing.values())})
+        return list(missing)
 
     def title_session(self, agent_session_id: str, issue_id: str, purpose: str) -> str:
         """Replace Linear's default `Work on <identifier>` session title with one that says what the session is for."""
