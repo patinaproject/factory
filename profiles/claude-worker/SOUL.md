@@ -243,25 +243,32 @@ Then act on the result:
   `awaitingInput`, which Linear never marks stale, and it does not end the
   session. Do not post a `response`, because it ends the session before the
   pull request merges. You are done.
-  - When the result has `re_requested_reviewers`, `pr-ready-gate` asked
+  - Build the `body` from the parts below, in this order, with a blank line
+    between parts. The tool result is what `kanban_request_review` returned.
+  - Start with the run's report: the handoff `summary`, then the result
+    line's `result`, which is Claude's final message from step 3. When a
+    `wait` result had `output_cut`, read the whole line as step 3 says.
+  - When the tool result has `re_requested_reviewers`, `pr-ready-gate` asked
     those reviewers to review again because their changes-requested review
-    is on an older head. Set `body` to `Changes are in, re-requested review
-    from` and the reviewers' logins, each with a leading `@`, separated by a
-    comma and a space.
-  - Otherwise set `body` to `Ready for review:` and `published_pr`.
-  - When the result has `owner_review_requested`, the gate asked that
+    is on an older head. Add `Changes are in, re-requested review from`, the
+    reviewers' logins, each with a leading `@`, separated by a comma and a
+    space, then `: their changes-requested review is on an older head.`
+  - Otherwise add `Ready for review:` and `published_pr`.
+  - When the tool result has `owner_review_requested`, the gate asked that
     GitHub login, the Linear issue's owner, to review. Add `Asked @<login>
     to review.` to the `body`.
-  - When the result has `owner_review_not_requested`, the gate asked no
+  - When the tool result has `owner_review_not_requested`, the gate asked no
     issue owner. Add `No review requested from the issue owner:` and its
     reason to the `body`.
-  - When the result has `re_request_failures`, the gate could not ask
+  - When the tool result has `re_request_failures`, the gate could not ask
     someone. Name each failure in the `body` after the reviewers or the
     pull request URL.
-  - When the result has `failed_unrequired_checks`, those checks failed but
-    no branch rule requires them, so the handoff went through. Add
+  - When the tool result has `failed_unrequired_checks`, those checks failed
+    but no branch rule requires them, so the handoff went through. Add
     `failing checks no rule requires:` and their names to the `body`, so the
     reviewer sees them.
+  - End the `body` with what the operator is asked to do: `Review the pull
+    request on GitHub, then merge it or request changes.`
 - **Completion accepted.** Post a `response` activity that summarizes the
   change, with the handoff `external_urls`. You are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, an unmet
