@@ -256,6 +256,24 @@ class SessionPromptedTest(unittest.TestCase):
             ),
         )
 
+    def test_a_reply_resumes_a_scheduled_triage_card_whether_or_not_the_issue_is_delegated_or_has_a_card(self):
+        triage = [card("t_triage", status="scheduled", body=id_line())]
+        for delegate in (APP, None):
+            for work, work_card in (([], None), ([card("t_work", branch=BRANCH)], {"id": "t_work", "status": "todo", "matched_by": "branch"})):
+                with self.subTest(delegate=delegate, card=bool(work)):
+                    self.assertEqual(
+                        self.prompted(live=issue(delegate=delegate, stateType="unstarted"), triage=triage, work=work),
+                        expected(
+                            "triage_card_reply",
+                            issue={"id": ISSUE_ID, "identifier": "PAT-1", "state_type": "unstarted"},
+                            delegated=delegate is not None,
+                            triage_card={"id": "t_triage", "status": "scheduled"},
+                            card=work_card,
+                            reply="yes",
+                            reply_source="payload",
+                        ),
+                    )
+
     def test_a_done_triage_card_does_not_take_the_reply(self):
         triage = [card("t_triage", status="done", body=id_line())]
         result = self.prompted(triage=triage, work=[card("t_work", branch=BRANCH)])

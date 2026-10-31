@@ -1,9 +1,10 @@
-"""Archive the triage card of an issue that left Triage, without a triage agent turn.
+"""Archive the triage card of an issue that left Triage, or leave it, without a triage agent turn.
 
 This applies step 2 of "Triage inbox" in `templates/triage-inbox.md` before dispatch. It acts only when that
 step is the whole turn: the issue is not delegated to the agent app, the update changed only its status, and no
-card on the default board could need a decision. Every other delivery, and every doubt or error, reaches the
-triage agent as before.
+card on the default board could need a decision. A `scheduled` card waits for a person's answer to its questions, so
+it stays unless the issue was completed, canceled, or closed as a duplicate. Every other delivery, and every doubt or
+error, reaches the triage agent as before.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ TRIAGE_BOARD = "triage"
 ARCHIVE_TIMEOUT_SECONDS = 120.0
 HERMES_TIMEOUT_SECONDS = 60.0
 TAKEOVER_SUFFIX = "-takeover"
+CLOSED_STATE_TYPES = ("completed", "canceled", "duplicate")
 LINEAR_ISSUE_ID = re.compile(r"^linear_issue_id:\s*(\S+)\s*$", re.MULTILINE)
 
 
@@ -89,6 +91,8 @@ def decide(payload: Any, app_user_id: str, triage_cards: list[Card], work_cards:
     card = found[0]
     if card.status == "running":
         return Verdict("leave", f"left running triage card {card.id} to its worker: {identifier} left Triage", card.id)
+    if card.status == "scheduled" and data["state"]["type"] not in CLOSED_STATE_TYPES:
+        return Verdict("leave", f"left scheduled triage card {card.id} waiting for a reply: {identifier} left Triage", card.id)
     return Verdict("archive", f"archived triage card {card.id}: {identifier} left Triage", card.id)
 
 
