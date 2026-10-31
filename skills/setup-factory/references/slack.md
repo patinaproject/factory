@@ -1,7 +1,8 @@
 # Slack
 
 The factory talks to the operator in Slack through Hermes Agent's own Slack
-integration. This repository adds no code to it, only display settings.
+integration. This repository adds no code to it, only display settings and an
+optional conversation model.
 Follow the Slack page in the Hermes install's messaging documentation for the
 app manifest, the scopes, and the token names that the pinned release expects.
 
