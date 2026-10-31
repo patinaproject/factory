@@ -1420,8 +1420,16 @@ last deployed one. One run does this:
    at most once per commit. It records the restart as pending before the first
    install and clears it only when `restart-gateway` succeeds, so a failed or
    interrupted restart is done by the next run that deploys. These restarts do not count against
-   `watch-gateway`'s budget. A manual line never holds an install. The run
-   records it, and `report-deploy` reports it.
+   `watch-gateway`'s budget. A manual line never holds an install, with one
+   exception. A run-gating manual line is one that the new code needs before
+   any run can start, such as a missing `service gh login refresh` job. When
+   the plan holds one, the run installs nothing, restarts nothing, and
+   records `BLOCKED` with the line. It then releases its hold and its lock.
+   A person fixes the line and deploys by hand. The run does not try that
+   commit again until the branch moves or a person runs `auto-deploy --retry`.
+   The next run sets no hold and records no event. A stale
+   `<worker>/gh/token-expiry.json` is not run-gating. `check-install` reports
+   it as a `gh login` line, and the refresh job clears it.
 5. It checks that `check-install` reports no install line and that
    `check-settings` passes. It records `DEPLOYED` or `FAILED`, lifts its pause,
    unsets `kanban.dispatch_profiles`, and removes its gateway lock. It deploys
@@ -1434,8 +1442,8 @@ records `BLOCKED` too when a person already set `kanban.dispatch_profiles` or
 holds the gateway lock. A run first releases what a dead run recorded as its
 own, so a crash or a reboot never leaves the cards held. The job runs at load,
 so a reboot also deploys a push that arrived while the machine was down. A
-`FAILED` commit is not tried again until the branch moves, or until a person
-runs `auto-deploy --retry`. `--status` prints the state file, and `--dry-run`
+`FAILED` commit, or a commit blocked by a run-gating line, is not tried again
+until the branch moves, or until a person runs `auto-deploy --retry`. `--status` prints the state file, and `--dry-run`
 prints the plan for the source checkout as it is and changes nothing:
 
 ```sh
@@ -1446,8 +1454,8 @@ HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --dry-run
 `report-deploy` is a `--no-agent` cron job in the root profile, like
 `retry-failed-webhooks`, and runs every 5 minutes. It reads only
 `<root>/auto-deploy.json`. It prints each `FAILED`, `WAITING`, or `BLOCKED`
-run once, the first `DEPLOYED` of each commit once, and each manual line once
-while the line stays. A quiet run prints nothing, so Hermes delivers nothing.
+run once, the first `DEPLOYED` of each commit once, a run-gating `BLOCKED`
+once per commit, and each manual line once while the line stays. A quiet run prints nothing, so Hermes delivers nothing.
 
 Install the scripts, the launchd job, and the cron job from the factory
 checkout. The plist sets `HERMES_HOME`, a `PATH` with `~/.local/bin`, and
@@ -2059,7 +2067,13 @@ Hermes process starts. The new helper also writes
      after the profile update installs `refresh-gh-app-login` and `gh_login.py`.
      `claude-session` refuses every run until the job has saved
      `<worker>/gh/token-expiry.json`, so install it right after the profile
-     update.
+     update. `auto-deploy` treats this line as run-gating. It installs nothing
+     while the plan holds it, so deploy by hand with these steps and then run
+     `auto-deploy --retry`.
+   - A `gh login` line: `<worker>/gh/token-expiry.json` is missing,
+     unreadable, or under 15 minutes from expiry. The refresh job renews it
+     within 15 minutes. When it does not, start the job once with
+     `launchctl kickstart`. This line does not block `auto-deploy`.
    - A `cron job refresh-gh-app-login` line: a launchd job replaced it, because
      `hermes pause` stops Hermes' cron. Once the launchd job has run, run
      `hermes -p claude-worker cron remove <job id>` with the id from
