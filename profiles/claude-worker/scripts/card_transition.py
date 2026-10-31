@@ -323,11 +323,15 @@ def sweep_login() -> dict:
 
 
 def install_matches() -> bool:
-    """claude-session's comparison: whether its skew check would let a run start."""
+    """claude-session's comparison: whether its skew check would no longer park a run. Once auto-deploy records a
+    failed or blocked commit no deploy is coming, so a released card's run is blocked and a person is told."""
     home = Path(os.environ["HERMES_HOME"])
+    state = install_drift.deploy_state(home)
+    if state.get("failed") or state.get("blocked"):
+        return True
     try:
         repo = factory_source.checkout(home)
-        return not install_drift.skew(home, repo, install_drift.deployed(install_drift.deploy_state(home)))
+        return not install_drift.skew(home, repo, install_drift.deployed(state))
     except install_drift.MissingCommit:
         return False
     except (OSError, factory_source.SourceError, install_drift.GitError):

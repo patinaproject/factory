@@ -175,10 +175,7 @@ class Deploy:
     def record(self, outcome: str, commit: Optional[str], detail: str, manual=None, gates_runs: bool = False) -> str:
         detail = self.redact(detail)
         events = self.state["events"]
-        if outcome != DEPLOYED and self.repeats(outcome, commit, detail):
-            self.log(f"{outcome} {short(commit)} again; recorded before")
-            return outcome
-        seq = (events[-1]["seq"] if events else 0) + 1
+        repeated = outcome != DEPLOYED and self.repeats(outcome, commit, detail)
         self.state["outcome"] = outcome
         self.state["detail"] = detail
         self.state["attempted"] = commit
@@ -192,6 +189,11 @@ class Deploy:
             self.state["blocked"] = commit
         if manual is not None:
             self.state["manual"] = [{"line": self.redact(m.line), "action": self.redact(m.action)} for m in manual]
+        if repeated:
+            self.save()
+            self.log(f"{outcome} {short(commit)} again; recorded before")
+            return outcome
+        seq = (events[-1]["seq"] if events else 0) + 1
         event = {"seq": seq, "outcome": outcome, "commit": commit, "detail": detail, "at": now()}
         if gates_runs:
             event["gates_runs"] = True

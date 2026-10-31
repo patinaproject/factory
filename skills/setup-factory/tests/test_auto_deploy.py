@@ -542,6 +542,17 @@ class AutoDeployTest(unittest.TestCase):
         self.assertEqual(self.m.outcomes(), [("FAILED", self.m.head), ("DEPLOYED", self.m.head)])
         self.assertEqual((self.m.state()["deployed"], self.m.state()["failed"]), (self.m.head, None))
 
+    def test_a_retry_that_fails_the_same_way_again_still_stops_later_runs(self) -> None:
+        self.m.drifts([], exit=2, stderr="boom")
+        self.deploy()
+        self.deploy("--retry")
+
+        self.assertEqual(self.m.outcomes(), [("FAILED", self.m.head)])
+        self.assertEqual(self.m.state()["failed"], self.m.head)
+        before = len(self.m.calls("check-install"))
+        self.deploy()
+        self.assertEqual(len(self.m.calls("check-install")), before)
+
     def test_the_plist_runs_the_installed_script_at_load_on_its_interval_and_on_demand_with_no_secret(self) -> None:
         proc = subprocess.run(
             [PYTHON, str(AUTO_DEPLOY), "--print-plist", "--root", "/h"],

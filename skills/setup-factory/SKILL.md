@@ -1470,7 +1470,8 @@ returns it to the queue once the install matches the `deployed` commit. A
 person's `stopped` comment, or an unassigned card, keeps it parked. When
 `auto-deploy.json` records a `failed` or `blocked` commit, no deploy is coming
 by itself. The run is then refused as `transient` and the card is blocked,
-which tells a person.
+which tells a person. A card already waiting is released then, so its next
+run is blocked the same way.
 
 `auto-deploy` is the second automatic gateway restarter, beside
 `watch-gateway`. It never lifts a pause or unsets a key that it did not set.
