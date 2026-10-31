@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 REPLY_PREFIX = "Linear reply:"
+NOT_ASSIGNEE_MARKER = "Context only, not from the assignee:"
 PENDING, DELIVERED, ASKED, ANSWERED = "pending", "delivered", "asked", "answered"
 TEXT_LIMIT = 8000
 MIN_REPLY_CHARS = 500
@@ -109,6 +110,10 @@ def reset(path: Path, answer_command: str, session_id: str | None) -> None:
 
 def is_reply(body: str | None) -> bool:
     return (body or "").lstrip().startswith(REPLY_PREFIX)
+
+
+def is_not_from_assignee(body: str | None) -> bool:
+    return (body or "").lstrip().startswith(NOT_ASSIGNEE_MARKER)
 
 
 def session_id_of(card_body: str | None) -> str | None:

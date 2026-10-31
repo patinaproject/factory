@@ -80,6 +80,12 @@ def main(argv: Optional[list] = None) -> int:
     owner = commands.add_parser("review-owner", help="name who reviews an issue's pull request and their GitHub user id")
     owner.add_argument("--issue", required=True, help="the issue's UUID or identifier")
 
+    authority = commands.add_parser(
+        "pr-authority", help="say whether a GitHub sender is the assignee of the Linear issue a card works"
+    )
+    authority.add_argument("--task", required=True, help="the card's task id")
+    authority.add_argument("--sender-id", required=True, help="the GitHub user id of the event's sender")
+
     args = parser.parse_args(argv)
     if args.command == "triage-exit":
         return _triage_exit(plugin, args.payload_file)
@@ -116,6 +122,10 @@ def main(argv: Optional[list] = None) -> int:
         )
     elif args.command == "review-owner":
         output = plugin.tools.run_review_owner(plugin.linear.client_from_env, {"issue": args.issue})
+    elif args.command == "pr-authority":
+        output = plugin.tools.run_pr_authority(
+            plugin.linear.client_from_env, plugin.triage_exit.card_body, {"task": args.task, "sender_id": args.sender_id}
+        )
     elif args.command == "undelegate":
         output = plugin.tools.run_undelegate(plugin.linear.client_from_env, {"issue": args.issue})
     else:

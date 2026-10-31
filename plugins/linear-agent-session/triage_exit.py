@@ -179,6 +179,10 @@ def listed_cards(board: Optional[str]) -> list[Card]:
     ]
 
 
+def card_body(task_id: str) -> str:
+    return json.loads(_hermes("kanban", "show", task_id, "--json"))["task"]["body"] or ""
+
+
 def configured_app_user_id() -> str:
     value = json.loads(_hermes("config", "get", "plugins.entries.linear-agent-session.settings.app_user_id", "--json"))
     return value if isinstance(value, str) else ""

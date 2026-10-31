@@ -492,6 +492,18 @@ class CheckInstallTest(unittest.TestCase):
         )))
         self.assertEqual(json.loads(self.raw)[0]["remedy"]["type"], "manual")
 
+    def test_render_reads_the_worker_marker_from_the_commit(self) -> None:
+        git(self.repo, "checkout", "-q", "-b", "marker-render")
+        self.install(self.repo, "profiles/claude-worker/scripts/reply_inbox.py", "MARKER = 'x'\n")
+        reads_marker = "from pathlib import Path\nPath(__file__).parent.parent.joinpath('profiles/claude-worker/scripts/reply_inbox.py').read_text()\n"
+        self.install(self.repo, "templates/render.py", reads_marker + RENDER)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "render reads the marker")
+
+        _, out = self.check("--ref", "marker-render", "--no-fetch")
+
+        self.assertNotIn("render.py failed", out)
+
     def test_every_drift_kind_check_install_builds_has_a_remedy_class(self) -> None:
         tree = ast.parse(SCRIPT.read_text())
         kinds = {

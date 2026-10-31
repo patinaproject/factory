@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -20,6 +21,7 @@ RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
 # redelivers.
 RATE_LIMIT = 1200
 TEMPLATE_DIR = Path(__file__).resolve().parent
+REPLY_INBOX = Path("profiles") / "claude-worker" / "scripts" / "reply_inbox.py"
 GITHUB_ROUTE = "github"
 ROUTINGS = ("default", "synced_github")
 TOOLSETS = ["terminal", "kanban", "linear_agent_session"]
@@ -304,6 +306,10 @@ def triage_card_flags(repositories: list) -> str:
     return "\n".join(f"- `{repo['full_name']}`: `{workspace_flag(repo)}`" for repo in repositories)
 
 
+def linear_cli_command(home: Path) -> str:
+    return f"python3 {shlex.quote(str(home / 'plugins' / 'linear-agent-session' / 'cli.py'))}"
+
+
 def card_transition_command(home: Path) -> str:
     return f"python3 {shlex.quote(str(home / 'profiles' / 'claude-worker' / 'scripts' / 'card_transition.py'))}"
 
@@ -328,6 +334,13 @@ def repository_lines(repositories: list) -> str:
         f"card flags `{workspace_flag(repo)} --completion-contract {repo['full_name']}`"
         for repo in repositories
     )
+
+
+def not_assignee_marker() -> str:
+    spec = importlib.util.spec_from_file_location("factory_reply_inbox", TEMPLATE_DIR.parent / REPLY_INBOX)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.NOT_ASSIGNEE_MARKER
 
 
 def render_prompt(template: str, values: dict) -> str:
@@ -414,6 +427,7 @@ def event_filter(event: GithubEvent, login: str) -> dict:
 
 def build_routes(settings: Any) -> dict:
     config = validate(settings)
+    marker = not_assignee_marker()
     repos = repository_lines(config["repositories"])
     full_names = [repo["full_name"] for repo in config["repositories"]]
     login = config["github_login"]
@@ -452,6 +466,7 @@ def build_routes(settings: Any) -> dict:
                     "triage_resume": triage_resume_section(),
                     "triage_inbox": triage_inbox_section(config),
                     "delegation_gate": delegation_gate_section(),
+                    "not_assignee_marker": marker,
                 },
             ),
         },
@@ -469,6 +484,8 @@ def build_routes(settings: Any) -> dict:
                     "triage_unblock": triage_unblock_section(),
                     "triage_resume": triage_resume_section(),
                     "triage_merged": triage_merged_section(),
+                    "linear_cli": linear_cli_command(hermes_home()),
+                    "not_assignee_marker": marker,
                 },
             ),
         },

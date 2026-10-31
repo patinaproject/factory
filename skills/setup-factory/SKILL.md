@@ -1159,7 +1159,8 @@ column, and by default its decomposer then splits the card into child cards.
 A factory card is one Linear issue, and its children would lack the key block
 the worker needs, so turn the decomposer off. A looping card then waits in
 `triage` for a person, and a reply on its Linear issue, a changes-requested
-review, or an actionable comment on its pull request resumes it.
+review, or an actionable comment on its pull request from the issue's assignee
+resumes it.
 
 Leave `kanban.default_assignee` unset. `card_transition.py resume`, which the
 triage prompts run, unassigns a card so the dispatcher skips it while `kanban specify` rewrites it,
@@ -1760,8 +1761,11 @@ each check. Report each result.
 5. A `CLEAN`, non-draft pull request moves the card to `review`, not `done`.
    An `action` activity with the pull request link appears in the same Linear
    session, and no reviewer worker starts for the card.
-6. A "changes requested" review on GitHub returns the card to `ready`. A worker
-   run starts, and the card returns to `review` after the fix.
+6. A "changes requested" review on GitHub from the issue's assignee returns the
+   card to `ready`. A worker run starts, and the card returns to `review` after
+   the fix. The same review from another person adds only a card comment that
+   starts `Context only, not from the assignee:`, and the card stays in
+   `review`.
 7. Merging the pull request moves the card to `done`. The final `response`
    with the pull request link appears in the same Linear session.
 8. A reply in Linear during a run is picked up when the run ends, and the next
@@ -1820,12 +1824,12 @@ each check. Report each result.
     the last `assigned` event. Run it once with a pull request open and once
     without.
 20. Move a card to `triage` with its pull request open, then submit a
-    `changes_requested` review on the pull request as a person. In
+    `changes_requested` review on the pull request as the issue's assignee. In
     `hermes kanban show <task id> --json`, the events after the review are the
     same as in check 19: `assigned` with no assignee, `specified`, `edited`,
     and `assigned` to `claude-worker`, with the title and body unchanged. A
     card in `review` still gets `review_reopened`. Repeat with an `approved`
-    review from a person: the events are the same, and the worker hands the
+    review from the assignee: the events are the same, and the worker hands the
     approved pull request off. An approval from a bot, or on a card in any
     other status, adds only the card comment.
 21. Merge a card's pull request while the card is in `triage`, with no worker
@@ -1854,14 +1858,14 @@ each check. Report each result.
     covers that.
 
 23. Move a card to `blocked` with its pull request open, then submit a
-    `changes_requested` review on the pull request as a person. In
+    `changes_requested` review on the pull request as the issue's assignee. In
     `hermes kanban show <task id> --json`, the events after the review are
     `unblocked`, `review_requested`, and `review_reopened`. The card's
     comments show the review before those events, the next dispatcher tick
     starts a worker, and no `respawn_guarded` event with reason `active_pr`
-    follows. Repeat with an actionable inline comment from a person. A review
-    or comment from a bot, an approval, a thanks, and a bare question leave the
-    card `blocked`.
+    follows. Repeat with an actionable inline comment from the assignee. A
+    review or comment from a bot or from another person, an approval, a
+    thanks, and a bare question leave the card `blocked`.
 
 24. Merge a card's pull request while Hermes still holds a failed check run
     against it, with the card in `review` and its Linear issue In Progress.
@@ -1955,7 +1959,7 @@ re-queue. Hermes v0.21.6 has no CLI command or tool for it. When a GitHub event
 arrives for a done card, triage comments on the card and asks the operator to
 reopen the card from the Kanban dashboard. A card reaches `done` only when its
 pull request merges, so this applies to follow-up work after the merge. A
-`triage` card needs no dashboard: its Linear reply, a changes-requested review, or an actionable pull request
+`triage` card needs no dashboard: its assignee's Linear reply, changes-requested review, or actionable pull request
 comment unassigns the card, runs
 `specify`, restores the title and body, and assigns the card again.
 
