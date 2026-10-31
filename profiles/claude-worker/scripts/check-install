@@ -112,6 +112,7 @@ OWNED_REFS = "owned-refs.json"
 TRIAGE_REFS = "triage-refs.json"
 TRIAGE_BOARD = "triage"
 STRANDED_MINUTES = 30  # Hermes' own threshold for a card stranded in ready
+GUARDED_MINUTES = 10  # two cron ticks of reopen-conflicts, so a hold that a handback lifts is gone
 # Hermes' events that start a card's wait in ready; `assigned` is the dispatch-triage assignment.
 WAIT_EVENTS = ("created", "promoted", "reclaimed", "unblocked", "assigned")
 LINEAR_ISSUE_FIELD = "data.id"
@@ -1265,6 +1266,64 @@ def check_stranded_triage(root: Path, now: float) -> list:
     ]
 
 
+GUARDED_FIX = Manual(
+    "rewrite the card's pull request URLs as <owner>/<name>#<number> in new comments, and lift the hold with an "
+    "`assigned` handoff: `hermes kanban [--board <board>] assign <task id> none`, then the same with `claude-worker`"
+)
+
+
+def board_databases(root: Path) -> list:
+    return sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")])
+
+
+def check_guarded_cards(root: Path, now: float) -> list:
+    """A card that Hermes' dispatcher holds in `ready` with `active_pr`, so no worker ever starts it.
+
+    Hermes logs `respawn_guarded` each tick while a card comment from the last day holds a pull request URL and
+    no handoff event came in a later second. Nothing else reports the hold, and a person's reply does not lift it."""
+    sql = (
+        "SELECT e.task_id AS id, e.kind AS kind, e.payload AS payload, e.created_at AS created_at FROM task_events e "
+        "JOIN tasks t ON t.id = e.task_id WHERE t.status = 'ready' ORDER BY e.task_id, e.created_at, e.id"
+    )
+    drifts = []
+    for path in board_databases(root):
+        if not path.is_file():
+            continue
+        try:
+            events = kanban_board.read(str(path), sql)
+        except sqlite3.Error as error:
+            drifts.append(Drift("guarded card check", path, f"cannot be read: {error}", ADVISORY))
+            continue
+        for task_id, since in sorted(active_pr_holds(events).items()):
+            if now - since >= GUARDED_MINUTES * 60:
+                drifts.append(Drift(
+                    "guarded card", task_id,
+                    f"has been held in ready from its worker as active_pr for {int((now - since) // 60)} minutes, "
+                    "because a card comment holds a pull request URL; an `assigned` handoff lifts the hold",
+                    GUARDED_FIX,
+                ))
+    return drifts
+
+
+def active_pr_holds(events: list) -> dict:
+    """Each card whose newest event is an `active_pr` guard, mapped to the start of its unbroken run of them."""
+    runs = {}
+    for event in events:
+        if event["kind"] == "respawn_guarded" and guard_reason(event["payload"]) == "active_pr":
+            runs.setdefault(event["id"], event["created_at"])
+        else:
+            runs.pop(event["id"], None)
+    return runs
+
+
+def guard_reason(payload) -> str | None:
+    try:
+        data = json.loads(payload or "{}")
+    except ValueError:
+        return None
+    return data.get("reason") if isinstance(data, dict) else None
+
+
 PARK_WAITING_FIX = Manual(
     "run card_transition.py --board triage park-waiting while dispatch is paused, as the deploy step in part 15 says"
 )
@@ -1326,7 +1385,7 @@ def check_kanban_boards(root: Path) -> list:
     Hermes' tables are internal. A renamed column makes the blocker check fail open, so cards start out of order,
     and stops the sweep that releases a waiting card, with nothing else to say so."""
     drifts = []
-    for path in sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")]):
+    for path in board_databases(root):
         if not path.is_file():
             continue
         try:
@@ -1869,6 +1928,7 @@ def main() -> int:
                 triage_max_running(settings),
             ),
             *check_stranded_triage(root, time.time()),
+            *check_guarded_cards(root, time.time()),
             *check_waiting_triage(root, worker / "plugins" / "blocker-order" / "__init__.py"),
             *check_triage_playbook(repo),
             *check_checkouts(settings),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,8 @@ REPO = "example-org/example-repo"
 OTHER_REPO = "example-org/other-repo"
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
+# Hermes' `_RESPAWN_GUARD_PR_URL_RE`: a match in a card comment holds the reopened card from its worker.
+HERMES_PULL_URL = re.compile(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+", re.IGNORECASE)
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 
 FAKE_HERMES = """#!/usr/bin/env python3
@@ -170,7 +173,11 @@ class ReopenConflictsTest(unittest.TestCase):
 
     def writes(self) -> list:
         reads = (["config", "get"], ["kanban", "list"], ["kanban", "show"])
-        return [call for call in self.hermes_calls() if call[:2] not in reads]
+        calls = [call for call in self.hermes_calls() if call[:2] not in reads]
+        for call in calls:
+            if call[:2] == ["kanban", "comment"]:
+                self.assertIsNone(HERMES_PULL_URL.search(call[3]), call[3])
+        return calls
 
     def gh_calls(self) -> list:
         log = Path(str(self.state_path) + ".gh")
@@ -182,7 +189,7 @@ class ReopenConflictsTest(unittest.TestCase):
 
     def review_comment(self, number: int, reason: str, head: str = HEAD) -> str:
         return (
-            f"Pull request https://github.com/{REPO}/pull/{number} has a changes-requested review and is not ready for "
+            f"Pull request {REPO}#{number} has a changes-requested review and is not ready for "
             f"another look: {reason}. Fix it and publish the fix with push-signed. When you cannot, stop and make the "
             "first line of your final message `Needs input:` followed by the reason.\n\n"
             f"review_head: {head}"
@@ -201,7 +208,7 @@ class ReopenConflictsTest(unittest.TestCase):
 
     def comment(self, number: int, head: str = HEAD, base: str = "main") -> list:
         text = (
-            f"Pull request https://github.com/{REPO}/pull/{number} conflicts with {base}. Merge origin/{base} into the "
+            f"Pull request {REPO}#{number} conflicts with {base}. Merge origin/{base} into the "
             "branch, resolve the conflicts, and publish the merge with push-signed. When you cannot resolve a conflict "
             "with confidence, stop and make the first line of your final message `Needs input:` followed by a reason "
             "naming each conflicting file.\n\n"
@@ -211,7 +218,7 @@ class ReopenConflictsTest(unittest.TestCase):
 
     def failed_comment(self, number: int, listed: str, head: str = HEAD) -> str:
         return (
-            f"Pull request https://github.com/{REPO}/pull/{number} at head {head} fails a required check:\n{listed}\n\n"
+            f"Pull request {REPO}#{number} at head {head} fails a required check:\n{listed}\n\n"
             "Read the failing job, fix the cause, and publish the fix with push-signed. When the failure lies in a "
             "step the pull request does not change, re-run it once with `gh run rerun <run-id> --failed`. When the "
             "pull request body fails the repository's body check, rewrite the body. When you cannot fix it with "
@@ -535,6 +542,18 @@ class ReopenConflictsTest(unittest.TestCase):
         self.run_script()
 
         listed = "- `alpha`\n- `zeta`: https://ci.example/zeta"
+        self.assertEqual(self.writes()[0], ["kanban", "comment", "t_1", self.failed_comment(7, listed)])
+
+    def test_a_target_url_on_a_pull_request_page_is_written_as_a_reference(self) -> None:
+        self.state["tasks"] = [card("t_1", "review", "abc-1")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1", mergeable="MERGEABLE", checks=[
+            status_context("ci", "FAILURE", f"https://github.com/{REPO}/pull/7/checks?check_run_id=9"),
+        ])]
+        self.state["rules"][REPO] = required("ci")
+
+        self.run_script()
+
+        listed = f"- `ci`: {REPO}#7"
         self.assertEqual(self.writes()[0], ["kanban", "comment", "t_1", self.failed_comment(7, listed)])
 
     def test_a_failed_check_head_already_on_the_card_skips_blocked_and_only_reopens_review(self) -> None:

@@ -25,7 +25,11 @@ comments already hold that line for the current head is skipped. A worker that
 blocks on the same head is not unblocked in a loop, and a worker that pushes a
 new head that still fails is told again. A `review` card that holds the line is
 a handback that failed partway, because the ready gate refuses a conflicting
-head and a failing required check, so the review reopen runs again. Prints one
+head and a failing required check, so the review reopen runs again. A card
+comment names a pull request as `<owner>/<name>#<number>`, never by URL,
+because Hermes holds a `ready` card from its worker while a card comment from
+the last day holds a pull request URL and no handoff event came in a later
+second, and the reopen lands in the same second as the comment. Prints one
 line per card sent back, `<task id> <pull request url>`. A failure for one
 repository or card goes to stderr and the others still run.
 
@@ -57,6 +61,7 @@ import card_branch
 import factory_settings
 import merged_checks
 import stale_reviews
+from card_transition import pull_ref
 
 REPO_LINE = re.compile(r"^repo:\s*(\S+)\s*$", re.MULTILINE)
 SESSION_LINE = re.compile(r"^linear_agent_session_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
@@ -253,7 +258,7 @@ def send_back(hermes: str, task: dict, handback: Handback, sent: bool) -> None:
         run(hermes, "kanban", "unblock", task_id)
         run(hermes, "kanban", "request-review", task_id)
     if not sent:
-        run(hermes, "kanban", "comment", task_id, handback.text)
+        run(hermes, "kanban", "comment", task_id, pull_ref(handback.text))
     run(hermes, "kanban", "reopen-review", task_id, "--reason", handback.reason)
 
 

@@ -2040,6 +2040,12 @@ Hermes process starts. The new helper also writes
    - A `stranded triage card` line: the `default` board is probably holding
      every worker slot. Check the capacity rule first, then
      `hermes kanban dispatch --dry-run --json`.
+   - A `guarded card` line: Hermes holds the card in `ready` because a card
+     comment from the last day holds a pull request URL. Write pull requests
+     as `<owner>/<name>#<number>` in comments, then lift the hold with an
+     `assigned` handoff: `hermes kanban assign <task id> none`, then
+     `hermes kanban assign <task id> claude-worker`. Add `--board <board>`
+     for a card on another board.
    - A `kanban board <name>` line: run the part 10 Kanban commands before the
      profile update. For a missing `triage` board, run
      `hermes kanban boards create triage --name Triage --default-workdir <path of the default repository>`.

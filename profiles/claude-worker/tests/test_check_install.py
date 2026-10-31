@@ -170,6 +170,8 @@ REMEDY_CLASSES = (
     ("kanban capacity", "", "manual"),
     ("stranded triage card", "", "advisory"),
     ("stranded triage card check", "", "advisory"),
+    ("guarded card", "", "manual"),
+    ("guarded card check", "", "advisory"),
     ("waiting triage card", "", "manual"),
     ("waiting triage card check", "", "advisory"),
     ("triage playbook", "", "manual"),
@@ -1363,6 +1365,7 @@ class CheckInstallTest(unittest.TestCase):
             f"kanban board database {triage}: has no tasks.branch_name, tasks.status, tasks.block_kind, so a card "
             "cannot wait for its blockers or a reply (part 15, check 29)\n"
             f"stranded triage card check {triage}: cannot be read: no such column: t.created_at (part 10)\n"
+            f"guarded card check {triage}: cannot be read: no such column: t.status\n"
             f"waiting triage card check {triage}: cannot be read: no such column: status (part 15, check 27)\n"
         )))
 
@@ -1377,6 +1380,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (1, (
             f"kanban board database {board}: has no task_comments.body, task_events.payload, so a card cannot wait "
             "for its blockers or a reply (part 15, check 29)\n"
+            f"guarded card check {board}: cannot be read: no such column: e.payload\n"
         )))
 
     def test_a_board_database_that_cannot_be_read(self) -> None:
@@ -1388,7 +1392,7 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(
             output, f"kanban board database {board}: cannot be read for blockers: file is not a database "
-            "(part 15, check 29)\n",
+            f"(part 15, check 29)\nguarded card check {board}: cannot be read: file is not a database\n",
         )
 
     def default_repository(self) -> Path:
@@ -1749,6 +1753,78 @@ class CheckTriageCapacityTest(unittest.TestCase):
                 self.assertEqual(self.rows(bad, 4, 2), [])
                 self.assertEqual(self.rows(2, bad, 2), [])
                 self.assertEqual(self.rows(2, 4, bad), [])
+
+
+class CheckGuardedCardsTest(unittest.TestCase):
+    NOW = 1_000_000.0
+    GUARD = ("respawn_guarded", '{"reason": "active_pr"}')
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "hermes"
+        self.root.mkdir()
+        self.default = self.board(self.root / "kanban.db")
+
+    def board(self, path: Path) -> sqlite3.Connection:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(path)
+        self.addCleanup(db.close)
+        db.execute("CREATE TABLE tasks (id, status)")
+        db.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id, kind, payload, created_at)")
+        return db
+
+    def card(self, id: str, events: list, *, status: str = "ready", db: sqlite3.Connection | None = None) -> None:
+        db = db or self.default
+        db.execute("INSERT INTO tasks VALUES (?, ?)", (id, status))
+        for kind, payload, age in events:
+            db.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+                (id, kind, payload, self.NOW - age * 60),
+            )
+        db.commit()
+
+    def rows(self) -> list:
+        return classified(self, check_install.check_guarded_cards(self.root, self.NOW))
+
+    def test_a_ready_card_held_as_active_pr_for_eleven_minutes(self) -> None:
+        self.card("t_held", [("review_reopened", None, 12), (*self.GUARD, 11), (*self.GUARD, 6), (*self.GUARD, 0)])
+
+        self.assertEqual(self.rows(), [(
+            "guarded card t_held: has been held in ready from its worker as active_pr for 11 minutes, because a "
+            "card comment holds a pull request URL; an `assigned` handoff lifts the hold"
+        )])
+
+    def test_a_card_on_another_board_is_reported(self) -> None:
+        other = self.board(self.root / "kanban" / "boards" / "triage" / "kanban.db")
+        self.card("t_triage", [("created", None, 60), (*self.GUARD, 59), (*self.GUARD, 1)], db=other)
+
+        self.assertEqual([row.split(":")[0] for row in self.rows()], ["guarded card t_triage"])
+
+    def test_a_hold_of_five_minutes_is_not_reported(self) -> None:
+        self.card("t_new", [("review_reopened", None, 6), (*self.GUARD, 5), (*self.GUARD, 0)])
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_run_broken_by_another_event_counts_from_the_newer_run(self) -> None:
+        self.card("t_back", [(*self.GUARD, 60), ("assigned", None, 7), (*self.GUARD, 6), (*self.GUARD, 0)])
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_newest_guard_with_another_reason_is_not_reported(self) -> None:
+        self.card("t_rate", [(*self.GUARD, 30), ("respawn_guarded", '{"reason": "rate_limit_cooldown"}', 0)])
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_card_that_left_ready_is_not_reported(self) -> None:
+        self.card("t_review", [(*self.GUARD, 30), (*self.GUARD, 0)], status="review")
+
+        self.assertEqual(self.rows(), [])
+
+    def test_an_unreadable_board_is_reported(self) -> None:
+        (self.root / "kanban.db").write_bytes(b"not a database")
+
+        self.assertEqual(self.rows(), [f"guarded card check {self.root / 'kanban.db'}: cannot be read: file is not a database"])
 
 
 class CheckStrandedTriageTest(unittest.TestCase):

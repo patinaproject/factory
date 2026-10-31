@@ -85,7 +85,8 @@ from archive_card import Failed, archive, kanban_command, last_line, run, run_ka
 
 WORKER = "claude-worker"
 STOPPED = "stopped"
-PULL_URL = re.compile(r"https://github\.com/([A-Za-z0-9-]+/[A-Za-z0-9._-]+)/pull/(\d+)(?:[/#?][^\s).,]*)?")
+# Covers Hermes' _RESPAWN_GUARD_PR_URL_RE, which holds a `ready` card for a day after a comment that matches it.
+PULL_URL = re.compile(r"https?://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)(?:[/#?][^\s).,]*)?", re.IGNORECASE)
 NOT_REFUSED = frozenset({"success", "pending"})
 
 
