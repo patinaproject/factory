@@ -8,7 +8,7 @@ import sys
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 DEFAULT_GATED_PROFILES = ["claude-worker"]
 TRIAGE_BOARD = "triage"
@@ -46,7 +46,7 @@ REVIEW_HANDOFF_RULES = frozenset(
 )
 THREAD_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){"
-    "reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved}} "
+    "reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:1){nodes{author{__typename login}}}}} "
     "commits(first:100){pageInfo{hasNextPage} nodes{commit{oid signature{isValid}}}} "
     "latestOpinionatedReviews(first:100){pageInfo{hasNextPage} nodes{state author{login} commit{oid}}}}}}"
 )
@@ -55,8 +55,9 @@ MERGE_STATE_REMEDIES = {
     "BEHIND": "update the branch from the base branch and push",
     "BLOCKED": (
         "a branch rule is not satisfied: required checks, reviews, or verified commit signatures; "
-        "wait for checks, address reviews, and make sure every commit is signed. "
-        "kanban_request_review passes a pull request whose only unmet rule is the approving review"
+        "wait for required checks, address reviews, and make sure every commit is signed. "
+        "kanban_request_review passes a pull request that waits only for a reviewer or for the merge queue, "
+        "but it refuses a BLOCKED pull request with no review decision to wait for and no open thread that a person started"
     ),
     "DIRTY": "merge the base branch, resolve the conflicts, and publish the merge with push-signed",
     "UNSTABLE": "a check is pending or failing; wait for checks to finish and fix any failures",
@@ -73,13 +74,24 @@ class GateError(Exception):
     pass
 
 
+class Blockers(NamedTuple):
+    problems: list[str]
+    required_checks: frozenset[str]
+    reviewer_threads: int
+
+
 def evaluate(
     pr: dict,
     local_head: str,
     tool_name: str,
-    other_blockers: Optional[Callable[[], list[str]]] = None,
+    other_blockers: Optional[Callable[[], Blockers]] = None,
 ) -> list[str]:
-    """other_blockers lists every unmet branch rule except the approval, for a pull request that waits on a review."""
+    """Lists what stops the pull request from being ready; an empty list lets the tool call through.
+
+    kanban_request_review also passes an UNSTABLE pull request, and a BLOCKED one that waits for a reviewer: its review
+    decision is REVIEW_REQUIRED or CHANGES_REQUESTED, or a person started a review thread that is still open.
+    It does so only when other_blockers finds no unmet branch rule. A check that no rule requires does not stop it.
+    """
     failures = []
     state = pr.get("state")
     if state == "MERGED" and tool_name == "kanban_request_review":
@@ -92,33 +104,44 @@ def evaluate(
     if pr.get("isDraft") is not False:
         failures.append(f"isDraft is {pr.get('isDraft')!r}, expected False: {MERGE_STATE_REMEDIES['DRAFT']}")
     merge_state = pr.get("mergeStateStatus")
+    blockers = None
     hidden: list[str] = []
-    if tool_name == "kanban_request_review" and _awaiting_review(pr) and other_blockers is not None:
-        # Hold for a review keeps GitHub at BLOCKED until a reviewer acts, which needs this handoff.
-        # BLOCKED also covers other unmet rules, so the handoff passes only when the approval is the sole one.
-        hidden = other_blockers()
-        if not hidden:
+    required = None
+    if tool_name == "kanban_request_review" and other_blockers is not None and state == "OPEN" and merge_state != "CLEAN":
+        blockers = other_blockers()
+        hidden = blockers.problems
+        required = blockers.required_checks
+        if not hidden and _awaiting_review(pr, blockers.reviewer_threads):
             merge_state = "CLEAN"
     if merge_state != "CLEAN":
         remedy = MERGE_STATE_REMEDIES.get(merge_state, "wait until GitHub reports CLEAN")
         failures.append(f"mergeStateStatus is {merge_state!r}, expected 'CLEAN': {remedy}")
     failures += hidden + _head_failures(pr, local_head)
-    return failures + _check_failures(pr) if failures else []
+    return failures + _check_failures(pr, required) if failures else []
 
 
-def _awaiting_review(pr: dict) -> bool:
-    """A failed check may still be one no rule requires, which other_blockers judges; a pending one is not judged yet."""
-    checks = _latest_runs(pr.get("statusCheckRollup"))
-    return (
-        pr.get("mergeStateStatus") == "BLOCKED"
-        and pr.get("reviewDecision") in ("CHANGES_REQUESTED", "REVIEW_REQUIRED")
-        and bool(checks)
-        and all(_check_passed(check) or _check_failed(check) for check in checks)
+def _awaiting_review(pr: dict, reviewer_threads: int) -> bool:
+    """True when only a reviewer or the merge queue can clear the merge state; the caller has found no unmet branch rule.
+
+    UNSTABLE means a check that no rule requires is pending or failing. BLOCKED needs a cause that a reviewer clears.
+    """
+    merge_state = pr.get("mergeStateStatus")
+    reviewer_cause = pr.get("reviewDecision") in ("CHANGES_REQUESTED", "REVIEW_REQUIRED") or reviewer_threads > 0
+    return bool(_latest_runs(pr.get("statusCheckRollup"))) and (
+        merge_state == "UNSTABLE" or (merge_state == "BLOCKED" and reviewer_cause)
     )
 
 
 def _failed_checks(pr: dict) -> list[str]:
     return [_rollup_name(check) or "unnamed" for check in _latest_runs(pr.get("statusCheckRollup")) if _check_failed(check)]
+
+
+def _pending_checks(pr: dict) -> list[str]:
+    return [
+        _rollup_name(check) or "unnamed"
+        for check in _latest_runs(pr.get("statusCheckRollup"))
+        if isinstance(check, dict) and not _check_passed(check) and not _check_failed(check)
+    ]
 
 
 def _latest_runs(rollup) -> list:
@@ -141,7 +164,8 @@ def _run_order(check: dict) -> tuple[str, bool]:
     return ("~" if started == UNSTARTED else started, not _check_passed(check))
 
 
-def _check_failures(pr: dict) -> list[str]:
+def _check_failures(pr: dict, required: Optional[frozenset[str]] = None) -> list[str]:
+    """required, when given, is the set of check names a rule requires; a pending check outside it is not reported."""
     problems = []
     for check in _latest_runs(pr.get("statusCheckRollup")):
         if _check_passed(check):
@@ -150,6 +174,8 @@ def _check_failures(pr: dict) -> list[str]:
         if not isinstance(check, dict):
             problems.append(f"a check in the rollup is unreadable: {check!r}")
         elif not _check_failed(check):
+            if required is not None and name not in required:
+                continue
             observed = check.get("state") or check.get("status")
             problems.append(f"check {name!r} is pending ({observed}): wait for it to finish, then call again")
         else:
@@ -170,9 +196,11 @@ def _rollup_name(check) -> Optional[str]:
     return check.get("name") or check.get("context")
 
 
-def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) -> list[str]:
+def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) -> Blockers:
     """Names every branch rule other than the approval that the pull request does not meet."""
     problems = []
+    required_checks: set[str] = set()
+    reviewer_threads = 0
     types = {rule.get("type") for rule in rules if isinstance(rule, dict)}
     for unknown in sorted(str(t) for t in types - REVIEW_HANDOFF_RULES):
         problems.append(f"branch rule {unknown!r} is one this gate cannot verify, so BLOCKED may not be only the review")
@@ -182,6 +210,7 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
             continue
         for required in (rule.get("parameters") or {}).get("required_status_checks") or []:
             context = required.get("context")
+            required_checks.add(context)
             seen = [check for check in latest if _rollup_name(check) == context]
             if not seen or not all(_check_passed(check) for check in seen):
                 problems.append(f"required check {context!r} has not passed: wait for it, or fix and push")
@@ -194,6 +223,7 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
     )
     if pr_state is not None and (wants_threads or "required_signatures" in types or changes_requested):
         state = pr_state()
+        reviewer_threads = state["reviewer_threads"]
         if changes_requested:
             if state["reviews_truncated"]:
                 problems.append("more than 100 reviews, so the gate cannot confirm none requests changes on the current head")
@@ -202,14 +232,14 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
         if wants_threads:
             if state["threads_truncated"]:
                 problems.append("more than 100 review threads, so the gate cannot confirm they are all resolved")
-            elif state["unresolved_threads"]:
-                problems.append(f"{state['unresolved_threads']} review thread(s) are unresolved: resolve them")
+            elif state["worker_threads"]:
+                problems.append(f"{state['worker_threads']} review thread(s) are unresolved: resolve them")
         if "required_signatures" in types:
             if state["commits_truncated"]:
                 problems.append("more than 100 commits, so the gate cannot confirm each is signed")
             elif state["unsigned_commits"]:
                 problems.append(f"{state['unsigned_commits']} commit(s) lack a verified signature: publish with push-signed")
-    return problems
+    return Blockers(problems, frozenset(required_checks), reviewer_threads)
 
 
 def _check_passed(check) -> bool:
@@ -380,6 +410,13 @@ def _pr_number(pr: dict) -> str:
     return pr["url"].rstrip("/").rsplit("/", 1)[1]
 
 
+def _person_started(thread: dict) -> bool:
+    """Only a User account counts as a reviewer. A bot, a deleted account, or a thread with no comment is the worker's to resolve."""
+    comments = (thread.get("comments") or {}).get("nodes") or []
+    author = comments[0].get("author") if comments else None
+    return isinstance(author, dict) and author.get("__typename") == "User"
+
+
 def _pr_state(pr: dict, repo: str, workspace: str, deadline: float) -> dict:
     owner, name = repo.split("/")
     data = _gh_json(
@@ -392,7 +429,8 @@ def _pr_state(pr: dict, repo: str, workspace: str, deadline: float) -> dict:
         threads, commits, reviews = node["reviewThreads"], node["commits"], node["latestOpinionatedReviews"]
         return {
             "threads_truncated": threads["pageInfo"]["hasNextPage"],
-            "unresolved_threads": sum(1 for t in threads["nodes"] if not t["isResolved"]),
+            "worker_threads": sum(1 for t in threads["nodes"] if not t["isResolved"] and not _person_started(t)),
+            "reviewer_threads": sum(1 for t in threads["nodes"] if not t["isResolved"] and _person_started(t)),
             "commits_truncated": commits["pageInfo"]["hasNextPage"],
             "unsigned_commits": sum(1 for c in commits["nodes"] if not (c["commit"].get("signature") or {}).get("isValid")),
             "reviews_truncated": reviews["pageInfo"]["hasNextPage"],
@@ -406,14 +444,14 @@ def _pr_state(pr: dict, repo: str, workspace: str, deadline: float) -> dict:
         raise GateError(f"the review threads, commit signatures, and reviews of {pr['url']} could not be read")
 
 
-def _blockers(pr: dict, workspace: str, deadline: float) -> Optional[Callable[[], list[str]]]:
+def _blockers(pr: dict, workspace: str, deadline: float) -> Optional[Callable[[], Blockers]]:
     match = PR_URL.match(str(pr.get("url")))
     base = pr.get("baseRefName")
     if not match or not isinstance(base, str) or not base:
         return None
     repo = match.group(1)
 
-    def blockers() -> list[str]:
+    def blockers() -> Blockers:
         rules = _gh_json(["api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100"], workspace, deadline)
         if not isinstance(rules, list):
             raise GateError(f"the branch rules of {repo}:{base} could not be read")
@@ -466,8 +504,9 @@ def make_hook(ctx: Any):
 def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optional[dict]] = linear_owner):
     """After a card lands in review, asks stale changes-requested reviewers to look again and names them in the tool result.
 
-    It also asks the Linear issue's owner to review, and names each failed check, which the gate let through only because
-    no branch rule requires it. Hermes keeps only the first transform_tool_result string, so one hook does all of it.
+    It also asks the Linear issue's owner to review. It names each failed or pending check that no branch rule requires,
+    and counts the open review threads that a person started, which the gate let through.
+    Hermes keeps only the first transform_tool_result string, so one hook does all of it.
 
     transform_tool_result is the one hook that can change what the worker reads, and Hermes bounds it at 30s and fails open.
     """
@@ -482,16 +521,25 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
         if not isinstance(landed, dict) or landed.get("status") != "review":
             return None
         unrequired: list[str] = []
+        pending: list[str] = []
+        reviewer_threads = 0
         owner: dict = {}
         try:
             deadline = time.monotonic() + HOOK_BUDGET_SECONDS
             workspace, _, pr = _load_pr(args, dict(os.environ), deadline)
             unrequired = _failed_checks(pr)
+            pending = _pending_checks(pr)
             asked, failed = re_request_reviews(pr, workspace, deadline)
+            match = PR_URL.match(str(pr.get("url")))
+            if pr.get("state") == "OPEN" and match:
+                try:
+                    reviewer_threads = _pr_state(pr, match.group(1), workspace, deadline)["reviewer_threads"]
+                except GateError as exc:
+                    failed.append(str(exc))
             owner = request_owner_review(pr, workspace, deadline, owner_lookup, asked)
         except GateError as exc:
             asked, failed = [], [str(exc)]
-        if not asked and not failed and not unrequired and not owner:
+        if not (asked or failed or unrequired or pending or reviewer_threads or owner):
             return None
         landed.update(owner)
         if asked:
@@ -500,6 +548,10 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
             landed["re_request_failures"] = failed
         if unrequired:
             landed["failed_unrequired_checks"] = unrequired
+        if pending:
+            landed["pending_unrequired_checks"] = pending
+        if reviewer_threads:
+            landed["reviewer_owned_threads"] = reviewer_threads
         return json.dumps(landed)
 
     return on_tool_result

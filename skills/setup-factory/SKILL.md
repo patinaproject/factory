@@ -1754,11 +1754,15 @@ each check. Report each result.
    default branch.
 3. The worker moves the issue to In Progress through the repository's own
    issue-start workflow. Hermes makes no status change.
-4. While the pull request is a draft, has a pending or failing non-required
-   check, has a conflict, or is `BLOCKED` or `BEHIND`, `kanban_request_review`
-   and `kanban_complete` are refused. `hermes kanban complete` from the
+4. While the pull request is a draft, has a pending or failing required
+   check, has a conflict, or is `BEHIND`, `kanban_request_review` is refused.
+   `kanban_complete` is also refused while any check is pending or failing, or
+   while the pull request is `BLOCKED`. `hermes kanban complete` from the
    worker's shell is also refused.
-5. A `CLEAN`, non-draft pull request moves the card to `review`, not `done`.
+5. A non-draft pull request that is `CLEAN`, or that waits only for a reviewer
+   or for the merge queue, moves the card to `review`, not `done`. A pending
+   check that no branch rule requires does not stop the handoff. An open review
+   thread that a person started does not stop it either.
    An `action` activity with the pull request link appears in the same Linear
    session, and no reviewer worker starts for the card.
 6. A "changes requested" review on GitHub from the issue's assignee returns the

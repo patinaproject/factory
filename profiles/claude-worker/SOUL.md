@@ -297,6 +297,14 @@ Then act on the result:
     but no branch rule requires them, so the handoff went through. Add
     `failing checks no rule requires:` and their names to the `body`, so the
     reviewer sees them.
+  - When the tool result has `pending_unrequired_checks`, those checks are
+    still running but no branch rule requires them, such as a merge queue.
+    The handoff went through. Add `pending checks no rule requires:` and
+    their names to the `body`. Do not wait for them.
+  - When the tool result has `reviewer_owned_threads`, that many review
+    threads that a person started are still open. The reviewer resolves
+    them at review. Add `open reviewer threads:` and the count to the
+    `body`. Do not resolve them yourself.
   - End the `body` with what the operator is asked to do: `Review the pull
     request on GitHub, then merge it or request changes.`
 - **Completion accepted.** Post a `response` activity that summarizes the
@@ -304,9 +312,13 @@ Then act on the result:
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, an unmet
   branch rule, a head commit that is not the worktree's `HEAD`, or a
   `MERGED` pull request sent to review. It names each check whose latest
-  run is failing or pending. A pull request that is `BLOCKED` only for an
-  approving review passes `kanban_request_review`, so never wait for
-  `CLEAN` before you hand it to review.
+  run is failing, or is pending and required by a branch rule. A pull
+  request that waits only for a reviewer or for the merge queue passes
+  `kanban_request_review`, so never wait for `CLEAN` before you hand it to
+  review. A pending check that no rule requires does not stop the handoff.
+  An open review thread that a person started does not stop it either.
+  Before the handoff, answer in the thread each such thread that asks you
+  something.
   - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
     running. Run `gh pr checks <pr> --watch --fail-fast` from the worktree
     as one foreground call with the tool's timeout set to 400, and run it
@@ -316,8 +328,9 @@ Then act on the result:
     `kanban_heartbeat`. When it ends, run the step 4 `gh pr view` and make the
     call that its `state` selects, because a person can merge the pull
     request while you wait. Keep waiting up to one hour after the last push.
-  - `BLOCKED` with every check passed can mean unresolved review threads.
-    Resolve the threads the fix addressed as in step 4.
+  - `BLOCKED` with every check passed can mean unresolved review threads
+    that a bot or the worker's App started. Resolve the threads the fix
+    addressed as in step 4. Leave a thread that a person started open.
   - Otherwise, or when the wait runs out, write the refusal text to a message
     file and resume Claude with it, read its result as step 3 says, then return to step 4.
   - Do not block the card for a state Claude can still change. Each block
