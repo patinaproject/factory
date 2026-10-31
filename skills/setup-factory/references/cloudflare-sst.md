@@ -22,7 +22,7 @@ Reproduce this model exactly.
 | Layer | Requirement |
 | --- | --- |
 | Tunnel | One remotely managed Cloudflare Tunnel. `cloudflared` runs it on the machine as a system service that survives a reboot, with only the tunnel token. |
-| Tunnel ingress | An explicit path allowlist on the factory hostname, in this order: the exact webhook paths `^/webhooks/(linear\|github)$` go to the Hermes webhook listener. The proxy's management UI paths go to the proxy, when a proxy is used. Every other path on the hostname goes to the Hermes dashboard. A final catch-all returns `http_status:404`. |
+| Tunnel ingress | An explicit path allowlist on the factory hostname, in this order: the exact webhook paths `^/webhooks/(linear\|github)$` go to the Hermes webhook listener. The proxy's management UI paths go to the proxy, when a proxy is used. That UI manages the proxy's upstream credentials. Every other path on the hostname goes to the Hermes dashboard. A final catch-all returns `http_status:404`. |
 | DNS | A proxied `CNAME` from the factory hostname to `<tunnel-id>.cfargotunnel.com`. |
 | Access | One `self_hosted` Access application covers the whole hostname. It has an `allow` policy for the operator's identities, such as an email domain, and a bounded session, such as `24h`. Every path requires an allowed identity by default, including the dashboard and the proxy's management UI. |
 | Webhook bypass | One path-scoped `self_hosted` Access application for each webhook path, each with a single `bypass` policy for `everyone`. Nothing broader than the exact webhook paths is exempt. These paths rely on Hermes' signature check: `GET` returns `405` and an unsigned `POST` returns `401`. |
@@ -106,7 +106,7 @@ between provider versions.
    | Hostname | Path | Service |
    | --- | --- | --- |
    | `<hostname>` | `^/webhooks/(linear\|github)$` | `http://127.0.0.1:<webhookPort>` |
-   | `<hostname>` | The proxy's management UI paths, only when a proxy is used | `http://127.0.0.1:<proxyPort>` |
+   | `<hostname>` | The proxy's management UI paths, which manage its upstream credentials, only when a proxy is used | `http://127.0.0.1:<proxyPort>` |
    | `<ssh-hostname>`, only when SSH is used | None | `ssh://127.0.0.1:22`, with the SSH application's Access token required at the origin |
    | `<hostname>` | None | `http://127.0.0.1:<dashboardPort>` |
    | None | None | `http_status:404` |
@@ -139,8 +139,8 @@ between provider versions.
    Output the certificate authority's public key. It is not a secret, and
    the machine's `TrustedUserCAKeys` file needs it.
 
-The proxy's management UI paths come from the proxy's documentation. Ask the
-operator to confirm them.
+The proxy's management UI manages its upstream credentials. Its paths still
+come from the proxy's documentation. Ask the operator to confirm them.
 
 ### Adopt existing resources
 

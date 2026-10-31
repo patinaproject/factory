@@ -17,7 +17,7 @@ These values move to Infisical:
 | --- | --- |
 | `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | `<home>` |
 | `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>` |
-| `CLAUDE_PROXY_TOKEN`, the variable that `claude_session.auth_token_env` names | `<home>` |
+| `CLAUDE_PROXY_TOKEN`, the variable that `claude_session.auth_token_env` names. It holds the proxy's client token or a Console API key | `<home>` |
 | Each variable that `claude_session.mcp_servers.<name>.token_env` names, such as `SENTRY_ACCESS_TOKEN` | `<home>` |
 
 The default home loads the whole folder. The worker home loads nothing from

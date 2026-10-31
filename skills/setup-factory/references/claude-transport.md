@@ -4,7 +4,9 @@
 example a local proxy. Claude Code still runs as the
 harness; only the model endpoint changes. Hermes' own agent loop can use the
 same proxy through the proxy provider in part 4 of the skill. The endpoint is
-optional. When
+optional. An operator with a Console API key and no proxy can instead put
+Claude Code and Hermes on `api.anthropic.com` with the Anthropic API provider
+in part 4. That case leaves `base_url` empty and sets `auth_token_env`. When
 `claude_session` is empty, Claude Code uses whatever its user configuration
 says, which is its own login unless `~/.claude/settings.json` has an `env`
 block.
@@ -17,7 +19,7 @@ Configure the transport only through these settings in
 | `base_url` | Sets `ANTHROPIC_BASE_URL` |
 | `model` | Passes `--model` and sets `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_OPUS_MODEL`. The main agent runs on it. Any tier without a `tier_models` entry, and the subagent default, also use it |
 | `tier_models` | Optional map from `sonnet`, `haiku`, and `fable` to model ids the endpoint serves. Each sets that `ANTHROPIC_DEFAULT_<TIER>_MODEL`. When `sonnet` is set, `CLAUDE_CODE_SUBAGENT_MODEL` is the alias `sonnet`, so a subagent that names no model runs on the Sonnet model and an explicit `opus` still runs on `model`. Any other key or a non-string value refuses the run |
-| `auth_token_env` | Names the variable that holds the proxy's token, `CLAUDE_PROXY_TOKEN`. Only the gateway holds its value. `claude-session` sets Claude Code's `apiKeyHelper` to `<worker>/scripts/proxy-token`, which asks the gateway's broker for the token. Claude Code keeps it in memory and sends it as the `Authorization` and `x-api-key` headers, so neither Claude Code's environment nor any process it starts holds it |
+| `auth_token_env` | Names the variable that holds the proxy's client token or a Console API key, `CLAUDE_PROXY_TOKEN`. Only the gateway holds its value. `claude-session` sets Claude Code's `apiKeyHelper` to `<worker>/scripts/proxy-token`, which asks the gateway's broker for the value. Claude Code keeps it in memory and sends it as the `Authorization` and `x-api-key` headers, so neither Claude Code's environment nor any process it starts holds it |
 | `mcp_servers` | Optional map from an MCP server name to the factory's own server on that service: its `url`, the `token_env` variable that only the gateway holds, and an optional `scheme` and fixed `headers`. Each server gets its token through a `headersHelper`, `<worker>/scripts/mcp-headers`, which asks the broker for it. See [MCP server identities](mcp-identities.md) |
 | `disabled_mcp_servers` | Optional list of repository MCP server names. Sets `disabledMcpjsonServers` |
 
@@ -30,9 +32,10 @@ The file is deleted when the run ends. Never put an `ANTHROPIC_*` variable in a
 start when it finds one.
 
 `claude_session.model`, `model.default`, and each `model` under
-`platforms.slack.channel_overrides` must be an alias the endpoint serves. A
-proxy answers `unknown provider for model ...` for any other model, and Claude
-Code retries until the run times out. Mapping every tier matters for the same reason:
+`platforms.slack.channel_overrides` must be a model id the endpoint serves. A
+proxy can answer `unknown provider for model ...` for any other model, and
+Claude Code retries until the run times out. Against the Anthropic API, use a
+full model id the API accepts. Mapping every tier matters for the same reason:
 Claude Code sends background and subagent requests to its Haiku and subagent
 models. A tier with no `tier_models` entry falls back to `model`,
 which keeps a one-model proxy working but sends every subagent to the main
@@ -40,8 +43,15 @@ agent's model. `check-install` reports a `model` with no `tier_models.sonnet`.
 
 ## Check
 
-When the operator uses no proxy, check that `base_url`, `model`, and
-`auth_token_env` are empty in both homes and skip this part.
+When the operator uses no proxy and no Console API key, check that
+`base_url`, `model`, and `auth_token_env` are empty in both homes and skip this
+part.
+
+When the operator uses the Anthropic API provider from part 4, `base_url` is
+empty and `auth_token_env` is `CLAUDE_PROXY_TOKEN` in both homes. The Console
+API key is in `<home>/.env` or the Infisical folder, and
+`env_has <worker>/.env CLAUDE_PROXY_TOKEN` prints `0`. The checks below about
+`127.0.0.1`, the proxy port, and `/v1/models` do not apply to it.
 
 When the operator uses a proxy, all of these must hold:
 
@@ -58,10 +68,10 @@ When the operator uses a proxy, all of these must hold:
   `curl -s http://127.0.0.1:<proxy port>/v1/models -H "x-api-key: <token or placeholder>"`.
 - The proxy listens only on `127.0.0.1`. If it has a management API, that API
   does not accept remote connections.
-- If the proxy requires a token, `auth_token_env` is `CLAUDE_PROXY_TOKEN`, and
+- If the proxy requires a client token, `auth_token_env` is `CLAUDE_PROXY_TOKEN`, and
   `env_has <home>/.env CLAUDE_PROXY_TOKEN` prints `1` or the Infisical folder
   holds it. `env_has <worker>/.env CLAUDE_PROXY_TOKEN` prints `0`: the worker
-  gets the token from the gateway, as part 5 of the skill sets up. The
+  gets the value from the gateway, as part 5 of the skill sets up. The
   `factory-secret-names` plugin declares only that name, so Hermes strips it
   from every process a home starts. `check-install` reports any other name.
 
@@ -70,24 +80,34 @@ When the operator uses a proxy, all of these must hold:
 1. Install the proxy with its own documented method. Ask the operator which
    proxy and version to use.
 2. Configure it to bind `127.0.0.1` only.
-3. Run it as a service. On macOS, use a launchd user agent. On Linux, use a
+3. Give the proxy an upstream credential that is a Console API key or a cloud
+   provider account (Amazon Bedrock, Google Vertex AI, or Microsoft Foundry).
+   The runbook does not load Claude subscription accounts or claude.ai logins
+   into a proxy.
+4. Run it as a service. On macOS, use a launchd user agent. On Linux, use a
    systemd user unit. A GUI proxy app can use its own launch-at-login setting
    instead. Use one of the two, never both, because two copies compete for
-   the port. Keep the proxy's own credentials in the proxy's configuration,
-   not in a Hermes `.env`.
-4. Do not use the proxy's "configure Claude Code" or "configure Hermes"
+   the port. Keep the proxy's own upstream credentials in the proxy's
+   configuration, not in a Hermes `.env`. The Anthropic API provider in part 4
+   differs: it has no proxy, so it stores the Console API key as
+   `CLAUDE_PROXY_TOKEN` for the gateway's broker to serve.
+5. Do not use the proxy's "configure Claude Code" or "configure Hermes"
    action. It writes `ANTHROPIC_*` into Claude Code's `settings.json` or into
    Hermes' `config.yaml`, where it overrides `claude_session` and stops the
    DirectSDK provider.
-5. If the proxy issues a client token, store it with `env_set` in
+6. If the proxy issues a client token, store it with `env_set` in
    `<home>/.env` under the name `CLAUDE_PROXY_TOKEN`. When the Infisical
    folder already exists, store it there with `infisical_set` instead. Never
    store it in `<worker>/.env`.
-6. If the proxy has a management UI, record its paths. The tunnel routes them
-   to the proxy behind Access in
+7. If the proxy has a management UI, record its paths. The UI manages the
+   proxy's upstream credentials. The tunnel routes the paths to the proxy
+   behind Access in
    [`cloudflare-sst.md`](cloudflare-sst.md).
 
 ## Verify
+
+The Anthropic API provider verifies through the `PONG` chats in part 4 and the
+end-to-end checks of part 15. The steps below are for a proxy.
 
 Run Claude Code with the same `--settings` override that `claude-session`
 passes. Run it from a scratch directory, never from a repository checkout, and
