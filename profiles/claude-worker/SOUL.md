@@ -274,8 +274,8 @@ Then act on the result:
     GitHub login, the Linear issue's owner, to review. Add `Asked @<login>
     to review.` to the `body`.
   - When the tool result has `owner_review_not_requested`, the gate asked no
-    issue owner. Add `No review requested from the issue owner:` and its
-    reason to the `body`.
+    issue owner. Add `No review requested from the issue owner:` followed by
+    the reason, quoted verbatim and not paraphrased, to the `body`.
   - When the tool result has `re_request_failures`, the gate could not ask
     someone. Name each failure in the `body` after the reviewers or the
     pull request URL.
