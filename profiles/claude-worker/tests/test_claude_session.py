@@ -2207,9 +2207,23 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session()
 
-        self.assertEqual((status, report.get("transient")), (2, True))
+        self.assertEqual((status, report.get("transient"), report.get("precondition")), (2, True, "gh_login"))
         self.assert_reads_back(report, RESULT_LINE.Refused)
         self.assertRegex(report["error"], r"^the worker's gh login in .*/gh has 13 minutes left, under the 15 needed")
+        self.assertFalse(self.log.exists())
+
+    def test_a_blocker_order_copy_that_predates_the_precondition_gets_the_plain_transient_refusal(self) -> None:
+        module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
+        text = module.read_text()
+        self.assertIn("    precondition: Optional[str] = None\n", text)
+        module.unlink()
+        module.write_text(text.replace("    precondition: Optional[str] = None\n", ""))
+        self.save_login_expiry(time.time() + 60)
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, set(report), report["transient"]), (2, {"error", "transient"}, True))
+        self.assertIn("minutes left", report["error"])
         self.assertFalse(self.log.exists())
 
     def test_a_login_with_exactly_15_minutes_left_starts(self) -> None:
@@ -2233,7 +2247,8 @@ class ClaudeSessionTest(GitFixture):
 
                 status, report = self.run_session()
 
-                self.assertEqual((status, report.get("transient")), (2, True))
+                self.assertEqual((status, report.get("transient"), report.get("precondition")), (2, True, "gh_login"))
+                self.assertEqual(set(report), {"error", "transient", "precondition"})
                 self.assertIn("token-expiry.json", report["error"])
                 self.assertFalse(self.log.exists())
 
@@ -2245,6 +2260,7 @@ class ClaudeSessionTest(GitFixture):
 
         report = json.loads(proc.stdout)
         self.assertEqual((proc.returncode, report.get("transient")), (2, True))
+        self.assertEqual(set(report), {"error", "transient"})
         self.assertIn("GH_CONFIG_DIR is not set", report["error"])
         self.assertFalse(self.log.exists())
 

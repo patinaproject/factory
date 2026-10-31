@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import sqlite3
 import unittest
 from contextlib import closing
@@ -24,18 +25,25 @@ with open(path + ".log", "a") as log:
 if argv[:2] == ["config", "get"]:
     print(json.dumps(state["settings"]))
 elif argv == ["kanban", "boards", "list", "--json"]:
-    print(json.dumps([{"slug": "default", "db_path": "/nowhere"}, {"slug": "triage", "db_path": state["db_path"]}]))
-elif argv[:4] == ["kanban", "--board", "triage", "list"]:
-    print(json.dumps(state["tasks"]))
-elif argv[:4] == ["kanban", "--board", "triage", "assign"] and not state.get("assign_fails"):
-    next(t for t in state["tasks"] if t["id"] == argv[4])["assignee"] = None if argv[5] == "none" else argv[5]
-    json.dump(state, open(path, "w"))
-elif argv[:4] == ["kanban", "--board", "triage", "unblock"]:
-    card = next(t for t in state["tasks"] if t["id"] == argv[4])
-    if card["status"] != "scheduled":
-        sys.exit("cannot unblock " + argv[4])
-    card["status"] = "ready"
-    json.dump(state, open(path, "w"))
+    print(json.dumps([{"slug": "default", "db_path": state.get("default_db", "/nowhere")},
+                      {"slug": "triage", "db_path": state["db_path"]}]))
+elif argv[:2] == ["kanban", "--board"] and argv[3] in ("list", "assign", "unblock", "show"):
+    tasks = state["tasks"] if argv[2] == "triage" else state["default_tasks"]
+    if argv[3] == "list":
+        print(json.dumps(tasks))
+    elif argv[3] == "assign" and not state.get("assign_fails"):
+        next(t for t in tasks if t["id"] == argv[4])["assignee"] = None if argv[5] == "none" else argv[5]
+        json.dump(state, open(path, "w"))
+    elif argv[3] == "assign":
+        sys.exit("hermes: refused " + repr(argv))
+    elif argv[3] == "show":
+        print(json.dumps({"task": next(t for t in tasks if t["id"] == argv[4])}))
+    elif argv[3] == "unblock":
+        card = next(t for t in tasks if t["id"] == argv[4])
+        if card["status"] != "scheduled" or state.get("unblock_fails"):
+            sys.exit("cannot unblock " + argv[4])
+        card["status"] = "ready"
+        json.dump(state, open(path, "w"))
 else:
     sys.exit("hermes: refused " + repr(argv))
 """
@@ -45,7 +53,7 @@ def task(task_id: str, status: str, assignee: str | None = None, priority: int =
     return {"id": task_id, "status": status, "assignee": assignee, "priority": priority, "created_at": created_at}
 
 
-class DispatchTriageTest(unittest.TestCase):
+class Harness(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -62,7 +70,8 @@ class DispatchTriageTest(unittest.TestCase):
 
     def run_script(self, tasks: list, settings: object = None, **state) -> subprocess.CompletedProcess:
         settings = {"triage": {"max_running": 2}} if settings is None else settings
-        self.state_path.write_text(json.dumps({"tasks": tasks, "settings": settings, "db_path": str(self.board), **state}))
+        state = {"default_tasks": [], "tasks": tasks, "settings": settings, "db_path": str(self.board), **state}
+        self.state_path.write_text(json.dumps(state))
         env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path),
                "HERMES_HOME": str(self.tmp / "home")}
         return subprocess.run([sys.executable, str(SCRIPTS / "dispatch-triage")], env=env, capture_output=True, text=True)
@@ -70,6 +79,8 @@ class DispatchTriageTest(unittest.TestCase):
     def assignees(self) -> dict:
         return {t["id"]: t["assignee"] for t in json.loads(self.state_path.read_text())["tasks"]}
 
+
+class DispatchTriageTest(Harness):
     def test_assigns_waiting_cards_up_to_the_cap_by_priority_then_age(self) -> None:
         proc = self.run_script([
             task("t_new", "ready", created_at=300),
@@ -160,6 +171,142 @@ class DispatchTriageTest(unittest.TestCase):
 
         self.assertEqual(proc.returncode, 1)
         self.assertIn("hermes kanban --board triage assign failed", proc.stderr)
+
+
+PARKED = "Waiting for the worker's gh login: the worker's gh login has 3 minutes left"
+
+
+class LoginReleaseTest(Harness):
+    def setUp(self) -> None:
+        super().setUp()
+        self.default_board = self.tmp / "default.db"
+        with closing(sqlite3.connect(self.default_board)) as db:
+            db.execute(TASKS)
+            db.executescript(COMMENTS_AND_EVENTS)
+
+    def login(self, seconds_left: float | None) -> None:
+        gh = self.tmp / "home" / "gh"
+        gh.mkdir(exist_ok=True)
+        (gh / "token-expiry.json").unlink(missing_ok=True)
+        if seconds_left is not None:
+            (gh / "token-expiry.json").write_text(json.dumps({"expires_at": time.time() + seconds_left}))
+
+    def park(self, board: Path, task_id: str, reason: str = PARKED, assignee: str | None = "claude-worker",
+             comments: tuple = ()) -> None:
+        with closing(sqlite3.connect(board)) as db:
+            db.execute("INSERT INTO tasks (id, title, body, branch_name, status, assignee, block_kind) "
+                       "VALUES (?, 'T', '', NULL, 'scheduled', ?, NULL)", (task_id, assignee))
+            db.executemany("INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, 'default', ?, 300)",
+                           [(task_id, body) for body in comments])
+            db.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'scheduled', ?, 200)",
+                       (task_id, json.dumps({"reason": reason})))
+            db.commit()
+
+    def sweep(self, tasks: list, default_tasks: list) -> subprocess.CompletedProcess:
+        return self.run_script(tasks, default_tasks=default_tasks, default_db=str(self.default_board))
+
+    def statuses(self) -> dict:
+        state = json.loads(self.state_path.read_text())
+        return {t["id"]: (t["status"], t["assignee"]) for t in state["tasks"] + state["default_tasks"]}
+
+    def test_a_fresh_login_releases_a_default_card_ready_and_assigned_and_a_triage_card_unassigned(self) -> None:
+        self.login(15 * 60 + 30)
+        self.park(self.default_board, "t_default")
+        self.park(self.board, "t_triage")
+        busy = [task("t_a", "running", "claude-worker"), task("t_b", "running", "claude-worker")]
+
+        proc = self.sweep([task("t_triage", "scheduled", "claude-worker"), *busy], [task("t_default", "scheduled", "claude-worker")])
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "released t_default\nreleased t_triage\n", ""))
+        self.assertEqual(self.statuses()["t_default"], ("ready", "claude-worker"))
+        self.assertEqual(self.statuses()["t_triage"], ("ready", None))
+
+    def test_a_released_triage_card_is_assigned_within_the_cap_in_the_same_run(self) -> None:
+        self.login(20 * 60)
+        self.park(self.board, "t_triage")
+
+        proc = self.sweep([task("t_triage", "scheduled", "claude-worker")], [])
+
+        self.assertEqual(proc.stdout, "released t_triage\nassigned t_triage\n")
+        self.assertEqual(self.statuses()["t_triage"], ("ready", "claude-worker"))
+
+    def test_a_login_under_15_minutes_missing_or_unreadable_releases_nothing_and_reads_no_board(self) -> None:
+        self.park(self.default_board, "t_default")
+        for name, setup in (
+            ("stale", lambda: self.login(14 * 60 + 50)),
+            ("expired", lambda: self.login(-60)),
+            ("missing", lambda: self.login(None)),
+            ("unreadable", lambda: (self.login(None), (self.tmp / "home" / "gh" / "token-expiry.json").write_text("{"))),
+        ):
+            with self.subTest(name):
+                setup()
+
+                proc = self.sweep([], [task("t_default", "scheduled", "claude-worker")])
+
+                self.assertEqual((proc.returncode, proc.stdout), (0, ""))
+                self.assertEqual(self.statuses()["t_default"], ("scheduled", "claude-worker"))
+
+    def test_a_card_a_person_stopped_or_unassigned_after_the_park_stays_parked(self) -> None:
+        self.login(30 * 60)
+        self.park(self.default_board, "t_stopped", assignee=None, comments=("stopped",))
+        self.park(self.default_board, "t_unassigned", assignee=None)
+        self.park(self.default_board, "t_stopped_assigned", comments=("stopped",))
+
+        proc = self.sweep([], [task(name, "scheduled", assignee) for name, assignee in
+                               (("t_stopped", None), ("t_unassigned", None), ("t_stopped_assigned", "claude-worker"))])
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, ""))
+        self.assertEqual({status for status, _ in self.statuses().values()}, {"scheduled"})
+
+    def test_a_stop_before_the_park_does_not_hold_the_card(self) -> None:
+        self.login(30 * 60)
+        self.park(self.default_board, "t_default")
+        with closing(sqlite3.connect(self.default_board)) as db:
+            db.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES ('t_default', 'default', 'stopped', 100)")
+            db.commit()
+
+        proc = self.sweep([], [task("t_default", "scheduled", "claude-worker")])
+
+        self.assertEqual(proc.stdout, "released t_default\n")
+
+    def test_a_reply_never_releases_a_login_park(self) -> None:
+        self.login(None)
+        self.park(self.board, "t_login", comments=("Linear reply: any news?",))
+
+        proc = self.sweep([task("t_login", "scheduled", "claude-worker")], [])
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, ""))
+        self.assertEqual(self.statuses()["t_login"], ("scheduled", "claude-worker"))
+
+    def test_a_fresh_login_never_releases_a_question(self) -> None:
+        self.login(30 * 60)
+        self.park(self.default_board, "t_question", reason="Needs input: which screen?\n\ncomments_seen: 0",
+                  comments=("Linear reply: the settings screen",))
+
+        proc = self.sweep([], [task("t_question", "scheduled", "claude-worker")])
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, ""))
+        self.assertEqual(self.statuses()["t_question"], ("scheduled", "claude-worker"))
+
+    def test_a_triage_card_whose_unblock_fails_is_assigned_again_so_a_later_sweep_releases_it(self) -> None:
+        self.login(30 * 60)
+        self.park(self.board, "t_triage")
+
+        proc = self.run_script([task("t_triage", "scheduled", "claude-worker")], unblock_fails=True)
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("releasing t_triage for the gh login failed", proc.stderr)
+        self.assertEqual(self.statuses()["t_triage"], ("scheduled", "claude-worker"))
+
+    def test_a_board_that_cannot_be_read_does_not_stop_the_others_and_exits_1(self) -> None:
+        self.login(30 * 60)
+        self.park(self.board, "t_triage")
+        self.default_board.write_bytes(b"not a database")
+
+        proc = self.sweep([task("t_triage", "scheduled", "claude-worker")], [])
+
+        self.assertEqual((proc.returncode, proc.stdout), (1, "released t_triage\nassigned t_triage\n"))
+        self.assertIn("cannot read the board", proc.stderr)
 
 
 if __name__ == "__main__":

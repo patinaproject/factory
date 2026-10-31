@@ -41,3 +41,11 @@ def seconds_left(config_dir: Path, now: float) -> float:
     if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
         raise ValueError(f"{path} does not hold an expires_at")
     return expires_at - now
+
+
+def is_fresh(config_dir: Path, now: float) -> bool:
+    """True when the saved login has `MIN_REMAINING_SECONDS` left, the margin `claude-session` needs to start a run."""
+    try:
+        return seconds_left(config_dir, now) >= MIN_REMAINING_SECONDS
+    except ValueError:
+        return False

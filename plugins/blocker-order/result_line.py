@@ -17,6 +17,10 @@ from typing import Any, Optional, Union
 
 NEEDS_INPUT = "Needs input:"
 COMMENTS_SEEN = "comments_seen:"
+GH_LOGIN = "gh_login"
+# A park whose reason starts with this waits for the worker's gh login, not for a person. It never starts with
+# `Needs input:`, so no reply rule and no triage round treats it as a question.
+GH_LOGIN_PARK = "Waiting for the worker's gh login:"
 _COMMENTS_SEEN_LINE = re.compile(r"\s*^" + COMMENTS_SEEN + r"[ \t]*(\d+)[ \t]*\Z", re.MULTILINE)
 
 
@@ -93,10 +97,12 @@ class Failed:
 @dataclass(frozen=True)
 class Refused:
     """`claude-session` stopped without a Claude session, on a refusal or an unexpected error. A transient
-    one goes back to the queue."""
+    one goes back to the queue. `precondition` names a machine condition that, once met, lets the card run:
+    `gh_login` parks the card until the worker's gh login is fresh."""
 
     error: str
     transient: bool = False
+    precondition: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +115,13 @@ class Crashed:
 
 Report = Union[Waiting, Done, Failed, Refused, Crashed]
 VARIANTS = (Waiting, Done, Failed, Refused, Crashed)
+
+
+def gh_login_refusal(report: Optional[Report]) -> Optional[str]:
+    """The error of a refusal that waits for the worker's gh login."""
+    if isinstance(report, Refused) and report.precondition == GH_LOGIN:
+        return report.error
+    return None
 
 
 def waiting_on(report: Optional[Report]) -> Optional[list[str]]:

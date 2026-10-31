@@ -74,6 +74,18 @@ class RecordTest(unittest.TestCase):
                 self.assertEqual(record["line"], "config kanban.max_spawn in /root: is not a positive limit (part 10)")
                 self.assertEqual(install_plan.drift_from_json(record), drift)
 
+    def test_a_manual_record_without_gates_runs_reads_as_false_and_the_flag_reaches_the_plan(self) -> None:
+        old = {"kind": "x", "where": "y", "detail": "z", "remedy": {"type": "manual", "action": "do it"}}
+        self.assertEqual(install_plan.drift_from_json(old).remedy, Manual("do it", False))
+
+        gating = Drift("service", "gh login refresh", "is not loaded", Manual("load it", True))
+        self.assertEqual(json.loads(json.dumps(gating.to_json()))["remedy"]["gates_runs"], True)
+        self.assertEqual(
+            install_plan.plan([gating, Drift("x", "y", "z", Manual("do it"))]).manual,
+            (install_plan.ManualLine("service gh login refresh: is not loaded", "load it", True),
+             install_plan.ManualLine("x y: z", "do it", False)),
+        )
+
     def test_a_record_of_another_shape_is_refused(self) -> None:
         for record in ({}, {"kind": "x", "where": "y", "detail": "z", "remedy": {"type": "later"}}, []):
             with self.subTest(record=record), self.assertRaises(ValueError):

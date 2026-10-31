@@ -27,6 +27,8 @@ class Install(NamedTuple):
 
 class Manual(NamedTuple):
     action: str
+    # True when the code a deploy installs refuses every run until a person does this.
+    gates_runs: bool = False
 
 
 class Advisory(NamedTuple):
@@ -57,7 +59,7 @@ def remedy_json(remedy: Remedy) -> dict:
     if isinstance(remedy, Install):
         return {"type": "install", "step": remedy.step.name, "argv": list(remedy.argv), "restarts_gateway": remedy.restarts_gateway}
     if isinstance(remedy, Manual):
-        return {"type": "manual", "action": remedy.action}
+        return {"type": "manual", "action": remedy.action, "gates_runs": remedy.gates_runs}
     return {"type": "advisory"}
 
 
@@ -68,7 +70,7 @@ def drift_from_json(record: dict) -> Drift:
         if kind == "install":
             parsed: Remedy = Install(Step[remedy["step"]], tuple(str(a) for a in remedy["argv"]), bool(remedy["restarts_gateway"]))
         elif kind == "manual":
-            parsed = Manual(str(remedy["action"]))
+            parsed = Manual(str(remedy["action"]), bool(remedy.get("gates_runs", False)))
         elif kind == "advisory":
             parsed = ADVISORY
         else:
@@ -81,6 +83,7 @@ def drift_from_json(record: dict) -> Drift:
 class ManualLine(NamedTuple):
     line: str
     action: str
+    gates_runs: bool = False
 
 
 class Plan(NamedTuple):
@@ -97,7 +100,7 @@ def plan(drifts) -> Plan:
     for drift in drifts:
         if isinstance(drift.remedy, Install) and drift.remedy not in installs:
             installs.append(drift.remedy)
-    manual = tuple(ManualLine(str(d), d.remedy.action) for d in drifts if isinstance(d.remedy, Manual))
+    manual = tuple(ManualLine(str(d), d.remedy.action, d.remedy.gates_runs) for d in drifts if isinstance(d.remedy, Manual))
     return Plan(tuple(sorted(installs, key=lambda install: install.step)), manual)
 
 

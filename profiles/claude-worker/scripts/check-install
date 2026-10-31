@@ -213,6 +213,7 @@ class Service(NamedTuple):
     scheduled: bool = False
     env: tuple = ()  # EnvironmentVariables keys the plist must set
     interval: int = 0  # the StartInterval the plist must set, in seconds
+    gates_runs: bool = False  # claude-session refuses every run while the job is missing
 
     def domains(self) -> tuple:
         # A user agent loads in gui/<uid> from a login session and in user/<uid> otherwise, such as over SSH.
@@ -284,7 +285,7 @@ SERVICES = (
     Service(12, "gateway watch", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist", scheduled=True),
     Service(
         10, "gh login refresh", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist",
-        scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME"), interval=gh_login.REFRESH_INTERVAL_SECONDS,
+        scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME"), interval=gh_login.REFRESH_INTERVAL_SECONDS, gates_runs=True,
     ),
     Service(
         12, "auto deploy", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
@@ -846,7 +847,27 @@ def hermes_lock_drifts(service: Service, plist: dict) -> list:
 
 
 def service_fix(service: Service) -> Manual:
-    return Manual(f"print, install, and load the launchd job as part {service.part} describes")
+    return Manual(f"print, install, and load the launchd job as part {service.part} describes", service.gates_runs)
+
+
+def check_gh_login(launchd_root: Path, worker: Path, now: float) -> list:
+    """The saved expiry claude-session reads. Not a run-gating line: a stale file clears when the job next runs."""
+    service = next(s for s in SERVICES if s.name == "gh login refresh")
+    if len(glob.glob(str(launchd_root / os.path.expanduser(service.plist).lstrip("/")))) != 1:
+        return []
+    config_dir = worker / "gh"
+    try:
+        left = gh_login.seconds_left(config_dir, now)
+    except ValueError as error:
+        detail = f"{error}; refresh-gh-app-login has not saved an expiry"
+    else:
+        if left >= gh_login.MIN_REMAINING_SECONDS:
+            return []
+        detail = f"expires in {max(left, 0) // 60:.0f} minutes, under the {gh_login.MIN_REMAINING_SECONDS // 60} a run needs"
+    return [Drift(
+        "gh login", str(config_dir), f"{detail} (part {service.part})",
+        Manual("wait for the refresh-gh-app-login job, or run it once as part 10 describes"),
+    )]
 
 
 def check_services(launchd_root: Path, launchctl: str) -> list:
@@ -1972,6 +1993,7 @@ def main() -> int:
         ]
         if sys.platform == "darwin":
             drifts.extend(check_services(launchd_root, launchctl))
+            drifts.extend(check_gh_login(launchd_root, worker, time.time()))
             drifts.extend(check_auto_deploy(
                 root, config_value(root, hermes, HOLD_KEY), None if args.ref else commit,
                 float(git(repo, "show", "-s", "--format=%ct", commit.sha)), time.time(),

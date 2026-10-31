@@ -28,6 +28,15 @@ comment written after it. The rule reads a card's comments and events in the sha
 unassigned, and `dispatch-triage` alone assigns it within `triage.max_running`. A card the other caller
 already released is not an error.
 
+The login release rule: a `scheduled` card whose newest park reason starts with `result_line.GH_LOGIN_PARK`
+waits for the worker's gh login, not for a reply, so `replied` never releases it. `sweep_login` releases it
+once `<HERMES_HOME>/gh/token-expiry.json` has at least the 15 minutes `claude-session` needs, on every board
+and for every such card still assigned to `claude-worker`, read from `show` just before the release, that no
+`stopped` comment follows. A person's `stop`
+unassigns the card and comments `stopped`, and either one keeps the card parked. On `triage` the release is
+`assign none` and `unblock`, so `dispatch-triage` assigns it within its cap, and on any other board the card
+lands `ready` and still assigned.
+
 - `unblock --repo <r> --branch <b> --reason <text>`: unblock a card. When the branch has a pull
   request, Hermes holds the `ready` card for 24 hours after a comment that names it, and only the
   review reopen lifts the hold, so the card is unblocked, sent to review, and reopened.
@@ -78,12 +87,14 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 import factory_settings
+import gh_login
 import kanban_board
 import merged_checks
 import reply_inbox
 from archive_card import Failed, archive, kanban_command, last_line, run, run_kanban
 
 WORKER = "claude-worker"
+TRIAGE_BOARD = "triage"
 STOPPED = "stopped"
 # Covers Hermes' _RESPAWN_GUARD_PR_URL_RE, which holds a `ready` card for a day after a comment that matches it.
 PULL_URL = re.compile(r"https?://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)(?:[/#?][^\s).,]*)?", re.IGNORECASE)
@@ -184,8 +195,18 @@ def resume(card: Card, assign: bool = True) -> dict:
     return result("resumed", assigned=assign)
 
 
+def login_parked(show: dict) -> bool:
+    """Whether the card's newest park waits for the worker's gh login."""
+    result_line = plugin_module("blocker-order", "result_line")
+    parks = [event for event in show["events"] if event["kind"] == "scheduled"]
+    reason = (parks[-1]["payload"] or {}).get("reason") if parks else None
+    return isinstance(reason, str) and reason.startswith(result_line.GH_LOGIN_PARK)
+
+
 def replied(show: dict) -> bool:
     """The release rule, for a `scheduled` card as `hermes kanban show --json` gives it."""
+    if login_parked(show):
+        return False
     result_line = plugin_module("blocker-order", "result_line")
     parks = [event for event in show["events"] if event["kind"] == "scheduled"]
     # Hermes writes a `scheduled` event with every park; without one, any reply counts as after it.
@@ -233,10 +254,13 @@ def triage_reply(card: Card, text: str) -> dict:
     return result("none", status=status)
 
 
+def boards() -> list[dict]:
+    return json.loads(run(*kanban_command(None), "boards", "list", "--json"))
+
+
 def board_database(board: str | None) -> str:
     slug = board or "default"
-    boards = json.loads(run(*kanban_command(None), "boards", "list", "--json"))
-    path = next((each["db_path"] for each in boards if each["slug"] == slug), None)
+    path = next((each["db_path"] for each in boards() if each["slug"] == slug), None)
     if path is None:
         raise Failed(f"Hermes has no board {slug}")
     return path
@@ -254,6 +278,59 @@ def sweep(board: str) -> dict:
             failed[task_id] = str(failure)
             continue
         released.append(task_id)
+    return {"released": released, "failed": failed}
+
+
+def login_wait_over(show: dict) -> bool:
+    """A login-parked card that no person stopped after the park."""
+    if not login_parked(show):
+        return False
+    park = [event for event in show["events"] if event["kind"] == "scheduled"][-1]
+    return not any(comment["body"] == STOPPED and comment["created_at"] >= park["created_at"] for comment in show["comments"])
+
+
+def release_for_login(card: Card, board: str) -> bool:
+    """False, releasing nothing, when the card is no longer assigned to the worker: a person unassigned it."""
+    if card.show()["task"]["assignee"] != WORKER:
+        return False
+    if board != TRIAGE_BOARD:
+        card.call("unblock")
+        return True
+    card.call("assign", "none")
+    try:
+        card.call("unblock")
+    except Failed:
+        if card.status() != "scheduled":
+            return True
+        # Left unassigned, the card would read as one a person unassigned and never be released.
+        card.call("assign", WORKER)
+        raise
+    return True
+
+
+def sweep_login() -> dict:
+    """Release every card parked for the worker's gh login, on every board, once the login is fresh enough to
+    start a run. `dispatch-triage` runs it each minute."""
+    released, failed = [], {}
+    if not gh_login.is_fresh(Path(os.environ["HERMES_HOME"]) / "gh", time.time()):
+        return {"released": released, "failed": failed}
+    for each in boards():
+        slug, path = each["slug"], each["db_path"]
+        if not os.path.exists(path):
+            continue
+        try:
+            waiting = kanban_board.scheduled(path)
+        except sqlite3.Error as failure:
+            failed[slug] = f"cannot read the board: {failure}"
+            continue
+        for task_id, show in sorted(waiting.items()):
+            if not login_wait_over(show):
+                continue
+            try:
+                if release_for_login(Card(slug, task_id), slug):
+                    released.append(task_id)
+            except Failed as failure:
+                failed[task_id] = str(failure)
     return {"released": released, "failed": failed}
 
 

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import fcntl
 import importlib
 import json
@@ -238,10 +239,15 @@ PULL_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$")
 GITHUB_ISSUE_LINE = re.compile(r"^github_issue_url:\s*(\S+)\s*$", re.MULTILINE)
 
 
+# The `precondition` value of a refusal that waits for the worker's gh login; `blocker-order` parks the card on it.
+GH_LOGIN = "gh_login"
+
+
 class Refusal(Exception):
-    def __init__(self, message: str, *, transient: bool = False) -> None:
+    def __init__(self, message: str, *, transient: bool = False, precondition: str | None = None) -> None:
         super().__init__(message)
         self.transient = transient
+        self.precondition = precondition
 
 
 class AfterClaude(Exception):
@@ -1185,12 +1191,15 @@ def require_fresh_login() -> None:
     try:
         left = gh_login.seconds_left(Path(config_dir), time.time())
     except ValueError as error:
-        raise Refusal(f"the worker's gh login: {error}; refresh-gh-app-login has not saved an expiry", transient=True) from None
+        raise Refusal(
+            f"the worker's gh login: {error}; refresh-gh-app-login has not saved an expiry",
+            transient=True, precondition=GH_LOGIN,
+        ) from None
     if left < gh_login.MIN_REMAINING_SECONDS:
         raise Refusal(
             f"the worker's gh login in {config_dir} has {max(left, 0) // 60:.0f} minutes left, "
             f"under the {gh_login.MIN_REMAINING_SECONDS // 60} needed; refresh-gh-app-login renews it",
-            transient=True,
+            transient=True, precondition=GH_LOGIN,
         )
 
 
@@ -1414,6 +1423,15 @@ def mcp_status(args: argparse.Namespace) -> tuple[int, dict]:
     return 0, {"repo": args.repo, "servers": statuses, "disabled": transport.get("disabled_mcp_servers") or []}
 
 
+def refused(result_line, refusal: Refusal):
+    """The refusal's report. An installed `blocker-order` that predates `precondition` gets today's transient
+    refusal, which its hook blocks, because it would raise TypeError on the field."""
+    declared = {each.name for each in dataclasses.fields(result_line.Refused)}
+    if refusal.precondition and "precondition" in declared:
+        return result_line.Refused(str(refusal), refusal.transient, refusal.precondition)
+    return result_line.Refused(str(refusal), refusal.transient)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id", help="the Kanban card id; Hermes does not pass it in the environment")
@@ -1459,7 +1477,7 @@ def main() -> int:
         message = str(cause) if isinstance(cause, (Refusal, factory_settings.SettingsError)) else f"{type(cause).__name__}: {cause}"
         status, report = 1, result_line.Crashed(message, failed.session_id)
     except Refusal as refusal:
-        status, report = 2, result_line.Refused(str(refusal), refusal.transient)
+        status, report = 2, refused(result_line, refusal)
     except factory_settings.SettingsError as error:
         status, report = 2, result_line.Refused(str(error))
     except Exception as error:
