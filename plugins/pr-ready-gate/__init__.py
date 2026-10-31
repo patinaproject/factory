@@ -223,13 +223,13 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
     )
     if pr_state is not None and (wants_threads or "required_signatures" in types or changes_requested):
         state = pr_state()
-        reviewer_threads = state["reviewer_threads"]
         if changes_requested:
             if state["reviews_truncated"]:
                 problems.append("more than 100 reviews, so the gate cannot confirm none requests changes on the current head")
             for login in _change_requesters(pr, state, current=True):
                 problems.append(f"{login or 'a deleted user'} requested changes on the current head: address the review and push")
         if wants_threads:
+            reviewer_threads = state["reviewer_threads"]
             if state["threads_truncated"]:
                 problems.append("more than 100 review threads, so the gate cannot confirm they are all resolved")
             elif state["worker_threads"]:
@@ -412,8 +412,8 @@ def _pr_number(pr: dict) -> str:
 
 def _person_started(thread: dict) -> bool:
     """Only a User account counts as a reviewer. A bot, a deleted account, or a thread with no comment is the worker's to resolve."""
-    comments = (thread.get("comments") or {}).get("nodes") or []
-    author = comments[0].get("author") if comments else None
+    first = ((thread.get("comments") or {}).get("nodes") or [None])[0]
+    author = first.get("author") if isinstance(first, dict) else None
     return isinstance(author, dict) and author.get("__typename") == "User"
 
 

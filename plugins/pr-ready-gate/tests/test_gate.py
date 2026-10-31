@@ -288,6 +288,22 @@ class ReviewHandoffTest(unittest.TestCase):
                 failures = evaluate_handoff(pr, state=threads_state(thread))
                 self.assertTrue(any("1 review thread(s) are unresolved" in failure for failure in failures), failures)
 
+    def test_a_null_first_comment_is_refused(self):
+        pr = {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "APPROVED", "statusCheckRollup": REQUIRED_PASSED}
+        failures = evaluate_handoff(pr, state=threads_state({"isResolved": False, "comments": {"nodes": [None]}}))
+        self.assertTrue(any("1 review thread(s) are unresolved" in failure for failure in failures), failures)
+
+    def test_a_thread_that_a_person_started_is_no_cause_when_no_rule_requires_resolution(self):
+        rules = [
+            {"type": "pull_request", "parameters": {"required_review_thread_resolution": False}},
+            {"type": "required_signatures"},
+            *rules_requiring("Required checks pass", "Validate pull request")[-1:],
+        ]
+        pr = {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "APPROVED", "statusCheckRollup": REQUIRED_PASSED}
+        failures = evaluate_handoff(pr, rules=rules, state=threads_state(open_thread(THREAD_AUTHORS["person"])))
+        self.assertEqual(len(failures), 1)
+        self.assertIn("mergeStateStatus is 'BLOCKED'", failures[0])
+
     def test_a_thread_node_with_no_comments_key_is_refused(self):
         pr = {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED", "statusCheckRollup": REQUIRED_PASSED}
         failures = evaluate_handoff(pr, state=threads_state({"isResolved": False}))
