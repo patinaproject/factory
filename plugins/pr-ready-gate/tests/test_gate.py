@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -758,28 +760,75 @@ class OwnerReviewTest(unittest.TestCase):
         shell, lookups, result = self.review(pr={"state": "MERGED"})
         self.assertEqual((lookups, self.posts(shell), result), ([], [], None))
 
-    def test_the_owner_comes_from_linear_agent_sessions_cli_for_the_card(self):
+    def read_card(self, body):
+        task = types.SimpleNamespace(body=body)
+        seen = []
+
+        class Connection:
+            def __enter__(self):
+                return "conn"
+
+            def __exit__(self, *exc):
+                return None
+
+        def connect_closing(board=None):
+            seen.append(board)
+            return Connection()
+
+        package = types.ModuleType("hermes_cli")
+        package.kanban_db = types.SimpleNamespace(get_task=lambda conn, task_id: task)
+        package.kanban_db_connect = types.SimpleNamespace(connect_closing=connect_closing)
+        return mock.patch.dict(sys.modules, {"hermes_cli": package}), seen
+
+    def test_the_owner_comes_from_linear_agent_sessions_cli_for_the_cards_issue(self):
         calls = []
 
         def run(cmd, cwd=None, timeout=None, **_):
             calls.append((cmd, cwd))
             return subprocess.CompletedProcess(cmd, 0, json.dumps({"owner": LUKE}), "")
 
-        with mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), mock.patch.object(gate.subprocess, "run", run):
+        modules, boards = self.read_card("```text\nlinear_issue_id: issue-uuid-1\n```")
+        env = {"HERMES_HOME": "/home/worker", "HERMES_KANBAN_BOARD": "factory"}
+        with mock.patch.dict(os.environ, env, clear=True), modules, mock.patch.object(gate.subprocess, "run", run):
             owner = gate.linear_owner("t_1", WORKSPACE, gate.time.monotonic() + 20)
         self.assertEqual(owner, LUKE)
+        self.assertEqual(boards, ["factory"])
         self.assertEqual(
             calls,
-            [([gate.sys.executable, "/home/worker/plugins/linear-agent-session/cli.py", "review-owner", "--task", "t_1"], WORKSPACE)],
+            [([gate.sys.executable, "/home/worker/plugins/linear-agent-session/cli.py", "review-owner", "--issue", "issue-uuid-1"], WORKSPACE)],
         )
+
+    def test_a_card_with_no_linear_issue_is_named_in_the_reason(self):
+        modules, _ = self.read_card("repo: o/r")
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), modules:
+            with self.assertRaisesRegex(gate.GateError, "^card t_1 names no linear_issue_id$"):
+                gate.linear_owner("t_1", WORKSPACE, gate.time.monotonic() + 20)
 
     def test_a_cli_error_reaches_the_reason(self):
         def run(cmd, **_):
-            return subprocess.CompletedProcess(cmd, 1, json.dumps({"error": "card t_1 names no linear_issue_id"}), "")
+            return subprocess.CompletedProcess(cmd, 1, json.dumps({"error": "Linear has no issue issue-uuid-1"}), "")
 
-        with mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), mock.patch.object(gate.subprocess, "run", run):
-            with self.assertRaisesRegex(gate.GateError, "names no linear_issue_id"):
+        modules, _ = self.read_card("linear_issue_id: issue-uuid-1")
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), modules, mock.patch.object(gate.subprocess, "run", run):
+            with self.assertRaisesRegex(gate.GateError, "Linear has no issue issue-uuid-1"):
                 gate.linear_owner("t_1", WORKSPACE, gate.time.monotonic() + 20)
+
+    def test_a_traceback_reaches_the_reason_as_its_last_line(self):
+        traceback = (
+            "Traceback (most recent call last):\n"
+            '  File "cli.py", line 1, in <module>\n'
+            "ModuleNotFoundError: No module named 'hermes_cli'\n"
+        )
+
+        def run(cmd, **_):
+            return subprocess.CompletedProcess(cmd, 1, "", traceback)
+
+        modules, _ = self.read_card("linear_issue_id: issue-uuid-1")
+        with mock.patch.dict(os.environ, {"HERMES_HOME": "/home/worker"}, clear=True), modules, mock.patch.object(gate.subprocess, "run", run):
+            with self.assertRaises(gate.GateError) as caught:
+                gate.linear_owner("t_1", WORKSPACE, gate.time.monotonic() + 20)
+        self.assertTrue(str(caught.exception).endswith("exited 1: ModuleNotFoundError: No module named 'hermes_cli'"))
+        self.assertNotIn("Traceback", str(caught.exception))
 
 
 class RegisterTest(unittest.TestCase):
