@@ -24,6 +24,7 @@ ACTIONS = {
     "ignore_factory_session": "the factory opened a session on an undelegated issue; post nothing",
     "answer_mention": "a person mentioned the agent on an undelegated issue; answer once",
     "gate_ready_for_human": "triage marked the issue for a person; create no card",
+    "gate_needs_brief": "the issue carries the ready label but has no Agent brief; start a triage pass and create no card",
     "gate_not_ready": "the issue has not passed the readiness check; create no card",
     "foreign_cards": "cards the factory did not create work the issue; create no card",
     "create_card": "create the issue's implementation card",
@@ -41,7 +42,11 @@ ACTIONS = {
     "open_session": "the issue is delegated; open a session and handle it there",
     "error": "the intent could not be computed; report `error` and stop",
 }
-GATE_ACTIONS = {"ready-for-human": "gate_ready_for_human", "not-ready": "gate_not_ready"}
+GATE_ACTIONS = {
+    "ready-for-human": "gate_ready_for_human",
+    "needs-brief": "gate_needs_brief",
+    "not-ready": "gate_not_ready",
+}
 SESSION_ACTIONS = ("use_session", "open_session")
 
 
@@ -90,11 +95,13 @@ def render(intent: Intent) -> str:
     return f"## Computed triage intent\n\n<triage_intent>\n{body}\n</triage_intent>\n\n"
 
 
-def gate_verdict(labels: list[str]) -> str:
+def gate_verdict(labels: list[str], identifier: str, document_titles: list[str]) -> str:
     roles = {linear.role_key(name) for name in labels}
     if "readyforhuman" in roles:
         return "ready-for-human"
-    return "pass" if "readyforagent" in roles else "not-ready"
+    if "readyforagent" not in roles:
+        return "not-ready"
+    return "pass" if f"{identifier} Agent brief" in document_titles else "needs-brief"
 
 
 def foreign_card_ids(cards: list[Card], issue: Mapping[str, Any]) -> list[str]:
@@ -176,6 +183,7 @@ def decide(
     now: dt.datetime,
     reply: Reply,
     thread: Thread,
+    document_titles: list[str],
 ) -> Intent:
     found = triage_exit.find_card(work_cards, issue["id"], issue["identifier"], issue["gitBranchName"])
     triage_card = find_triage_card(triage_cards, issue["id"])
@@ -184,7 +192,7 @@ def decide(
         action="",
         issue={"id": issue["id"], "identifier": issue["identifier"], "state_type": issue["stateType"]},
         delegated=delegated,
-        gate=gate_verdict(issue["labels"]),
+        gate=gate_verdict(issue["labels"], issue["identifier"], document_titles),
         card={"id": found[0].id, "status": found[0].status, "matched_by": found[1]} if found else None,
         triage_card={"id": triage_card.id, "status": triage_card.status} if triage_card else None,
         foreign_cards=[] if found else foreign_card_ids(work_cards, issue),
@@ -272,6 +280,7 @@ def compute(
             raise ValueError("the payload is not a Linear Issue or AgentSessionEvent")
         linear_client = client()
         issue = linear_client.get_issue(_issue_id(payload))
+        documents = linear_client.issue_documents(issue["id"])["documents"]
         return decide(
             payload,
             issue,
@@ -281,6 +290,7 @@ def compute(
             now or delivery_time(payload),
             resolve_reply(payload, linear_client),
             resolve_thread(payload, linear_client),
+            [document["title"] for document in documents],
         )
     except Exception as failure:
         return error_intent(redact(f"{type(failure).__name__}: {failure}"))

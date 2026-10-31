@@ -322,6 +322,11 @@ After each run, read the first line of the result line's `result`:
   `agentSessions` entry that `linear_issue` returns. When a person delegated
   the issue after the card was created, that is the delegation's session, so
   the response reaches the delegator.
+  For a `thought` on an issue whose status the run did not change,
+  `claude-session` opens a new session on the issue after the run, so that
+  Linear sends the app the event that creates the implementation card. The
+  newest `agentSessions` entry is then that session, and posting there is
+  right.
   Any text you write to people names a triage label as Linear shows it, from
   the `role_labels` that `linear_issue` returns, never by its role such as
   `ready-for-agent`.

@@ -62,8 +62,11 @@ def issue_event(updated_from=None):
     return {"type": "Issue", "action": "update", "updatedFrom": updated_from or {"stateId": "old"}, "data": {"id": ISSUE_ID}}
 
 
-def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD):
-    return intent_module.decide(payload, live or issue(), list(triage), list(work), APP, NOW, reply, thread)
+BRIEF = ["PAT-1 Agent brief"]
+
+
+def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD, titles=BRIEF):
+    return intent_module.decide(payload, live or issue(), list(triage), list(work), APP, NOW, reply, thread, list(titles))
 
 
 def expected(action, **overrides):
@@ -126,7 +129,53 @@ class GateTest(unittest.TestCase):
         for verdict, label_sets in cases.items():
             for labels in label_sets:
                 with self.subTest(labels):
-                    self.assertEqual(intent_module.gate_verdict(labels), verdict)
+                    self.assertEqual(intent_module.gate_verdict(labels, "PAT-1", BRIEF), verdict)
+
+    def test_the_label_without_the_brief_needs_the_brief(self):
+        for titles in ([], ["PAT-2 Agent brief"], ["PAT-1 Agent brief draft"], ["PAT-1 agent brief"], ["Agent brief"]):
+            with self.subTest(titles):
+                self.assertEqual(intent_module.gate_verdict(["Ready for agent"], "PAT-1", titles), "needs-brief")
+
+    def test_the_brief_does_not_override_ready_for_human_or_a_missing_label(self):
+        self.assertEqual(intent_module.gate_verdict(["Ready for human"], "PAT-1", []), "ready-for-human")
+        self.assertEqual(intent_module.gate_verdict([], "PAT-1", BRIEF), "not-ready")
+
+
+class NeedsBriefTest(unittest.TestCase):
+    def needs(self, event, state="triage", titles=(), work=(), **issue_overrides):
+        live = issue(stateType=state, **issue_overrides)
+        return decide(event, live, work=work, titles=titles)
+
+    def test_session_created_on_an_issue_in_triage_or_todo_starts_triage_and_no_card(self):
+        for state in ("triage", "unstarted"):
+            with self.subTest(state):
+                result = self.needs(session_event("created"), state)
+                self.assertEqual(result.action, "gate_needs_brief")
+                self.assertEqual(result.gate, "needs-brief")
+                self.assertEqual(result.agent_session_id, "session-1")
+
+    def test_session_prompted_and_issue_updates_start_triage_and_no_card(self):
+        self.assertEqual(self.needs(session_event("prompted", body="go")).action, "gate_needs_brief")
+        for previous in ({"stateId": "old"}, {"labelIds": []}):
+            with self.subTest(previous):
+                live = issue(stateType="triage", agentSessions=[session("s-open", 30, creator=None)])
+                result = decide(issue_event(previous), live, titles=[])
+                self.assertEqual((result.action, result.agent_session_id, result.then), ("gate_needs_brief", "s-open", None))
+
+    def test_the_issue_update_without_a_session_leaves_the_session_to_the_prompt(self):
+        result = self.needs(issue_event(), "unstarted")
+        self.assertEqual((result.action, result.agent_session_id), ("gate_needs_brief", None))
+
+    def test_a_wrong_brief_does_not_count(self):
+        for titles in (["PAT-2 Agent brief"], ["PAT-1 Agent brief (old)"]):
+            with self.subTest(titles):
+                self.assertEqual(self.needs(session_event("created"), titles=titles).action, "gate_needs_brief")
+
+    def test_the_brief_makes_the_card_as_before(self):
+        self.assertEqual(self.needs(session_event("created"), titles=BRIEF).action, "create_card")
+        reuse = self.needs(session_event("created"), titles=BRIEF, work=[card("t_work", branch=BRANCH)])
+        self.assertEqual(reuse.action, "reuse_card")
+        self.assertEqual(self.needs(issue_event(), titles=BRIEF).action, "open_session")
 
 
 class SessionCreatedTest(unittest.TestCase):
@@ -337,7 +386,7 @@ class IssueUpdateTest(unittest.TestCase):
 
     def test_the_duplicate_is_judged_at_the_delivery_time(self):
         live = issue(agentSessions=[session("s-1", 60)])
-        replay = intent_module.decide(issue_event(), live, [], [], APP, NOW - dt.timedelta(minutes=57), intent_module.NO_REPLY, intent_module.NO_THREAD)
+        replay = intent_module.decide(issue_event(), live, [], [], APP, NOW - dt.timedelta(minutes=57), intent_module.NO_REPLY, intent_module.NO_THREAD, BRIEF)
         self.assertEqual(replay.action, "session_created_handles_it")
         self.assertEqual(self.update(live).action, "open_session")
 
@@ -454,8 +503,14 @@ class RenderTest(unittest.TestCase):
 
 
 class FakeLinearClient:
-    def __init__(self, live, error=None, thread_error=None):
+    def __init__(self, live, error=None, thread_error=None, titles=BRIEF, documents_error=None):
         self.live, self.error, self.thread_error, self.asked = live, error, thread_error, []
+        self.titles, self.documents_error = titles, documents_error
+
+    def issue_documents(self, issue_id):
+        if self.documents_error:
+            raise self.documents_error
+        return {"identifier": "PAT-1", "documents": [{"id": f"d{n}", "title": t, "own": True} for n, t in enumerate(self.titles)]}
 
     def get_issue(self, issue_id):
         self.asked.append(issue_id)
@@ -517,6 +572,18 @@ class ComputeTest(unittest.TestCase):
         client = FakeLinearClient(None, error=RuntimeError("Linear refused lin_api_a1b2c3"))
         result = self.compute(issue_event(), client)
         self.assertEqual(result, Intent(action="error", error="RuntimeError: Linear refused [redacted]"))
+
+    def test_the_issues_documents_decide_the_gate(self):
+        result = self.compute(session_event("created"), FakeLinearClient(issue(), titles=["PAT-1 Agent brief draft"]))
+        self.assertEqual((result.action, result.gate), ("gate_needs_brief", "needs-brief"))
+        result = self.compute(session_event("created"), FakeLinearClient(issue(), titles=["PAT-1 Agent brief"]))
+        self.assertEqual((result.action, result.gate), ("create_card", "pass"))
+
+    def test_an_unreadable_documents_list_is_the_error_intent(self):
+        client = FakeLinearClient(issue(), documents_error=RuntimeError("documents down"))
+        self.assertEqual(
+            self.compute(session_event("created"), client), Intent(action="error", error="RuntimeError: documents down")
+        )
 
     def test_an_unreadable_board_is_the_error_intent(self):
         def unreadable(_board):
