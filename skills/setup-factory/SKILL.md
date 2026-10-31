@@ -133,6 +133,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `plugins.entries.work.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
 | `kanban.max_in_progress`, `kanban.max_spawn`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
+| `platforms.slack.channel_overrides`, when the operator chose a Slack conversation model | `<home>/config.yaml` of the root home only. The channel IDs and aliases are private, so they go in the private record and never enter this repository |
 | The `default` and `triage` boards' `default_workdir` | Kanban board metadata, not `config.yaml` |
 
 When the factory uses Infisical, part 14 moves the Linear credentials, both
@@ -267,7 +268,8 @@ minimum:
 | `haiku` | 2.1.293 |
 
 The check uses the higher of `2.1.263` and the minimum for every alias the
-factory uses, in both `model.default` and `claude_session.model`.
+factory uses, in `model.default`, in `claude_session.model`, and in each
+`model` under `platforms.slack.channel_overrides`.
 
 **Install or upgrade.** Use the operator's install method, either Anthropic's
 native installer or the npm package. Run the check again.
@@ -365,6 +367,9 @@ hermes config get providers.<proxy provider>.api        # http://127.0.0.1:<prox
 hermes config get providers.<proxy provider>.transport  # anthropic_messages
 hermes config get providers.<proxy provider>.key_env    # <token variable>
 ```
+
+Every `model` in `platforms.slack.channel_overrides` is also an alias the proxy
+lists (see [Slack](references/slack.md#choose-the-conversation-model)).
 
 When the proxy requires a token, `<token variable>` is `CLAUDE_PROXY_TOKEN`,
 and `env_has <home>/.env CLAUDE_PROXY_TOKEN` prints `1` or the Infisical folder

@@ -1,7 +1,8 @@
 # Slack
 
 The factory talks to the operator in Slack through Hermes Agent's own Slack
-integration. This repository adds no code to it, only display settings.
+integration. This repository adds no code to it, only display settings and an
+optional conversation model.
 Follow the Slack page in the Hermes install's messaging documentation for the
 app manifest, the scopes, and the token names that the pinned release expects.
 
@@ -15,6 +16,10 @@ All of these must hold:
 - The Slack app is a member of each channel the operator listed.
 - `streaming.enabled` and `platforms.slack.extra.native_task_cards` are `true`
   in `<home>/config.yaml` (see [Show progress](#show-progress)).
+- When the operator chose a conversation model, `platforms.slack.channel_overrides`
+  holds an entry for each channel they named, with the chosen `model` and,
+  when they gave one, `provider` (see
+  [Choose the conversation model](#choose-the-conversation-model)).
 - A message round-trip works (see [Verify](#verify)).
 
 If all of them hold, report Slack as already configured.
@@ -67,6 +72,50 @@ hermes config set platforms.slack.extra.native_task_cards true </dev/null
 ```
 
 The gateway reads both at startup, so part 15's restart applies them.
+
+## Choose the conversation model
+
+By default the agent answers in Slack with `model.default`. The operator may
+choose a different model for Slack conversations. Ask whether to use one. If
+so, ask for:
+
+- a model alias, `<alias>`;
+- optionally a provider, `<provider>`, in the form of `model.provider`, for
+  example `custom:<proxy provider>`;
+- the channels it covers, defaulting to the home channel.
+
+Hermes reads one `platforms.slack.channel_overrides` entry per channel ID. A
+thread uses its channel's entry. A direct message matches only when its `D...`
+ID is listed. A session's `/model` choice wins over the entry, and the entry
+wins over `model.default`. Webhook turns and the worker profile's Kanban runs
+keep `model.default`.
+
+Check, in the root home:
+
+```sh
+hermes config get platforms.slack.channel_overrides
+```
+
+For each channel `<channel id>` that lacks the choice, set it. Set `provider`
+only when the operator gave one:
+
+```sh
+hermes config set platforms.slack.channel_overrides.<channel id>.model <alias> </dev/null
+hermes config set platforms.slack.channel_overrides.<channel id>.provider <provider> </dev/null
+```
+
+`hermes config set` splits the key at each `.`, and a channel ID has no dot.
+Leave existing entries and their other keys, such as `system_prompt`, as they
+are. Each `model` must be an alias the transport serves (part 4). Record the
+alias, the provider, and the channel IDs in the private record only, so a fresh
+install can reproduce the choice.
+
+Hermes silently ignores an entry that is not a mapping. A top-level `slack:`
+block in `<home>/config.yaml` replaces `platforms.slack` and hides the
+entries, so the choice must not sit beside one.
+
+The gateway reads the entries at startup. A change on a running factory needs
+the operator to restart the gateway. For setup, part 15's restart applies it.
 
 ## Verify
 

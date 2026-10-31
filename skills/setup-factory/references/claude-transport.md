@@ -29,9 +29,10 @@ The file is deleted when the run ends. Never put an `ANTHROPIC_*` variable in a
 `.env` file or in the gateway's service unit. The DirectSDK provider refuses to
 start when it finds one.
 
-`model` must be an alias the endpoint serves. A proxy answers
-`unknown provider for model ...` for any other model, and Claude Code retries
-until the run times out. Mapping every tier matters for the same reason:
+`claude_session.model`, `model.default`, and each `model` under
+`platforms.slack.channel_overrides` must be an alias the endpoint serves. A
+proxy answers `unknown provider for model ...` for any other model, and Claude
+Code retries until the run times out. Mapping every tier matters for the same reason:
 Claude Code sends background and subagent requests to its Haiku and subagent
 models. A tier with no `tier_models` entry falls back to `model`,
 which keeps a one-model proxy working but sends every subagent to the main
@@ -52,8 +53,8 @@ When the operator uses a proxy, all of these must hold:
 - It listens on `127.0.0.1` only:
   `lsof -nP -iTCP:<proxy port> -sTCP:LISTEN` shows `127.0.0.1:<proxy port>`.
 - `claude_session.base_url` is `http://127.0.0.1:<proxy port>` in both homes.
-- `claude_session.model` and each `claude_session.tier_models` value is listed
-  by the proxy:
+- `claude_session.model`, each `claude_session.tier_models` value, and each
+  `model` under `platforms.slack.channel_overrides` is listed by the proxy:
   `curl -s http://127.0.0.1:<proxy port>/v1/models -H "x-api-key: <token or placeholder>"`.
 - The proxy listens only on `127.0.0.1`. If it has a management API, that API
   does not accept remote connections.

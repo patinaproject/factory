@@ -522,6 +522,31 @@ def check_config(homes: Homes, table: tuple = CONFIG) -> list:
     return drifts
 
 
+SLACK_OVERRIDES_KEY = "platforms.slack.channel_overrides"
+
+
+def check_slack_overrides(root: Path, hermes: str) -> list:
+    """Hermes silently drops a non-mapping override, so the Slack model choice would revert to model.default."""
+    overrides = config_value(root, hermes, SLACK_OVERRIDES_KEY)
+    if overrides is None:
+        return []
+
+    def drift(key: str, detail: str) -> list:
+        return [Drift("config", f"{key} in {root}", f"is not {detail} (part 13)",
+                      Manual("set the Slack channel overrides as part 13 describes"))]
+
+    if not isinstance(overrides, dict):
+        return drift(SLACK_OVERRIDES_KEY, "a mapping")
+    drifts = []
+    for channel, entry in overrides.items():
+        key = f"{SLACK_OVERRIDES_KEY}.{channel}"
+        if not isinstance(entry, dict):
+            drifts += drift(key, "a mapping")
+        elif "model" in entry and not (isinstance(entry["model"], str) and entry["model"].strip()):
+            drifts += drift(f"{key}.model", "a non-empty model alias")
+    return drifts
+
+
 UPLOAD_STATUS_SECONDS = 5
 BROKER_CLIENT = Path("plugins/linear-agent-session/broker_client.py")
 
@@ -1912,6 +1937,7 @@ def main() -> int:
             *check_profile(commit, homes_),
             *check_plugins(commit, homes_),
             *check_config(homes_, CONFIG if broker is None else BROKER_USER_CONFIG),
+            *check_slack_overrides(root, hermes),
             *check_worker_secrets(commit, worker, hermes, settings),
             *check_upload_broker(root, *factory_settings.token_variables(settings)),
             *check_cron(commit, homes_),
