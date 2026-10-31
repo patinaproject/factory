@@ -465,7 +465,7 @@ def wait_for_brief(card: Card, board: str, show: dict, client, linear) -> tuple[
     except (factory_settings.SettingsError, factory_source.SourceError, KeyError, ValueError) as error:
         raise Failed(f"queueing a triage card for {identifier} failed: {error}") from None
     card.call("comment", f"{TRIAGE_QUEUED} {triage_id}")
-    note = f"No {identifier} Agent brief yet, so triage runs first. Queued for triage as {triage_id}."
+    note = f"No {identifier} Agent brief yet, so triage runs first. {TRIAGE_QUEUED} {triage_id}."
     try:
         client.create_activity(card_field(task["body"], "linear_agent_session_id"), linear.activity_content("thought", note))
     except (*linear.CLIENT_ERRORS, OSError) as error:
