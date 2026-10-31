@@ -322,7 +322,7 @@ After each run, read the first line of the result line's `result`:
   `agentSessions` entry that `linear_issue` returns. When a person delegated
   the issue after the card was created, that is the delegation's session, so
   the response reaches the delegator.
-  For a `thought` on an issue that was outside Triage when the run started,
+  For a `thought` on an issue whose status the run did not change,
   `claude-session` opens a new session on the issue after the run, so that
   Linear sends the app the event that creates the implementation card. The
   newest `agentSessions` entry is then that session, and posting there is

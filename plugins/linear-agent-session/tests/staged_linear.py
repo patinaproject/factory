@@ -7,7 +7,8 @@ request issues minted-<n>, which Linear then accepts unless reject_all is set.
 An issue's labels come from its `labels` list, `["ready-for-agent"]` when unset, and its delegate
 from `delegate`, none when unset; `hidden` makes Linear return no issue.
 The labels the issue can carry come from `team_labels` and `workspace_labels`, lists of names, none when unset.
-Its state type comes from `state_type`, "unstarted" when unset, and an AgentSessionCreateOnIssue is logged as
+Its state type comes from `state_type`, "unstarted" when unset; a list gives one per issue read, the last one
+repeating. An AgentSessionCreateOnIssue is logged as
 `session_create`, with `session_create_error` making it fail.
 Its Documents come from its `documents` list of {id, title, creator}, the Agent brief when unset, and a
 DocumentUpdate rewrites the title there, `documents_error` fails the read, and
@@ -59,10 +60,15 @@ def _fake_urlopen(request, timeout=None):
         body = json.loads(request.data.decode())
         query = body["query"]
         if "query Issue(" in query:
+            state_type = state.get("state_type", "unstarted")
+            if isinstance(state_type, list):
+                if len(state_type) > 1:
+                    state_path.write_text(json.dumps({**state, "state_type": state_type[1:]}))
+                state_type = state_type[0]
             issue = {
                 "id": "issue-uuid", "identifier": "ABC-123", "title": state.get("issue_title", "Fix checkout"),
                 "description": None, "url": "https://linear.app/example/issue/ABC-123", "branchName": "abc-123-fix",
-                "priority": 0, "state": {"name": "Todo", "type": state.get("state_type", "unstarted")},
+                "priority": 0, "state": {"name": "Todo", "type": state_type},
                 "delegate": {"id": state["delegate"]} if state.get("delegate") else None,
                 "labels": {"nodes": []}, "attachments": {"nodes": []}, "agentSessions": {"nodes": []},
                 "inverseRelations": {"nodes": []},

@@ -1214,7 +1214,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         require_mcp_tokens(servers)
         mcp = mcp_config(servers)
         if triage:
-            started_in_triage = issue_state_type(client, args.issue_id, args.issue_identifier) == "triage"
+            started_in = issue_state_type(client, args.issue_id, args.issue_identifier)
             system_prompt = TRIAGE_SYSTEM_PROMPT.format(
                 identifier=args.issue_identifier,
                 triage_playbook=triage_playbook(),
@@ -1314,9 +1314,9 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         if not triage:
             return 0, result_line.Done(session, outcome, blocker_error)
         activity = triage_activity(client, args.issue_id, outcome.result)
-        # An issue that started in Triage reaches its card through the move to Todo the triage run makes.
-        # Any other issue sees no event, so a new session makes Linear send the app one.
-        if activity == "thought" and not started_in_triage:
+        # A triage run that moves the issue to Todo sends the Issue event that creates its card. An issue the run
+        # left where it was sees no event, so a new session makes Linear send the app one.
+        if activity == "thought" and issue_state_type(client, args.issue_id, args.issue_identifier) == started_in:
             client.create_session_on_issue(args.issue_id)
         return 0, result_line.Done(session, outcome, blocker_error, activity)
     except Exception as error:

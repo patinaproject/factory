@@ -491,14 +491,16 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual((status, report["activity"]), (0, "thought"))
         self.assertEqual(self.session_creates(), [{"input": {"issueId": ISSUE_ID}}])
 
-    def test_a_triage_run_opens_no_session_when_the_issue_started_in_triage(self) -> None:
-        self.set_linear_issue(delegate="app-user", state_type="triage")
-        self.configure_fake_claude(result="Triage outcome: ready-for-agent")
+    def test_a_triage_run_opens_no_session_when_it_moved_the_issue(self) -> None:
+        for moved in (["triage", "unstarted"], ["backlog", "unstarted"]):
+            with self.subTest(moved=moved):
+                self.set_linear_issue(delegate="app-user", state_type=moved)
+                self.configure_fake_claude(result="Triage outcome: ready-for-agent")
 
-        status, report = self.run_session(env=TRIAGE_ENV)
+                status, report = self.run_session(env=TRIAGE_ENV)
 
-        self.assertEqual((status, report["activity"]), (0, "thought"))
-        self.assertEqual(self.session_creates(), [])
+                self.assertEqual((status, report["activity"]), (0, "thought"))
+                self.assertEqual(self.session_creates(), [])
 
     def test_a_triage_run_opens_no_session_for_an_undelegated_issue_or_another_outcome(self) -> None:
         cases = (
