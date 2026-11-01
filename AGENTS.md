@@ -28,10 +28,11 @@ templates and examples.
 GitHub Issues are the canonical tracker for this public repository. Linear
 receives issues through one-way GitHub-to-Linear intake for team visibility
 and is not authoritative. Synced property updates are bidirectional, so do not
-edit or close public-repository issues in Linear. There are two exceptions.
-Delegating the Linear copy to the factory's agent starts a card, and triage sets
-the Linear copy's priority from the adapter's Priority rubric (see
-`docs/agents/issue-tracker.md`). Do not add committed design
+edit or close public-repository issues in Linear. There are three exceptions.
+Delegating the Linear copy to the factory's agent starts a card, triage sets
+the Linear copy's priority from the adapter's Priority rubric, and the agent
+posts a top-level comment on the Linear copy when a teammate's reply asks for
+one (see `docs/agents/issue-tracker.md`). Do not add committed design
 or plan artifacts for routine issue work; put durable context on the GitHub
 issue or in normal docs when it is broadly useful beyond one issue.
 

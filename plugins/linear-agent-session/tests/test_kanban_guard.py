@@ -51,6 +51,22 @@ class CreateTest(unittest.TestCase):
             self.assertIsNone(decide("kanban_create", {"title": "x"}, platform))
 
 
+class GatewayOnlyToolsTest(unittest.TestCase):
+    TOOLS = ("linear_issue_comment", "github_issue_create")
+
+    def test_a_worker_or_cli_call_is_blocked_with_a_message(self):
+        for tool in self.TOOLS:
+            for platform in ("", "kanban", "cli", "slack"):
+                with self.subTest(tool=tool, platform=platform):
+                    result = decide(tool, {"idempotency_key": "x"}, platform)
+                    self.assertEqual(result["action"], "block")
+                    self.assertIn(tool, result["message"])
+
+    def test_a_webhook_turn_may_call_them(self):
+        for tool in self.TOOLS:
+            self.assertIsNone(decide(tool, {"idempotency_key": "x"}, "webhook"))
+
+
 class OtherCallsTest(unittest.TestCase):
     def test_other_tools_pass(self):
         self.assertIsNone(decide("terminal", {"body": "https://github.com/a/b/pull/1"}, "webhook"))

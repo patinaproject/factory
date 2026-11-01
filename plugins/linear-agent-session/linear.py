@@ -129,6 +129,10 @@ COMMENT_CREATE_MUTATION = """mutation CommentCreate($input: CommentCreateInput!)
   commentCreate(input: $input) { success }
 }"""
 
+COMMENT_ON_ISSUE_MUTATION = """mutation CommentOnIssue($input: CommentCreateInput!) {
+  commentCreate(input: $input) { success comment { id url } }
+}"""
+
 SESSION_CREATE_MUTATION = """mutation AgentSessionCreateOnIssue($input: AgentSessionCreateOnIssue!) {
   agentSessionCreateOnIssue(input: $input) { success agentSession { id } }
 }"""
@@ -425,6 +429,14 @@ class LinearClient:
         )["commentCreate"]
         if not payload["success"]:
             raise LinearError("commentCreate reported success: false")
+
+    def comment_on_issue(self, id_or_identifier: str, body: str) -> dict:
+        """Post a top-level comment on the issue. It has no parentId, so Linear keeps it out of a synced GitHub thread."""
+        issue_id = self.get_issue(id_or_identifier)["id"]
+        payload = self._graphql(COMMENT_ON_ISSUE_MUTATION, {"input": {"issueId": issue_id, "body": body}})["commentCreate"]
+        if not payload["success"]:
+            raise LinearError("commentCreate reported success: false")
+        return {"url": payload["comment"]["url"], "id": payload["comment"]["id"]}
 
     def read_prompt(self, *, agent_activity_id: Optional[str] = None, agent_session_id: Optional[str] = None) -> dict:
         """A person's prompt by its activity id, or else the newest prompt in the session that is not a stop."""

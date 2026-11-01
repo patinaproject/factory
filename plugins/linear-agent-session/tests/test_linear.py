@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import stat
 import tempfile
 import unittest
@@ -1094,6 +1095,128 @@ class EditTest(unittest.TestCase):
         self.assertNotIn("required", tools.EDIT_SCHEMA["parameters"])
         self.assertNotIn("required", tools.SEARCH_SCHEMA["parameters"])
         self.assertNotIn("required", tools.GITHUB_EDIT_SCHEMA["parameters"])
+
+
+KEY = "5b0e3a1c-8d41-4f6e-9a57-2c1d0e7f9b34:1"
+ISSUE_UUID = "2f9a6f0e-0000-4000-8000-000000000001"
+COMMENT_OK = (
+    200,
+    {"data": {"commentCreate": {"success": True, "comment": {"id": "c-9", "url": "https://linear.app/example/issue/ABC-123#comment-c-9"}}}},
+)
+
+
+class CommentTest(unittest.TestCase):
+    def setUp(self):
+        self.store = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.store)
+
+    def comment(self, responses, **args):
+        fake = FakeLinear(responses)
+        args = {"issue": "ABC-123", "body": "Filed ABC-9.", "idempotency_key": KEY, **args}
+        return fake, json.loads(tools.run_comment(lambda: make_client(fake), args, self.store))
+
+    def issue_response(self, attachments=()):
+        issue = {**IssueTest.RESPONSE["data"]["issue"], "attachments": {"nodes": list(attachments)}}
+        return 200, {"data": {"issue": issue}}
+
+    def test_one_comment_on_the_issue_uuid_without_a_parent_returns_its_url(self):
+        fake, output = self.comment([self.issue_response(), COMMENT_OK])
+        self.assertEqual(
+            output, {"url": "https://linear.app/example/issue/ABC-123#comment-c-9", "id": "c-9"}
+        )
+        reads = [r for r in fake.graphql_requests if "commentCreate" not in r["query"]]
+        mutations = [r for r in fake.graphql_requests if "commentCreate" in r["query"]]
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(len(mutations), 1)
+        self.assertEqual(mutations[0]["variables"], {"input": {"issueId": ISSUE_UUID, "body": "Filed ABC-9."}})
+        self.assertIn("comment { id url }", mutations[0]["query"])
+
+    def test_an_issue_with_a_public_github_issue_gets_the_same_top_level_comment(self):
+        github = {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"}
+        fake, output = self.comment([self.issue_response([github]), COMMENT_OK])
+        self.assertEqual(output["id"], "c-9")
+        (mutation,) = [r for r in fake.graphql_requests if "commentCreate" in r["query"]]
+        self.assertEqual(mutation["variables"], {"input": {"issueId": ISSUE_UUID, "body": "Filed ABC-9."}})
+
+    def test_a_repeat_returns_the_first_url_and_posts_nothing(self):
+        fake, first = self.comment([self.issue_response(), COMMENT_OK])
+        fake2, again = self.comment([])
+        self.assertEqual(again, first)
+        self.assertEqual(fake2.graphql_requests, [])
+
+    def test_an_argument_the_schema_lacks_is_refused_before_any_request(self):
+        for extra in ({"parent": "c-1"}, {"parentId": "c-1"}, {"title": "x"}):
+            with self.subTest(extra=extra):
+                fake, output = self.comment([], **extra)
+                self.assertEqual(
+                    output,
+                    {"error": f"linear_issue_comment takes only issue, body, idempotency_key; drop {next(iter(extra))}"},
+                )
+                self.assertEqual(fake.graphql_requests, [])
+
+    def test_people_fields_are_refused_before_any_request(self):
+        for name in ("assignee", "delegate", "assigneeId"):
+            with self.subTest(name=name):
+                fake, output = self.comment([], **{name: "user-1"})
+                self.assertEqual(output, {"error": f"this tool never changes assignee or delegate; drop {name}"})
+                self.assertEqual(fake.graphql_requests, [])
+
+    def test_a_missing_key_issue_or_body_sends_nothing(self):
+        cases = [
+            ({"idempotency_key": None}, "pass idempotency_key, a string that starts with a UUID, such as <Activity id>:<item number>"),
+            ({"idempotency_key": "nope"}, "pass idempotency_key, a string that starts with a UUID, such as <Activity id>:<item number>"),
+            ({"issue": None}, "pass issue: the issue UUID or identifier such as ABC-123"),
+            ({"body": " "}, "pass body, the comment's Markdown"),
+        ]
+        for override, message in cases:
+            with self.subTest(override=override):
+                fake, output = self.comment([], **override)
+                self.assertEqual(output, {"error": message})
+                self.assertEqual(fake.graphql_requests, [])
+
+    def test_the_same_key_with_another_body_is_an_error(self):
+        self.comment([self.issue_response(), COMMENT_OK])
+        fake, output = self.comment([], body="Different.")
+        self.assertEqual(
+            output, {"error": f"idempotency_key {KEY!r} was used with different arguments; pass a new key"}
+        )
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_the_schema_requires_the_key(self):
+        self.assertEqual(tools.COMMENT_SCHEMA["parameters"]["required"], ["issue", "body", "idempotency_key"])
+        self.assertNotIn("parent", json.dumps(tools.COMMENT_SCHEMA["parameters"]))
+
+
+class CreateIdempotencyTest(unittest.TestCase):
+    def setUp(self):
+        self.store = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.store)
+
+    def create(self, responses, **args):
+        fake = FakeLinear(responses)
+        output = json.loads(tools.run_create(lambda: make_client(fake), lambda: "ABC", args, self.store))
+        return fake, output
+
+    def test_a_repeat_with_the_key_creates_one_issue(self):
+        _, first = self.create([team_for_create(), CREATE_OK], title="A title", idempotency_key=KEY)
+        fake, again = self.create([], title="A title", idempotency_key=KEY)
+        self.assertEqual(first, {"identifier": "ABC-7", "url": "https://linear.app/x/issue/ABC-7"})
+        self.assertEqual(again, first)
+        self.assertEqual(fake.graphql_requests, [])
+
+    def test_without_a_key_every_call_creates(self):
+        for _ in range(2):
+            fake, output = self.create([team_for_create(), CREATE_OK], title="A title")
+            self.assertEqual(output["identifier"], "ABC-7")
+            self.assertEqual(len(fake.graphql_requests), 2)
+
+    def test_a_malformed_key_creates_nothing(self):
+        fake, output = self.create([], title="A title", idempotency_key="nope")
+        self.assertEqual(
+            output,
+            {"error": "pass idempotency_key, a string that starts with a UUID, such as <Activity id>:<item number>"},
+        )
+        self.assertEqual(fake.graphql_requests, [])
 
 
 def team_for_create(key="ABC"):

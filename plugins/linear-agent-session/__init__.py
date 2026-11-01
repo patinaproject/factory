@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, kanban_guard, linear, missing_secret, replies, tools, triage_exit, triage_intent, triage_round
+from . import blocks, idempotency, kanban_guard, linear, missing_secret, replies, tools, triage_exit, triage_intent, triage_round
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +125,17 @@ def register(ctx: Any) -> None:
         name="linear_issue_create",
         toolset=TOOLSET,
         schema=tools.CREATE_SCHEMA,
-        handler=lambda args, **_: tools.run_create(get_client, lambda: ctx.get_config("default_team", default=""), args),
+        handler=lambda args, **_: tools.run_create(
+            get_client, lambda: ctx.get_config("default_team", default=""), args, idempotency.store_dir(os.environ)
+        ),
         description=tools.CREATE_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="linear_issue_comment",
+        toolset=TOOLSET,
+        schema=tools.COMMENT_SCHEMA,
+        handler=lambda args, **_: tools.run_comment(get_client, args, idempotency.store_dir(os.environ)),
+        description=tools.COMMENT_SCHEMA["description"],
     )
     ctx.register_tool(
         name="linear_issue_search",
@@ -141,6 +150,13 @@ def register(ctx: Any) -> None:
         schema=tools.GITHUB_EDIT_SCHEMA,
         handler=lambda args, **_: tools.run_github_edit(args),
         description=tools.GITHUB_EDIT_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="github_issue_create",
+        toolset=TOOLSET,
+        schema=tools.GITHUB_CREATE_SCHEMA,
+        handler=lambda args, **_: tools.run_github_create(args, idempotency.store_dir(os.environ)),
+        description=tools.GITHUB_CREATE_SCHEMA["description"],
     )
     ctx.register_tool(
         name=triage_round.NAME,
