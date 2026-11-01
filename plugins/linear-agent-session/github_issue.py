@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -51,6 +52,38 @@ def run_gh(args: Sequence[str], stdin: Optional[str] = None) -> str:
     return proc.stdout
 
 
+REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.{1,2}$)[A-Za-z0-9._-]+")
+
+
+def label_named(repository: str, names: Sequence[str], name: str) -> str:
+    match = [n for n in names if role_key(n) == role_key(name)]
+    if len(match) > 1:
+        raise LinearError(f"more than one label of {repository} matches {name!r}: {', '.join(match)}")
+    if not match:
+        raise LinearError(f"{repository} has no label named {name!r}; it has: {', '.join(names)}")
+    return match[0]
+
+
+def require_public(repo: str, verb: str, gh: Gh) -> None:
+    """A private repository's issues are canonical in Linear."""
+    visibility = json.loads(gh(["api", f"repos/{repo}"], None))["visibility"]
+    if visibility != "public":
+        raise LinearError(f"{repo} is {visibility}; {verb} its issues in Linear")
+
+
+def create_issue(repo: str, title: str, body: str, labels: Sequence[str] = (), gh: Gh = run_gh) -> dict:
+    if not REPOSITORY.fullmatch(repo):
+        raise LinearError(f"{repo!r} is not a repository; pass owner/name")
+    require_public(repo, "create", gh)
+    request: dict = {"title": title, "body": body}
+    if labels:
+        known = json.loads(gh(["api", "--paginate", "--slurp", f"repos/{repo}/labels?per_page=100"], None))
+        names = sorted(label["name"] for page in known for label in page)
+        request["labels"] = sorted({label_named(repo, names, name) for name in labels})
+    created = json.loads(gh(["api", "-X", "POST", f"repos/{repo}/issues", "--input", "-"], json.dumps(request)))
+    return {"url": created["html_url"], "number": created["number"]}
+
+
 def edit_issue(
     url: str,
     *,
@@ -67,9 +100,7 @@ def edit_issue(
     if not GITHUB_ISSUE_URL.fullmatch(url):
         raise LinearError(f"{url} is not a GitHub issue URL")
     owner, repo, _, number = url.removeprefix("https://github.com/").split("/")
-    visibility = json.loads(gh(["api", f"repos/{owner}/{repo}"], None))["visibility"]
-    if visibility != "public":
-        raise LinearError(f"{owner}/{repo} is {visibility}; edit its issues in Linear")
+    require_public(f"{owner}/{repo}", "edit", gh)
     path = f"repos/{owner}/{repo}/issues/{number}"
     issue = json.loads(gh(["api", path], None))
     current = [label["name"] for label in issue["labels"]]
@@ -78,13 +109,9 @@ def edit_issue(
         known = json.loads(gh(["api", "--paginate", "--slurp", f"repos/{owner}/{repo}/labels?per_page=100"], None))
         names = sorted(label["name"] for page in known for label in page)
         for name in add_labels:
-            match = [n for n in names if role_key(n) == role_key(name)]
-            if len(match) > 1:
-                raise LinearError(f"more than one label of {owner}/{repo} matches {name!r}: {', '.join(match)}")
-            if not match:
-                raise LinearError(f"{owner}/{repo} has no label named {name!r}; it has: {', '.join(names)}")
-            if match[0] not in labels:
-                labels.append(match[0])
+            match = label_named(f"{owner}/{repo}", names, name)
+            if match not in labels:
+                labels.append(match)
     update: dict = {}
     if title is not None and title != issue["title"]:
         update["title"] = title
