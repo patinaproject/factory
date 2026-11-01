@@ -52,21 +52,22 @@ CARDS = 3000
 # Each transaction moves every card to one new status, so a consistent read sees one status on every card.
 # `held` keeps a second connection open, so the -wal and -shm files stay.
 CONCURRENT_WRITER = """
-import sqlite3, sys, time
-path, mode, seconds = sys.argv[1], sys.argv[2], float(sys.argv[3])
+import os, sqlite3, sys
+path, mode, stop = sys.argv[1], sys.argv[2], sys.argv[3]
 if mode == "held":
     holder = sqlite3.connect(path)
     holder.execute("PRAGMA journal_mode = WAL")
     holder.execute("SELECT count(*) FROM tasks").fetchall()
-end = time.monotonic() + seconds
 version = 0
-while time.monotonic() < end:
+while not os.path.exists(stop):
     version += 1
     board = sqlite3.connect(path, timeout=30)
     board.execute("PRAGMA journal_mode = %s" % ("DELETE" if mode == "delete" else "WAL"))
     board.execute("UPDATE tasks SET status = ?, body = ?", ("s%d" % version, "x" * (400 + version % 7 * 300)))
     board.commit()
     board.close()
+if mode == "held":
+    holder.close()
 """
 
 
@@ -197,22 +198,32 @@ class KanbanBoardTest(unittest.TestCase):
 
     def assert_every_read_is_one_snapshot(self, journal_mode: str, writer_mode: str) -> None:
         busy_board(self.path, journal_mode)
+        stop = self.path.parent / "stop"
+        started = time.monotonic()
         writer = subprocess.Popen(
-            [sys.executable, "-c", CONCURRENT_WRITER, str(self.path), writer_mode, "2.5"]
+            [sys.executable, "-c", CONCURRENT_WRITER, str(self.path), writer_mode, str(stop)]
         )
         self.addCleanup(writer.kill)
-        snapshots, torn = set(), []
-        while writer.poll() is None:
+        snapshots, torn, reads, failed = set(), [], 0, 0
+        while len(snapshots) < 3 or reads < 5 or time.monotonic() - started < 1.5:
+            if time.monotonic() - started > 60:
+                self.fail(f"saw {len(snapshots)} statuses in {reads} reads, {failed} reads raised")
+            if writer.poll() is not None:
+                self.fail(f"the writer exited with {writer.returncode} before it was told to stop")
             try:
                 cards = kanban_board.cards(str(self.path))
             except sqlite3.Error:
+                failed += 1
+                time.sleep(0.01)
                 continue
+            reads += 1
             statuses = {card["status"] for card in cards}
             if len(cards) != CARDS or len(statuses) != 1:
                 torn.append((len(cards), sorted(statuses)))
             snapshots |= statuses
             time.sleep(0.01)
-        writer.wait()
+        stop.touch()
+        writer.wait(timeout=60)
 
         self.assertEqual(writer.returncode, 0)
         self.assertGreater(len(snapshots), 2)
