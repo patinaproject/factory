@@ -2087,8 +2087,8 @@ class CheckStaleFailureCardsTest(unittest.TestCase):
 
         self.assertEqual(self.rows(), [(
             "guarded card t_held: has been held in ready from its worker as blocker_auth for 61 minutes, because "
-            "last_failure_error still names an old quota or auth error after its newest run requested review; "
-            "reassigning the card clears the error"
+            "last_failure_error still names an old quota or auth error after its newest run ended in review or "
+            "completion; reassigning the card clears the error"
         )])
 
     def test_a_card_whose_newest_run_completed_is_reported(self) -> None:
