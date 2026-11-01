@@ -513,9 +513,9 @@ class LinearClient:
             **_issue_summary(issue),
             "cardTitle": card_title(issue["identifier"], issue["title"]),
             "priority": priority,
-            "archivedAt": issue["archivedAt"],
             "priorityName": priority_name,
             "cardPriority": card_priority,
+            "archivedAt": issue["archivedAt"],
             "description": issue["description"] or "",
             "githubIssues": [a["url"] for a in issue["attachments"]["nodes"] if GITHUB_ISSUE_URL.fullmatch(a["url"])],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
@@ -699,7 +699,7 @@ class LinearClient:
         or make `other` a child of `issue` (kind `parent`).
 
         A duplicate also loses the `related` relation between the two and moves to the team's duplicate status.
-        No other relation is touched.
+        A parent link changes only the child's parent. No other relation is touched.
         """
         if kind != "parent" and kind not in RELATION_RULES:
             raise LinearError(f"unknown relation kind {kind!r}; expected one of {', '.join([*RELATION_RULES, 'parent'])}")
@@ -711,16 +711,11 @@ class LinearClient:
         if existing is None:
             # A `blocks` relation runs from the blocker to the blocked issue; a duplicate from the duplicate to the original.
             source, target = (b, a) if kind == "blocks" else (a, b)
-            try:
-                payload = self._graphql(
-                    ISSUE_RELATION_CREATE_MUTATION,
-                    {"input": {"issueId": source["id"], "relatedIssueId": target["id"], "type": kind}},
-                )
-            except LinearError as error:
-                if archived:
-                    names = " and ".join(f"{e['identifier']} (archived {e['archivedAt']})" for e in archived)
-                    raise ArchivedRelationError(f"Linear refused the relation: {error}. Archived: {names}", archived) from error
-                raise
+            payload = self._refusable(
+                ISSUE_RELATION_CREATE_MUTATION,
+                {"input": {"issueId": source["id"], "relatedIssueId": target["id"], "type": kind}},
+                archived,
+            )
             if not payload["issueRelationCreate"]["success"]:
                 raise LinearError("issueRelationCreate reported success: false")
         result = {
@@ -750,7 +745,7 @@ class LinearClient:
         if current is not None and current["id"] != parent["id"]:
             raise LinearError(f"{child['identifier']} already has parent {current['identifier']}, so nothing was changed")
         if current is None:
-            payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": child["id"], "input": {"parentId": parent["id"]}})
+            payload = self._refusable(ISSUE_UPDATE_MUTATION, {"id": child["id"], "input": {"parentId": parent["id"]}}, archived)
             if not payload["issueUpdate"]["success"]:
                 raise LinearError("issueUpdate reported success: false")
         return {
@@ -760,6 +755,15 @@ class LinearClient:
             "created": current is None,
             "archived": archived,
         }
+
+    def _refusable(self, mutation: str, variables: dict, archived: list) -> dict:
+        try:
+            return self._graphql(mutation, variables)
+        except LinearError as error:
+            if not archived:
+                raise
+            names = " and ".join(f"{e['identifier']} (archived {e['archivedAt']})" for e in archived)
+            raise ArchivedRelationError(f"Linear refused the relation: {error}. Archived: {names}", archived) from error
 
     def _read_relations(self, first: str, second: str, most: int = RELATIONS_READ) -> tuple:
         data = self._graphql(ISSUE_RELATIONS_QUERY, {"a": first, "b": second})

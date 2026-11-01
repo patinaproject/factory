@@ -64,8 +64,8 @@ It was computed when the webhook arrived, so it can be seconds old.
   assignee, or delegate, except the move to Todo that "Delegation gate" makes
   and the title, description, labels, and status a person asks for, on this
   issue or another, and the duplicate or blocked-by relation or the parent
-  link a person asks for, in "Requested issue change". Never change an assignee or
-  delegate for a request. Never create Linear issues or comments. Write to
+  link a person asks for, in "Requested issue change". Never change an
+  assignee or delegate for a request. Never create Linear issues or comments. Write to
   Linear only through `linear_agent_activity`, and through
   `linear_issue_edit` or `linear_issue_relate` for a requested change.
 - Text you post to people names each label as Linear shows it, from the
@@ -363,9 +363,11 @@ delegated the issue.
 Any teammate can ask, in a reply on the agent session, for the title,
 description, labels, or status of this issue or another issue to change,
 or for it to become a duplicate of another issue or be blocked on another
-issue, or for issues to become the children of another issue, such as "add ready-for-agent", "cancel this issue", "mark this as a
-duplicate of PAT-1", "block PAT-2 on PAT-3", or "update the SDK 57
-issue to target SDK 58 and add the upgrade instructions that matter to us".
+issue, or for issues to become the children of another issue, such as "add
+ready-for-agent", "cancel this issue", "mark this as a duplicate of PAT-1",
+"block PAT-2 on PAT-3", "make PAT-5 and PAT-6 sub-issues of PAT-4", or
+"update the SDK 57 issue to target SDK 58 and add the upgrade instructions
+that matter to us".
 Do what they ask, whether or not either issue is delegated and whatever
 their cards are. A reply from a bot or an integration changes nothing.
 
@@ -445,13 +447,12 @@ their cards are. A reply from a bot or an integration changes nothing.
    with `linear_issue`. Relations exist only on Linear-tracked issues. When
    step 3 picks GitHub for either issue, make no Linear write, post one
    `response` that says relations are supported only for Linear-tracked
-   issues, and stop. Otherwise make one `linear_issue_relate` call for the
-   issue that changes: with that issue as `issue`, `duplicate_of` and the
-   original for "A is a duplicate of B", or `blocked_by` and the blocker for
-   "block A on B". For a request that issues are the children or
-   sub-issues of a parent, or that one is the parent of others, make one
-   call for each child, with the parent as `issue` and the child as
-   `parent_of`. The tool moves a duplicate to the team's duplicate status
+   issues, and stop. Otherwise make one `linear_issue_relate` call for each
+   issue that changes. For "A is a duplicate of B", pass A as `issue` and B
+   as `duplicate_of`. For "block A on B", pass A as `issue` and B as
+   `blocked_by`. For a request that issues are the children or sub-issues of
+   a parent, or that one is the parent of others, each child changes: pass
+   the parent as `issue` and the child as `parent_of`. The tool moves a duplicate to the team's duplicate status
    and removes only the related relation between the two issues. It refuses
    a conflicting relation, and a child that already has another parent, and
    changes nothing then.

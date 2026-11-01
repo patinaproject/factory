@@ -20,6 +20,10 @@ STATES = [
 ]
 
 
+class Refused(Exception):
+    pass
+
+
 class RelationsLinear(FakeLinear):
     def __init__(
         self,
@@ -29,6 +33,7 @@ class RelationsLinear(FakeLinear):
         create_moves_to_duplicate=False,
         create_removes_related=False,
         refuse_create=None,
+        refuse_update=None,
     ) -> None:
         super().__init__()
         self.issues = {
@@ -42,6 +47,7 @@ class RelationsLinear(FakeLinear):
         self.create_moves_to_duplicate = create_moves_to_duplicate
         self.create_removes_related = create_removes_related
         self.refuse_create = refuse_create
+        self.refuse_update = refuse_update
         self.mutations = []
         self.created = 0
 
@@ -60,11 +66,10 @@ class RelationsLinear(FakeLinear):
         self.graphql_requests.append(body)
         self.query, variables = body["query"], body["variables"]
         marker = next(m for m in QUERY_MARKERS if f"{m}(" in self.query)
-        data = getattr(self, f"_{marker}")(variables)
-        if data is None:
-            body = {"errors": [{"message": self.refuse_create}], "data": None}
-        else:
-            body = {"data": data}
+        try:
+            body = {"data": getattr(self, f"_{marker}")(variables)}
+        except Refused as refusal:
+            body = {"errors": [{"message": str(refusal)}], "data": None}
         return FakeResponse(200, json.dumps(body).encode())
 
     def _find(self, key):
@@ -106,7 +111,7 @@ class RelationsLinear(FakeLinear):
         spec = variables["input"]
         self.mutations.append(("create", spec))
         if self.refuse_create:
-            return None
+            raise Refused(self.refuse_create)
         self.created += 1
         self.relations.append(
             {"id": f"rel-new-{self.created}", "type": spec["type"], "issue": spec["issueId"], "relatedIssue": spec["relatedIssueId"]}
@@ -126,6 +131,8 @@ class RelationsLinear(FakeLinear):
 
     def _IssueUpdate(self, variables):
         self.mutations.append(("update", variables["id"], variables["input"]))
+        if self.refuse_update:
+            raise Refused(self.refuse_update)
         spec = variables["input"]
         child = self._find(variables["id"])
         if "parentId" in spec:

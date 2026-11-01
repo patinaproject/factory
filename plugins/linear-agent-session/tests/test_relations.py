@@ -231,11 +231,20 @@ class ParentTest(unittest.TestCase):
         )
         self.assertEqual(fake.mutations, [])
 
+    def test_a_refused_parent_link_names_the_archived_child(self):
+        fake = RelationsLinear({**ISSUES, "ABC-2": {"archivedAt": TS}}, refuse_update="Entity is archived: issue")
+        self.assertEqual(
+            relate(fake, parent_of="ABC-2"),
+            {"error": f"Linear refused the relation: Entity is archived: issue. Archived: ABC-2 (archived {TS})",
+             "archived": [{"identifier": "ABC-2", "archivedAt": TS}]},
+        )
+        self.assertEqual(fake.mutations, [("update", "uuid-ABC-2", {"parentId": "uuid-ABC-1"})])
+
     def test_an_issue_cannot_be_its_own_parent(self):
-        for other in ("ABC-1", "uuid-ABC-1"):
-            with self.subTest(other):
+        for issue, other in (("ABC-1", "ABC-1"), ("ABC-1", "uuid-ABC-1"), ("uuid-ABC-1", "ABC-1")):
+            with self.subTest((issue, other)):
                 fake = RelationsLinear(ISSUES)
-                self.assertEqual(relate(fake, parent_of=other), {"error": "ABC-1 cannot be its own parent"})
+                self.assertEqual(relate(fake, issue=issue, parent_of=other), {"error": "ABC-1 cannot be its own parent"})
                 self.assertEqual(fake.mutations, [])
 
 
