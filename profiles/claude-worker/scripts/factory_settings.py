@@ -145,6 +145,42 @@ def toolchain_checks(repo: dict) -> list[str]:
     return checks
 
 
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+ARTIFACT_KEYS = frozenset({"auth_dir", "organization_uuid", "claude", "operation_model", "design_model"})
+
+
+@dataclass(frozen=True)
+class ArtifactSettings:
+    auth_dir: Path
+    organization_uuid: str
+    claude: Path
+    operation_model: str = "haiku"
+    design_model: str = "opus"
+
+
+def artifact(settings) -> ArtifactSettings:
+    """The artifact service's settings. Not a run-refusing field: only the artifact service refuses on them."""
+    section = settings.get("claude_artifact") if isinstance(settings, dict) else None
+    if not isinstance(section, dict):
+        raise SettingsError("claude_artifact is not set")
+    unknown = sorted(set(section) - ARTIFACT_KEYS)
+    if unknown:
+        raise SettingsError(f"claude_artifact has unknown keys {', '.join(unknown)}")
+    for key in ("auth_dir", "claude"):
+        value = section.get(key)
+        if not (isinstance(value, str) and os.path.isabs(value)):
+            raise SettingsError(f"claude_artifact.{key} must be an absolute path")
+    if not (isinstance(section.get("organization_uuid"), str) and UUID.fullmatch(section["organization_uuid"])):
+        raise SettingsError("claude_artifact.organization_uuid must be the Team organization's lowercase UUID")
+    models = {key: section[key] for key in ("operation_model", "design_model") if key in section}
+    for key, value in models.items():
+        if not (isinstance(value, str) and value):
+            raise SettingsError(f"claude_artifact.{key} must be a non-empty model alias or id")
+    return ArtifactSettings(
+        Path(section["auth_dir"]), section["organization_uuid"], Path(section["claude"]), **models,
+    )
+
+
 GLOBAL_FIELDS = (fresh_after_tokens, max_turns, tier_models, mcp_servers, disabled_mcp_servers)
 REPOSITORY_FIELDS = (worker_entry, toolchain_checks)
 
