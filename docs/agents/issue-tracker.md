@@ -22,12 +22,15 @@ native sync still propagates updates to synced properties in both directions.
 Do not edit or close the Linear copy; close public work on GitHub, and treat any
 disagreement in favor of GitHub.
 
-Two Linear writes on a public issue are sanctioned. The first is its
+Three Linear writes on a public issue are sanctioned. The first is its
 delegate. Setting the Linear copy's delegate to the factory's agent is how the
 factory starts a card for the issue, and removing it archives that card. The
 second is its priority, a Linear-only field that GitHub cannot represent:
-triage sets it on the Linear copy as **Priority rubric** describes. Change no
-other Linear field of a public issue: not its title, body, state, labels, or
+triage sets it on the Linear copy as **Priority rubric** describes. The third
+is a top-level comment from the factory's agent, posted on the Linear copy
+when a teammate's reply in an agent session asks for it. It has no parent, so
+it stays out of the synced thread and never reaches GitHub. Change no other
+Linear field of a public issue: not its title, body, state, labels, or
 assignee.
 
 The sync creates a comment thread whose replies publish to GitHub. Comments

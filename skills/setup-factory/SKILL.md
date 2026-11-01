@@ -980,7 +980,11 @@ waiting cards only while fewer than `max_running` run or wait assigned.
 
 `default_team` is the Linear team key, such as `ABC`, where
 `linear_issue_create` files an issue when the call names no team. Its value
-belongs in the private record. `kanban_url` is the dashboard's
+belongs in the private record. The plugin's `linear_issue_comment` and
+`github_issue_create` tools, like `linear_issue_create`, take an
+`idempotency_key` and keep one record per key under
+`$HERMES_HOME/plugin-data/linear-agent-session/idempotency/`. They run only on
+the gateway's webhook platform, so a worker or CLI session cannot call them. `kanban_url` is the dashboard's
 Kanban page; triage links it from the "Queued" activity in Linear. Leave it
 empty to post no link. Set `github.login` to the App's
 `[bot]` login. It is required: `render.py` rejects a value that does not end

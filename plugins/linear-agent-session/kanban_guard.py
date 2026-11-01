@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 PULL_URL = re.compile(r"https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)", re.IGNORECASE)
 
 WEBHOOK_PLATFORM = "webhook"
+GATEWAY_ONLY_TOOLS = ("linear_issue_comment", "github_issue_create")
 
 
 def refusal(tool_name: str, args: Any, platform: Callable[[], str]) -> Optional[str]:
@@ -30,6 +31,11 @@ def refusal(tool_name: str, args: Any, platform: Callable[[], str]) -> Optional[
             "A triage turn creates a card only with the shell command `hermes kanban create` (or "
             "`hermes kanban --board triage create` for a triage card), because the kanban_create tool cannot set "
             "the card's branch. Run the command that the prompt's card-creation step shows."
+        )
+    if tool_name in GATEWAY_ONLY_TOOLS and platform() != WEBHOOK_PLATFORM:
+        return (
+            f"{tool_name} runs only in a Linear agent session on the gateway, answering a teammate's reply. "
+            "Name the issue or comment you wanted in your card comment or pull request, and a person files it."
         )
     return None
 
