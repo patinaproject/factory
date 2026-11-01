@@ -85,16 +85,16 @@ def session_urls_ok(*urls):
 LIVE_SESSION_URL = "https://linear.app/example/agent-session/live"
 
 
+def sibling(id, status, created, app, links=()):
+    return {
+        "id": id, "status": status, "createdAt": created, "appUser": {"id": app},
+        "externalUrls": [{"label": label, "url": url} for label, url in links],
+    }
+
+
 def sessions_ok(others=(), live_urls=()):
-    """Each of `others` is `(id, status, createdAt, app)` plus an optional list of `(label, url)` links."""
     nodes = [{"id": "live", "status": "active", "createdAt": "2026-10-27T10:00:00.000Z", "appUser": {"id": "app-1"}}]
-    nodes += [
-        {
-            "id": i, "status": status, "createdAt": created, "appUser": {"id": app},
-            "externalUrls": [{"label": label, "url": url} for label, url in (links[0] if links else ())],
-        }
-        for i, status, created, app, *links in others
-    ]
+    nodes += [sibling(*other) for other in others]
     session = {
         "url": LIVE_SESSION_URL,
         "createdAt": "2026-10-27T10:00:00.000Z",

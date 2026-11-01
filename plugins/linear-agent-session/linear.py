@@ -407,7 +407,6 @@ class LinearClient:
         return closed
 
     def _carry_pull_requests(self, agent_session_id: str, session: dict, older: list) -> None:
-        """Copy the older sessions' pull request links to the live one, so its sidebar keeps them. Never raises."""
         held = {review_links(u["url"]) for u in session["externalUrls"]}
         missing = {}
         for other in older:

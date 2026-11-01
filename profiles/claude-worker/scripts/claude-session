@@ -872,7 +872,6 @@ def title_agent_session(client, session_id: str | None, issue_id: str, triage: b
 
 
 def sync_pull_requests(client, session_id: str, args: argparse.Namespace, branch: str, report: dict) -> dict:
-    """Adds the branch's pull requests to the card's agent session and folds the outcome into the run's `session_links`."""
     linear = plugin_module("linear-agent-session", "linear")
     step = session_links.sync_session_pull_requests(linear, client, session_id, args.repo, branch, args.takeover_pr)
     return session_links.combine(report, step)

@@ -45,7 +45,6 @@ def combine(total: dict, step: dict) -> dict:
 
 
 def branch_pull_links(repo: str, branch: str, gh=card_branch.run_gh) -> list[dict]:
-    """Every pull request whose head is `branch`, whoever opened it and whatever its state, oldest first."""
     pulls = gh(f"repos/{repo}/pulls?state=all&head={repo.split('/')[0]}:{branch}&per_page=100")
     return [pull_link(pull["html_url"]) for pull in sorted(pulls, key=lambda pull: pull["number"])]
 
@@ -53,7 +52,6 @@ def branch_pull_links(repo: str, branch: str, gh=card_branch.run_gh) -> list[dic
 def sync_session_pull_requests(
     linear, client, session_id: str, repo: str, branch: str, takeover_pr: str | None = None, gh=card_branch.run_gh,
 ) -> dict:
-    """Add each pull request on the branch, and the taken-over one, that the session lacks. Never removes, never raises."""
     links, error = [], None
     try:
         if takeover_pr:
