@@ -5,9 +5,11 @@ import os
 import re
 import shutil
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from tests.support import BOT_LOGIN, SCRIPTS, with_interpreter
@@ -34,6 +36,8 @@ if argv[:2] == ["config", "get"]:
     print(json.dumps(state["settings"]))
 elif argv[:2] == ["kanban", "list"]:
     print(json.dumps(state["tasks"]))
+elif argv[:3] == ["kanban", "boards", "list"]:
+    print(json.dumps([{"slug": "default", "db_path": state["board_db"]}]))
 elif argv[:2] == ["kanban", "show"]:
     print(json.dumps({"task": {"id": argv[2]}, "comments": state["comments"].get(argv[2], [])}))
 elif argv[:2] == ["kanban", "comment"] and argv[2] in state.get("comment_fails", []):
@@ -156,8 +160,16 @@ class ReopenConflictsTest(unittest.TestCase):
         for fake in (self.hermes, self.gh):
             os.chmod(fake, 0o755)
         self.state_path = self.dir / "state.json"
+        self.board_db = self.dir / "default.db"
+        with closing(sqlite3.connect(self.board_db)) as db:
+            db.execute(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY, last_failure_error TEXT, consecutive_failures INTEGER DEFAULT 0)"
+            )
+            db.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, outcome TEXT, ended_at INTEGER)")
+            db.commit()
         self.state = {
             "settings": {"github": {"login": BOT_LOGIN}}, "tasks": [], "comments": {}, "pulls": {}, "graphql": {}, "rules": {},
+            "board_db": str(self.board_db),
         }
 
     def run_script(self, home: Path | None = None) -> subprocess.CompletedProcess:
@@ -176,7 +188,7 @@ class ReopenConflictsTest(unittest.TestCase):
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
     def writes(self) -> list:
-        reads = (["config", "get"], ["kanban", "list"], ["kanban", "show"])
+        reads = (["config", "get"], ["kanban", "list"], ["kanban", "show"], ["kanban", "boards"])
         calls = [call for call in self.hermes_calls() if call[:2] not in reads]
         for call in calls:
             if call[:2] == ["kanban", "comment"]:
@@ -229,6 +241,34 @@ class ReopenConflictsTest(unittest.TestCase):
             "confidence, stop and make the first line of your final message `Needs input:` followed by the reason.\n\n"
             f"failed_check_head: {head}"
         )
+
+    QUOTA_ERROR = "pid 1 exited rate-limited (quota wall) — requeued without counting a failure"
+
+    def seed_failure(self, *runs: tuple[str, int]) -> None:
+        with closing(sqlite3.connect(self.board_db)) as db:
+            db.execute("INSERT INTO tasks VALUES ('t_1', ?, 2)", (self.QUOTA_ERROR,))
+            db.executemany("INSERT INTO task_runs (task_id, outcome, ended_at) VALUES ('t_1', ?, ?)", runs)
+            db.commit()
+
+    def failure_row(self) -> tuple:
+        with closing(sqlite3.connect(self.board_db)) as db:
+            return db.execute("SELECT last_failure_error, consecutive_failures FROM tasks WHERE id = 't_1'").fetchone()
+
+    def test_a_handback_clears_an_old_quota_error_after_a_review_run(self) -> None:
+        self.seed_failure(("rate_limited", 100), ("review_requested", 200))
+        self.state["tasks"] = [card("t_1", "review", "abc-1")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1")]
+        result = self.run_script()
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertEqual(self.failure_row(), (None, 2))
+
+    def test_a_handback_keeps_the_error_when_the_newest_ended_run_is_rate_limited(self) -> None:
+        self.seed_failure(("review_requested", 100), ("rate_limited", 200))
+        self.state["tasks"] = [card("t_1", "review", "abc-1")]
+        self.state["pulls"][REPO] = [pull(7, "abc-1")]
+        result = self.run_script()
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertEqual(self.failure_row(), (self.QUOTA_ERROR, 2))
 
     def test_a_conflicting_review_card_gets_a_comment_then_a_review_reopen(self) -> None:
         self.state["tasks"] = [card("t_1", "review", "abc-1")]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -178,8 +179,12 @@ class CardTransitionTest(unittest.TestCase):
             "branch_has_pr": True,
         }
         with closing(sqlite3.connect(self.state["default_db"])) as db:
-            db.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, completion_contract TEXT)")
-            db.execute("INSERT INTO tasks VALUES ('t_1', 'triage', ?)", (REPOSITORY_CONTRACT,))
+            db.execute(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, completion_contract TEXT, "
+                "last_failure_error TEXT, consecutive_failures INTEGER DEFAULT 0)"
+            )
+            db.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, outcome TEXT, ended_at INTEGER)")
+            db.execute("INSERT INTO tasks (id, status, completion_contract) VALUES ('t_1', 'triage', ?)", (REPOSITORY_CONTRACT,))
             db.commit()
         self.home = self.dir / "hermes"
         (self.home / "plugins").mkdir(parents=True)
@@ -513,7 +518,57 @@ class ReopenAndStopTest(CardTransitionTest):
         self.given("review")
         code, out = self.transition("reopen", "t_1", "--reason", "changes requested on GitHub; see the card comments")
         self.assertEqual((code, out), (0, {"action": "reopened", "post": None}))
-        self.assertEqual(self.calls(), [["reopen-review", "t_1", "--reason", "changes requested on GitHub; see the card comments"]])
+        self.assertEqual(self.state_changes(), [["reopen-review", "t_1", "--reason", "changes requested on GitHub; see the card comments"]])
+
+    QUOTA_ERROR = "pid 1 exited rate-limited (quota wall) — requeued without counting a failure"
+
+    def failure_state(self, error: str | None, *runs: tuple[str, int], failures: int = 2) -> None:
+        with closing(sqlite3.connect(self.state["default_db"])) as db:
+            db.execute("UPDATE tasks SET last_failure_error = ?, consecutive_failures = ? WHERE id = 't_1'", (error, failures))
+            db.executemany("INSERT INTO task_runs (task_id, outcome, ended_at) VALUES ('t_1', ?, ?)", runs)
+            db.commit()
+
+    def failure_row(self) -> tuple:
+        with closing(sqlite3.connect(self.state["default_db"])) as db:
+            return db.execute("SELECT last_failure_error, consecutive_failures FROM tasks WHERE id = 't_1'").fetchone()
+
+    def held_as_blocker_auth(self) -> bool:
+        error, _ = self.failure_row()
+        with closing(sqlite3.connect(self.state["default_db"])) as db:
+            newest = db.execute(
+                "SELECT outcome FROM task_runs WHERE task_id = 't_1' AND ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 1"
+            ).fetchone()
+        outcome = newest[0] if newest else None
+        return bool(error and outcome not in ("crashed", "rate_limited") and re.search(r"quota|rate.?limit|auth", error))
+
+    def test_reopen_clears_an_old_quota_error_after_a_review_run_and_keeps_the_failure_count(self):
+        for ended in ("review_requested", "completed"):
+            with self.subTest(ended):
+                self.setUp()
+                self.given("review")
+                self.failure_state(self.QUOTA_ERROR, ("rate_limited", 100), (ended, 200))
+                self.assertTrue(self.held_as_blocker_auth())
+                code, out = self.transition("reopen", "t_1", "--reason", "changes requested")
+                self.assertEqual((code, out), (0, {"action": "reopened", "post": None}))
+                self.assertEqual(self.state["task"]["status"], "ready")
+                self.assertEqual(self.failure_row(), (None, 2))
+                self.assertFalse(self.held_as_blocker_auth())
+
+    def test_reopen_keeps_the_error_when_the_newest_ended_run_is_not_a_review(self):
+        for outcome in ("rate_limited", "spawn_failed", "crashed", "timed_out", "gave_up", "blocked"):
+            with self.subTest(outcome):
+                self.setUp()
+                self.given("review")
+                self.failure_state(self.QUOTA_ERROR, ("review_requested", 100), (outcome, 200))
+                code, _ = self.transition("reopen", "t_1", "--reason", "changes requested")
+                self.assertEqual(code, 0)
+                self.assertEqual(self.failure_row(), (self.QUOTA_ERROR, 2))
+
+    def test_reopen_keeps_the_error_of_a_card_with_no_ended_run(self):
+        self.given("review")
+        self.failure_state(self.QUOTA_ERROR)
+        self.transition("reopen", "t_1", "--reason", "changes requested")
+        self.assertEqual(self.failure_row(), (self.QUOTA_ERROR, 2))
 
     def test_stop_reopens_a_review_card_then_blocks_it(self):
         self.given("review")

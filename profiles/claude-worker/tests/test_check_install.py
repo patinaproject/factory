@@ -2047,6 +2047,99 @@ class CheckGuardedCardsTest(unittest.TestCase):
         self.assertEqual(self.rows(), [f"guarded card check {self.root / 'kanban.db'}: cannot be read: file is not a database"])
 
 
+class CheckStaleFailureCardsTest(unittest.TestCase):
+    NOW = 1_000_000.0
+    GUARD = ("respawn_guarded", '{"reason": "blocker_auth"}')
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "hermes"
+        self.root.mkdir()
+        self.default = self.board(self.root / "kanban.db")
+
+    def board(self, path: Path) -> sqlite3.Connection:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(path)
+        self.addCleanup(db.close)
+        db.execute("CREATE TABLE tasks (id, status)")
+        db.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id, kind, payload, created_at)")
+        db.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id, outcome, ended_at)")
+        return db
+
+    def card(self, id: str, events: list, runs: list, *, db: sqlite3.Connection | None = None) -> None:
+        db = db or self.default
+        db.execute("INSERT INTO tasks VALUES (?, 'ready')", (id,))
+        for kind, payload, age in events:
+            db.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+                (id, kind, payload, self.NOW - age * 60),
+            )
+        for outcome, age in runs:
+            db.execute("INSERT INTO task_runs (task_id, outcome, ended_at) VALUES (?, ?, ?)", (id, outcome, self.NOW - age * 60))
+        db.commit()
+
+    def rows(self) -> list:
+        return classified(self, check_install.check_guarded_cards(self.root, self.NOW))
+
+    def test_a_card_held_as_blocker_auth_for_an_hour_after_a_review_run_is_reported(self) -> None:
+        self.card("t_held", [(*self.GUARD, 61), (*self.GUARD, 30), (*self.GUARD, 0)], [("rate_limited", 200), ("review_requested", 90)])
+
+        self.assertEqual(self.rows(), [(
+            "guarded card t_held: has been held in ready from its worker as blocker_auth for 61 minutes, because "
+            "last_failure_error still names an old quota or auth error after its newest run requested review; "
+            "reassigning the card clears the error"
+        )])
+
+    def test_a_card_whose_newest_run_completed_is_reported(self) -> None:
+        self.card("t_done", [(*self.GUARD, 60), (*self.GUARD, 0)], [("completed", 90)])
+
+        self.assertEqual([row.split(":")[0] for row in self.rows()], ["guarded card t_done"])
+
+    def test_a_hold_of_fifty_nine_minutes_is_not_reported(self) -> None:
+        self.card("t_new", [(*self.GUARD, 59), (*self.GUARD, 0)], [("review_requested", 90)])
+
+        self.assertEqual(self.rows(), [])
+
+    def test_a_card_whose_newest_run_is_rate_limited_or_crashed_is_not_reported(self) -> None:
+        for outcome in ("rate_limited", "crashed"):
+            with self.subTest(outcome):
+                self.default.execute("DELETE FROM tasks")
+                self.default.execute("DELETE FROM task_events")
+                self.default.execute("DELETE FROM task_runs")
+                self.card("t_other", [(*self.GUARD, 90), (*self.GUARD, 0)], [("review_requested", 200), (outcome, 100)])
+
+                self.assertEqual(self.rows(), [])
+
+    def test_a_hold_broken_by_another_event_counts_from_the_newer_run(self) -> None:
+        self.card("t_back", [(*self.GUARD, 120), ("assigned", None, 40), (*self.GUARD, 30), (*self.GUARD, 0)], [("review_requested", 200)])
+
+        self.assertEqual(self.rows(), [])
+
+    def test_an_active_pr_hold_is_not_reported_as_a_stale_failure(self) -> None:
+        self.card("t_pr", [("respawn_guarded", '{"reason": "active_pr"}', 90), ("respawn_guarded", '{"reason": "active_pr"}', 0)], [("review_requested", 200)])
+
+        self.assertEqual(len(self.rows()), 1)
+        self.assertIn(" as active_pr for ", self.rows()[0])
+
+    def test_a_card_on_another_board_is_reported(self) -> None:
+        other = self.board(self.root / "kanban" / "boards" / "triage" / "kanban.db")
+        self.card("t_triage", [(*self.GUARD, 90), (*self.GUARD, 0)], [("review_requested", 200)], db=other)
+
+        self.assertEqual([row.split(":")[0] for row in self.rows()], ["guarded card t_triage"])
+
+    def test_a_board_without_task_runs_is_reported_as_unreadable(self) -> None:
+        self.default.execute("DROP TABLE task_runs")
+        self.card("t_held", [(*self.GUARD, 90), (*self.GUARD, 0)], [])
+
+        self.assertEqual(self.rows(), [f"guarded card check {self.root / 'kanban.db'}: cannot be read: no such table: task_runs"])
+
+    def test_an_unreadable_board_is_reported(self) -> None:
+        (self.root / "kanban.db").write_bytes(b"not a database")
+
+        self.assertEqual(self.rows(), [f"guarded card check {self.root / 'kanban.db'}: cannot be read: file is not a database"])
+
+
 class CheckStrandedTriageTest(unittest.TestCase):
     NOW = 1_000_000.0
 
