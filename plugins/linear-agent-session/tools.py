@@ -4,11 +4,12 @@ import json
 import logging
 from typing import Callable, Optional
 
-from . import github_issue, triage_exit
+from . import github_issue, idempotency, triage_exit
 from .linear import (
     ACTIVITY_TYPES,
     CLIENT_ERRORS,
     SESSION_VERBS,
+    ArchivedRelationError,
     LinearClient,
     LinearError,
     activity_content,
@@ -61,6 +62,7 @@ ISSUE_PARAMETERS = {
     "type": "object",
     "properties": {"issue": {"type": "string", "description": "Required. Issue UUID or identifier such as ABC-123."}},
 }
+IDEMPOTENCY_KEY_DESCRIPTION = "A string that starts with a UUID. A retry with the same key and arguments returns the first result."
 ISSUE_ARGUMENT_NAMES = ("issue", "id", "issue_id")
 
 ISSUE_SCHEMA = {
@@ -68,7 +70,7 @@ ISSUE_SCHEMA = {
     "description": (
         "Read the Linear issue named by `issue` (UUID or ABC-123). Reads as the agent app and returns "
         "id, identifier, title, cardTitle (the Kanban card title, to use exactly as returned), url, "
-        "gitBranchName, priority, priorityName, "
+        "gitBranchName, priority, archivedAt (the archive timestamp, or null when the issue is not archived), priorityName, "
         "cardPriority (the Kanban card priority for this issue), "
         "description, githubIssues (the URLs of the GitHub issues attached to it), "
         "state, stateType, delegate (the delegate's user ID, or null), labels (names), role_labels (the live label name of each triage role the issue's team and workspace "
@@ -184,10 +186,15 @@ RELATE_SCHEMA = {
     "name": "linear_issue_relate",
     "description": (
         "Relate `issue` (UUID or ABC-123) to another Linear issue: pass duplicate_of to mark `issue` a duplicate "
-        "of it, or blocked_by to block `issue` on it, exactly one of the two. A duplicate moves to the team's "
-        "duplicate status and loses its related relation to the original, and no other relation changes. "
-        "Refuses a conflicting relation and more than 50 relations, changing nothing. Never changes assignee "
-        "or delegate. Returns identifier, related_issue, relation, created, removed_related, and state."
+        "of it, blocked_by to block `issue` on it, or parent_of to make it a child of `issue`, exactly one of the "
+        "three. A duplicate moves to the team's duplicate status and loses its related relation to the original, "
+        "and no other relation changes. A parent link sets the child's parent and refuses a child that already has "
+        "a different parent. Refuses a conflicting relation and more than 50 relations, changing nothing. Never "
+        "changes assignee or delegate. Returns identifier, related_issue, relation, created, removed_related, and "
+        "state for a duplicate or blocker, and identifier (the child), parent, relation, created, and archived for "
+        "a parent link. archived lists {identifier, archivedAt} for each of the two issues that is archived. When "
+        "Linear refuses a relation and an issue is archived, returns error and archived, and retrying the same "
+        "call cannot succeed."
     ),
     "parameters": {
         "type": "object",
@@ -195,6 +202,7 @@ RELATE_SCHEMA = {
             **ISSUE_PARAMETERS["properties"],
             "duplicate_of": {"type": "string", "description": "The issue that `issue` duplicates: UUID or ABC-123."},
             "blocked_by": {"type": "string", "description": "The issue that blocks `issue`: UUID or ABC-123."},
+            "parent_of": {"type": "string", "description": "The child issue: UUID or ABC-123. `issue` becomes its parent."},
         },
     },
 }
@@ -205,7 +213,8 @@ CREATE_SCHEMA = {
         "Create a Linear issue as the agent app: title (required), description in Markdown, team (a team key "
         "such as ABC, else the configured default team), and labels by name, matched whatever their case and "
         "punctuation. Sends no status, so Linear applies the team's default for new issues. Creates no label "
-        "and never sets assignee or delegate. Returns identifier and url."
+        "and never sets assignee or delegate. Pass idempotency_key, a string that starts with a UUID, so a retry "
+        "returns the first result and creates nothing twice. Returns identifier and url."
     ),
     "parameters": {
         "type": "object",
@@ -214,7 +223,49 @@ CREATE_SCHEMA = {
             "description": {"type": "string", "description": "The issue's description, in Markdown."},
             "team": {"type": "string", "description": "Team key, such as ABC. Defaults to the configured default team."},
             "labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to apply."},
+            "idempotency_key": {"type": "string", "description": IDEMPOTENCY_KEY_DESCRIPTION},
         },
+    },
+}
+
+COMMENT_SCHEMA = {
+    "name": "linear_issue_comment",
+    "description": (
+        "Post a top-level comment on the Linear issue `issue` (UUID or ABC-123) as the agent app: body, in "
+        "Markdown. Replies to no thread, so it stays in Linear even on the copy of a public GitHub issue. Pass "
+        "idempotency_key, a string that starts with a UUID; a retry returns the first result and posts nothing "
+        "twice. Returns url and id."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            **ISSUE_PARAMETERS["properties"],
+            "body": {"type": "string", "description": "Required. The comment, in Markdown."},
+            "idempotency_key": {"type": "string", "description": IDEMPOTENCY_KEY_DESCRIPTION},
+        },
+        "required": ["issue", "body", "idempotency_key"],
+    },
+}
+
+GITHUB_CREATE_SCHEMA = {
+    "name": "github_issue_create",
+    "description": (
+        "Create an issue in the public GitHub repository `repo` (owner/name) as the factory's GitHub App, with "
+        "one POST: title, body in Markdown, and labels by name, matched whatever their case and punctuation. "
+        "Refuses a private repository and a label the repository lacks. Never sets an assignee. Pass "
+        "idempotency_key, a string that starts with a UUID; a retry returns the first result and creates "
+        "nothing twice. Returns url and number."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "repo": {"type": "string", "description": "Required. owner/name of a public repository."},
+            "title": {"type": "string", "description": "Required. The issue's title."},
+            "body": {"type": "string", "description": "Required. The issue's body, in Markdown."},
+            "labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to apply."},
+            "idempotency_key": {"type": "string", "description": IDEMPOTENCY_KEY_DESCRIPTION},
+        },
+        "required": ["repo", "title", "body", "idempotency_key"],
     },
 }
 
@@ -382,16 +433,24 @@ def run_relate(client_factory: ClientFactory, args: dict) -> str:
     def run() -> dict:
         _refuse_people(args)
         issue = _issue_argument(args)
-        asked = {kind: args[name] for name, kind in (("duplicate_of", "duplicate"), ("blocked_by", "blocks")) if args.get(name)}
+        asked = {kind: args[name] for name, kind in (("duplicate_of", "duplicate"), ("blocked_by", "blocks"), ("parent_of", "parent")) if args.get(name)}
         if len(asked) != 1:
-            raise LinearError("pass exactly one of duplicate_of or blocked_by")
+            raise LinearError("pass exactly one of duplicate_of, blocked_by, or parent_of")
         ((kind, other),) = asked.items()
-        return client_factory().relate_issues(issue, other, kind)
+        try:
+            return client_factory().relate_issues(issue, other, kind)
+        except ArchivedRelationError as error:
+            return {"error": str(error), "archived": error.archived}
 
     return _tool_result_or_error(run)
 
 
-def run_create(client_factory: ClientFactory, default_team: Callable[[], str], args: dict) -> str:
+def run_create(
+    client_factory: ClientFactory,
+    default_team: Callable[[], str],
+    args: dict,
+    idempotency_dir: Optional[str] = None,
+) -> str:
     def run() -> dict:
         _refuse_people(args)
         title = _title(args)
@@ -400,8 +459,49 @@ def run_create(client_factory: ClientFactory, default_team: Callable[[], str], a
         team = (args.get("team") or default_team() or "").strip()
         if not team:
             raise LinearError("pass team, a Linear team key, or set the default_team setting")
-        return client_factory().create_issue(
-            team, title, args.get("description") or "", labels=_names(args.get("labels"))
+
+        def send() -> dict:
+            return client_factory().create_issue(
+                team, title, args.get("description") or "", labels=_names(args.get("labels"))
+            )
+
+        if args.get("idempotency_key") is None:
+            return send()
+        return idempotency.once(idempotency_dir, "linear_issue_create", args["idempotency_key"], args, send)
+
+    return _tool_result_or_error(run)
+
+
+def run_comment(client_factory: ClientFactory, args: dict, idempotency_dir: Optional[str] = None) -> str:
+    def run() -> dict:
+        _refuse_people(args)
+        _refuse_unknown(args, COMMENT_SCHEMA)
+        key = idempotency.check_key(args.get("idempotency_key"))
+        issue = _issue_argument(args)
+        body = args.get("body")
+        if not isinstance(body, str) or not body.strip():
+            raise LinearError("pass body, the comment's Markdown")
+        return idempotency.once(
+            idempotency_dir, "linear_issue_comment", key, args, lambda: client_factory().comment_on_issue(issue, body)
+        )
+
+    return _tool_result_or_error(run)
+
+
+def run_github_create(args: dict, idempotency_dir: Optional[str] = None, gh: github_issue.Gh = github_issue.run_gh) -> str:
+    def run() -> dict:
+        _refuse_people(args)
+        key = idempotency.check_key(args.get("idempotency_key"))
+        repo, title, body = args.get("repo"), _title(args), args.get("body")
+        if not (isinstance(repo, str) and title and isinstance(body, str)):
+            raise LinearError("pass repo (owner/name), title, and body")
+        labels = _names(args.get("labels"))
+        return idempotency.once(
+            idempotency_dir,
+            "github_issue_create",
+            key,
+            args,
+            lambda: github_issue.create_issue(repo, title, body, labels, gh=gh),
         )
 
     return _tool_result_or_error(run)
@@ -428,6 +528,12 @@ def _refuse_people(args: dict) -> None:
     refused = sorted(k for k in args if "assignee" in k.casefold() or "delegate" in k.casefold())
     if refused:
         raise LinearError(f"this tool never changes assignee or delegate; drop {', '.join(refused)}")
+
+
+def _refuse_unknown(args: dict, schema: dict) -> None:
+    unknown = sorted(set(args) - set(schema["parameters"]["properties"]))
+    if unknown:
+        raise LinearError(f"{schema['name']} takes only {', '.join(schema['parameters']['properties'])}; drop {', '.join(unknown)}")
 
 
 def _title(args: dict) -> Optional[str]:
