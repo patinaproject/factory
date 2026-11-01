@@ -9,6 +9,7 @@ from .linear import (
     ACTIVITY_TYPES,
     CLIENT_ERRORS,
     SESSION_VERBS,
+    ArchivedRelationError,
     LinearClient,
     LinearError,
     activity_content,
@@ -68,7 +69,7 @@ ISSUE_SCHEMA = {
     "description": (
         "Read the Linear issue named by `issue` (UUID or ABC-123). Reads as the agent app and returns "
         "id, identifier, title, cardTitle (the Kanban card title, to use exactly as returned), url, "
-        "gitBranchName, priority, priorityName, "
+        "gitBranchName, priority, archivedAt (the archive timestamp, or null when the issue is not archived), priorityName, "
         "cardPriority (the Kanban card priority for this issue), "
         "description, githubIssues (the URLs of the GitHub issues attached to it), "
         "state, stateType, delegate (the delegate's user ID, or null), labels (names), role_labels (the live label name of each triage role the issue's team and workspace "
@@ -184,10 +185,15 @@ RELATE_SCHEMA = {
     "name": "linear_issue_relate",
     "description": (
         "Relate `issue` (UUID or ABC-123) to another Linear issue: pass duplicate_of to mark `issue` a duplicate "
-        "of it, or blocked_by to block `issue` on it, exactly one of the two. A duplicate moves to the team's "
-        "duplicate status and loses its related relation to the original, and no other relation changes. "
-        "Refuses a conflicting relation and more than 50 relations, changing nothing. Never changes assignee "
-        "or delegate. Returns identifier, related_issue, relation, created, removed_related, and state."
+        "of it, blocked_by to block `issue` on it, or parent_of to make it a child of `issue`, exactly one of the "
+        "three. A duplicate moves to the team's duplicate status and loses its related relation to the original, "
+        "and no other relation changes. A parent link sets the child's parent and refuses a child that already has "
+        "a different parent. Refuses a conflicting relation and more than 50 relations, changing nothing. Never "
+        "changes assignee or delegate. Returns identifier, related_issue, relation, created, removed_related, and "
+        "state for a duplicate or blocker, and identifier (the child), parent, relation, created, and archived for "
+        "a parent link. archived lists {identifier, archivedAt} for each of the two issues that is archived. When "
+        "Linear refuses a relation and an issue is archived, returns error and archived, and retrying the same "
+        "call cannot succeed."
     ),
     "parameters": {
         "type": "object",
@@ -195,6 +201,7 @@ RELATE_SCHEMA = {
             **ISSUE_PARAMETERS["properties"],
             "duplicate_of": {"type": "string", "description": "The issue that `issue` duplicates: UUID or ABC-123."},
             "blocked_by": {"type": "string", "description": "The issue that blocks `issue`: UUID or ABC-123."},
+            "parent_of": {"type": "string", "description": "The child issue: UUID or ABC-123. `issue` becomes its parent."},
         },
     },
 }
@@ -382,11 +389,14 @@ def run_relate(client_factory: ClientFactory, args: dict) -> str:
     def run() -> dict:
         _refuse_people(args)
         issue = _issue_argument(args)
-        asked = {kind: args[name] for name, kind in (("duplicate_of", "duplicate"), ("blocked_by", "blocks")) if args.get(name)}
+        asked = {kind: args[name] for name, kind in (("duplicate_of", "duplicate"), ("blocked_by", "blocks"), ("parent_of", "parent")) if args.get(name)}
         if len(asked) != 1:
-            raise LinearError("pass exactly one of duplicate_of or blocked_by")
+            raise LinearError("pass exactly one of duplicate_of, blocked_by, or parent_of")
         ((kind, other),) = asked.items()
-        return client_factory().relate_issues(issue, other, kind)
+        try:
+            return client_factory().relate_issues(issue, other, kind)
+        except ArchivedRelationError as error:
+            return {"error": str(error), "archived": error.archived}
 
     return _tool_result_or_error(run)
 

@@ -138,7 +138,7 @@ PRIORITIES = {0: ("No priority", 0), 1: ("Urgent", 4), 2: ("High", 3), 3: ("Medi
 
 ISSUE_QUERY = """query Issue($id: String!) {
   issue(id: $id) {
-    id identifier title description url branchName priority
+    id identifier title description url branchName priority archivedAt
     state { name type }
     delegate { id }
     assignee { id name gitHubUserId app }
@@ -242,7 +242,8 @@ ISSUE_RELATIONS_QUERY = """query IssueRelations($a: String!, $b: String!) {
   b: issue(id: $b) { ...RelationFields }
 }
 fragment RelationFields on Issue {
-  id identifier
+  id identifier archivedAt
+  parent { id identifier }
   state { name type }
   team { states { nodes { id name type } } }
   relations(first: 51) { pageInfo { hasNextPage } nodes { id type issue { id identifier } relatedIssue { id identifier } } }
@@ -293,6 +294,12 @@ def review_links(text: str) -> str:
 
 class LinearError(Exception):
     pass
+
+
+class ArchivedRelationError(LinearError):
+    def __init__(self, message: str, archived: list) -> None:
+        super().__init__(message)
+        self.archived = archived
 
 
 CLIENT_ERRORS = (LinearError, broker_client.BrokerError)
@@ -506,6 +513,7 @@ class LinearClient:
             **_issue_summary(issue),
             "cardTitle": card_title(issue["identifier"], issue["title"]),
             "priority": priority,
+            "archivedAt": issue["archivedAt"],
             "priorityName": priority_name,
             "cardPriority": card_priority,
             "description": issue["description"] or "",
@@ -687,22 +695,32 @@ class LinearClient:
         return {"identifier": payload["issue"]["identifier"], "url": payload["issue"]["url"]}
 
     def relate_issues(self, id_or_identifier: str, other: str, kind: str) -> dict:
-        """Make `issue` a duplicate of `other` (kind `duplicate`), or make `other` block it (kind `blocks`).
+        """Make `issue` a duplicate of `other` (kind `duplicate`), make `other` block it (kind `blocks`),
+        or make `other` a child of `issue` (kind `parent`).
 
         A duplicate also loses the `related` relation between the two and moves to the team's duplicate status.
         No other relation is touched.
         """
-        if kind not in RELATION_RULES:
-            raise LinearError(f"unknown relation kind {kind!r}; expected one of {', '.join(RELATION_RULES)}")
+        if kind != "parent" and kind not in RELATION_RULES:
+            raise LinearError(f"unknown relation kind {kind!r}; expected one of {', '.join([*RELATION_RULES, 'parent'])}")
         a, b, relations = self._read_relations(id_or_identifier, other)
+        archived = _archived_entries(a, b)
+        if kind == "parent":
+            return self._link_parent(a, b, archived)
         existing = decide_relation(kind, a, b, relations)
         if existing is None:
             # A `blocks` relation runs from the blocker to the blocked issue; a duplicate from the duplicate to the original.
             source, target = (b, a) if kind == "blocks" else (a, b)
-            payload = self._graphql(
-                ISSUE_RELATION_CREATE_MUTATION,
-                {"input": {"issueId": source["id"], "relatedIssueId": target["id"], "type": kind}},
-            )
+            try:
+                payload = self._graphql(
+                    ISSUE_RELATION_CREATE_MUTATION,
+                    {"input": {"issueId": source["id"], "relatedIssueId": target["id"], "type": kind}},
+                )
+            except LinearError as error:
+                if archived:
+                    names = " and ".join(f"{e['identifier']} (archived {e['archivedAt']})" for e in archived)
+                    raise ArchivedRelationError(f"Linear refused the relation: {error}. Archived: {names}", archived) from error
+                raise
             if not payload["issueRelationCreate"]["success"]:
                 raise LinearError("issueRelationCreate reported success: false")
         result = {
@@ -724,6 +742,24 @@ class LinearClient:
                     result["removed_related"] = True
             result["state"] = self._move_to_duplicate_status(a)
         return result
+
+    def _link_parent(self, parent: dict, child: dict, archived: list) -> dict:
+        if parent["id"] == child["id"]:
+            raise LinearError(f"{parent['identifier']} cannot be its own parent")
+        current = child["parent"]
+        if current is not None and current["id"] != parent["id"]:
+            raise LinearError(f"{child['identifier']} already has parent {current['identifier']}, so nothing was changed")
+        if current is None:
+            payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": child["id"], "input": {"parentId": parent["id"]}})
+            if not payload["issueUpdate"]["success"]:
+                raise LinearError("issueUpdate reported success: false")
+        return {
+            "identifier": child["identifier"],
+            "parent": parent["identifier"],
+            "relation": "parent",
+            "created": current is None,
+            "archived": archived,
+        }
 
     def _read_relations(self, first: str, second: str, most: int = RELATIONS_READ) -> tuple:
         data = self._graphql(ISSUE_RELATIONS_QUERY, {"a": first, "b": second})
@@ -1014,6 +1050,10 @@ def decide_relation(kind: str, a: dict, b: dict, relations: dict) -> Optional[Re
                 text = message.format(a=a["identifier"], b=b["identifier"], target=a["names"][relation.target])
                 raise LinearError(f"{text} (relation {relation.id}), so nothing was changed")
     return None
+
+
+def _archived_entries(*issues: dict) -> list:
+    return [{"identifier": i["identifier"], "archivedAt": i["archivedAt"]} for i in issues if i["archivedAt"]]
 
 
 def _blocking_issues(relations: dict) -> list:

@@ -195,11 +195,64 @@ class RefusalTest(unittest.TestCase):
                 self.assertEqual((fake.graphql_requests, fake.token_requests), ([], []))
 
     def test_exactly_one_relation_argument_is_required_before_any_request(self):
-        for args in ({}, {"duplicate_of": "ABC-2", "blocked_by": "ABC-3"}):
+        for args in ({}, {"duplicate_of": "ABC-2", "blocked_by": "ABC-3"}, {"parent_of": "ABC-2", "blocked_by": "ABC-3"}):
             with self.subTest(args):
                 fake = RelationsLinear(ISSUES)
-                self.assertEqual(relate(fake, **args), {"error": "pass exactly one of duplicate_of or blocked_by"})
+                self.assertEqual(relate(fake, **args), {"error": "pass exactly one of duplicate_of, blocked_by, or parent_of"})
                 self.assertEqual(fake.graphql_requests, [])
+
+
+TS = "2026-03-04T05:06:07.000Z"
+
+
+class ParentTest(unittest.TestCase):
+    def test_an_archived_child_with_no_parent_gets_the_parent(self):
+        fake = RelationsLinear({**ISSUES, "ABC-2": {"archivedAt": TS}})
+        self.assertEqual(
+            relate(fake, parent_of="ABC-2"),
+            {"identifier": "ABC-2", "parent": "ABC-1", "relation": "parent", "created": True,
+             "archived": [{"identifier": "ABC-2", "archivedAt": TS}]},
+        )
+        self.assertEqual(fake.mutations, [("update", "uuid-ABC-2", {"parentId": "uuid-ABC-1"})])
+        self.assertEqual(fake.issues["ABC-2"]["parent"], "ABC-1")
+
+    def test_a_child_that_already_has_the_parent_changes_nothing(self):
+        fake = RelationsLinear({**ISSUES, "ABC-2": {"parent": "ABC-1"}})
+        output = relate(fake, parent_of="ABC-2")
+        self.assertEqual(
+            output, {"identifier": "ABC-2", "parent": "ABC-1", "relation": "parent", "created": False, "archived": []}
+        )
+        self.assertEqual(fake.mutations, [])
+
+    def test_a_child_with_a_different_parent_is_refused(self):
+        fake = RelationsLinear({**ISSUES, "ABC-2": {"parent": "ABC-3"}})
+        self.assertEqual(
+            relate(fake, parent_of="ABC-2"), {"error": "ABC-2 already has parent ABC-3, so nothing was changed"}
+        )
+        self.assertEqual(fake.mutations, [])
+
+    def test_an_issue_cannot_be_its_own_parent(self):
+        for other in ("ABC-1", "uuid-ABC-1"):
+            with self.subTest(other):
+                fake = RelationsLinear(ISSUES)
+                self.assertEqual(relate(fake, parent_of=other), {"error": "ABC-1 cannot be its own parent"})
+                self.assertEqual(fake.mutations, [])
+
+
+class ArchivedRefusalTest(unittest.TestCase):
+    def test_a_refused_relation_names_the_archived_blocker(self):
+        fake = RelationsLinear({**ISSUES, "ABC-2": {"archivedAt": TS}}, refuse_create="Entity is archived: issue")
+        output = relate(fake, blocked_by="ABC-2")
+        self.assertEqual(
+            output,
+            {"error": f"Linear refused the relation: Entity is archived: issue. Archived: ABC-2 (archived {TS})",
+             "archived": [{"identifier": "ABC-2", "archivedAt": TS}]},
+        )
+        self.assertEqual(fake.mutations, [("create", {"issueId": "uuid-ABC-2", "relatedIssueId": "uuid-ABC-1", "type": "blocks"})])
+
+    def test_a_refusal_with_no_archived_issue_passes_through(self):
+        fake = RelationsLinear(ISSUES, refuse_create="Entity is archived: issue")
+        self.assertEqual(relate(fake, blocked_by="ABC-2"), {"error": "Entity is archived: issue"})
 
 
 if __name__ == "__main__":

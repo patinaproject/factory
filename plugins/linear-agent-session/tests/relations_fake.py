@@ -28,9 +28,12 @@ class RelationsLinear(FakeLinear):
         states=STATES,
         create_moves_to_duplicate=False,
         create_removes_related=False,
+        refuse_create=None,
     ) -> None:
         super().__init__()
-        self.issues = {i: {"id": f"uuid-{i}", "identifier": i, "state": "Todo", **extra} for i, extra in dict(issues).items()}
+        self.issues = {
+            i: {"id": f"uuid-{i}", "identifier": i, "state": "Todo", "archivedAt": None, "parent": None, **extra} for i, extra in dict(issues).items()
+        }
         self.states = [dict(s) for s in states]
         self.relations = [
             {"id": f"rel-{n}", "type": t, "issue": f"uuid-{a}", "relatedIssue": f"uuid-{b}"}
@@ -38,6 +41,7 @@ class RelationsLinear(FakeLinear):
         ]
         self.create_moves_to_duplicate = create_moves_to_duplicate
         self.create_removes_related = create_removes_related
+        self.refuse_create = refuse_create
         self.mutations = []
         self.created = 0
 
@@ -56,7 +60,12 @@ class RelationsLinear(FakeLinear):
         self.graphql_requests.append(body)
         self.query, variables = body["query"], body["variables"]
         marker = next(m for m in QUERY_MARKERS if f"{m}(" in self.query)
-        return FakeResponse(200, json.dumps({"data": getattr(self, f"_{marker}")(variables)}).encode())
+        data = getattr(self, f"_{marker}")(variables)
+        if data is None:
+            body = {"errors": [{"message": self.refuse_create}], "data": None}
+        else:
+            body = {"data": data}
+        return FakeResponse(200, json.dumps(body).encode())
 
     def _find(self, key):
         return next((i for i in self.issues.values() if key in (i["id"], i["identifier"])), None)
@@ -77,9 +86,12 @@ class RelationsLinear(FakeLinear):
         if issue is None:
             return None
         state = next(s for s in self.states if s["name"] == issue["state"])
+        parent = self._find(issue["parent"]) if issue["parent"] else None
         return {
             "id": issue["id"],
             "identifier": issue["identifier"],
+            "archivedAt": issue["archivedAt"],
+            "parent": {"id": parent["id"], "identifier": parent["identifier"]} if parent else None,
             "state": {"name": state["name"], "type": state["type"]},
             "team": {"states": {"nodes": self.states}},
             "relations": self._page([r for r in self.relations if r["issue"] == issue["id"]]),
@@ -93,6 +105,8 @@ class RelationsLinear(FakeLinear):
     def _IssueRelationCreate(self, variables):
         spec = variables["input"]
         self.mutations.append(("create", spec))
+        if self.refuse_create:
+            return None
         self.created += 1
         self.relations.append(
             {"id": f"rel-new-{self.created}", "type": spec["type"], "issue": spec["issueId"], "relatedIssue": spec["relatedIssueId"]}
@@ -112,8 +126,12 @@ class RelationsLinear(FakeLinear):
 
     def _IssueUpdate(self, variables):
         self.mutations.append(("update", variables["id"], variables["input"]))
-        state = next(s for s in self.states if s["id"] == variables["input"]["stateId"])
-        self._find(variables["id"])["state"] = state["name"]
+        spec = variables["input"]
+        child = self._find(variables["id"])
+        if "parentId" in spec:
+            child["parent"] = self._find(spec["parentId"])["identifier"]
+        else:
+            child["state"] = next(s for s in self.states if s["id"] == spec["stateId"])["name"]
         return {"issueUpdate": {"success": True}}
 
     def _IssueBlockers(self, variables):

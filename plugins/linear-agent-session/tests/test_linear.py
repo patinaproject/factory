@@ -735,6 +735,7 @@ class IssueTest(unittest.TestCase):
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "branchName": "abc-123-fix-checkout",
                 "priority": 2.0,
+                "archivedAt": None,
                 "state": {"name": "Todo", "type": "unstarted"},
                 "delegate": {"id": "app-user-1"},
                 "assignee": {"id": "user-1", "name": "Ted Example", "gitHubUserId": "1001", "app": False},
@@ -778,6 +779,7 @@ class IssueTest(unittest.TestCase):
                 "url": "https://linear.app/example/issue/ABC-123/fix-checkout",
                 "gitBranchName": "abc-123-fix-checkout",
                 "priority": 2,
+                "archivedAt": None,
                 "priorityName": "High",
                 "cardPriority": 3,
                 "state": "Todo",
@@ -820,6 +822,15 @@ class IssueTest(unittest.TestCase):
                 response["data"]["issue"]["priority"] = float(linear_priority)
                 issue = make_client(FakeLinear([(200, response)])).get_issue("ABC-123")
                 self.assertEqual((issue["priorityName"], issue["cardPriority"]), (name, card_priority))
+
+    def test_an_archived_issue_returns_its_archive_timestamp(self):
+        response = json.loads(json.dumps(self.RESPONSE))
+        response["data"]["issue"]["archivedAt"] = "2026-03-04T05:06:07.000Z"
+        issue = make_client(FakeLinear([(200, response)])).get_issue("ABC-123")
+        self.assertEqual(issue["archivedAt"], "2026-03-04T05:06:07.000Z")
+
+    def test_an_issue_that_is_not_archived_returns_none(self):
+        self.assertIsNone(make_client(FakeLinear([(200, self.RESPONSE)])).get_issue("ABC-123")["archivedAt"])
 
     def test_issue_without_delegate(self):
         response = json.loads(json.dumps(self.RESPONSE))
