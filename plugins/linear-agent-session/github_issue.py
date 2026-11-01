@@ -64,12 +64,17 @@ def label_named(repository: str, names: Sequence[str], name: str) -> str:
     return match[0]
 
 
+def require_public(repo: str, verb: str, gh: Gh) -> None:
+    """A private repository's issues are canonical in Linear."""
+    visibility = json.loads(gh(["api", f"repos/{repo}"], None))["visibility"]
+    if visibility != "public":
+        raise LinearError(f"{repo} is {visibility}; {verb} its issues in Linear")
+
+
 def create_issue(repo: str, title: str, body: str, labels: Sequence[str] = (), gh: Gh = run_gh) -> dict:
     if not REPOSITORY.fullmatch(repo):
         raise LinearError(f"{repo!r} is not a repository; pass owner/name")
-    visibility = json.loads(gh(["api", f"repos/{repo}"], None))["visibility"]
-    if visibility != "public":
-        raise LinearError(f"{repo} is {visibility}; create its issues in Linear")
+    require_public(repo, "create", gh)
     request: dict = {"title": title, "body": body}
     if labels:
         known = json.loads(gh(["api", "--paginate", "--slurp", f"repos/{repo}/labels?per_page=100"], None))
@@ -95,9 +100,7 @@ def edit_issue(
     if not GITHUB_ISSUE_URL.fullmatch(url):
         raise LinearError(f"{url} is not a GitHub issue URL")
     owner, repo, _, number = url.removeprefix("https://github.com/").split("/")
-    visibility = json.loads(gh(["api", f"repos/{owner}/{repo}"], None))["visibility"]
-    if visibility != "public":
-        raise LinearError(f"{owner}/{repo} is {visibility}; edit its issues in Linear")
+    require_public(f"{owner}/{repo}", "edit", gh)
     path = f"repos/{owner}/{repo}/issues/{number}"
     issue = json.loads(gh(["api", path], None))
     current = [label["name"] for label in issue["labels"]]

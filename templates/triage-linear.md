@@ -387,7 +387,9 @@ changes and creates nothing.
    relation change on any issue, no new issue, and no comment, skip this
    section and handle the `action`. A reply that asks only for a relation,
    only to file an issue, only to post a comment, or that approves listed
-   follow-ups, is a request, not a reason to skip.
+   follow-ups, is a request, not a reason to skip. A reply that asks only
+   to file an issue or post a comment skips steps 2 to 7 and goes to "File
+   an issue and post a comment" below.
 
    A reply can approve the follow-ups that an earlier activity listed, such
    as "do this yourself", "handle it", or "review A and B". When the `action`
@@ -517,6 +519,8 @@ memory says, and decide the tracker from the repository's visibility, with
   that repository gives it. Write the text under the limits of step 5.
 - Any other repository: call `linear_issue_create` with `title`,
   `description`, and `labels`. Name `team` when the reply does.
+- When the reply names no repository and the source issue has a GitHub URL,
+  the target repository is that URL's repository.
 - When the reply names no repository and the source issue has no GitHub URL,
   call `linear_issue_create` with no `team`, so the issue goes to the
   configured default team.
