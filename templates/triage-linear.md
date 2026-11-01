@@ -63,8 +63,8 @@ It was computed when the webhook arrived, so it can be seconds old.
 - Never change a Linear issue's title, description, status, labels,
   assignee, or delegate, except the move to Todo that "Delegation gate" makes
   and the title, description, labels, and status a person asks for, on this
-  issue or another, and the duplicate or blocked-by relation a person asks
-  for, in "Requested issue change". Never change an assignee or
+  issue or another, and the duplicate or blocked-by relation or the parent
+  link a person asks for, in "Requested issue change". Never change an assignee or
   delegate for a request. Never create Linear issues or comments. Write to
   Linear only through `linear_agent_activity`, and through
   `linear_issue_edit` or `linear_issue_relate` for a requested change.
@@ -363,7 +363,7 @@ delegated the issue.
 Any teammate can ask, in a reply on the agent session, for the title,
 description, labels, or status of this issue or another issue to change,
 or for it to become a duplicate of another issue or be blocked on another
-issue, such as "add ready-for-agent", "cancel this issue", "mark this as a
+issue, or for issues to become the children of another issue, such as "add ready-for-agent", "cancel this issue", "mark this as a
 duplicate of PAT-1", "block PAT-2 on PAT-3", or "update the SDK 57
 issue to target SDK 58 and add the upgrade instructions that matter to us".
 Do what they ask, whether or not either issue is delegated and whatever
@@ -445,19 +445,35 @@ their cards are. A reply from a bot or an integration changes nothing.
    with `linear_issue`. Relations exist only on Linear-tracked issues. When
    step 3 picks GitHub for either issue, make no Linear write, post one
    `response` that says relations are supported only for Linear-tracked
-   issues, and stop. Otherwise make one `linear_issue_relate` call on the
-   issue that changes: `duplicate_of` with the original for "A is a
-   duplicate of B", or `blocked_by` with the blocker for "block A on B".
-   The tool moves a duplicate to the team's duplicate status and removes
-   only the related relation between the two issues. It refuses a conflicting
-   relation and changes nothing then.
-7. When a command or the tool fails, post the error as one `response` on
+   issues, and stop. Otherwise make one `linear_issue_relate` call for the
+   issue that changes: with that issue as `issue`, `duplicate_of` and the
+   original for "A is a duplicate of B", or `blocked_by` and the blocker for
+   "block A on B". For a request that issues are the children or
+   sub-issues of a parent, or that one is the parent of others, make one
+   call for each child, with the parent as `issue` and the child as
+   `parent_of`. The tool moves a duplicate to the team's duplicate status
+   and removes only the related relation between the two issues. It refuses
+   a conflicting relation, and a child that already has another parent, and
+   changes nothing then.
+
+   When `linear_issue` or a tool result shows that an issue is archived, say
+   that it is archived and give its `archivedAt` date. Never say an archived
+   issue is not archived. When `linear_issue_relate` returns `error` with a
+   non-empty `archived` list, never call it again with the same arguments.
+   When the request already allows a parent link, such as "link them as
+   children" or "make them sub-issues", make the parent links as above.
+   Otherwise post one `response` that names each archived issue and its
+   archive date and offers the parent link, and make no other change.
+7. When a command or the tool fails, except an `archived` refusal that step 6
+   handles, post the error as one `response` on
    this agent session and stop. Never make the change on the other tracker
    instead. Otherwise post one `response` that names the target issue and
    what changed: its title, labels, and status from the result, and a short
    summary of a new description. For a relation, name both issues, the
-   relation, and the first issue's resulting status. Say when the relation
-   already existed. When the reply also asks for an issue comment, say
+   relation, and the first issue's resulting status. For a parent link, name
+   both issues and that the link is a parent link, and name no status. Say
+   when the relation or link already existed, and name each archived issue
+   with its archive date. When the reply also asks for an issue comment, say
    that you cannot post comments. When step 8 stops because the event's
    issue is closed, the same `response` answers any question that the
    issue and `thread` answer, names each other part of the reply that was
