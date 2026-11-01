@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -101,6 +102,13 @@ VALIDATE_REQUIRED = [
     *DEFAULT_RULES[:-1],
     {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Required checks pass"}, {"context": "Validate pull request"}]}},
 ]
+def rules_requiring(*contexts):
+    return [
+        *DEFAULT_RULES[:-1],
+        {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": name} for name in contexts]}},
+    ]
+
+
 REVIEW_STATE = {
     "data": {
         "repository": {
@@ -175,6 +183,144 @@ class EvaluateTest(unittest.TestCase):
 
     def test_missing_fields_fail_every_condition(self):
         self.assertEqual(len(gate.evaluate({}, HEAD, "kanban_complete")), 4)
+
+
+MERGE_QUEUE = {"__typename": "CheckRun", "name": "Mergify Merge Queue", "status": "IN_PROGRESS", "conclusion": ""}
+REQUIRED_PASSED = [
+    {"__typename": "CheckRun", "name": "Required checks pass", "status": "COMPLETED", "conclusion": "SUCCESS"},
+    {"__typename": "CheckRun", "name": "Validate pull request", "status": "COMPLETED", "conclusion": "SUCCESS"},
+]
+QUEUED = {
+    **CLEAN,
+    "mergeStateStatus": "UNSTABLE",
+    "reviewDecision": "APPROVED",
+    "statusCheckRollup": [*REQUIRED_PASSED, MERGE_QUEUE],
+}
+THREAD_AUTHORS = {
+    "person": {"__typename": "User", "login": "tlmader"},
+    "bot": {"__typename": "Bot", "login": "patinaproject-goodyear"},
+    "mannequin": {"__typename": "Mannequin", "login": "ghost"},
+    "organization": {"__typename": "Organization", "login": "example-org"},
+    "deleted": None,
+}
+
+
+def open_thread(author):
+    return {"isResolved": False, "comments": {"nodes": [{"author": author}]}}
+
+
+def threads_state(*threads):
+    return state_with(reviewThreads={"pageInfo": {"hasNextPage": False}, "nodes": list(threads)})
+
+
+def evaluate_handoff(pr, rules=None, state=None, tool_name="kanban_request_review"):
+    shell = FakeShell(rules=rules or rules_requiring("Required checks pass", "Validate pull request"), state=state)
+    with mock.patch.object(gate.subprocess, "run", shell):
+        blockers = gate._blockers(pr, WORKSPACE, time.monotonic() + 25)
+        return gate.evaluate(pr, HEAD, tool_name, blockers)
+
+
+class ReviewHandoffTest(unittest.TestCase):
+    def test_an_unstable_pull_request_waiting_in_the_merge_queue_passes(self):
+        self.assertEqual(evaluate_handoff(QUEUED), [])
+
+    def test_a_blocked_pull_request_that_needs_a_review_passes_with_a_pending_unrequired_check(self):
+        self.assertEqual(evaluate_handoff({**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED"}), [])
+
+    def test_a_blocked_approved_pull_request_with_no_open_thread_is_refused_without_naming_the_queue(self):
+        failures = evaluate_handoff({**QUEUED, "mergeStateStatus": "BLOCKED"})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("mergeStateStatus is 'BLOCKED'", failures[0])
+        self.assertNotIn("Mergify Merge Queue", failures[0])
+
+    def test_a_blocked_pull_request_with_no_review_decision_and_no_open_thread_is_refused(self):
+        failures = evaluate_handoff({**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": None})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("mergeStateStatus is 'BLOCKED'", failures[0])
+
+    def test_a_pending_check_that_a_rule_requires_is_refused(self):
+        rules = rules_requiring("Required checks pass", "Validate pull request", "Mergify Merge Queue")
+        failures = evaluate_handoff(QUEUED, rules=rules)
+        self.assertIn("required check 'Mergify Merge Queue' has not passed: wait for it, or fix and push", failures)
+
+    def test_completion_still_names_the_pending_check(self):
+        failures = evaluate_handoff(QUEUED, tool_name="kanban_complete")
+        self.assertTrue(any("check 'Mergify Merge Queue' is pending (IN_PROGRESS)" in failure for failure in failures))
+
+    def test_a_refusal_for_another_reason_leaves_out_the_pending_unrequired_check(self):
+        failures = evaluate_handoff({**QUEUED, "mergeStateStatus": "BEHIND"})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("mergeStateStatus is 'BEHIND'", failures[0])
+
+    def test_other_unmet_conditions_still_refuse(self):
+        unsigned = state_with(commits={"pageInfo": {"hasNextPage": False}, "nodes": [{"commit": {"oid": HEAD, "signature": None}}]})
+        requested = {"pageInfo": {"hasNextPage": False}, "nodes": [{"state": "CHANGES_REQUESTED", "author": {"login": "reviewer"}, "commit": {"oid": HEAD}}]}
+        validate_failed = [REQUIRED_PASSED[0], {**REQUIRED_PASSED[1], "conclusion": "FAILURE"}, MERGE_QUEUE]
+        cases = {
+            "unsigned commit": (QUEUED, unsigned, "1 commit(s) lack a verified signature"),
+            "changes requested on the head": (
+                {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "CHANGES_REQUESTED"},
+                state_with(latestOpinionatedReviews=requested),
+                "reviewer requested changes on the current head",
+            ),
+            "behind": ({**QUEUED, "mergeStateStatus": "BEHIND"}, None, "mergeStateStatus is 'BEHIND'"),
+            "required check failed": ({**QUEUED, "statusCheckRollup": validate_failed}, None, "required check 'Validate pull request' has not passed"),
+            "empty rollup": ({**QUEUED, "statusCheckRollup": []}, None, "mergeStateStatus is 'UNSTABLE'"),
+        }
+        for name, (pr, state, expected) in cases.items():
+            with self.subTest(name):
+                failures = evaluate_handoff(pr, state=state)
+                self.assertTrue(any(expected in failure for failure in failures), failures)
+
+    def test_a_blocked_pull_request_with_an_open_thread_that_a_person_started_passes(self):
+        state = threads_state(open_thread(THREAD_AUTHORS["person"]))
+        for decision in ("REVIEW_REQUIRED", "APPROVED"):
+            with self.subTest(decision):
+                pr = {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": decision, "statusCheckRollup": REQUIRED_PASSED}
+                self.assertEqual(evaluate_handoff(pr, state=state), [])
+
+    def test_an_open_thread_that_nobody_who_is_a_user_started_is_refused(self):
+        pr = {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "APPROVED", "statusCheckRollup": REQUIRED_PASSED}
+        threads = {name: open_thread(author) for name, author in THREAD_AUTHORS.items() if name != "person"}
+        threads["no comments"] = {"isResolved": False, "comments": {"nodes": []}}
+        for name, thread in threads.items():
+            with self.subTest(name):
+                failures = evaluate_handoff(pr, state=threads_state(thread))
+                self.assertTrue(any("1 review thread(s) are unresolved" in failure for failure in failures), failures)
+
+    def test_a_null_first_comment_is_refused(self):
+        pr = {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "APPROVED", "statusCheckRollup": REQUIRED_PASSED}
+        failures = evaluate_handoff(pr, state=threads_state({"isResolved": False, "comments": {"nodes": [None]}}))
+        self.assertTrue(any("1 review thread(s) are unresolved" in failure for failure in failures), failures)
+
+    def test_a_thread_that_a_person_started_is_no_cause_when_no_rule_requires_resolution(self):
+        rules = [
+            {"type": "pull_request", "parameters": {"required_review_thread_resolution": False}},
+            {"type": "required_signatures"},
+            *rules_requiring("Required checks pass", "Validate pull request")[-1:],
+        ]
+        pr = {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "APPROVED", "statusCheckRollup": REQUIRED_PASSED}
+        failures = evaluate_handoff(pr, rules=rules, state=threads_state(open_thread(THREAD_AUTHORS["person"])))
+        self.assertEqual(len(failures), 1)
+        self.assertIn("mergeStateStatus is 'BLOCKED'", failures[0])
+
+    def test_a_thread_node_with_no_comments_key_is_refused(self):
+        pr = {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED", "statusCheckRollup": REQUIRED_PASSED}
+        failures = evaluate_handoff(pr, state=threads_state({"isResolved": False}))
+        self.assertTrue(any("1 review thread(s) are unresolved" in failure for failure in failures), failures)
+
+    def test_a_mixed_set_of_open_threads_is_refused_for_the_worker_threads_only(self):
+        pr = {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED", "statusCheckRollup": REQUIRED_PASSED}
+        state = threads_state(open_thread(THREAD_AUTHORS["person"]), open_thread(THREAD_AUTHORS["bot"]))
+        failures = evaluate_handoff(pr, state=state)
+        self.assertTrue(any("1 review thread(s) are unresolved" in failure for failure in failures), failures)
+
+    def test_the_gate_reads_the_pull_request_state_once(self):
+        shell = FakeShell(rules=rules_requiring("Required checks pass", "Validate pull request"))
+        with mock.patch.object(gate.subprocess, "run", shell):
+            gate.evaluate(QUEUED, HEAD, "kanban_request_review", gate._blockers(QUEUED, WORKSPACE, time.monotonic() + 25))
+        graphql = [call for call in shell.calls if call[0][:3] == ["gh", "api", "graphql"]]
+        self.assertEqual(len(graphql), 1)
 
 
 class HookScopeTest(unittest.TestCase):
@@ -271,8 +417,10 @@ class HookDecisionTest(unittest.TestCase):
         self.assertIsNone(call_hook(shell, tool_name="kanban_request_review"))
 
     def test_review_handoff_after_changes_requested_waits_for_pending_checks(self):
-        pending = {**AWAITING_RE_REVIEW, "statusCheckRollup": [*PASSING_CHECKS, {"status": "IN_PROGRESS", "conclusion": ""}]}
-        result = call_hook(FakeShell(pr={**CLEAN, **pending}), tool_name="kanban_request_review")
+        queued = {"__typename": "CheckRun", "name": "Test", "status": "IN_PROGRESS", "conclusion": ""}
+        pending = {**AWAITING_RE_REVIEW, "statusCheckRollup": [*PASSING_CHECKS, queued]}
+        shell = FakeShell(pr={**CLEAN, **pending}, rules=rules_requiring("Required checks pass", "Test"))
+        result = call_hook(shell, tool_name="kanban_request_review")
         self.assertEqual(result["action"], "block")
         self.assertIn("mergeStateStatus is 'BLOCKED'", result["message"])
 
@@ -359,7 +507,8 @@ class HookDecisionTest(unittest.TestCase):
 
     def test_approval_wait_with_a_pending_check_is_refused(self):
         pending = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Test", "status": "IN_PROGRESS", "conclusion": ""}]
-        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": pending}), "mergeStateStatus is 'BLOCKED'")
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": pending}, rules=rules_requiring("Required checks pass", "Test"))
+        self.assert_blocked(result, "mergeStateStatus is 'BLOCKED'")
 
     def test_approval_wait_with_a_required_check_missing_from_the_rollup_is_refused(self):
         rules = [*DEFAULT_RULES[:-1], {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Validate pull request"}]}}]
@@ -385,7 +534,7 @@ class HookDecisionTest(unittest.TestCase):
 
     def test_approval_wait_with_a_pending_rerun_is_refused_naming_the_check(self):
         rollup = [*PASSING_CHECKS, self.check_run("SUCCESS", "2026-10-14T01:09:23Z"), self.check_run("", "0001-01-01T00:00:00Z", status="QUEUED")]
-        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup})
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}, rules=VALIDATE_REQUIRED)
         self.assert_blocked(result, "check 'Validate pull request' is pending (QUEUED)")
 
     def test_runs_that_started_together_count_the_one_that_did_not_pass(self):
@@ -404,7 +553,8 @@ class HookDecisionTest(unittest.TestCase):
 
     def test_a_pending_status_context_is_named(self):
         rollup = [*PASSING_CHECKS, {"__typename": "StatusContext", "context": "Preview deploy", "state": "PENDING"}]
-        self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}), "check 'Preview deploy' is pending (PENDING)")
+        result = self.review_handoff({**AWAITING_APPROVAL, "statusCheckRollup": rollup}, rules=rules_requiring("Required checks pass", "Preview deploy"))
+        self.assert_blocked(result, "check 'Preview deploy' is pending (PENDING)")
 
     def test_completion_refusal_names_the_failing_check(self):
         rollup = [*PASSING_CHECKS, self.check_run("FAILURE", "2026-10-14T01:09:23Z")]
@@ -684,6 +834,32 @@ class ReviewHookTest(unittest.TestCase):
         new = {**old, "conclusion": "SUCCESS", "startedAt": "2026-10-14T01:10:14Z"}
         shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL, "statusCheckRollup": [*PASSING_CHECKS, old, new]})
         self.assertIsNone(call_review_hook(shell))
+
+    def test_a_pending_check_no_rule_requires_is_named_in_the_result(self):
+        shell = FakeShell(pr=QUEUED, rules=rules_requiring("Required checks pass", "Validate pull request"))
+        result = json.loads(call_review_hook(shell))
+        self.assertEqual(result, {**json.loads(LANDED_IN_REVIEW), "pending_unrequired_checks": ["Mergify Merge Queue"]})
+
+    def test_an_unnamed_pending_check_is_named_unnamed(self):
+        rollup = [*REQUIRED_PASSED, {"status": "QUEUED", "conclusion": ""}]
+        result = json.loads(call_review_hook(FakeShell(pr={**QUEUED, "statusCheckRollup": rollup})))
+        self.assertEqual(result["pending_unrequired_checks"], ["unnamed"])
+
+    def test_open_threads_that_a_person_started_are_counted_in_the_result(self):
+        pr = {**QUEUED, "mergeStateStatus": "BLOCKED", "reviewDecision": "APPROVED", "statusCheckRollup": REQUIRED_PASSED}
+        state = threads_state(open_thread(THREAD_AUTHORS["person"]), open_thread(THREAD_AUTHORS["bot"]))
+        result = json.loads(call_review_hook(FakeShell(pr=pr, state=state)))
+        self.assertEqual(result, {**json.loads(LANDED_IN_REVIEW), "reviewer_owned_threads": 1})
+
+    def test_a_pull_request_with_neither_leaves_the_result_alone(self):
+        pr = {**QUEUED, "statusCheckRollup": REQUIRED_PASSED}
+        self.assertIsNone(call_review_hook(FakeShell(pr=pr)))
+
+    def test_an_unreadable_thread_state_is_reported_and_the_count_is_left_out(self):
+        pr = {**QUEUED, "statusCheckRollup": REQUIRED_PASSED}
+        result = json.loads(call_review_hook(FakeShell(pr=pr, state={"data": None})))
+        self.assertNotIn("reviewer_owned_threads", result)
+        self.assertIn("could not be read", result["re_request_failures"][0])
 
     def test_an_ungated_profile_is_ignored(self):
         shell = self.shell(review_nodes(("reviewer", OTHER)))
