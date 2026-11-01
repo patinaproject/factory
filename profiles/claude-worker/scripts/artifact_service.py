@@ -200,6 +200,7 @@ def init_tools(claude: Path, env: dict, cwd: str, timeout: float = INIT_SECONDS)
     finally:
         timer.cancel()
         kill_group(process)
+        process.stdout.close()
 
 
 def kill_group(process: subprocess.Popen) -> None:
