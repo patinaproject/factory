@@ -46,7 +46,7 @@ issue's `<ID> Agent brief` Document. `sweep_brief` reads the issue's labels and 
 assigned to `claude-worker` that no `stopped` comment follows. It releases the card once the brief exists and the
 issue carries `ready-for-agent`, and also once the issue no longer carries that label, so the card's next run
 refuses and a person is told. Otherwise, unless a `Queued for triage as <task id>` comment follows the park, it
-creates the issue's triage card as "Triage inbox" step 7 does, archiving a `done` one first, comments that line
+creates the issue's triage card as "Start triage" step 4 does, archiving a `done` one first, comments that line
 on the parked card, and posts one `thought` on the card's agent session. A wait that already queued its triage
 card posts nothing more, even once that card ends without a brief. A failed Linear read leaves the card parked
 and is reported.
@@ -428,7 +428,7 @@ def triage_flags(full_name: str) -> list[str]:
 
 
 def queue_triage(body: str, client) -> str:
-    """Create the issue's triage card the way "Triage inbox" step 7 does, archiving a `done` one first, because
+    """Create the issue's triage card the way "Start triage" step 4 does, archiving a `done` one first, because
     its idempotency key would otherwise return that card. A live one is returned as it is."""
     issue_id = card_field(body, "linear_issue_id")
     triage = kanban_command(TRIAGE_BOARD)

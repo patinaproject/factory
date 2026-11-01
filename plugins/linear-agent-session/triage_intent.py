@@ -25,7 +25,8 @@ ACTIONS = {
     "answer_mention": "a person mentioned the agent on an undelegated issue; answer once",
     "gate_ready_for_human": "triage marked the issue for a person; create no card",
     "gate_needs_brief": "the issue carries the ready label but has no Agent brief; start a triage pass and create no card",
-    "gate_not_ready": "the issue has not passed the readiness check; create no card",
+    "gate_start_triage": "the issue has not passed the readiness check and a person delegated it or replied; start a triage pass and create no implementation card",
+    "gate_not_ready": "an update that is not a delegation found the issue not ready; create no card",
     "foreign_cards": "cards the factory did not create work the issue; create no card",
     "create_card": "create the issue's implementation card",
     "reuse_card": "the issue has a card; move it to this session and handle its status",
@@ -48,6 +49,7 @@ GATE_ACTIONS = {
     "needs-brief": "gate_needs_brief",
     "not-ready": "gate_not_ready",
 }
+GATE_ACTION_NAMES = {*GATE_ACTIONS.values(), "gate_start_triage"}
 SESSION_ACTIONS = ("use_session", "open_session")
 
 
@@ -142,9 +144,13 @@ def _open_session(issue: Mapping[str, Any], app_user_id: str) -> Optional[str]:
     return next((s["id"] for s in issue["agentSessions"] if s["appUserId"] == app_user_id and s["status"] != "complete"), None)
 
 
-def _delegated(facts: Intent) -> str:
+def _gate_action(gate: str, delegation: bool) -> str:
+    return "gate_start_triage" if gate == "not-ready" and delegation else GATE_ACTIONS[gate]
+
+
+def _delegated(facts: Intent, delegation: bool) -> str:
     if facts.gate != "pass":
-        return GATE_ACTIONS[facts.gate]
+        return _gate_action(facts.gate, delegation)
     if facts.card:
         return "reuse_card"
     return "foreign_cards" if facts.foreign_cards else "create_card"
@@ -152,7 +158,7 @@ def _delegated(facts: Intent) -> str:
 
 def _session_created(facts: Intent, creator_id: Optional[str]) -> str:
     if facts.delegated:
-        return _delegated(facts)
+        return _delegated(facts, delegation=True)
     return "answer_mention" if creator_id else "ignore_factory_session"
 
 
@@ -165,19 +171,20 @@ def _session_prompted(facts: Intent, stop: bool) -> str:
         return "triage_card_reply"
     if facts.card:
         return "card_reply" if facts.from_assignee else "card_reply_not_assignee"
-    return _delegated(facts) if facts.delegated else "answer_reply"
+    return _delegated(facts, delegation=True) if facts.delegated else "answer_reply"
 
 
-def _issue_update(facts: Intent, labels_changed: bool) -> str:
+def _issue_update(facts: Intent, updated_from: Mapping[str, Any]) -> str:
     if facts.issue["state_type"] in triage_exit.CLOSED_STATE_TYPES:
         return "issue_closed"
     if not facts.delegated:
         return "undelegated"
-    if labels_changed and not facts.card:
-        return GATE_ACTIONS.get(facts.gate, "use_session")
+    delegation = "delegateId" in updated_from
+    if "labelIds" in updated_from and not facts.card:
+        return _gate_action(facts.gate, delegation) if facts.gate != "pass" else "use_session"
     if facts.session_duplicate:
         return "session_created_handles_it"
-    return GATE_ACTIONS.get(facts.gate, "open_session")
+    return _gate_action(facts.gate, delegation) if facts.gate != "pass" else "open_session"
 
 
 def decide(
@@ -209,9 +216,9 @@ def decide(
         thread_source=thread.source,
     )
     if payload["type"] == "Issue":
-        action = _issue_update(facts, "labelIds" in (payload.get("updatedFrom") or {}))
-        session = _open_session(issue, app_user_id) if action == "use_session" or action in GATE_ACTIONS.values() else None
-        then = _delegated(replace(facts, gate="pass")) if action in SESSION_ACTIONS else None
+        action = _issue_update(facts, payload.get("updatedFrom") or {})
+        session = _open_session(issue, app_user_id) if action == "use_session" or action in GATE_ACTION_NAMES else None
+        then = _delegated(replace(facts, gate="pass"), delegation=False) if action in SESSION_ACTIONS else None
         return replace(facts, action=action, agent_session_id=session, then=then)
     session = payload["agentSession"]["id"]
     if payload["action"] == "created":

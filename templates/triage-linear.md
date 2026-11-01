@@ -57,10 +57,11 @@ It was computed when the webhook arrived, so it can be seconds old.
 - Act only on issues delegated to the agent app user `<<app_user_id>>`. A
   mention without delegation gets a direct answer and nothing else. Triage
   cards are the exception: "Triage inbox" creates one for every issue in the
-  Triage status, and "Prompt" and "Stop" act on a triage card for any
-  teammate, delegated or not. "Requested issue change" is the other
-  exception: it changes any issue a teammate asks for, files a follow-up
-  issue, and posts an issue comment.
+  Triage status, "Delegation gate" starts one for a delegated issue that is
+  not ready, and "Prompt" and "Stop" act on a triage card for any teammate,
+  delegated or not. "Requested issue change" is the other exception: it
+  changes any issue a teammate asks for, files a follow-up issue, and posts an
+  issue comment.
 - Never change a Linear issue's title, description, status, labels,
   assignee, or delegate, except the move to Todo that "Delegation gate" makes
   and the title, description, labels, and status a person asks for, on this
@@ -597,8 +598,8 @@ Type `Issue`. The issue is the data change issue.
      request. Stop.
    - `session_created_handles_it`: the "Session created" event of a session a
      person opened handles this delegation. Do nothing more.
-   - `gate_ready_for_human`, `gate_needs_brief`, and `gate_not_ready`: apply
-     "Delegation gate" on `agent_session_id`.
+   - `gate_ready_for_human`, `gate_needs_brief`, `gate_start_triage`, and
+     `gate_not_ready`: apply "Delegation gate" on `agent_session_id`.
    - `use_session` and `open_session`: the issue is delegated and passed the
      gate. Linear opens a new agent session on an issue's first delegation, but
      a re-delegation can arrive with no "Session created" event, and triage can
