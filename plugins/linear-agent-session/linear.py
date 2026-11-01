@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 import os
 import re
 import time
@@ -15,6 +16,8 @@ if __package__:
     from . import broker_client
 else:
     import broker_client
+
+logger = logging.getLogger(__name__)
 
 API_URL = "https://api.linear.app/graphql"
 TOKEN_URL = "https://api.linear.app/oauth/token"
@@ -48,8 +51,8 @@ SESSION_THREAD_QUERY = """query AgentSessionThread($id: String!) {
 
 ISSUE_SESSIONS_QUERY = """query AgentSessionSiblings($id: String!) {
   agentSession(id: $id) {
-    url createdAt appUser { id }
-    issue { agentSessions(first: 50) { nodes { id status createdAt appUser { id } } } }
+    url createdAt appUser { id } externalUrls { url }
+    issue { agentSessions(first: 50) { nodes { id status createdAt appUser { id } externalUrls { label url } } } }
   }
 }"""
 
@@ -296,6 +299,9 @@ def review_links(text: str) -> str:
     return "".join(parts)
 
 
+PULL_REQUEST_LINK = re.compile(r"https://(?:github\.com|linear\.review)/[^/\s]+/[^/\s]+/pull/[0-9]+")
+
+
 class LinearError(Exception):
     pass
 
@@ -382,19 +388,39 @@ class LinearClient:
         session = self._graphql(ISSUE_SESSIONS_QUERY, {"id": agent_session_id})["agentSession"]
         if session is None or session["issue"] is None:
             return []
+        older = [
+            other
+            for other in session["issue"]["agentSessions"]["nodes"]
+            if other["id"] != agent_session_id
+            and other["appUser"] is not None
+            and other["appUser"]["id"] == session["appUser"]["id"]
+            and other["createdAt"] < session["createdAt"]
+        ]
         closed = []
-        for other in session["issue"]["agentSessions"]["nodes"]:
-            if (
-                other["id"] != agent_session_id
-                and other["appUser"] is not None
-                and other["appUser"]["id"] == session["appUser"]["id"]
-                and other["createdAt"] < session["createdAt"]
-                and other["status"] in OPEN_SESSION_STATUSES
-            ):
+        for other in older:
+            if other["status"] in OPEN_SESSION_STATUSES:
                 body = f"Work on this issue continues in [this session]({session['url']})."
                 self.create_activity(other["id"], activity_content("response", body))
                 closed.append(other["id"])
+        if closed:
+            self._carry_pull_requests(agent_session_id, session, older)
         return closed
+
+    def _carry_pull_requests(self, agent_session_id: str, session: dict, older: list) -> None:
+        """Copy the older sessions' pull request links to the live one, so its sidebar keeps them. Never raises."""
+        held = {review_links(u["url"]) for u in session["externalUrls"]}
+        missing = {}
+        for other in older:
+            for u in other["externalUrls"]:
+                url = review_links(u["url"])
+                if PULL_REQUEST_LINK.fullmatch(url) and url not in held:
+                    missing.setdefault(url, {"label": u["label"], "url": url})
+        if not missing:
+            return
+        try:
+            self._update_session(agent_session_id, {"addedExternalUrls": list(missing.values())})
+        except (*CLIENT_ERRORS, OSError) as error:
+            logger.warning("linear-agent-session: copying pull request links failed: %s", type(error).__name__)
 
     def add_external_urls(self, agent_session_id: str, urls: list) -> list:
         """Add the links the session lacks, matched by URL, and return the URLs added. Never replaces the list."""

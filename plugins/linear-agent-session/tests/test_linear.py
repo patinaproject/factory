@@ -173,6 +173,54 @@ class ActivityTest(unittest.TestCase):
             ],
         )
 
+    def carried(self, others, live_urls=(), responses=None):
+        fake = FakeLinear([sessions_ok(others, live_urls), activity_ok(), *(responses or [session_update_ok()])])
+        make_client(fake).close_older_sessions("live")
+        return [r["variables"]["input"] for r in fake.graphql_requests[2:]]
+
+    def test_a_closed_sessions_pull_requests_are_copied_in_review_page_form_and_cards_are_not(self):
+        old = "2026-10-27T09:00:00.000Z"
+        links = [
+            ("Pull request #7", "https://github.com/o/r/pull/7"),
+            ("Pull request #8", "https://linear.review/o/r/pull/8"),
+            ("Card", "https://kanban.test/t_1"),
+            ("Issue", "https://github.com/o/r/issues/7"),
+        ]
+        self.assertEqual(
+            self.carried([("old", "active", old, "app-1", links)]),
+            [{"addedExternalUrls": [
+                {"label": "Pull request #7", "url": "https://linear.review/o/r/pull/7"},
+                {"label": "Pull request #8", "url": "https://linear.review/o/r/pull/8"},
+            ]}],
+        )
+
+    def test_an_awaiting_input_sessions_pull_request_is_copied_when_another_sibling_closes(self):
+        old = "2026-10-27T09:00:00.000Z"
+        link = [("Pull request #7", "https://github.com/o/r/pull/7")]
+        others = [("old-active", "active", old, "app-1"), ("old-awaiting", "awaitingInput", old, "app-1", link)]
+        self.assertEqual(
+            self.carried(others),
+            [{"addedExternalUrls": [{"label": "Pull request #7", "url": "https://linear.review/o/r/pull/7"}]}],
+        )
+
+    def test_no_pull_request_is_copied_when_no_sibling_closes(self):
+        link = [("Pull request #7", "https://github.com/o/r/pull/7")]
+        self.assertEqual(self.carried([("old", "awaitingInput", "2026-10-27T09:00:00.000Z", "app-1", link)], responses=[]), [])
+
+    def test_a_pull_request_the_live_session_holds_is_not_copied_again(self):
+        link = [("Pull request #7", "https://github.com/o/r/pull/7")]
+        others = [("old", "active", "2026-10-27T09:00:00.000Z", "app-1", link)]
+        self.assertEqual(self.carried(others, live_urls=["https://github.com/o/r/pull/7"], responses=[]), [])
+
+    def test_a_failed_copy_never_stops_the_close(self):
+        link = [("Pull request #7", "https://github.com/o/r/pull/7")]
+        old = "2026-10-27T09:00:00.000Z"
+        fake = FakeLinear([
+            sessions_ok([("a", "active", old, "app-1", link), ("b", "active", old, "app-1")]),
+            activity_ok(), activity_ok(), (200, {"errors": [{"message": "boom"}], "data": None}),
+        ])
+        self.assertEqual(make_client(fake).close_older_sessions("live"), ["a", "b"])
+
     def test_a_session_with_no_older_siblings_posts_nothing(self):
         fake = FakeLinear([sessions_ok()])
         self.assertEqual(make_client(fake).close_older_sessions("live"), [])
