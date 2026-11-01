@@ -305,6 +305,27 @@ class TriageIntentContractTest(unittest.TestCase):
         self.assertNotIn("<triage_intent>", render.build_routes(SETTINGS)["github"]["prompt"])
 
 
+class IssueWriteToolContractTest(unittest.TestCase):
+    """The prompt must name the tools that file an issue and post a comment, as the code defines them."""
+
+    def test_the_linear_prompt_names_each_tool_and_each_requires_an_idempotency_key(self):
+        plugin_dir = Path(__file__).resolve().parents[2] / "plugins" / "linear-agent-session"
+        spec = importlib.util.spec_from_file_location(
+            "linear_agent_session", plugin_dir / "__init__.py", submodule_search_locations=[str(plugin_dir)]
+        )
+        plugin = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = plugin
+        spec.loader.exec_module(plugin)
+        schemas = [plugin.tools.COMMENT_SCHEMA, plugin.tools.GITHUB_CREATE_SCHEMA]
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+
+        missing = [schema["name"] for schema in schemas if f"`{schema['name']}`" not in prompt]
+        keyless = [schema["name"] for schema in schemas if "idempotency_key" not in schema["parameters"]["required"]]
+
+        self.assertEqual(missing, [])
+        self.assertEqual(keyless, [])
+
+
 class ReplyPrefixContractTest(unittest.TestCase):
     """The running worker recognizes a person's reply by `reply_inbox.REPLY_PREFIX`, so triage must write it."""
 

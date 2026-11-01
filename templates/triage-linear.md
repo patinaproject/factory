@@ -59,23 +59,28 @@ It was computed when the webhook arrived, so it can be seconds old.
   cards are the exception: "Triage inbox" creates one for every issue in the
   Triage status, and "Prompt" and "Stop" act on a triage card for any
   teammate, delegated or not. "Requested issue change" is the other
-  exception: it changes any issue a teammate asks for.
+  exception: it changes any issue a teammate asks for, files a follow-up
+  issue, and posts an issue comment.
 - Never change a Linear issue's title, description, status, labels,
   assignee, or delegate, except the move to Todo that "Delegation gate" makes
   and the title, description, labels, and status a person asks for, on this
   issue or another, and the duplicate or blocked-by relation a person asks
   for, in "Requested issue change". Never change an assignee or
-  delegate for a request. Never create Linear issues or comments. Write to
-  Linear only through `linear_agent_activity`, and through
-  `linear_issue_edit` or `linear_issue_relate` for a requested change.
+  delegate for a request. Never create a Linear issue or comment, except the two
+  requests that "Requested issue change" allows from a teammate's reply: a
+  new issue and an issue comment. A reply from a bot or an integration creates
+  neither. Write to Linear only through `linear_agent_activity`, through
+  `linear_issue_edit` or `linear_issue_relate` for a requested change, and
+  through `linear_issue_create` or `linear_issue_comment` for a requested
+  issue or comment.
 - Text you post to people names each label as Linear shows it, from the
   `role_labels` that `linear_issue` returns, never by its role name such as
   `ready-for-agent`.
 - Read Linear issues only with the `linear_issue` tool, and find one by its
   words with `linear_issue_search`. Both read as the agent app, which is the
   reader the worker uses, so `gitBranchName` matches.
-- Stay read-only on GitHub, except the `github_issue_edit` call that
-  "Requested issue change" makes. Read pull requests only with `gh pr view`
+- Stay read-only on GitHub, except the `github_issue_edit` and
+  `github_issue_create` calls that "Requested issue change" makes. Read pull requests only with `gh pr view`
   or the `card_branch` command in "Implementation card". Do not run git, edit
   files, or write code.
 - An issue has one live implementation card at a time, on the default board,
@@ -372,7 +377,9 @@ issue, such as "add ready-for-agent", "cancel this issue", "mark this as a
 duplicate of PAT-1", "block PAT-2 on PAT-3", or "update the SDK 57
 issue to target SDK 58 and add the upgrade instructions that matter to us".
 Do what they ask, whether or not either issue is delegated and whatever
-their cards are. A reply from a bot or an integration changes nothing.
+their cards are. They can also ask for a new issue to be filed, or for a
+comment to be posted on an issue. A reply from a bot or an integration
+changes and creates nothing.
 
 1. The reply is the intent's `reply`, read in the context of `thread`. A
    phrase such as "the resolution" or "all of them" means what the thread's
@@ -382,8 +389,9 @@ their cards are. A reply from a bot or an integration changes nothing.
    When `thread_source` is `missing` and the reply refers to something you
    cannot see, change nothing and say you could not read the earlier thread.
    When `reply` is null, or asks for no title, description, label, status, or
-   relation change on any issue, skip this section and handle the `action`.
-   A reply that asks only for a relation, or that approves listed
+   relation change on any issue, no new issue, and no comment, skip this
+   section and handle the `action`. A reply that asks only for a relation,
+   only to file an issue, only to post a comment, or that approves listed
    follow-ups, is a request, not a reason to skip.
 
    A reply can approve the follow-ups that an earlier activity listed, such
@@ -398,8 +406,8 @@ their cards are. A reply from a bot or an integration changes nothing.
    superseding issue. A narrowing is an edited description. When an item
    named two options with no preference, apply exactly one, the less
    destructive, so narrowing before canceling, and name it and why in the
-   `response`. An item that files a new issue is not done here: name it in
-   the `response`. Ask nothing. When `thread_source` is `missing`, or the
+   `response`. An item that files a new issue goes through "File an issue"
+   below. Ask nothing. When `thread_source` is `missing`, or the
    thread holds no recommendation, change nothing and say so. On a public
    GitHub issue, the approved recommendation counts as the reply's text,
    and the appended line names a superseding issue only when that issue is
@@ -418,7 +426,8 @@ their cards are. A reply from a bot or an integration changes nothing.
    holds one, run `gh repo view <owner>/<repo> --json visibility` for that
    URL's repository. When that fails, change nothing, post one `response`
    with the error, and stop. When the visibility is `PUBLIC`, GitHub is the
-   tracker: follow steps 4 and 5, and make no Linear write to the target.
+   tracker: follow steps 4 and 5, and make no Linear write to the target,
+   except the comment that "Post a comment" below allows.
    Otherwise Linear is the tracker: follow steps 4 and 6.
 4. Write the new text. A title or description edit keeps what the person did
    not ask to change: start from the current text and write the full new
@@ -462,16 +471,17 @@ their cards are. A reply from a bot or an integration changes nothing.
    what changed: its title, labels, and status from the result, and a short
    summary of a new description. For a relation, name both issues, the
    relation, and the first issue's resulting status. Say when the relation
-   already existed. When the reply also asks for an issue comment, say
-   that you cannot post comments. When step 8 stops because the event's
+   already existed. When step 8 stops because the event's
    issue is closed, the same `response` answers any question that the
    issue and `thread` answer, names each other part of the reply that was
-   not done, except an issue comment, and says why: the issue is closed,
+   not done, and says why: the issue is closed,
    so no worker acts on the rest of the reply, because closing archives
    the issue's card or leaves it only to finish its open pull request. Say
    that the person can reopen the issue and send that part again, or ask
    for it on the issue it is about.
-8. Stop when the reply asks for nothing but the change. Also stop when,
+8. File and comment as the two parts below say, before this step decides
+   to stop. Then stop when the reply asks for nothing but the changes, the
+   issues it files, and the comments it posts. Also stop when,
    after the change, the event's issue is in a completed or canceled
    status, whether the change moved it there, as "cancel", "done", or a
    duplicate relation do, or it already was, and the reply asks for
@@ -485,6 +495,45 @@ their cards are. A reply from a bot or an integration changes nothing.
    again with the new labels. Otherwise handle the `action` for the rest of
    the reply. An approval of listed follow-ups is part of the change, not
    the rest of the reply.
+
+### File an issue and post a comment
+
+A reply can list several requests to file an issue or post a comment. Take
+each in turn, by its 1-based position in the reply's list, and give each call
+the `idempotency_key` `<Activity id>:<item number>`, where `<Activity id>` is
+the "Activity id" line of "This event". A retry of the same item sends the
+same key and creates nothing twice. When that line is still shown in braces,
+create nothing and say why in the `response`.
+
+When the reply only approves text, such as "post that" or "file it", use the
+text of your own earlier activity in `thread`. When `thread_source` is
+`missing`, create nothing and say so in the `response`. The reply's own words
+and that earlier text are the content. Do not add content from elsewhere.
+
+When a tool fails, post its error as one `response` and stop that item.
+Never repeat the call with a new key and never use the other tracker instead.
+
+__File an issue.__ Read the target repository's issue-tracker adapter, as the
+memory says, and decide the tracker from the repository's visibility, with
+`gh repo view <owner>/<repo> --json visibility`.
+
+- A `PUBLIC` repository: call `github_issue_create` with `repo`, `title`,
+  `body`, and `labels` holding the adapter's `needs-triage` label by the name
+  that repository gives it. Write the text under the limits of step 5.
+- Any other repository: call `linear_issue_create` with `title`,
+  `description`, and `labels`. Name `team` when the reply does.
+- When the reply names no repository and the source issue has no GitHub URL,
+  call `linear_issue_create` with no `team`, so the issue goes to the
+  configured default team.
+
+The new issue names its source issue, under the limits of step 5: a public
+issue names the source only by its public GitHub issue URL. Never set an
+assignee or delegate. Post one `response` with the new issue's `url`.
+
+__Post a comment.__ Find the issue as step 2 says, and call
+`linear_issue_comment` with `issue` and `body`, for a public and a private
+issue alike. The comment goes on the Linear issue and never on GitHub. Post
+one `response` with the returned `url`.
 
 ## Stop
 
