@@ -583,7 +583,7 @@ class Session:
         if not calls:
             raise ArtifactError("failed", f"the run made no Artifact {action or 'publish'} call")
         if not calls[-1].ok:
-            raise ArtifactError("failed", f"the Artifact tool refused the {action or 'publish'}: {calls[-1].text[:500]}")
+            raise ArtifactError("failed", f"the Artifact tool refused the {action or 'publish'}")
         return calls[-1]
 
     def confirm(self, url: str) -> None:
