@@ -911,7 +911,7 @@ key file but does not contain the key.
   "kanban_url": "https://<hostname>/kanban",
   "factory_repository": {"full_name": "<owner>/<factory>", "default_branch": "<branch>"},
   "triage": {"max_running": <n>},
-  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0}
+  "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0, "command_timeout_seconds": 600, "idle_limit_seconds": 2700}
 }
 ```
 
@@ -930,6 +930,17 @@ it to the prefix. `claude_session.max_turns`
 caps the turns of one `claude-session` run. `0`, or no value, sets no limit, so
 one run can finish a whole task. A positive limit pauses a long task, such as
 a dependency upgrade, and the worker resumes it in a second run.
+`claude_session.command_timeout_seconds` is the longest a worker command may
+run, in seconds. It is an integer of at least 270 and defaults to 600. The
+`guard-ci-wait` hook refuses a background command whose `timeout` is above it,
+and an `until` or `while` loop that runs `sleep` with no `timeout`, counter, or
+`$SECONDS` limit. An explicit value also sets `BASH_MAX_TIMEOUT_MS` in Claude
+Code's environment. `claude_session.idle_limit_seconds` is how long a run may
+write nothing to its transcript or its subagents' transcripts before
+`claude-session` ends it and reports the failure with the last Bash command.
+It is a positive integer and defaults to 2700. When both are set, the idle
+limit must be greater than the command limit. Leave both out unless the
+defaults need tuning.
 `claude_session.mcp_servers` gives the factory its own identity on each
 third-party MCP service, and `disabled_mcp_servers` lists the repository
 servers a worker does not load, as [MCP server
