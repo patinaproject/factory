@@ -75,6 +75,39 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(factory_settings.fresh_after_tokens({}), 100_000)
 
 
+class CommandLimitsTest(unittest.TestCase):
+    def test_unset_fields_use_their_defaults(self) -> None:
+        self.assertEqual((factory_settings.command_timeout_seconds({}), factory_settings.idle_limit_seconds({})), (600, 2700))
+
+    def test_explicit_values_that_fit_together_are_valid(self) -> None:
+        transport = {"command_timeout_seconds": 270, "idle_limit_seconds": 271}
+        self.assertEqual(factory_settings.validate(settings(transport)).global_errors, ())
+        self.assertEqual(factory_settings.command_timeout_seconds(transport), 270)
+
+    def test_values_that_are_not_positive_integers_are_refused(self) -> None:
+        for value in ("600", 600.5, True, 0, -5, [600]):
+            errors = factory_settings.validate(settings({"command_timeout_seconds": value, "idle_limit_seconds": value})).global_errors
+            self.assertEqual(len(errors), 2, value)
+            self.assertIn("claude_session.command_timeout_seconds", errors[0])
+            self.assertIn("claude_session.idle_limit_seconds", errors[1])
+
+    def test_a_command_limit_under_270_is_refused(self) -> None:
+        errors = factory_settings.validate(settings({"command_timeout_seconds": 269})).global_errors
+        self.assertEqual(errors, ("claude_session.command_timeout_seconds 269 must be an integer of at least 270 seconds",))
+
+    def test_an_idle_limit_not_above_the_explicit_command_limit_is_refused(self) -> None:
+        for idle in (900, 600):
+            errors = factory_settings.validate(
+                settings({"command_timeout_seconds": 900, "idle_limit_seconds": idle})
+            ).global_errors
+            self.assertEqual(errors, (
+                f"claude_session.idle_limit_seconds {idle} must be greater than claude_session.command_timeout_seconds 900",
+            ))
+
+    def test_an_idle_limit_alone_is_not_compared_with_the_default_command_limit(self) -> None:
+        self.assertEqual(factory_settings.validate(settings({"idle_limit_seconds": 300})).global_errors, ())
+
+
 class NoValueInErrorTest(unittest.TestCase):
     def test_no_error_quotes_a_refused_credential_shape(self) -> None:
         prefixes = (

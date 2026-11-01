@@ -127,6 +127,69 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(self.decide(command), (0, ""), command)
         self.assertEqual(self.decide("gh pr checks 7 --watch", tool="Read"), (0, ""))
 
+    def test_a_wait_loop_with_no_limit_is_refused_in_the_foreground_and_the_background(self) -> None:
+        for command in [
+            "until grep -q done out.txt; do sleep 15; done",
+            "while ! grep -q x f; do sleep 5; done",
+            "cd /w && while true; do\n  sleep 5\ndone",
+            "while ! test -f f; do for i in 1 2; do sleep 1; done; done",
+        ]:
+            for extra in ({}, {"run_in_background": True}):
+                code, text = self.decide(command, **extra)
+                self.assertEqual(code, 2, (command, extra))
+                self.assertIn("wait-for-checks", text)
+                self.assertIn("bounded loop", text)
+
+    def test_a_bounded_loop_and_text_that_only_mentions_a_loop_pass(self) -> None:
+        for command in [
+            "for i in $(seq 20); do grep -q x f && break; sleep 10; done",
+            "timeout 600 sh -c 'until grep -q x f; do sleep 5; done'",
+            "while [ $i -lt 20 ]; do i=$((i+1)); sleep 5; done",
+            "until [ $SECONDS -gt 200 ]; do sleep 5; done",
+            "while ((i < 20)); do i=$((i+1)); sleep 5; done",
+            "until grep -q x f; do [ $n -ge 20 ] && break; n=$((n+1)); sleep 5; done",
+            'while read l; do echo "$l"; sleep 1; done < f',
+            "git ls-files | while IFS= read -r l; do echo $l; sleep 1; done",
+            'git commit -m "until grep -q x f; do sleep 15; done"',
+            "gh pr create --body 'while true; do sleep 5; done'",
+            "cat > poll.sh <<'EOF'\nuntil grep -q x f; do sleep 5; done\nEOF",
+            "python3 /w/scripts/wait-for-checks 12 --repo o/r",
+        ]:
+            code, _ = self.decide(command)
+            self.assertEqual(code, 0, command)
+
+    def test_a_loop_after_a_quoted_string_with_a_quote_in_a_heredoc_is_still_read(self) -> None:
+        code, _ = self.decide("cat <<EOF\nit's\nEOF\nuntil grep -q x f; do sleep 5; done")
+        self.assertEqual(code, 2)
+
+    def test_monitor_calls_pass(self) -> None:
+        event = {"tool_name": "Monitor", "tool_input": {"command": "until grep -q x f; do sleep 5; done"}}
+        self.assertEqual(guard.decide(event), (0, ""))
+
+    def test_a_background_call_above_the_command_limit_is_refused(self) -> None:
+        refused = guard.decide(
+            {"tool_name": "Bash", "tool_input": {"command": "make", "run_in_background": True, "timeout": 3_600_000}}, 600
+        )
+        at_limit = guard.decide(
+            {"tool_name": "Bash", "tool_input": {"command": "make", "run_in_background": True, "timeout": 600_000}}, 600
+        )
+        unset = guard.decide({"tool_name": "Bash", "tool_input": {"command": "make", "run_in_background": True}}, 600)
+        foreground = guard.decide({"tool_name": "Bash", "tool_input": {"command": "make", "timeout": 3_600_000}}, 600)
+
+        self.assertEqual(refused[0], 2)
+        self.assertIn("600 seconds", refused[1])
+        self.assertEqual((at_limit, unset, foreground), ((0, ""), (0, ""), (0, "")))
+
+    def test_the_command_limit_comes_from_the_hook_argument(self) -> None:
+        event = {"tool_name": "Bash", "tool_input": {"command": "make", "run_in_background": True, "timeout": 900_000}}
+        codes = []
+        for limit in ("600", "900"):
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS / "guard-ci-wait"), limit], capture_output=True, text=True, input=json.dumps(event)
+            )
+            codes.append(result.returncode)
+        self.assertEqual(codes, [2, 0])
+
     def test_the_helper_gets_a_timeout_that_outlasts_its_budget(self) -> None:
         code, text = self.decide("python3 /w/scripts/wait-for-checks 7 --repo o/r", timeout=120000, description="wait")
         update = json.loads(text)["hookSpecificOutput"]["updatedInput"]
