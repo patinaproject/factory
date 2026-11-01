@@ -89,12 +89,12 @@ class Harness(unittest.TestCase):
             db.execute(TASKS)
             db.executescript(COMMENTS_AND_EVENTS)
 
-    def run_script(self, tasks: list, settings: object = None, **state) -> subprocess.CompletedProcess:
+    def run_script(self, tasks: list, settings: object = None, _env: dict | None = None, **state) -> subprocess.CompletedProcess:
         settings = {"triage": {"max_running": 2}} if settings is None else settings
         state = {"default_tasks": [], "tasks": tasks, "settings": settings, "db_path": str(self.board), **state}
         self.state_path.write_text(json.dumps(state))
         env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path),
-               "HERMES_HOME": str(self.home)}
+               "HERMES_HOME": str(self.home), **(_env or {})}
         return subprocess.run([sys.executable, str(SCRIPTS / "dispatch-triage")], env=env, capture_output=True, text=True)
 
     def assignees(self) -> dict:
