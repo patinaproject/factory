@@ -188,6 +188,20 @@ def configured_app_user_id() -> str:
     return value if isinstance(value, str) else ""
 
 
+def operator_user_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ValueError("operator_user_ids must be a list of Linear user ids")
+    return value
+
+
+def configured_operator_user_ids() -> list[str]:
+    return operator_user_ids(
+        json.loads(_hermes("config", "get", "plugins.entries.linear-agent-session.settings.operator_user_ids", "--json"))
+    )
+
+
 def _hermes(*args: str) -> str:
     hermes = os.environ.get("HERMES_BIN") or shutil.which("hermes") or str(Path.home() / ".local" / "bin" / "hermes")
     proc = subprocess.run([hermes, *args], capture_output=True, text=True, timeout=HERMES_TIMEOUT_SECONDS)

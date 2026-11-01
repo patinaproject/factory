@@ -569,20 +569,46 @@ class CliTest(unittest.TestCase):
         return code, json.loads(out.getvalue())
 
     def test_pr_authority_reads_the_cards_issue_and_compares_the_senders_github_id(self):
-        from tests.test_linear import IssueTest
+        from tests.test_linear import IssueTest, delegated_by, history_page, users_page
 
+        ann = {"id": "user-ann", "name": "Ann", "gitHubUserId": "4242", "app": False}
+        dee = {"id": "user-dee", "name": "Dee", "gitHubUserId": "5151", "app": False}
+        olive = {"id": "user-olive", "name": "Olive", "gitHubUserId": "6161", "app": False}
         issue = json.loads(json.dumps(IssueTest.RESPONSE))
-        issue["data"]["issue"]["assignee"] = {"id": "user-ann", "name": "Ann", "gitHubUserId": "4242", "app": False}
+        issue["data"]["issue"]["assignee"] = ann
+        approvers = [
+            {"id": "user-ann", "name": "Ann", "role": "assignee"},
+            {"id": "user-dee", "name": "Dee", "role": "delegator"},
+            {"id": "user-olive", "name": "Olive", "role": "operator"},
+        ]
         with tempfile.TemporaryDirectory() as tmp:
             hermes = Path(tmp) / "hermes"
             show = {"task": {"id": "t_work", "body": "linear_issue_id: ABC-1\n"}}
-            hermes.write_text(f"#!/bin/sh\n[ \"$*\" = 'kanban show t_work --json' ] && printf '%s' '{json.dumps(show)}'\n")
+            hermes.write_text(
+                "#!/bin/sh\n"
+                f"[ \"$*\" = 'kanban show t_work --json' ] && printf '%s' '{json.dumps(show)}'\n"
+                "case \"$*\" in *settings.app_user_id*) printf '\"app-user-1\"';; "
+                "*settings.operator_user_ids*) printf '[\"user-olive\"]';; esac\n"
+            )
             hermes.chmod(0o755)
-            for sender, from_assignee in (("4242", True), ("99", False)):
+            cases = (
+                ("4242", True, "assignee"),
+                ("5151", True, "delegator"),
+                ("6161", True, "operator"),
+                ("99", False, None),
+            )
+            for sender, from_assignee, role in cases:
                 with self.subTest(sender), mock.patch.dict(os.environ, {"HERMES_BIN": str(hermes)}):
-                    fake = FakeLinear([(200, issue)])
+                    fake = FakeLinear([(200, issue), history_page(delegated_by(dee)), users_page(olive)])
                     code, output = self.run_cli(["pr-authority", "--task", "t_work", "--sender-id", sender], fake)
-                    self.assertEqual((code, output), (0, {"from_assignee": from_assignee, "assignee": "Ann", "reason": None}))
+                    expected = {
+                        "from_assignee": from_assignee,
+                        "assignee": "Ann",
+                        "reason": None,
+                        "authorized_as": role,
+                        "approvers": approvers,
+                    }
+                    self.assertEqual((code, output), (0, expected))
                     self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
 
     def test_review_owner_runs_in_an_interpreter_that_cannot_see_hermes(self):
@@ -651,7 +677,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 
         class Plugin:
             linear = types.SimpleNamespace(client_from_env=lambda: "client", ACTIVITY_TYPES=[])
-            triage_exit = types.SimpleNamespace(configured_app_user_id=lambda: "app", listed_cards=lambda board: [])
+            triage_exit = types.SimpleNamespace(
+                configured_app_user_id=lambda: "app", configured_operator_user_ids=lambda: [], listed_cards=lambda board: []
+            )
             triage_intent = types.SimpleNamespace(
                 parse_time=lambda text: ("parsed", text),
                 compute=lambda payload, **kwargs: calls.append((payload, kwargs)) or intent.Intent(action="open_session"),

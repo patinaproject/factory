@@ -36,6 +36,12 @@ config_schema:
     type: str
     default: ""
     description: Linear user ID of the agent app in this workspace.
+  operator_user_ids:
+    type: list
+    default: []
+    description: >-
+      Linear user IDs of operators who, like an issue's assignee and the person who delegated it, can start card
+      work with a reply or a pull request review or comment. Empty means no operator.
   default_team:
     type: str
     default: ""

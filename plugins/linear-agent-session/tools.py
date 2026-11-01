@@ -14,6 +14,7 @@ from .linear import (
     LinearError,
     activity_content,
     authority,
+    lookup_approvers,
     review_links,
 )
 
@@ -388,14 +389,29 @@ def run_review_owner(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(lambda: {"owner": client_factory().review_owner(_issue_argument(args))})
 
 
-def run_pr_authority(client_factory: ClientFactory, card_body: Callable[[str], str], args: dict) -> str:
+def run_pr_authority(
+    client_factory: ClientFactory,
+    card_body: Callable[[str], str],
+    app_user_id: str,
+    operator_user_ids: list[str],
+    args: dict,
+) -> str:
     def run() -> dict:
         match = triage_exit.LINEAR_ISSUE_ID.search(card_body(args["task"]))
         if match is None:
             raise LinearError(f"card {args['task']} names no linear_issue_id")
-        assignee = client_factory().get_issue(match.group(1))["assignee"]
-        from_assignee, reason = authority(assignee, args["sender_id"], "gitHubUserId")
-        return {"from_assignee": from_assignee, "assignee": assignee["name"] if assignee else None, "reason": reason}
+        client = client_factory()
+        issue = client.get_issue(match.group(1))
+        people = lookup_approvers(client, issue, app_user_id, operator_user_ids)
+        role, reason = authority(people, args["sender_id"], "gitHubUserId")
+        assignee = issue["assignee"]
+        return {
+            "from_assignee": role is not None,
+            "assignee": assignee["name"] if assignee else None,
+            "reason": reason,
+            "authorized_as": role,
+            "approvers": [{key: p[key] for key in ("id", "name", "role")} for p in people if not p["app"]],
+        }
 
     return _tool_result_or_error(run)
 

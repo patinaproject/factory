@@ -23,6 +23,7 @@ plugins:
     linear-agent-session:
       settings:
         app_user_id: "<linear agent app user id>"
+        operator_user_ids: []
         webhook_route: linear
         repositories:
           - full_name: example-org/example-repo

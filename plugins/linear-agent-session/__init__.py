@@ -181,6 +181,7 @@ def register(ctx: Any) -> None:
             lambda payload: triage_intent.compute(
                 payload,
                 app_user_id=lambda: ctx.get_config("app_user_id", default=""),
+                operator_user_ids=lambda: triage_exit.operator_user_ids(ctx.get_config("operator_user_ids", default=[])),
                 client=get_client,
                 cards=triage_exit.kanban_cards,
             ),

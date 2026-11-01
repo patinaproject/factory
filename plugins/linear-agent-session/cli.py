@@ -81,7 +81,7 @@ def main(argv: Optional[list] = None) -> int:
     owner.add_argument("--issue", required=True, help="the issue's UUID or identifier")
 
     authority = commands.add_parser(
-        "pr-authority", help="say whether a GitHub sender is the assignee of the Linear issue a card works"
+        "pr-authority", help="say whether a GitHub sender is the assignee, the delegator, or a configured operator of the Linear issue a card works"
     )
     authority.add_argument("--task", required=True, help="the card's task id")
     authority.add_argument("--sender-id", required=True, help="the GitHub user id of the event's sender")
@@ -124,7 +124,11 @@ def main(argv: Optional[list] = None) -> int:
         output = plugin.tools.run_review_owner(plugin.linear.client_from_env, {"issue": args.issue})
     elif args.command == "pr-authority":
         output = plugin.tools.run_pr_authority(
-            plugin.linear.client_from_env, plugin.triage_exit.card_body, {"task": args.task, "sender_id": args.sender_id}
+            plugin.linear.client_from_env,
+            plugin.triage_exit.card_body,
+            plugin.triage_exit.configured_app_user_id(),
+            plugin.triage_exit.configured_operator_user_ids(),
+            {"task": args.task, "sender_id": args.sender_id},
         )
     elif args.command == "undelegate":
         output = plugin.tools.run_undelegate(plugin.linear.client_from_env, {"issue": args.issue})
@@ -172,6 +176,7 @@ def _triage_intent(plugin, payload_file: str, now: Optional[str]) -> int:
         intent = triage_intent.compute(
             payload,
             app_user_id=triage_exit.configured_app_user_id,
+            operator_user_ids=triage_exit.configured_operator_user_ids,
             client=plugin.linear.client_from_env,
             cards=triage_exit.listed_cards,
             now=moment,

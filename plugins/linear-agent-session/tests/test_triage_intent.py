@@ -68,8 +68,10 @@ def issue_event(updated_from=None):
 BRIEF = ["PAT-1 Agent brief"]
 
 
-def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD, titles=BRIEF):
-    return intent_module.decide(payload, live or issue(), list(triage), list(work), APP, NOW, reply, thread, list(titles))
+def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD, titles=BRIEF, approvers=None):
+    live = live or issue()
+    people = plugin.linear.approvers(live["assignee"], None, []) if approvers is None else approvers
+    return intent_module.decide(payload, live, list(triage), list(work), APP, NOW, reply, thread, list(titles), people)
 
 
 def expected(action, **overrides):
@@ -87,7 +89,15 @@ ASSIGNEE_FIELDS = {"id": ASSIGNEE, "name": "Ann Assignee", "gitHubUserId": "1001
 
 
 def replied(action, **overrides):
-    fields = dict(reply="yes", reply_source="payload", reply_author_id=ASSIGNEE, assignee=ASSIGNEE_FIELDS, from_assignee=True)
+    fields = dict(
+        reply="yes",
+        reply_source="payload",
+        reply_author_id=ASSIGNEE,
+        assignee=ASSIGNEE_FIELDS,
+        from_assignee=True,
+        authorized_as="assignee",
+        approvers=[{"id": ASSIGNEE, "name": "Ann Assignee", "role": "assignee"}],
+    )
     return expected(action, **{**fields, **overrides})
 
 
@@ -359,6 +369,7 @@ class SessionPromptedTest(unittest.TestCase):
                 card={"id": "t_work", "status": "review", "matched_by": "branch"},
                 reply_author_id=OTHER,
                 from_assignee=False,
+                authorized_as=None,
             ),
         )
 
@@ -501,7 +512,7 @@ class IssueUpdateTest(unittest.TestCase):
 
     def test_the_duplicate_is_judged_at_the_delivery_time(self):
         live = issue(agentSessions=[session("s-1", 60)])
-        replay = intent_module.decide(issue_event(), live, [], [], APP, NOW - dt.timedelta(minutes=57), intent_module.NO_REPLY, intent_module.NO_THREAD, BRIEF)
+        replay = intent_module.decide(issue_event(), live, [], [], APP, NOW - dt.timedelta(minutes=57), intent_module.NO_REPLY, intent_module.NO_THREAD, BRIEF, [])
         self.assertEqual(replay.action, "session_created_handles_it")
         self.assertEqual(self.update(live).action, "open_session")
 
@@ -629,10 +640,25 @@ class RenderTest(unittest.TestCase):
             self.assertTrue(meaning)
 
 
-class FakeLinearClient:
-    def __init__(self, live, error=None, thread_error=None, titles=BRIEF, documents_error=None):
+class FakeLinearClient(plugin.linear.LinearClient):
+    """The real delegator and operator lookups over a fake GraphQL: `history` is newest first, `users` maps id to a user."""
+
+    def __init__(self, live, error=None, thread_error=None, titles=BRIEF, documents_error=None, history=(), users=None, lookup_error=None):
+        super().__init__("client-id", "client-secret")
         self.live, self.error, self.thread_error, self.asked = live, error, thread_error, []
         self.titles, self.documents_error = titles, documents_error
+        self.history, self.users, self.lookup_error = list(history), users or {}, lookup_error
+
+    def _graphql(self, query, variables):
+        if self.lookup_error:
+            raise self.lookup_error
+        if "query IssueHistory(" in query:
+            start = int(variables["after"] or 0)
+            page = self.history[start : start + 50]
+            more = start + 50 < len(self.history)
+            return {"issue": {"history": {"nodes": page, "pageInfo": {"hasNextPage": more, "endCursor": str(start + 50)}}}}
+        assert "query OperatorUsers(" in query, query
+        return {"users": {"nodes": [self.users[i] for i in variables["ids"] if i in self.users]}}
 
     def issue_documents(self, issue_id):
         if self.documents_error:
@@ -654,12 +680,139 @@ class FakeLinearClient:
         return [thread_item("a1", "response", "1, 2 or 3?"), thread_item("activity-1", "prompt", "yes")]
 
 
+DELEGATOR = "user-delegator"
+OPERATOR = "user-operator"
+BOARDS = {"triage": [], None: [card("t_work", status="review", branch=BRANCH)]}
+
+
+def person(user_id, name, github="2000", app=False):
+    return {"id": user_id, "name": name, "gitHubUserId": github, "app": app}
+
+
+USERS = {
+    DELEGATOR: person(DELEGATOR, "Dee Delegator"),
+    OPERATOR: person(OPERATOR, "Olive Operator"),
+    OTHER: person(OTHER, "Bo Bystander"),
+}
+
+
+def delegation(actor, to=APP):
+    return {"toDelegate": {"id": to} if to else None, "actor": USERS[actor] if isinstance(actor, str) else actor}
+
+
+class ApproverTest(unittest.TestCase):
+    def reply(self, author, history=(), operators=(), live=None, **client_overrides):
+        client = FakeLinearClient(live or issue(), history=history, users=USERS, **client_overrides)
+        return ComputeTest().compute(
+            session_event("prompted", body="go", author=author), client, BOARDS, operators=operators
+        )
+
+    def test_the_assignee_the_delegator_and_an_operator_each_start_card_work(self):
+        history = [delegation(DELEGATOR)]
+        cases = ((ASSIGNEE, "assignee"), (DELEGATOR, "delegator"), (OPERATOR, "operator"))
+        for author, role in cases:
+            with self.subTest(role):
+                result = self.reply(author, history, [OPERATOR])
+                self.assertEqual((result.action, result.from_assignee, result.authorized_as), ("card_reply", True, role))
+
+    def test_a_stranger_wakes_no_card_and_the_note_names_every_approver_in_order(self):
+        result = self.reply(OTHER, [delegation(DELEGATOR)], [OPERATOR])
+        self.assertEqual(
+            (result.action, result.from_assignee, result.authorized_as, result.not_assignee_reason),
+            ("card_reply_not_assignee", False, None, None),
+        )
+        self.assertEqual(
+            result.approvers,
+            [
+                {"id": ASSIGNEE, "name": "Ann Assignee", "role": "assignee"},
+                {"id": DELEGATOR, "name": "Dee Delegator", "role": "delegator"},
+                {"id": OPERATOR, "name": "Olive Operator", "role": "operator"},
+            ],
+        )
+
+    def test_the_assignee_who_delegated_is_one_approver_with_the_assignee_role(self):
+        history = [delegation({"id": ASSIGNEE, "name": "Ann Assignee", "gitHubUserId": "1001", "app": False})]
+        result = self.reply(OTHER, history)
+        self.assertEqual(result.approvers, [{"id": ASSIGNEE, "name": "Ann Assignee", "role": "assignee"}])
+
+    def test_without_an_assignee_or_with_an_app_assignee_the_delegator_and_operators_still_approve(self):
+        app_assignee = {"id": "app-user-2", "name": "Other agent", "gitHubUserId": None, "app": True}
+        for live in (issue(assignee=None), issue(assignee=app_assignee)):
+            for author, action in ((DELEGATOR, "card_reply"), (OPERATOR, "card_reply"), (OTHER, "card_reply_not_assignee")):
+                with self.subTest(assignee=live["assignee"], author=author):
+                    result = self.reply(author, [delegation(DELEGATOR)], [OPERATOR], live=live)
+                    self.assertEqual((result.action, result.not_assignee_reason), (action, None))
+
+    def test_a_delegation_nobody_can_name_authorizes_only_the_assignee_and_operators(self):
+        app_actor = person("app-user-3", "Some agent", None, app=True)
+        histories = {
+            "no delegation entry": [delegation(DELEGATOR, to=None)],
+            "null actor": [{"toDelegate": {"id": APP}, "actor": None}],
+            "app actor": [delegation(app_actor)],
+            "delegation to another app": [delegation(DELEGATOR, to="app-user-9")],
+            "beyond the page cap": [delegation(DELEGATOR, to=None)] * 150 + [delegation(DELEGATOR)],
+        }
+        for name, history in histories.items():
+            with self.subTest(name):
+                self.assertEqual(self.reply(DELEGATOR, history, [OPERATOR]).action, "card_reply_not_assignee")
+                self.assertEqual(self.reply(OPERATOR, history, [OPERATOR]).action, "card_reply")
+                self.assertEqual(self.reply(ASSIGNEE, history, [OPERATOR]).action, "card_reply")
+
+    def test_the_newest_delegation_inside_the_page_cap_wins(self):
+        history = [delegation(DELEGATOR)] + [delegation(DELEGATOR, to=None)] * 99 + [delegation(OTHER)]
+        self.assertEqual(self.reply(DELEGATOR, history).authorized_as, "delegator")
+        self.assertEqual(self.reply(OTHER, history).action, "card_reply_not_assignee")
+
+    def test_a_redelegation_replaces_the_earlier_delegator(self):
+        d1 = "user-d1"
+        users = {**USERS, d1: person(d1, "First Delegator")}
+        history = [delegation(DELEGATOR), delegation(DELEGATOR, to=None), delegation(users[d1])]
+        client = FakeLinearClient(issue(), history=history, users=users)
+        for author, action in ((DELEGATOR, "card_reply"), (d1, "card_reply_not_assignee")):
+            with self.subTest(author):
+                result = ComputeTest().compute(session_event("prompted", body="go", author=author), client, BOARDS)
+                self.assertEqual(result.action, action)
+
+    def test_an_operator_who_resolves_to_nobody_or_to_an_app_matches_nobody(self):
+        app_operator = person("app-user-4", "Some agent", None, app=True)
+        users = {**USERS, "app-user-4": app_operator}
+        for author in ("user-ghost", "app-user-4"):
+            with self.subTest(author):
+                client = FakeLinearClient(issue(), users=users)
+                with self.assertLogs("linear_agent_session.linear", "WARNING"):
+                    result = ComputeTest().compute(
+                        session_event("prompted", body="go", author=author), client, BOARDS, operators=["user-ghost", "app-user-4"]
+                    )
+                self.assertEqual(result.action, "card_reply_not_assignee")
+
+    def test_a_failed_lookup_leaves_the_assignee_alone_and_is_not_an_error(self):
+        for author, action in ((ASSIGNEE, "card_reply"), (DELEGATOR, "card_reply_not_assignee"), (OPERATOR, "card_reply_not_assignee")):
+            with self.subTest(author), self.assertLogs("linear_agent_session.linear", "WARNING"):
+                result = self.reply(author, [delegation(DELEGATOR)], [OPERATOR], lookup_error=RuntimeError("down"))
+                self.assertEqual((result.action, result.approvers), (action, [{"id": ASSIGNEE, "name": "Ann Assignee", "role": "assignee"}]))
+
+    def test_only_a_reply_reads_the_history_or_the_users(self):
+        for payload in (issue_event(), session_event("created"), session_event("prompted", signal="stop")):
+            with self.subTest(type=payload["type"], action=payload.get("action")):
+                client = FakeLinearClient(issue(), lookup_error=AssertionError("no lookup expected"))
+                self.assertNotEqual(ComputeTest().compute(payload, client, BOARDS, operators=[OPERATOR]).action, "error")
+
+    def test_a_stop_from_anyone_and_a_reply_to_a_live_triage_card_keep_their_handling(self):
+        triage = {"triage": [card("t_triage", status="running", body=id_line())], None: BOARDS[None]}
+        client = FakeLinearClient(issue(), history=[delegation(DELEGATOR)], users=USERS)
+        result = ComputeTest().compute(session_event("prompted", body="go", author=OTHER), client, triage, operators=[OPERATOR])
+        self.assertEqual(result.action, "triage_card_reply")
+        stop = ComputeTest().compute(session_event("prompted", signal="stop", author=OTHER), client, BOARDS, operators=[OPERATOR])
+        self.assertEqual((stop.action, stop.approvers, stop.authorized_as), ("stop_card", None, None))
+
+
 class ComputeTest(unittest.TestCase):
-    def compute(self, payload, client, boards=None, now=NOW, redact=lambda text: re.sub(r"lin_api_\w+", "[redacted]", text)):
+    def compute(self, payload, client, boards=None, now=NOW, redact=lambda text: re.sub(r"lin_api_\w+", "[redacted]", text), operators=()):
         boards = boards or {"triage": [], None: []}
         return intent_module.compute(
             payload,
             app_user_id=lambda: APP,
+            operator_user_ids=lambda: list(operators),
             client=lambda: client,
             cards=lambda board: boards[board],
             now=now,
@@ -681,6 +834,17 @@ class ComputeTest(unittest.TestCase):
             with self.subTest(author):
                 result = self.compute(session_event("prompted", body="fix it", author=author), FakeLinearClient(issue()), boards)
                 self.assertEqual((result.action, result.reply_author_id), (action, author))
+
+    def test_a_non_list_operator_setting_is_the_error_intent_naming_it(self):
+        def misconfigured():
+            return plugin.triage_exit.operator_user_ids("user-operator")
+
+        boards = {"triage": [], None: [card("t_work", branch=BRANCH)]}
+        result = intent_module.compute(
+            session_event("prompted", body="go"), app_user_id=lambda: APP, operator_user_ids=misconfigured,
+            client=lambda: FakeLinearClient(issue()), cards=lambda board: boards[board], now=NOW, redact=lambda text: text,
+        )
+        self.assertEqual(result, Intent(action="error", error="ValueError: operator_user_ids must be a list of Linear user ids"))
 
     def test_a_reply_keeps_its_action_and_text_when_the_thread_cannot_be_read(self):
         client = FakeLinearClient(issue(), thread_error=RuntimeError("down"))
@@ -724,8 +888,8 @@ class ComputeTest(unittest.TestCase):
             raise OSError("database is locked")
 
         result = intent_module.compute(
-            issue_event(), app_user_id=lambda: APP, client=lambda: FakeLinearClient(issue()), cards=unreadable, now=NOW,
-            redact=lambda text: text,
+            issue_event(), app_user_id=lambda: APP, operator_user_ids=lambda: [], client=lambda: FakeLinearClient(issue()),
+            cards=unreadable, now=NOW, redact=lambda text: text,
         )
         self.assertEqual(result.action, "error")
         self.assertIn("database is locked", result.error)
@@ -745,7 +909,8 @@ class ComputeTest(unittest.TestCase):
         payload = {**issue_event(), "webhookTimestamp": int(NOW.timestamp() * 1000)}
         client = FakeLinearClient(live)
         result = intent_module.compute(
-            payload, app_user_id=lambda: APP, client=lambda: client, cards=lambda _: [], redact=lambda text: text
+            payload, app_user_id=lambda: APP, operator_user_ids=lambda: [], client=lambda: client, cards=lambda _: [],
+            redact=lambda text: text
         )
         self.assertEqual(result.action, "session_created_handles_it")
 

@@ -156,6 +156,21 @@ ISSUE_QUERY = """query Issue($id: String!) {
   }
 }"""
 
+HISTORY_PAGES = 3
+
+ISSUE_HISTORY_QUERY = """query IssueHistory($id: String!, $after: String) {
+  issue(id: $id) {
+    history(first: 50, after: $after, orderBy: createdAt) {
+      nodes { toDelegate { id } actor { id name gitHubUserId app } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
+
+OPERATORS_QUERY = """query OperatorUsers($ids: [ID!]) {
+  users(first: 50, filter: { id: { in: $ids } }) { nodes { id name gitHubUserId app } }
+}"""
+
 ISSUE_BLOCKERS_QUERY = """query IssueBlockers($id: String!) {
   viewer { id }
   issue(id: $id) { inverseRelations(first: 50) { nodes { type issue { id identifier branchName state { type } delegate { id } } } } }
@@ -346,16 +361,40 @@ def card_title(identifier: str, title: str) -> str:
     return f"{identifier}: {' '.join(kept.split())}"
 
 
-def authority(assignee: Optional[dict], sender_id: Optional[str], key: str) -> tuple[bool, Optional[str]]:
+def approvers(assignee: Optional[dict], delegator: Optional[dict], operators: list[dict]) -> list[dict]:
+    """The people who can approve card work, assignee first, one record per Linear id with its first role."""
+    found: list[dict] = []
+    for role, people in (("assignee", [assignee]), ("delegator", [delegator]), ("operator", operators)):
+        for person in people:
+            if person is not None and all(person["id"] != known["id"] for known in found):
+                found.append({**{key: person[key] for key in ("id", "name", "gitHubUserId", "app")}, "role": role})
+    return found
+
+
+def authority(people: list[dict], sender_id: Optional[str], key: str) -> tuple[Optional[str], Optional[str]]:
+    """The role that matched the sender, or None, and why nobody could match when no approver has a value for `key`."""
+    usable = [person for person in people if not person["app"] and person[key] is not None]
+    if usable:
+        if sender_id is None:
+            return None, "no_author"
+        return next((p["role"] for p in usable if str(p[key]) == str(sender_id)), None), None
+    assignee = next((person for person in people if person["role"] == "assignee"), None)
     if assignee is None:
-        return False, "no_assignee"
+        return None, "no_assignee"
     if assignee["app"]:
-        return False, "app_assignee"
-    if assignee[key] is None:
-        return False, "no_github_id"
-    if sender_id is None:
-        return False, "no_author"
-    return str(assignee[key]) == str(sender_id), None
+        return None, "app_assignee"
+    return None, "no_github_id"
+
+
+def lookup_approvers(client: Any, issue: Mapping[str, Any], app_user_id: str, operator_ids: list[str]) -> list[dict]:
+    """Read the delegator and operators live. A failed read leaves the assignee alone, so it never authorizes anyone else."""
+    try:
+        delegator = client.delegator(issue["id"], app_user_id)
+        operators = client.operators(operator_ids)
+    except Exception as failure:
+        logger.warning("linear-agent-session: reading delegator and operators failed: %s", type(failure).__name__)
+        return approvers(issue["assignee"], None, [])
+    return approvers(issue["assignee"], delegator, operators)
 
 
 class LinearClient:
@@ -582,6 +621,36 @@ class LinearClient:
                 reverse=True,
             ),
         }
+
+    def delegator(self, issue_id: str, app_user_id: str) -> Optional[dict]:
+        """The person who last delegated the issue to the app, or None: not in the newest pages, no actor, or an app."""
+        after = None
+        for _ in range(HISTORY_PAGES):
+            issue = self._graphql(ISSUE_HISTORY_QUERY, {"id": issue_id, "after": after})["issue"]
+            if issue is None:
+                raise LinearError(f"Linear has no issue {issue_id} that the agent app can read")
+            page = issue["history"]
+            for entry in page["nodes"]:
+                if entry["toDelegate"] and entry["toDelegate"]["id"] == app_user_id:
+                    actor = entry["actor"]
+                    return actor if actor and not actor["app"] else None
+            if not page["pageInfo"]["hasNextPage"]:
+                return None
+            after = page["pageInfo"]["endCursor"]
+        return None
+
+    def operators(self, user_ids: list[str]) -> list[dict]:
+        """The people the ids name, in order. An id that resolves to nobody or to an app is logged and left out."""
+        if not user_ids:
+            return []
+        known = {u["id"]: u for u in self._graphql(OPERATORS_QUERY, {"ids": user_ids})["users"]["nodes"]}
+        people = []
+        for user_id in user_ids:
+            if user_id not in known or known[user_id]["app"]:
+                logger.warning("linear-agent-session: operator_user_ids entry %s names no person; it matches nobody", user_id)
+            else:
+                people.append(known[user_id])
+        return people
 
     def issue_status(self, id_or_identifier: str) -> dict:
         issue = self._graphql(ISSUE_STATUS_QUERY, {"id": id_or_identifier})["issue"]
