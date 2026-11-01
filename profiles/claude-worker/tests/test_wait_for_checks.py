@@ -133,6 +133,12 @@ class GuardTests(unittest.TestCase):
             "while ! grep -q x f; do sleep 5; done",
             "cd /w && while true; do\n  sleep 5\ndone",
             "while ! test -f f; do for i in 1 2; do sleep 1; done; done",
+            "if true; then while true; do sleep 1; done; fi",
+            "for r in a b; do until test -f $r; do sleep 5; done; done",
+            "time until test -f x; do sleep 1; done",
+            "x=$(until test -f x; do sleep 2; done)",
+            "w() { until test -f x; do sleep 1; done; }; w",
+            "! until test -f x; do sleep 1; done",
         ]:
             for extra in ({}, {"run_in_background": True}):
                 code, text = self.decide(command, **extra)

@@ -34,6 +34,10 @@ BOUNDING_CONDITION = re.compile(r"-(?:lt|le|gt|ge)\b|\(\(|\bSECONDS\b")
 READ_CONDITION = re.compile(r"(?:\w+=\S*\s+)*read\b")
 COUNTER_TEST = re.compile(r"-(?:lt|le|gt|ge|eq|ne)\b|\bSECONDS\b|\(\([^)]*(?:<|>|==|!=)")
 BREAK = re.compile(r"\bbreak\b")
+# A command starts after a separator, a command substitution, or a brace group's opening or closing brace.
+COMMAND_SPLIT = re.compile(r"[;&|\n`]+|\$\((?!\()|(?<![\w$])[{}](?=[\s;]|$)")
+# Words that can precede a loop keyword in the same command.
+PREFIX_WORDS = frozenset({"then", "else", "elif", "do", "time", "!"})
 REFUSAL = (
     "A foreground wait over {limit} seconds outlasts the 5-minute prompt cache, so the next call "
     "rewrites the whole context. To wait for CI, run `python3 <scripts>/{helper} <number> --repo <owner/repo>`. "
@@ -107,22 +111,23 @@ class Loop:
 def waits_without_limit(command: str) -> bool:
     """Whether the shell code holds a `while` or `until` loop that runs `sleep` and nothing bounds."""
     open_loops: list[Loop] = []
-    for segment in re.split(r"[;&|\n]+", shell_code(command)):
-        words = segment.strip().lstrip("({ \t").split(None, 1)
+    for segment in COMMAND_SPLIT.split(shell_code(command)):
+        words = segment.strip().lstrip("( \t").split()
+        while words and words[0] in PREFIX_WORDS:
+            if words.pop(0) == "do" and open_loops:
+                open_loops[-1].in_body = True
         if not words:
             continue
-        keyword, rest = words[0], words[1] if len(words) > 1 else ""
+        keyword, rest = words[0].rstrip(")"), " ".join(words[1:])
         if keyword in ("while", "until", "for", "select"):
             open_loops.append(Loop(keyword, rest))
             continue
-        if keyword == "do" and open_loops:
-            open_loops[-1].in_body = True
-        elif keyword == "done" and open_loops:
+        if keyword == "done" and open_loops:
             if open_loops.pop().unbounded_wait():
                 return True
             rest = ""
         else:
-            rest = segment
+            rest = " ".join(words)
         for loop in open_loops:
             (loop.body if loop.in_body else loop.condition).append(rest)
     return False
