@@ -79,7 +79,7 @@ def session_update_ok():
 
 
 def session_urls_ok(*urls):
-    return 200, {"data": {"agentSession": {"externalUrls": [{"label": "Held", "url": u} for u in urls]}}}
+    return 200, {"data": {"agentSession": {"externalUrls": json.dumps([{"label": "Held", "url": u} for u in urls])}}}
 
 
 LIVE_SESSION_URL = "https://linear.app/example/agent-session/live"

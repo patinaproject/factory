@@ -85,7 +85,7 @@ def _fake_urlopen(request, timeout=None):
         elif "AgentSessionUrls" in query and state.get("session_urls_error"):
             response = _Response(200, {"errors": [{"message": state["session_urls_error"]}]})
         elif "AgentSessionUrls" in query:
-            urls = [{"url": url} for url in state.get("session_urls", [])]
+            urls = json.dumps([{"label": "Held", "url": url} for url in state.get("session_urls", [])])
             response = _Response(200, {"data": {"agentSession": {"externalUrls": urls}}})
         elif "AgentSessionUpdate" in query:
             entry["session_update"] = body["variables"]
