@@ -871,9 +871,9 @@ def title_agent_session(client, session_id: str | None, issue_id: str, triage: b
         return {"error": f"titling the agent session failed: {error}"}
 
 
-def sync_pull_requests(client, session_id: str, args: argparse.Namespace, branch: str, report: dict) -> dict:
+def sync_pull_requests(client, session_id: str, repo: str, branch: str, takeover_pr: str | None, report: dict) -> dict:
     linear = plugin_module("linear-agent-session", "linear")
-    step = session_links.sync_session_pull_requests(linear, client, session_id, args.repo, branch, args.takeover_pr)
+    step = session_links.sync_session_pull_requests(linear, client, session_id, repo, branch, takeover_pr)
     return session_links.combine(report, step)
 
 
@@ -1372,14 +1372,16 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
 
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         login = (settings.get("github") or {}).get("login")
+        # A successful run marks this snapshot as seen, so a comment that lands mid-run goes to the next run.
         card = read_card(args.card_json, args.task_id)
         card_session_id = reply_inbox.session_id_of(card["task"]["body"])
         link_report = None
         if card_session_id and not triage:
-            link_report = sync_pull_requests(client, card_session_id, args, branch, {"added": [], "action": "unchanged"})
+            link_report = sync_pull_requests(
+                client, card_session_id, args.repo, branch, args.takeover_pr, {"added": [], "action": "unchanged"}
+            )
         adopted = None if triage else adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
         handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"), args.issue_identifier, triage)
-        # A successful run marks this snapshot as seen, so a comment that lands mid-run goes to the next run.
         comments = card["comments"]
         seen_path = lock_path.with_name(COMMENTS_SEEN_NAME)
         seen = json.loads(seen_path.read_text()) if seen_path.exists() else []
@@ -1425,7 +1427,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                     args.repo, branch, login, args.issue_identifier, args.issue_url, github_issue_url(card)
                 )
             if link_report is not None:
-                link_report = sync_pull_requests(client, card_session_id, args, branch, link_report)
+                link_report = sync_pull_requests(client, card_session_id, args.repo, branch, args.takeover_pr, link_report)
             documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
             first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
         except Exception as error:

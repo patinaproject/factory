@@ -53,9 +53,9 @@ def sync_session_pull_requests(
     linear, client, session_id: str, repo: str, branch: str, takeover_pr: str | None = None, gh=card_branch.run_gh,
 ) -> dict:
     links, error = [], None
+    if takeover_pr and PULL_REQUEST_URL.fullmatch(takeover_pr):
+        links.append(pull_link(takeover_pr, "Taken-over pull request"))
     try:
-        if takeover_pr:
-            links.append(pull_link(takeover_pr, "Taken-over pull request"))
         links += branch_pull_links(repo, branch, gh)
     except (card_branch.GhFailed, ValueError, KeyError, TypeError) as failure:
         error = f"listing the pull requests on {branch} failed: {failure}"
