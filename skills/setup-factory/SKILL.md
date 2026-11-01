@@ -910,6 +910,7 @@ key file but does not contain the key.
     "private_key_path": "/abs/path/to/github-app.pem"
   },
   "default_team": "<Linear team key>",
+  "operator_user_ids": [],
   "kanban_url": "https://<hostname>/kanban",
   "factory_repository": {"full_name": "<owner>/<factory>", "default_branch": "<branch>"},
   "triage": {"max_running": <n>},
@@ -990,6 +991,12 @@ record. Hermes caps workers per host and per profile, but has no per-board
 cap, so the factory applies this one itself: triage creates each triage card
 with no assignee, and the `dispatch-triage` cron job from part 12 assigns
 waiting cards only while fewer than `max_running` run or wait assigned.
+
+`operator_user_ids` is an optional input the operator supplies, default `[]`: the
+Linear user ids of operators who, like an issue's assignee and the person who
+delegated it, can start card work with a reply or a pull request review or
+comment. Do not discover or guess it, and commit no real id. The real value
+belongs in the private record. A value that is not a list is refused by name.
 
 `default_team` is the Linear team key, such as `ABC`, where
 `linear_issue_create` files an issue when the call names no team. Its value

@@ -73,8 +73,9 @@ If no card matches, stop. The event belongs to work the factory does not own.
 
 ## Check the sender
 
-Only the assignee of the card's Linear issue starts work on the card from a
-review or a comment. For a `pull_request_review`, a
+Only an approver of the card's Linear issue starts work on the card from a
+review or a comment. The approvers are the issue's assignee, the person who
+delegated it to the agent app, and the operators the factory lists. For a `pull_request_review`, a
 `pull_request_review_comment`, or an `issue_comment` on a pull request, when
 the sender is a person (not a bot), run
 
@@ -82,13 +83,15 @@ the sender is a person (not a bot), run
 <<linear_cli>> pr-authority --task <task id> --sender-id <sender id>
 ```
 
-It prints one JSON line. `from_assignee` is true when the sender is the
-assignee. Otherwise `assignee` names the assignee or is null, and `reason` is
-`no_assignee`, `app_assignee`, or `no_github_id` when no one can be matched,
-or null when the sender is simply someone else. When it prints `error`, treat
-the sender as not the assignee, with that error as the reason.
+It prints one JSON line. `from_assignee` is true when the sender is an
+approver, and `authorized_as` says which: `assignee`, `delegator`, or
+`operator`. `approvers` lists each approver as `id`, `name`, and `role`,
+assignee first. Otherwise `assignee` names the assignee or is null, and
+`reason` is `no_assignee`, `app_assignee`, or `no_github_id` when no one can be
+matched, or null when the sender is simply someone else. When it prints
+`error`, treat the sender as not an approver, with that error as the reason.
 
-The sender is not the assignee when the command ran and `from_assignee` is not
+The sender is not an approver when the command ran and `from_assignee` is not
 true. Such an event wakes no card: in steps 3, 4, and 5, the comment from step 1
 is enough, whatever the card's status. A bot's event, a merge, and every other
 event keep the steps below unchanged.
@@ -97,14 +100,15 @@ event keep the steps below unchanged.
 
 1. Comment on the card. Name the event, its action, the sender, and the page.
    Quote the review or comment body, or name the failed check and its
-   conclusion. When the sender is not the assignee, start the comment with
-   `<<not_assignee_marker>>`. Name the assignee, or, when `reason` is set, say
-   why the event woke nothing, for example that the issue has no assignee or
-   that the assignee has not connected GitHub to Linear.
+   conclusion. When `from_assignee` is not true, start the comment with
+   `<<not_assignee_marker>>`. Name each person in `approvers` and their role,
+   or, when `reason` is set, say why the event woke nothing, for example that
+   the issue has no assignee or that the assignee has not connected GitHub to
+   Linear.
 2. For `pull_request` action `closed` with merged `True`, complete the card as
    "Complete a card whose pull request merged" says, whatever its status.
 3. For `pull_request_review` action `submitted` with review state
-   `changes_requested`, from a bot or from the assignee, act on the card's
+   `changes_requested`, from a bot or with `from_assignee` true, act on the card's
    status:
    - `review`: run
      `<<card_transition>> reopen <task id> --reason 'changes requested on GitHub; see the card comments'`.
@@ -112,19 +116,19 @@ event keep the steps below unchanged.
      addresses them.
    - `triage`: resume it as "Resume a parked card" says, after step 1 has
      commented on the card, so the worker finds the review there.
-   - `blocked`, when the sender is the assignee: unblock it as
+   - `blocked`, when `from_assignee` is true: unblock it as
      "Unblock a card" says, with the reason
      `changes requested on GitHub; see the card comments`, after step 1 has
      commented on the card, so the worker finds the review there.
    - Any other status: the comment from step 1 is enough.
 4. For `pull_request_review` action `submitted` with review state `approved`,
-   when the sender is the assignee and the card's status is `triage`,
+   when `from_assignee` is true and the card's status is `triage`,
    resume it as "Resume a parked card" says, after step 1 has commented on the
    card, so the worker hands the approved pull request off. When the sender is
    anyone else, or the card is in any other status, the comment from step 1 is
    enough.
 5. For a `pull_request_review` submitted as a comment, a `pull_request_review_comment`,
-   or an `issue_comment` on a pull request, when the sender is the assignee and
+   or an `issue_comment` on a pull request, when `from_assignee` is true and
    the text asks for a change or reports a defect, act on the card's
    status, after step 1 has commented on the card:
    - `triage`: resume it as "Resume a parked card" says.
