@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -51,6 +52,35 @@ def run_gh(args: Sequence[str], stdin: Optional[str] = None) -> str:
     return proc.stdout
 
 
+REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.{1,2}$)[A-Za-z0-9._-]+")
+
+
+def label_named(repository: str, names: Sequence[str], name: str) -> str:
+    """The repository's one label that matches `name` whatever its case and punctuation."""
+    match = [n for n in names if role_key(n) == role_key(name)]
+    if len(match) > 1:
+        raise LinearError(f"more than one label of {repository} matches {name!r}: {', '.join(match)}")
+    if not match:
+        raise LinearError(f"{repository} has no label named {name!r}; it has: {', '.join(names)}")
+    return match[0]
+
+
+def create_issue(repo: str, title: str, body: str, labels: Sequence[str] = (), gh: Gh = run_gh) -> dict:
+    """Create one issue in a public repository with one POST. It sets no assignee, and every label must already exist."""
+    if not REPOSITORY.fullmatch(repo):
+        raise LinearError(f"{repo!r} is not a repository; pass owner/name")
+    visibility = json.loads(gh(["api", f"repos/{repo}"], None))["visibility"]
+    if visibility != "public":
+        raise LinearError(f"{repo} is {visibility}; create its issues in Linear")
+    request: dict = {"title": title, "body": body}
+    if labels:
+        known = json.loads(gh(["api", "--paginate", "--slurp", f"repos/{repo}/labels?per_page=100"], None))
+        names = sorted(label["name"] for page in known for label in page)
+        request["labels"] = sorted({label_named(repo, names, name) for name in labels})
+    created = json.loads(gh(["api", "-X", "POST", f"repos/{repo}/issues", "--input", "-"], json.dumps(request)))
+    return {"url": created["html_url"], "number": created["number"]}
+
+
 def edit_issue(
     url: str,
     *,
@@ -78,13 +108,9 @@ def edit_issue(
         known = json.loads(gh(["api", "--paginate", "--slurp", f"repos/{owner}/{repo}/labels?per_page=100"], None))
         names = sorted(label["name"] for page in known for label in page)
         for name in add_labels:
-            match = [n for n in names if role_key(n) == role_key(name)]
-            if len(match) > 1:
-                raise LinearError(f"more than one label of {owner}/{repo} matches {name!r}: {', '.join(match)}")
-            if not match:
-                raise LinearError(f"{owner}/{repo} has no label named {name!r}; it has: {', '.join(names)}")
-            if match[0] not in labels:
-                labels.append(match[0])
+            match = label_named(f"{owner}/{repo}", names, name)
+            if match not in labels:
+                labels.append(match)
     update: dict = {}
     if title is not None and title != issue["title"]:
         update["title"] = title
