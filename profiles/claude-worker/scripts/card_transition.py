@@ -63,7 +63,9 @@ timeout, or `OSError` leaves the card parked and is reported. `replied` never re
 - `unblock --repo <r> --branch <b> --reason <text>`: unblock a card. When the branch has a pull
   request, Hermes holds the `ready` card for 24 hours after a comment that names it, and only the
   review reopen lifts the hold, so the card is unblocked, sent to review, and reopened.
-- `reopen --reason <text>`: hand a `review` card back to its worker.
+- `reopen --reason <text>`: hand a `review` card back to its worker. First `stale_failure.clear_after_review`
+  clears the card's `last_failure_error` when its newest ended run is `review_requested` or `completed`, because
+  Hermes holds a `ready` card as `blocker_auth` for an old quota or auth error that the reopen leaves in place.
 - `stop`: block a card whatever it is doing. Hermes blocks only a `ready` or `running` card, so a
   `review` card is reopened first. A `scheduled` card stays `scheduled`, is unassigned, and gets a `stopped`
   comment, which has no reply prefix, so the next reply releases it like any wait.
@@ -120,6 +122,7 @@ import install_drift
 import kanban_board
 import merged_checks
 import reply_inbox
+import stale_failure
 from archive_card import Failed, archive, kanban_command, last_line, run, run_kanban
 
 WORKER = "claude-worker"
@@ -665,6 +668,7 @@ def unblock(card: Card, repo: str, branch: str, reason: str) -> dict:
 
 
 def reopen(card: Card, reason: str) -> dict:
+    stale_failure.clear_after_review(board_database(card.board), card.id)
     card.call("reopen-review", "--reason", reason)
     return result("reopened")
 

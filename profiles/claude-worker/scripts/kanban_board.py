@@ -2,8 +2,8 @@
 
 `claude-session` reads the cards for its blocker check, `dispatch-triage` and `check-install` read the cards that
 wait for a reply, `finish-merged` reads the cards whose pull request may have merged, and `check-install` probes
-that every read still works, so all of them read the board here. `completion_contract.py` makes the one write.
-The columns are Hermes' internal `tasks`, `task_comments`, and `task_events` schema, which Hermes may change.
+that every read still works, so all of them read the board here. `completion_contract.py` and `stale_failure.py`
+make the only writes. The columns are Hermes' internal `tasks`, `task_comments`, and `task_events` schema, which Hermes may change.
 """
 from __future__ import annotations
 
