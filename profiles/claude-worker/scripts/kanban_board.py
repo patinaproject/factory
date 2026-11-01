@@ -1,7 +1,8 @@
 """Read a Hermes board database without writing to it.
 
 `claude-session` reads the cards for its blocker check, `dispatch-triage` and `check-install` read the cards that
-wait for a reply, and `check-install` probes that every read still works, so all of them read the board here.
+wait for a reply, `finish-merged` reads the cards whose pull request may have merged, and `check-install` probes
+that every read still works, so all of them read the board here. `completion_contract.py` makes the one write.
 The columns are Hermes' internal `tasks`, `task_comments`, and `task_events` schema, which Hermes may change.
 """
 from __future__ import annotations
@@ -14,7 +15,7 @@ from contextlib import closing
 from typing import NamedTuple
 from urllib.parse import quote
 
-COLUMNS = ("id", "title", "body", "branch_name", "status", "block_kind")
+COLUMNS = ("id", "title", "body", "branch_name", "status", "block_kind", "completion_contract")
 COMMENT_COLUMNS = ("id", "task_id", "author", "body", "created_at")
 EVENT_COLUMNS = ("id", "task_id", "kind", "payload", "created_at")
 TABLES = {"tasks": COLUMNS, "task_comments": COMMENT_COLUMNS, "task_events": EVENT_COLUMNS}

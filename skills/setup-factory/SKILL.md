@@ -1241,8 +1241,8 @@ belongs to the worker profile.
 `refresh-checkouts`. `cron create` does not remove duplicates. If more than one
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
-jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`, and
-`dispatch-triage`.
+jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`,
+`finish-merged`, and `dispatch-triage`.
 A copy there runs without the worker's scripts and settings, so remove it the
 same way. The default home holds two jobs, `retry-failed-webhooks` and
 `report-deploy`, described below. A second setup session runs this check before it
@@ -1322,6 +1322,32 @@ card. Create the job when `cron list` has no `reopen-conflicts` job:
 ```sh
 hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null
 ```
+
+**Merged card job.** A card whose pull request merged moves to `done` without
+a person, whatever its check runs say. Hermes refuses `hermes kanban complete`
+for a card with a repository `completion_contract` unless every required check
+on the head passed, and it counts check runs per check suite, so an old failed
+run can refuse a merged pull request forever. When GitHub reports the pull
+request `MERGED`, `card_transition.py merged` sets the card's
+`completion_contract` to `local-only` in the card's board database, which
+Hermes' acceptance skips, and then completes the card the normal way. It
+writes only when the contract names this pull request or its repository, and
+never on a `done` or `archived` card. A card whose required checks did not
+all pass gets one comment that names them. A running card keeps its worker,
+whose own `kanban_complete` Hermes then accepts. The merge webhook runs it
+through GitHub triage. `finish-merged` runs every 5 minutes and does the same
+for every card that is not `done` or `archived` whose pull request GitHub
+reports `MERGED`: a worker that exited without completing, a missed webhook,
+or a completion that failed after the write. Create the job when `cron list`
+has no `finish-merged` job:
+
+```sh
+hermes -p claude-worker cron create "every 5m" --name finish-merged --no-agent --script finish-merged </dev/null
+```
+
+A card that a person reopens from the dashboard after it reached `done` keeps
+its `local-only` contract, so its next completion skips Hermes' acceptance.
+This is an accepted limit. Archived cards stay archived and are never swept.
 
 **Install drift check.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
@@ -1873,26 +1899,19 @@ each check. Report each result.
 
 24. Merge a card's pull request while Hermes still holds a failed check run
     against it, with the card in `review` and its Linear issue In Progress.
-    First merge past a check whose newest run failed. The card's comments
-    include `Merge refused by Hermes: required checks failed:` with the check
-    names, the card is unassigned and `blocked` with block kind `needs_input` (a
-    `review` card stays in `review`, unassigned),
-    and the Linear agent session gets one `elicitation` that says the pull
-    request merged and asks whether the issue is done. A reply in the session
-    leaves the card `blocked`. Mark the Linear issue Done, and the card is
-    archived. Then repeat with a check that failed once and passed on a newer
-    run (re-run it before the merge). The comment is
-    `Merge refused by Hermes: Hermes counted failed runs that newer passing runs replaced:`
-    and the elicitation says the checks passed on their newest runs. Repeat
-    either case with the issue already Done before the merge: the card is
-    archived with the same comment, and the session gets no post. Then merge a
-    pull request into a base branch with no required checks, so Hermes refuses
-    it as `missing`. The comment is
-    `Merge refused by Hermes: the base branch has no required checks.`, and the
-    elicitation asks whether the issue is done. Repeat it with the issue
-    already Done before the merge, and with the issue marked Done after the
-    refusal: the card is archived both times. In every case the card stays
-    unassigned.
+    First merge past a check whose newest run failed. Within a minute the card
+    is `done` with a `completed` event, its `completion_contract` in
+    `hermes kanban show <task id> --json` is `local-only`, and its comments
+    include one that starts `Merged past required checks:` and names the
+    check. The Linear agent session gets the final `response` with the pull
+    request link, and no `elicitation`. Repeat with a check that failed once
+    and passed on a newer run, and with a base branch that has no required
+    checks: the card is `done` both times, with no `Merged past required
+    checks:` comment. Then merge a pull request while its card is `running`:
+    the worker completes the card and does not block. Finally merge a pull
+    request whose merge webhook triage does not handle, for example while the
+    gateway is stopped: within 5 minutes `finish-merged` moves the card to
+    `done`. `check-install` reports no `tasks.completion_contract` line.
 
 25. Create an issue in the team's Triage status. Within a minute the
     `triage` board has one card for it, with no assignee until

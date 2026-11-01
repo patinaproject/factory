@@ -54,7 +54,11 @@ anything.
 
 A card's repository is its `completion_contract`. Hermes replaces that
 `<owner>/<name>` with the pull request URL once a worker reports one. Then the
-card's repository is the `<owner>/<name>` in that URL.
+card's repository is the `<owner>/<name>` in that URL. The factory sets the
+contract to `local-only` once the card's pull request merged. Then the card's
+repository is the `repo:` line of its body, or else the `<owner>/<name>` in the
+`published_pr` metadata of its runs in `hermes kanban show <task id> --json`.
+A `done` card still matches, so a late review or close event is recorded on it.
 
 - For a pull request, review, check, or workflow event, take the branch from
   the event fields above. For an `issue_comment` on a pull request, read it with

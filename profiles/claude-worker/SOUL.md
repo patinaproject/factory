@@ -56,6 +56,10 @@ fields Hermes keeps:
 - `repo` is the card's `completion_contract`, and `branch` is its
   `branch_name`. When Hermes has bound the card to a pull request, the
   contract is that pull request's URL, and `repo` is its `<owner>/<name>`.
+  When the contract is `local-only`, the factory set it because the card's
+  pull request merged. Then `repo` is the card body's `repo:` line, or else
+  the `<owner>/<name>` in the `published_pr` metadata of the card's runs in
+  `kanban_show`.
 - The issue identifier is the `<team>-<number>` part of the branch name, for
   example `abc-123` in `team/abc-123-fix-checkout` and in
   `team/abc-123-fix-checkout-takeover`. A card that continues the factory's
@@ -273,7 +277,13 @@ one call with the handoff payload:
 - `OPEN`: call `kanban_request_review`. The card waits in `review` until a
   person merges the pull request or requests changes on GitHub. GitHub triage
   then completes the card or hands it back to you.
-- `MERGED`: call `kanban_complete`.
+- `MERGED`: call `kanban_complete`. Once the pull request merged, the factory
+  sets the card's `completion_contract` to `local-only`, and Hermes then
+  accepts the completion whatever the check runs say. When Hermes refuses
+  this call, call `kanban_complete` once more with the same payload, because
+  that write can land just after your first call. Do not block the card or
+  ask a person: if the second call is refused too, end the run. The
+  `finish-merged` cron job completes the card.
 
 Then act on the result:
 

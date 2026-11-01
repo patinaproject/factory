@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -471,13 +472,13 @@ class MergedCardTest(unittest.TestCase):
         self.assertEqual(self.github.count(self.section), 1)
         self.assertNotIn(self.section, self.linear)
 
-    def test_linear_triage_reads_the_marker_that_card_transition_writes(self):
-        marker = "Merge refused by Hermes:"
-        self.assertTrue(all(case.marker.startswith(marker) for case in card_transition.Case))
-        change = self.linear[self.linear.index("## Issue change") :]
-        reply = self.linear[self.linear.index("## Prompt") : self.linear.index("## Requested issue change")]
-        for step in (change, reply):
-            self.assertIn(f"starts `{marker}`", " ".join(step.split()))
+    def test_both_prompts_run_a_merged_command_that_card_transition_accepts(self):
+        for name, prompt in (("github", self.github), ("linear", self.linear)):
+            with self.subTest(route=name):
+                commands = re.findall(r"card_transition\.py merged ([^`]+)`", prompt)
+                self.assertEqual(len(commands), 1)
+                args = card_transition.parser().parse_args(["merged", *shlex.split(commands[0].replace("<task id>", "t_1"))])
+                self.assertEqual((args.task_id, args.pr[0]), ("t_1", "<"))
 
 
 class TransitionCommandTest(unittest.TestCase):

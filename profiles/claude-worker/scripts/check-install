@@ -114,6 +114,7 @@ TRIAGE_REFS = "triage-refs.json"
 TRIAGE_BOARD = "triage"
 STRANDED_MINUTES = 30  # Hermes' own threshold for a card stranded in ready
 GUARDED_MINUTES = 10  # two cron ticks of reopen-conflicts, so a hold that a handback lifts is gone
+CONTRACT_COLUMN = "tasks.completion_contract"
 # Hermes' events that start a card's wait in ready; `assigned` is the dispatch-triage assignment.
 WAIT_EVENTS = ("created", "promoted", "reclaimed", "unblocked", "assigned")
 LINEAR_ISSUE_FIELD = "data.id"
@@ -271,6 +272,7 @@ CRON = (
     CronJob(12, "refresh-checkouts", 60, equal("local")),
     CronJob(12, "refresh-owned-refs", 1, equal("local")),
     CronJob(12, "reopen-conflicts", 5, equal("local")),
+    CronJob(12, "finish-merged", 5, equal("local")),
     CronJob(12, "dispatch-triage", 1, equal("local")),
     CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
     CronJob(12, "report-deploy", 5, declared("the operator's chat platform", besides=("local",)), home=ROOT),
@@ -1429,10 +1431,12 @@ def check_waiting_triage(root: Path, plugin: Path) -> list:
 
 def check_kanban_boards(root: Path) -> list:
     """Probe every board database for the columns `kanban_board` reads: the blocker check's, and the comments
-    and events that release a triage card waiting for a reply.
+    and events that release a triage card waiting for a reply, and `completion_contract`, which a merged card's
+    completion writes.
 
     Hermes' tables are internal. A renamed column makes the blocker check fail open, so cards start out of order,
-    and stops the sweep that releases a waiting card, with nothing else to say so."""
+    and stops the sweep that releases a waiting card, with nothing else to say so. Without `completion_contract`,
+    no merged card whose old check runs failed can reach `done`."""
     drifts = []
     for path in board_databases(root):
         if not path.is_file():
@@ -1442,6 +1446,14 @@ def check_kanban_boards(root: Path) -> list:
         except (sqlite3.Error, AttributeError) as error:
             drifts.append(Drift("kanban board database", path, f"cannot be read for blockers: {error} (part 15, check 29)", ADVISORY))
             continue
+        if CONTRACT_COLUMN in missing:
+            missing.remove(CONTRACT_COLUMN)
+            drifts.append(Drift(
+                "kanban board database", path,
+                f"has no {CONTRACT_COLUMN}, so a merged card cannot be completed: card_transition.py merged and "
+                "finish-merged set it to local-only before they complete the card (part 15, check 24)",
+                Manual("change completion_contract.py and kanban_board.py to Hermes' new contract column in a pull request"),
+            ))
         if missing:
             drifts.append(Drift(
                 "kanban board database", path,

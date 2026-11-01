@@ -1162,10 +1162,11 @@ class ClaudeSessionTest(GitFixture):
             with sqlite3.connect(database) as db:
                 db.execute(
                     "CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, assignee TEXT, status TEXT, branch_name TEXT, "
-                    "block_kind TEXT)"
+                    "block_kind TEXT, completion_contract TEXT)"
                 )
                 db.executemany(
-                    "INSERT INTO tasks VALUES (:id, :title, :body, 'claude-worker', :status, :branch_name, NULL)", board or []
+                    "INSERT INTO tasks VALUES (:id, :title, :body, 'claude-worker', :status, :branch_name, NULL, NULL)",
+                    board or [],
                 )
             db.close()
         self.board_env = {"HERMES_KANBAN_DB": str(database)}

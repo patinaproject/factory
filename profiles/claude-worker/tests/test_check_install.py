@@ -121,6 +121,7 @@ WORKER_JOBS = [
     cron_job("refresh-checkouts", 60),
     cron_job("refresh-owned-refs", 1),
     cron_job("reopen-conflicts", 5),
+    cron_job("finish-merged", 5),
     cron_job("dispatch-triage", 1),
 ]
 RETRY_SCRIPT = "retry-failed-webhooks"
@@ -1246,6 +1247,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("refresh-checkouts", 15, enabled=False, no_agent=False),
             cron_job("refresh-owned-refs", 1),
             cron_job("reopen-conflicts", 5),
+            cron_job("finish-merged", 5),
             cron_job("dispatch-triage", 1),
         ])
         self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local"), ROOT_JOBS[1]])
@@ -1460,7 +1462,7 @@ class CheckInstallTest(unittest.TestCase):
         return path
 
     def test_board_databases_that_hold_the_columns_the_blocker_check_reads_are_silent(self) -> None:
-        columns = "id, title, body, branch_name, status, block_kind, assignee, claim_lock, created_at"
+        columns = "id, title, body, branch_name, status, block_kind, completion_contract, assignee, claim_lock, created_at"
         self.kanban_database(self.root / "kanban.db", columns)
         self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", columns)
 
@@ -1469,7 +1471,7 @@ class CheckInstallTest(unittest.TestCase):
     def test_a_triage_board_with_a_stranded_card_is_reported_by_the_full_check(self) -> None:
         board = self.kanban_database(
             self.root / "kanban" / "boards" / "triage" / "kanban.db",
-            "id, title, body, branch_name, status, block_kind, assignee, claim_lock, created_at",
+            "id, title, body, branch_name, status, block_kind, completion_contract, assignee, claim_lock, created_at",
         )
         with sqlite3.connect(board) as db:
             db.execute(
@@ -1487,6 +1489,9 @@ class CheckInstallTest(unittest.TestCase):
         triage = self.kanban_database(self.root / "kanban" / "boards" / "triage" / "kanban.db", "id, title, body, state")
 
         self.assertEqual(self.check(), (1, (
+            f"kanban board database {triage}: has no tasks.completion_contract, so a merged card cannot be "
+            "completed: card_transition.py merged and finish-merged set it to local-only before they complete "
+            "the card (part 15, check 24)\n"
             f"kanban board database {triage}: has no tasks.branch_name, tasks.status, tasks.block_kind, so a card "
             "cannot wait for its blockers or a reply (part 15, check 29)\n"
             f"stranded triage card check {triage}: cannot be read: no such column: t.created_at (part 10)\n"
@@ -1497,7 +1502,7 @@ class CheckInstallTest(unittest.TestCase):
     def test_a_board_database_missing_a_comment_or_event_column_the_release_reads(self) -> None:
         board = self.root / "kanban.db"
         with sqlite3.connect(board) as db:
-            db.execute("CREATE TABLE tasks (id, title, body, branch_name, status, block_kind)")
+            db.execute("CREATE TABLE tasks (id, title, body, branch_name, status, block_kind, completion_contract)")
             db.execute("CREATE TABLE task_events (id, task_id, kind, data, created_at)")
             db.execute("CREATE TABLE task_comments (id, task_id, author, text, created_at)")
         db.close()
@@ -1506,6 +1511,16 @@ class CheckInstallTest(unittest.TestCase):
             f"kanban board database {board}: has no task_comments.body, task_events.payload, so a card cannot wait "
             "for its blockers or a reply (part 15, check 29)\n"
             f"guarded card check {board}: cannot be read: no such column: e.payload\n"
+        )))
+
+    def test_a_board_database_without_completion_contract_says_a_merged_card_cannot_finish(self) -> None:
+        columns = "id, title, body, branch_name, status, block_kind, assignee, claim_lock, created_at"
+        board = self.kanban_database(self.root / "kanban.db", columns)
+
+        self.assertEqual(self.check(), (1, (
+            f"kanban board database {board}: has no tasks.completion_contract, so a merged card cannot be "
+            "completed: card_transition.py merged and finish-merged set it to local-only before they complete "
+            "the card (part 15, check 24)\n"
         )))
 
     def test_a_board_database_that_cannot_be_read(self) -> None:
