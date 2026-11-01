@@ -39,7 +39,7 @@ SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: A
 }"""
 
 SESSION_URLS_QUERY = """query AgentSessionUrls($id: String!) {
-  agentSession(id: $id) { externalUrls { url } }
+  agentSession(id: $id) { externalUrls }
 }"""
 
 SESSION_THREAD_QUERY = """query AgentSessionThread($id: String!) {
@@ -400,7 +400,7 @@ class LinearClient:
         """Add the links the session lacks, matched by URL, and return the URLs added. Never replaces the list."""
         try:
             session = self._graphql(SESSION_URLS_QUERY, {"id": agent_session_id})["agentSession"]
-            held = {u["url"] for u in session["externalUrls"]}
+            held = {u["url"] for u in json.loads(session["externalUrls"])}
         except (*CLIENT_ERRORS, OSError):
             held = set()
         missing = {}
