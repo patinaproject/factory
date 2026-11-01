@@ -189,6 +189,57 @@ class NeedsBriefTest(unittest.TestCase):
         self.assertEqual(self.needs(issue_event(), titles=BRIEF).action, "open_session")
 
 
+class StartTriageTest(unittest.TestCase):
+    NOT_READY = {"labels": [], "stateType": "unstarted"}
+
+    def test_a_delegation_in_todo_without_the_ready_label_starts_triage_whatever_the_board_says(self):
+        for triage, board in (
+            ([], None),
+            ([card("t_triage", status="scheduled", body=id_line())], {"id": "t_triage", "status": "scheduled"}),
+            ([card("t_triage", status="done", body=id_line())], {"id": "t_triage", "status": "done"}),
+        ):
+            with self.subTest(board):
+                result = decide(session_event("created"), issue(**self.NOT_READY), triage=triage)
+                self.assertEqual((result.action, result.gate, result.triage_card), ("gate_start_triage", "not-ready", board))
+                self.assertEqual(result.agent_session_id, "session-1")
+
+    def test_a_delegateId_change_starts_triage_on_the_open_session(self):
+        live = issue(agentSessions=[session("s-open", 30, creator=None)], **self.NOT_READY)
+        result = decide(issue_event({"delegateId": None}), live)
+        self.assertEqual((result.action, result.agent_session_id, result.then), ("gate_start_triage", "s-open", None))
+
+    def test_a_delegateId_change_starts_triage_even_when_a_label_changed_too(self):
+        result = decide(issue_event({"delegateId": None, "labelIds": []}), issue(**self.NOT_READY))
+        self.assertEqual(result.action, "gate_start_triage")
+
+    def test_other_issue_updates_keep_gate_not_ready(self):
+        for previous in ({"priority": 2}, {"description": "old"}, {"labelIds": []}, {"stateId": "old"}):
+            with self.subTest(previous):
+                self.assertEqual(decide(issue_event(previous), issue(**self.NOT_READY)).action, "gate_not_ready")
+
+    def test_a_prompt_with_no_live_triage_card_starts_triage(self):
+        event = session_event("prompted", body="go")
+        for triage in ([], [card("t_triage", status="done", body=id_line())]):
+            with self.subTest(triage):
+                result = decide(event, issue(**self.NOT_READY), triage=triage, reply=Reply("go", "payload", ASSIGNEE))
+                self.assertEqual(result.action, "gate_start_triage")
+
+    def test_a_prompt_with_a_live_triage_card_replies_to_it(self):
+        event = session_event("prompted", body="go")
+        triage = [card("t_triage", status="scheduled", body=id_line())]
+        result = decide(event, issue(**self.NOT_READY), triage=triage, reply=Reply("go", "payload", ASSIGNEE))
+        self.assertEqual(result.action, "triage_card_reply")
+
+    def test_ready_for_human_stays_on_a_delegation(self):
+        live = issue(labels=["Ready for human"])
+        self.assertEqual(decide(session_event("created"), live).action, "gate_ready_for_human")
+        self.assertEqual(decide(issue_event({"delegateId": None}), live).action, "gate_ready_for_human")
+
+    def test_the_session_a_person_opened_still_wins_over_a_delegateId_change(self):
+        live = issue(agentSessions=[session("s-recent", 1)], **self.NOT_READY)
+        self.assertEqual(decide(issue_event({"delegateId": None}), live).action, "session_created_handles_it")
+
+
 class SessionCreatedTest(unittest.TestCase):
     def test_a_factory_session_on_an_undelegated_issue_is_ignored(self):
         self.assertEqual(
@@ -210,7 +261,7 @@ class SessionCreatedTest(unittest.TestCase):
         existing = card("t_work", branch=BRANCH)
         for labels, action, gate in (
             (["Ready for human"], "gate_ready_for_human", "ready-for-human"),
-            ([], "gate_not_ready", "not-ready"),
+            ([], "gate_start_triage", "not-ready"),
         ):
             with self.subTest(action):
                 self.assertEqual(
@@ -346,7 +397,7 @@ class SessionPromptedTest(unittest.TestCase):
     def test_a_reply_on_a_delegated_issue_with_no_card_follows_the_creation_chain(self):
         cases = {
             "create_card": (issue(), {}),
-            "gate_not_ready": (issue(labels=[]), {"gate": "not-ready"}),
+            "gate_start_triage": (issue(labels=[]), {"gate": "not-ready"}),
         }
         for action, (live, extra) in cases.items():
             with self.subTest(action):
