@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+import card_branch
+
 PULL_REQUEST_URL = re.compile(r"(https://github\.com/[^/\s]+/[^/\s]+/pull/([0-9]+))\b")
 CREATE_COMMAND = "gh pr create"
 
@@ -40,3 +42,26 @@ def combine(total: dict, step: dict) -> dict:
     if failed["action"] == "failed":
         return {"added": added, "action": "failed", "error": failed["error"]}
     return {"added": added, "action": "linked" if added else "unchanged"}
+
+
+def branch_pull_links(repo: str, branch: str, gh=card_branch.run_gh) -> list[dict]:
+    """Every pull request whose head is `branch`, whoever opened it and whatever its state, oldest first."""
+    pulls = gh(f"repos/{repo}/pulls?state=all&head={repo.split('/')[0]}:{branch}&per_page=100")
+    return [pull_link(pull["html_url"]) for pull in sorted(pulls, key=lambda pull: pull["number"])]
+
+
+def sync_session_pull_requests(
+    linear, client, session_id: str, repo: str, branch: str, takeover_pr: str | None = None, gh=card_branch.run_gh,
+) -> dict:
+    """Add each pull request on the branch, and the taken-over one, that the session lacks. Never removes, never raises."""
+    links, error = [], None
+    try:
+        if takeover_pr:
+            links.append(pull_link(takeover_pr, "Taken-over pull request"))
+        links += branch_pull_links(repo, branch, gh)
+    except (card_branch.GhFailed, ValueError, KeyError, TypeError) as failure:
+        error = f"listing the pull requests on {branch} failed: {failure}"
+    report = add(linear, client, session_id, links) if links else {"added": [], "action": "unchanged"}
+    if error and report["action"] != "failed":
+        return {**report, "action": "failed", "error": error}
+    return report

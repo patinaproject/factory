@@ -422,11 +422,14 @@ class LinearClient:
         except (*CLIENT_ERRORS, OSError) as error:
             logger.warning("linear-agent-session: copying pull request links failed: %s", type(error).__name__)
 
+    def external_urls(self, agent_session_id: str) -> set:
+        session = self._graphql(SESSION_URLS_QUERY, {"id": agent_session_id})["agentSession"]
+        return {u["url"] for u in session["externalUrls"]}
+
     def add_external_urls(self, agent_session_id: str, urls: list) -> list:
         """Add the links the session lacks, matched by URL, and return the URLs added. Never replaces the list."""
         try:
-            session = self._graphql(SESSION_URLS_QUERY, {"id": agent_session_id})["agentSession"]
-            held = {u["url"] for u in session["externalUrls"]}
+            held = self.external_urls(agent_session_id)
         except (*CLIENT_ERRORS, OSError):
             held = set()
         missing = {}
