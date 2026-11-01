@@ -85,7 +85,7 @@ def _fake_urlopen(request, timeout=None):
         elif "AgentSessionUrls" in query and state.get("session_urls_error"):
             response = _Response(200, {"errors": [{"message": state["session_urls_error"]}]})
         elif "AgentSessionUrls" in query:
-            urls = [{"url": url} for url in state.get("session_urls", [])]
+            urls = json.dumps([{"label": "Held", "url": url} for url in state.get("session_urls", [])])
             response = _Response(200, {"data": {"agentSession": {"externalUrls": urls}}})
         elif "AgentSessionUpdate" in query:
             entry["session_update"] = body["variables"]
@@ -122,7 +122,7 @@ def _fake_urlopen(request, timeout=None):
             response = _Response(200, {"data": {"agentActivityCreate": {"success": True, "agentActivity": {"id": "activity-1"}}}})
         elif "AgentSessionSiblings" in query:
             session = {"url": "https://linear.app/example/agent-session/live", "createdAt": "2026-10-27T10:00:00.000Z",
-                       "appUser": {"id": "app-user"}, "externalUrls": [],
+                       "appUser": {"id": "app-user"}, "externalUrls": "[]",
                        "issue": {"agentSessions": {"nodes": []}}}
             response = _Response(200, {"data": {"agentSession": session}})
         elif "TriagePeople" in query and state.get("people_timeout"):

@@ -42,7 +42,7 @@ SESSION_UPDATE_MUTATION = """mutation AgentSessionUpdate($id: String!, $input: A
 }"""
 
 SESSION_URLS_QUERY = """query AgentSessionUrls($id: String!) {
-  agentSession(id: $id) { externalUrls { url } }
+  agentSession(id: $id) { externalUrls }
 }"""
 
 SESSION_THREAD_QUERY = """query AgentSessionThread($id: String!) {
@@ -51,8 +51,8 @@ SESSION_THREAD_QUERY = """query AgentSessionThread($id: String!) {
 
 ISSUE_SESSIONS_QUERY = """query AgentSessionSiblings($id: String!) {
   agentSession(id: $id) {
-    url createdAt appUser { id } externalUrls { url }
-    issue { agentSessions(first: 50) { nodes { id status createdAt appUser { id } externalUrls { label url } } } }
+    url createdAt appUser { id } externalUrls
+    issue { agentSessions(first: 50) { nodes { id status createdAt appUser { id } externalUrls } } }
   }
 }"""
 
@@ -302,6 +302,11 @@ def review_links(text: str) -> str:
 PULL_REQUEST_LINK = re.compile(r"https://(?:github\.com|linear\.review)/[^/\s]+/[^/\s]+/pull/[0-9]+")
 
 
+def session_links(session: dict) -> list:
+    """Linear types `externalUrls` as a JSON scalar and returns it as a JSON-encoded string."""
+    return json.loads(session["externalUrls"])
+
+
 class LinearError(Exception):
     pass
 
@@ -407,10 +412,10 @@ class LinearClient:
         return closed
 
     def _carry_pull_requests(self, agent_session_id: str, session: dict, older: list) -> None:
-        held = {review_links(u["url"]) for u in session["externalUrls"]}
+        held = {review_links(u["url"]) for u in session_links(session)}
         missing = {}
         for other in older:
-            for u in other["externalUrls"]:
+            for u in session_links(other):
                 url = review_links(u["url"])
                 if PULL_REQUEST_LINK.fullmatch(url) and url not in held:
                     missing.setdefault(url, {"label": u["label"], "url": url})
@@ -423,7 +428,7 @@ class LinearClient:
 
     def external_urls(self, agent_session_id: str) -> set:
         session = self._graphql(SESSION_URLS_QUERY, {"id": agent_session_id})["agentSession"]
-        return {u["url"] for u in session["externalUrls"]}
+        return {u["url"] for u in session_links(session)}
 
     def add_external_urls(self, agent_session_id: str, urls: list) -> list:
         """Add the links the session lacks, matched by URL, and return the URLs added. Never replaces the list."""
