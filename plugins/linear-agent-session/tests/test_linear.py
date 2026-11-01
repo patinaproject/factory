@@ -1554,7 +1554,7 @@ class PrAuthorityTest(unittest.TestCase):
             replies.append(users_page(*users))
         fake = FakeLinear(replies)
         output = tools.run_pr_authority(
-            lambda: make_client(fake), {"t_work": body}.__getitem__, "app-user-1", list(operators), {"task": "t_work", "sender_id": sender_id}
+            lambda: make_client(fake), {"t_work": body}.__getitem__, lambda: "app-user-1", lambda: list(operators), {"task": "t_work", "sender_id": sender_id}
         )
         return fake, json.loads(output)
 

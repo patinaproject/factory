@@ -13,6 +13,7 @@ from .linear import (
     LinearClient,
     LinearError,
     activity_content,
+    approver_summary,
     authority,
     lookup_approvers,
     review_links,
@@ -392,8 +393,8 @@ def run_review_owner(client_factory: ClientFactory, args: dict) -> str:
 def run_pr_authority(
     client_factory: ClientFactory,
     card_body: Callable[[str], str],
-    app_user_id: str,
-    operator_user_ids: list[str],
+    app_user_id: Callable[[], str],
+    operator_user_ids: Callable[[], list[str]],
     args: dict,
 ) -> str:
     def run() -> dict:
@@ -402,7 +403,7 @@ def run_pr_authority(
             raise LinearError(f"card {args['task']} names no linear_issue_id")
         client = client_factory()
         issue = client.get_issue(match.group(1))
-        people = lookup_approvers(client, issue, app_user_id, operator_user_ids)
+        people = lookup_approvers(client, issue, app_user_id(), operator_user_ids())
         role, reason = authority(people, args["sender_id"], "gitHubUserId")
         assignee = issue["assignee"]
         return {
@@ -410,7 +411,7 @@ def run_pr_authority(
             "assignee": assignee["name"] if assignee else None,
             "reason": reason,
             "authorized_as": role,
-            "approvers": [{key: p[key] for key in ("id", "name", "role")} for p in people if not p["app"]],
+            "approvers": approver_summary(people),
         }
 
     return _tool_result_or_error(run)

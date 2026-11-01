@@ -243,7 +243,7 @@ def _with_authority(facts: Intent, approvers: list[dict], author_id: Optional[st
         assignee={key: assignee[key] for key in ("id", "name", "gitHubUserId")} if assignee else None,
         from_assignee=role is not None,
         authorized_as=role,
-        approvers=[{key: person[key] for key in ("id", "name", "role")} for person in approvers if not person["app"]],
+        approvers=linear.approver_summary(approvers),
         not_assignee_reason=reason,
     )
 

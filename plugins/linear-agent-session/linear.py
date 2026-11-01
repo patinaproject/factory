@@ -371,6 +371,10 @@ def approvers(assignee: Optional[dict], delegator: Optional[dict], operators: li
     return found
 
 
+def approver_summary(people: list[dict]) -> list[dict]:
+    return [{key: person[key] for key in ("id", "name", "role")} for person in people if not person["app"]]
+
+
 def authority(people: list[dict], sender_id: Optional[str], key: str) -> tuple[Optional[str], Optional[str]]:
     """The role that matched the sender, or None, and why nobody could match when no approver has a value for `key`."""
     usable = [person for person in people if not person["app"] and person[key] is not None]

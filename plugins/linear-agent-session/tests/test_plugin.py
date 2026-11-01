@@ -611,6 +611,24 @@ class CliTest(unittest.TestCase):
                     self.assertEqual((code, output), (0, expected))
                     self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
 
+    def test_pr_authority_prints_an_error_naming_a_non_list_operator_setting(self):
+        from tests.test_linear import IssueTest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes = Path(tmp) / "hermes"
+            show = {"task": {"id": "t_work", "body": "linear_issue_id: ABC-1\n"}}
+            hermes.write_text(
+                "#!/bin/sh\n"
+                f"[ \"$*\" = 'kanban show t_work --json' ] && printf '%s' '{json.dumps(show)}'\n"
+                "case \"$*\" in *settings.app_user_id*) printf '\"app-user-1\"';; "
+                "*settings.operator_user_ids*) printf '\"user-olive\"';; esac\n"
+            )
+            hermes.chmod(0o755)
+            with mock.patch.dict(os.environ, {"HERMES_BIN": str(hermes)}):
+                fake = FakeLinear([(200, IssueTest.RESPONSE)])
+                code, output = self.run_cli(["pr-authority", "--task", "t_work", "--sender-id", "4242"], fake)
+        self.assertEqual((code, output), (1, {"error": "operator_user_ids must be a list of Linear user ids"}))
+
     def test_review_owner_runs_in_an_interpreter_that_cannot_see_hermes(self):
         cli_path = Path(PLUGIN_DIR) / "cli.py"
         wrapper = """

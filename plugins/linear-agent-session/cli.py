@@ -126,8 +126,8 @@ def main(argv: Optional[list] = None) -> int:
         output = plugin.tools.run_pr_authority(
             plugin.linear.client_from_env,
             plugin.triage_exit.card_body,
-            plugin.triage_exit.configured_app_user_id(),
-            plugin.triage_exit.configured_operator_user_ids(),
+            plugin.triage_exit.configured_app_user_id,
+            plugin.triage_exit.configured_operator_user_ids,
             {"task": args.task, "sender_id": args.sender_id},
         )
     elif args.command == "undelegate":
