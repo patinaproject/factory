@@ -148,9 +148,11 @@ class OneClientTest(unittest.TestCase):
         )
 
         # probe-sandbox binds a decoy broker socket of its own and never reaches the real broker.
+        # claude-artifact talks to the artifact service's own socket, not the broker's.
         self.assertEqual(opening, [
             "plugins/factory-uploads/broker.py",
             "plugins/linear-agent-session/broker_client.py",
+            "profiles/claude-worker/scripts/claude-artifact",
             "profiles/claude-worker/scripts/probe-sandbox",
         ])
 
