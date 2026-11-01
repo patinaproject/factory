@@ -136,6 +136,7 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
 | `platforms.slack.channel_overrides`, when the operator chose a Slack conversation model | `<home>/config.yaml` of the root home only. The channel IDs and aliases are private, so they go in the private record and never enter this repository |
 | The `default` and `triage` boards' `default_workdir` | Kanban board metadata, not `config.yaml` |
+| `claude_artifact.auth_dir`, `claude_artifact.organization_uuid`, and `claude_artifact.claude` in `plugins.entries.linear-agent-session.settings` | `config.yaml` of both homes, with the rest of the factory settings. The real values go only in the private record, never in this repository |
 
 When the factory uses Infisical, part 14 moves the Linear credentials, both
 webhook secrets, and the proxy token or Console API key from `.env` into one Infisical folder. On
@@ -221,6 +222,7 @@ Run the parts in this order. Later parts depend on values from earlier ones.
 15. [Restart and end-to-end checks](#15-restart-and-end-to-end-checks)
 16. [Host exposure](#16-host-exposure)
 17. [Agent instructions](#17-agent-instructions)
+18. [Claude artifact service](#18-claude-artifact-service)
 
 ## 1. Hermes
 
@@ -2133,6 +2135,99 @@ worker sessions read the same `<config>/CLAUDE.md` as the operator, where
 
    Pass `--config-dir <config>` when `CLAUDE_CONFIG_DIR` is set in the worker
    environment but not in your shell.
+
+## 18. Claude artifact service
+
+The artifact service publishes, reads, and makes Claude artifacts for every
+factory caller with the factory's Claude account. It runs as its own launchd
+job, `ai.patinaproject.factory.claude-artifact`, with its own Unix socket at
+`<worker>/claude-artifact/service.sock`. It does not share the uploads broker.
+Callers run `python3 <worker>/scripts/claude-artifact`. Its `--help` lists the
+operations and the error codes.
+
+For each request, the service reads the model proxy's Team login from the
+proxy's auth directory. It picks the one enabled login whose
+`organization_uuid` is the configured one, and gives only that login's access
+token to one `claude -p` run, in the run's environment. It never writes to the
+proxy's files. It runs one session at a time.
+
+**Credential risk.** Every process that runs as the factory's OS user can read
+the proxy's auth directory, which holds the access and refresh tokens of every
+organization the proxy signs in to. A worker's Bash, a gateway terminal turn,
+or `ps eww` on an artifact run can reach them. This exposure exists today
+because the proxy runs as that user, and the service does not widen it. The
+service's caller scope holds only for callers that go through
+`claude-artifact`. `claude-session` denies Claude's `Read` and `Edit` tools on
+the auth directory and on `<worker>/claude-artifact` in every run, but Bash
+is not blocked. Artifact runs share the Team login's usage limits with every
+other use of that login. State this risk in the private record.
+
+**Settings.** Add a `claude_artifact` section to the factory settings in both
+homes, as part 10 sets them:
+
+```json
+"claude_artifact": {
+  "auth_dir": "<the proxy's auth directory>",
+  "organization_uuid": "<the Team organization's UUID>",
+  "claude": "<the pinned claude binary>",
+  "operation_model": "haiku",
+  "design_model": "opus"
+}
+```
+
+- `auth_dir` is the directory where the proxy keeps one JSON login file per
+  account.
+- `organization_uuid` is the lowercase UUID in the Team login's
+  `organization_uuid` field. Read it in your own shell, and do not print the
+  other fields.
+- `claude` is a versioned Claude Code binary, such as
+  `~/.local/share/claude/versions/<version>`, not the `~/.local/bin/claude`
+  symlink, which updates move. The service relies on the undocumented
+  `CLAUDE_CODE_ARTIFACT=1` switch, so change the pin only after
+  `probe-artifact` passes with the new version. The service sets
+  `DISABLE_AUTOUPDATER=1` for its runs.
+- `operation_model` runs `publish`, `read`, `comments`, and `reply`.
+  `design_model` runs `design` and `slides`. Both are optional.
+
+Check the new version before you pin it:
+
+```sh
+python3 <worker>/scripts/probe-artifact --auth-dir <auth dir> \
+  --organization-uuid <uuid> --claude <pinned claude>
+```
+
+Every line must say `pass`.
+
+**Install** the launchd job. The plist holds no secret:
+
+```sh
+mkdir -p <worker>/logs
+python3 <worker>/scripts/artifact_service.py --print-plist \
+  > ~/Library/LaunchAgents/ai.patinaproject.factory.claude-artifact.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.patinaproject.factory.claude-artifact.plist
+```
+
+The service reads the settings for each request, so a settings change needs no
+restart. A deploy that changes `artifact_service.py` needs one:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/ai.patinaproject.factory.claude-artifact
+```
+
+**Verify.** `check-install` reports a missing or stopped job, unusable
+settings, a missing, disabled, or ambiguous Team login, a login for another
+organization, and a pinned `claude` without the `Artifact` tool. It reads the
+tool list from the first `system/init` event and stops `claude` before it
+calls the model. Then publish a test page as the operator:
+
+```sh
+printf '<h1>Artifact service check</h1>' > /tmp/artifact-check.html
+python3 <worker>/scripts/claude-artifact publish --file /tmp/artifact-check.html --title "Artifact service check"
+```
+
+The result has `"ok": true` and a `claude.ai` artifact link. The service log
+at `<worker>/logs/claude-artifact.log` holds one line per request with the
+card, run, operation, call and turn counts, and error code.
 
 ## Deploy a merged factory change
 

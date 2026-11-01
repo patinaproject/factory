@@ -10,6 +10,9 @@ the `github` route reads is present and fresh. Silent when the install
 matches. Prints one line per difference and exits 1, or exits 2 when it cannot
 run.
 
+It checks the artifact service's settings and the proxy's Team login, and that the pinned claude's first
+system/init event lists the Artifact tool, killing claude before it calls the model.
+
 It also checks that the config keys, cron jobs, and launchd services the setup
 runbook creates still match what it creates (the CONFIG, CRON, and SERVICES
 tables), that a cron job delivers only to a platform with a home channel in
@@ -99,6 +102,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 import app_events
+import artifact_service
 import factory_settings
 import factory_source
 import gh_login
@@ -294,6 +298,9 @@ SERVICES = (
     Service(
         12, "auto deploy", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist",
         scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME", "PATH"), interval=AUTO_DEPLOY_INTERVAL_SECONDS,
+    ),
+    Service(
+        18, "claude artifact", "agent", f"~/Library/LaunchAgents/{artifact_service.LABEL}.plist", env=("HERMES_HOME", "PATH"),
     ),
 )
 # watch-gateway's own files in the root home. WATCH_INTERVAL and RESTARTS_PER_HOUR equal the script's.
@@ -1614,6 +1621,35 @@ def check_settings(settings, worker: Path) -> list:
     ]
 
 
+ARTIFACT_FIX = Manual("fix the artifact settings or the proxy's Team login as part 18 describes")
+
+
+def check_artifact(settings) -> list:
+    """The Team login and the pinned claude's Artifact tool, by name and boolean only.
+
+    It never prints a token, an email, a path from the settings, or the organization UUID. The tool list comes
+    from claude's first system/init event; claude is killed there, before it calls the model.
+    """
+    if not isinstance(settings, dict):
+        return []
+    where = "claude_artifact"
+    try:
+        artifact = factory_settings.artifact(settings)
+    except factory_settings.SettingsError as error:
+        return [Drift("config", where, f"{error}, so claude-artifact answers account_unavailable (part 18)", ARTIFACT_FIX)]
+    logins = artifact_service.team_logins(artifact.auth_dir, artifact.organization_uuid)
+    if logins.state != "ok":
+        return [Drift("artifact login", where, f"{artifact_service.LOGIN_PROBLEMS[logins.state]} (part 18)", ARTIFACT_FIX)]
+    if not os.access(artifact.claude, os.X_OK):
+        return [Drift("artifact tool", where, "the pinned claude is not an executable file (part 18)", ARTIFACT_FIX)]
+    token = str(logins.login.get("access_token") or "")
+    with tempfile.TemporaryDirectory(prefix="artifact-check-") as scratch:
+        tools = artifact_service.init_tools(artifact.claude, artifact_service.child_env(token, Path(scratch)), scratch)
+    if "Artifact" not in tools:
+        return [Drift("artifact tool", where, "the pinned claude offers no Artifact tool (part 18)", ARTIFACT_FIX)]
+    return []
+
+
 MCP_STATUS_SECONDS = 120
 
 
@@ -2020,6 +2056,7 @@ def main() -> int:
                 config_value(root, hermes, "plugins.entries.work.settings.allow"),
             ),
             *check_settings(settings, worker),
+            *check_artifact(settings),
             *check_app_events(settings),
             *check_model_tiers(settings, worker),
             *check_mcp_servers(settings, worker),

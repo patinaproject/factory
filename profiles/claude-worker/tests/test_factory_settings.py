@@ -153,5 +153,24 @@ class TokenVariablesTest(unittest.TestCase):
         self.assertEqual(factory_settings.token_variables(None), ("", {}))
 
 
+class ArtifactSettingsTest(unittest.TestCase):
+    SECTION = {"auth_dir": "/auth", "organization_uuid": "11111111-2222-3333-4444-555555555555", "claude": "/bin/claude"}
+
+    def test_a_complete_section_takes_the_default_models(self) -> None:
+        self.assertEqual(
+            factory_settings.artifact({"claude_artifact": self.SECTION}),
+            factory_settings.ArtifactSettings(Path("/auth"), self.SECTION["organization_uuid"], Path("/bin/claude"), "haiku", "opus"),
+        )
+
+    def test_each_unusable_section_is_refused(self) -> None:
+        cases = (
+            None, {}, {**self.SECTION, "token": "x"}, {**self.SECTION, "auth_dir": "auth"},
+            {**self.SECTION, "organization_uuid": "Patina"}, {**self.SECTION, "design_model": ""},
+        )
+        for section in cases:
+            with self.subTest(section=section), self.assertRaises(factory_settings.SettingsError):
+                factory_settings.artifact({"claude_artifact": section} if section is not None else {})
+
+
 if __name__ == "__main__":
     unittest.main()

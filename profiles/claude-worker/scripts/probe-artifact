@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Probe whether the model proxy's Team login can publish a Claude artifact.
+
+Reads the one login in the proxy's auth directory whose organization_uuid is
+the given one, holds its access token in memory, and hands it only to the
+`claude` processes it starts, through their environment. Each run gets an empty
+Claude config directory, CLAUDE_CODE_ARTIFACT=1, and an environment with no
+ANTHROPIC_* variable. The probe never reads, passes, or prints the refresh
+token, and never writes to the auth directory.
+
+Three checks run in order and each prints one line:
+
+  tools    the first system/init event lists the Artifact tool
+  publish  a run publishes a private test page with the Artifact tool
+  read     the run reads that page back with the Artifact tool
+
+Prints only pass or fail, the tool names, and an error class, never a token,
+an email, a URL, or the organization. Exits 0 only when every check passes.
+
+    python3 probe-artifact --auth-dir <dir> --organization-uuid <uuid> [--claude <path>] [--model <alias>]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+ENV_ALLOWLIST = ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME", "SHELL")
+INIT_DEADLINE = 60
+RUN_DEADLINE = 300
+PAGE = """<!doctype html>
+<html><head><title>Factory artifact probe</title></head>
+<body><h1>Factory artifact probe</h1><p>marker: {marker}</p></body></html>
+"""
+PROMPT = """Use the Artifact tool to publish the file {page} as a new private artifact titled "Factory artifact probe".
+Then use the Artifact tool to read that artifact back by the URL the publish returned.
+Use no other tool. Do not share the artifact. Reply with only the URL."""
+
+
+def team_token(auth_dir: Path, organization_uuid: str) -> str:
+    matches = []
+    for path in sorted(auth_dir.glob("*.json")):
+        with path.open("r", encoding="utf-8") as handle:
+            login = json.load(handle)
+        if login.get("organization_uuid") == organization_uuid and not login.get("disabled"):
+            matches.append(login)
+    if len(matches) != 1:
+        raise SystemExit(f"login: fail ({len(matches)} enabled logins match the organization)")
+    login = matches[0]
+    expires = datetime.fromisoformat(login["expired"]).astimezone(timezone.utc)
+    if expires.timestamp() - time.time() < RUN_DEADLINE * 2 + INIT_DEADLINE:
+        raise SystemExit("login: fail (expires before the probe could finish)")
+    return login["access_token"]
+
+
+def child_env(token: str, config_dir: str) -> dict:
+    env = {name: os.environ[name] for name in ENV_ALLOWLIST if name in os.environ}
+    env.update(
+        CLAUDE_CODE_OAUTH_TOKEN=token,
+        CLAUDE_CONFIG_DIR=config_dir,
+        CLAUDE_CODE_ARTIFACT="1",
+        CLAUDE_CODE_ARTIFACT_AUTO_OPEN="0",
+        DISABLE_AUTOUPDATER="1",
+    )
+    return env
+
+
+def init_tools(claude: str, env: dict, cwd: str) -> list[str]:
+    process = subprocess.Popen(
+        [claude, "-p", "--output-format", "stream-json", "--verbose", "--settings", '{"env": {}}', "Reply with OK."],
+        cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    try:
+        for line in process.stdout:
+            event = json.loads(line)
+            if event.get("type") == "system" and event.get("subtype") == "init":
+                return list(event.get("tools", []))
+        return []
+    finally:
+        process.kill()
+        process.wait()
+
+
+def publish_and_read(claude: str, env: dict, cwd: str, model: str) -> tuple[list[str], str]:
+    page = Path(cwd, "probe.html")
+    page.write_text(PAGE.format(marker=os.urandom(8).hex()), encoding="utf-8")
+    settings = {"env": {}, "permissions": {"allow": [f"Read({cwd}/**)"]}}
+    completed = subprocess.run(
+        [
+            claude, "-p", "--output-format", "stream-json", "--verbose",
+            "--model", model, "--max-turns", "8",
+            "--permission-mode", "dontAsk",
+            "--allowedTools", "Artifact", "Read",
+            "--settings", json.dumps(settings),
+            PROMPT.format(page=page),
+        ],
+        cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=RUN_DEADLINE,
+    )
+    calls: dict[str, str] = {}
+    outcomes: list[str] = []
+    result = "no result event"
+    for line in completed.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        content = (event.get("message") or {}).get("content")
+        if isinstance(content, list):
+            for block in content:
+                if block.get("type") == "tool_use":
+                    calls[block["id"]] = block["name"]
+                elif block.get("type") == "tool_result":
+                    name = calls.get(block.get("tool_use_id"), "?")
+                    outcomes.append(f"{name}:{'error' if block.get('is_error') else 'ok'}")
+        if event.get("type") == "result":
+            result = event.get("subtype", "?")
+            if event.get("is_error"):
+                result += " (error)"
+    return outcomes, result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--auth-dir", required=True, type=Path)
+    parser.add_argument("--organization-uuid", required=True)
+    parser.add_argument("--claude", default="claude")
+    parser.add_argument("--model", default="haiku")
+    args = parser.parse_args()
+
+    token = team_token(args.auth_dir, args.organization_uuid)
+    print("login: pass")
+    with tempfile.TemporaryDirectory(prefix="artifact-probe-") as scratch:
+        config_dir = os.path.join(scratch, "config")
+        work_dir = os.path.join(scratch, "work")
+        os.mkdir(config_dir, 0o700)
+        os.mkdir(work_dir, 0o700)
+        env = child_env(token, config_dir)
+
+        tools = init_tools(args.claude, env, work_dir)
+        artifact_tools = sorted(name for name in tools if name.startswith("Artifact"))
+        if "Artifact" not in tools:
+            print(f"tools: fail ({len(tools)} tools, no Artifact)")
+            return 1
+        print(f"tools: pass ({', '.join(artifact_tools)})")
+
+        try:
+            outcomes, result = publish_and_read(args.claude, env, work_dir, args.model)
+        except subprocess.TimeoutExpired:
+            print("publish: fail (timeout)")
+            return 1
+        artifact = [outcome for outcome in outcomes if outcome.startswith("Artifact:")]
+        published = bool(artifact) and artifact[0] == "Artifact:ok"
+        read_back = len(artifact) >= 2 and artifact[-1] == "Artifact:ok"
+        print(f"publish: {'pass' if published else 'fail'} (tool results: {', '.join(outcomes) or 'none'}; run: {result})")
+        print(f"read: {'pass' if read_back else 'fail'}")
+        return 0 if published and read_back else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

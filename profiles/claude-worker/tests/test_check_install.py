@@ -80,7 +80,45 @@ atexit.register(shutil.rmtree, WORK_SKILLS, ignore_errors=True)
 WORK_KEY = "plugins.entries.work.settings.skills_dir"
 WORK_ALLOW_KEY = "plugins.entries.work.settings.allow"
 
-SETTINGS = {"app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}}
+ARTIFACT_ORG = "11111111-2222-3333-4444-555555555555"
+ARTIFACT_TOKEN = "team-token-value"
+# Prints the system/init event that real claude prints before it calls the model, then waits to be killed.
+FAKE_INIT_CLAUDE = """#!/usr/bin/env python3
+import json, os, sys, time
+options = json.load(open(__file__ + ".json"))
+with open(options["log"], "a") as log:
+    log.write(json.dumps({"argv": sys.argv[1:], "token": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")}) + "\\n")
+print(json.dumps({"type": "system", "subtype": "init", "tools": options["tools"]}), flush=True)
+time.sleep(60)
+"""
+ARTIFACT_FIXTURE = Path(tempfile.mkdtemp(prefix="check-install-artifact-")).resolve()
+atexit.register(shutil.rmtree, ARTIFACT_FIXTURE, True)
+ARTIFACT_AUTH = ARTIFACT_FIXTURE / "auth"
+ARTIFACT_CLAUDE = ARTIFACT_FIXTURE / "claude"
+ARTIFACT_LOG = ARTIFACT_FIXTURE / "claude.log"
+ARTIFACT_SETTINGS = {"auth_dir": str(ARTIFACT_AUTH), "organization_uuid": ARTIFACT_ORG, "claude": str(ARTIFACT_CLAUDE)}
+
+
+def artifact_login(organization: str = ARTIFACT_ORG, disabled: bool = False) -> None:
+    ARTIFACT_AUTH.mkdir(exist_ok=True)
+    for path in ARTIFACT_AUTH.iterdir():
+        path.unlink()
+    (ARTIFACT_AUTH / "team.json").write_text(json.dumps({
+        "access_token": ARTIFACT_TOKEN, "refresh_token": "refresh-value", "expired": "2099-01-01T00:00:00-07:00",
+        "organization_uuid": organization, "email": "agent@example.com", "disabled": disabled,
+    }))
+
+
+def artifact_tools(*tools: str) -> None:
+    ARTIFACT_CLAUDE.write_text(with_interpreter(FAKE_INIT_CLAUDE))
+    ARTIFACT_CLAUDE.chmod(0o755)
+    (ARTIFACT_FIXTURE / "claude.json").write_text(json.dumps({"log": str(ARTIFACT_LOG), "tools": list(tools)}))
+
+
+artifact_login()
+artifact_tools("Artifact", "Read")
+
+SETTINGS = {"app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}, "claude_artifact": ARTIFACT_SETTINGS}
 MAX_RUNNING_KEY = "plugins.entries.linear-agent-session.settings.triage.max_running"
 BOARDS = [{"slug": "default", "default_workdir": None}, {"slug": "triage", "default_workdir": None}]
 ROOT_CONFIG = {
@@ -173,6 +211,8 @@ REMEDY_CLASSES = (
     ("stranded triage card", "", "advisory"),
     ("stranded triage card check", "", "advisory"),
     ("gh login", "", "manual"),
+    ("artifact login", "", "manual"),
+    ("artifact tool", "", "manual"),
     ("guarded card", "", "manual"),
     ("guarded card check", "", "advisory"),
     ("waiting triage card", "", "manual"),
@@ -1850,6 +1890,7 @@ class CheckInstallTest(unittest.TestCase):
         )
         self.launchd.plist(f"{agents}/ai.patinaproject.factory.gh-login.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS)
         self.launchd.plist(f"{agents}/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL, **AUTO_DEPLOY_FIELDS)
+        self.launchd.plist(f"{agents}/{ARTIFACT_LABEL}.plist", ARTIFACT_LABEL, **ARTIFACT_FIELDS)
         env = {"PATH": "/usr/bin:/bin", **self.launchd.env, "HOME": str(home), "HERMES_HOME": str(self.worker)}
         proc = subprocess.run(
             ["/usr/bin/env", "python3", str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True
@@ -2115,6 +2156,8 @@ GH_LOGIN_FIELDS = {
     "StartInterval": 900, "EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/w"},
 }
 AUTO_DEPLOY_LABEL = "ai.patinaproject.factory.auto-deploy"
+ARTIFACT_LABEL = "ai.patinaproject.factory.claude-artifact"
+ARTIFACT_FIELDS = {"EnvironmentVariables": {"HERMES_HOME": "/w", "PATH": "/w/.local/bin:/usr/bin"}}
 AUTO_DEPLOY_FIELDS = {
     "StartInterval": 300, "EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/h", "PATH": "/h/.local/bin:/usr/bin"},
 }
@@ -2292,12 +2335,16 @@ class Launchd:
             f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL,
             **AUTO_DEPLOY_FIELDS,
         )
+        self.artifact = self.plist(
+            f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{ARTIFACT_LABEL}.plist", ARTIFACT_LABEL, **ARTIFACT_FIELDS,
+        )
         uid = os.getuid()
         self.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
             f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
             f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
             f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
+            f"user/{uid}/{ARTIFACT_LABEL}": "running",
         })
         self.env = {
             "LAUNCHD_ROOT": str(self.root), "LAUNCHCTL_BIN": str(self.launchctl),
@@ -2770,6 +2817,46 @@ class ImportPluginsTest(unittest.TestCase):
         self.assertEqual(result, {"p": None})
 
 
+class CheckArtifactTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.addCleanup(artifact_login)
+        self.addCleanup(artifact_tools, "Artifact", "Read")
+        ARTIFACT_LOG.unlink(missing_ok=True)
+
+    def check(self, settings: dict | None = None) -> list:
+        drifts = check_install.check_artifact({"claude_artifact": ARTIFACT_SETTINGS} if settings is None else settings)
+        return [str(drift) for drift in drifts]
+
+    def test_a_team_login_whose_claude_offers_the_artifact_tool_is_silent_and_never_calls_the_model(self) -> None:
+        self.assertEqual(self.check(), [])
+        (run,) = [json.loads(line) for line in ARTIFACT_LOG.read_text().splitlines()]
+        self.assertEqual((run["token"], run["argv"][:4]), (ARTIFACT_TOKEN, ["-p", "--output-format", "stream-json", "--verbose"]))
+
+    def test_each_login_and_tool_problem_is_named_without_a_secret(self) -> None:
+        artifact_login(disabled=True)
+        disabled = self.check()
+        artifact_login(organization="99999999-8888-7777-6666-555555555555")
+        other = self.check()
+        for path in ARTIFACT_AUTH.iterdir():
+            path.unlink()
+        missing = self.check()
+        artifact_login()
+        artifact_tools("Read")
+        no_tool = self.check()
+        unset = self.check({})
+
+        self.assertEqual([disabled, other, missing, no_tool], [
+            ["artifact login claude_artifact: the configured organization's proxy login is disabled (part 18)"],
+            ["artifact login claude_artifact: no proxy login belongs to the configured organization (part 18)"],
+            ["artifact login claude_artifact: the proxy's auth directory holds no login (part 18)"],
+            ["artifact tool claude_artifact: the pinned claude offers no Artifact tool (part 18)"],
+        ])
+        self.assertEqual(len(unset), 1)
+        printed = json.dumps([disabled, other, missing, no_tool, unset])
+        for secret in (ARTIFACT_TOKEN, "refresh-value", "agent@example.com", ARTIFACT_ORG, str(ARTIFACT_AUTH)):
+            self.assertNotIn(secret, printed)
+
+
 class CheckServicesTest(unittest.TestCase):
     def setUp(self) -> None:
         tmp = Path(tempfile.mkdtemp()).resolve()
@@ -2792,6 +2879,7 @@ class CheckServicesTest(unittest.TestCase):
             f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
             f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
             f"gui/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
+            f"gui/{uid}/{ARTIFACT_LABEL}": "running",
         })
 
         self.assertEqual(self.check(), [])
@@ -2817,6 +2905,7 @@ class CheckServicesTest(unittest.TestCase):
             "service gateway watch: is not loaded in launchd (part 12)",
             "service gh login refresh: is not loaded in launchd (part 10)",
             "service auto deploy: is not loaded in launchd (part 12)",
+            "service claude artifact: is not loaded in launchd (part 18)",
         ])
 
     def test_a_missing_watch_job_is_reported(self) -> None:
@@ -2843,6 +2932,7 @@ class CheckServicesTest(unittest.TestCase):
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
             f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "waiting",
             f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
+            f"user/{uid}/{ARTIFACT_LABEL}": "running",
         })
 
     def test_a_login_refresh_job_without_its_environment_is_reported_by_name_only(self) -> None:
@@ -2864,6 +2954,7 @@ class CheckServicesTest(unittest.TestCase):
         states = {
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
             f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"user/{uid}/{ARTIFACT_LABEL}": "running",
         }
         self.launchd.states({**states, f"user/{uid}/ai.patinaproject.factory.auto-deploy": "running"})
         running = self.check()
@@ -2900,6 +2991,7 @@ class CheckServicesTest(unittest.TestCase):
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
             f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
             f"user/{uid}/{AUTO_DEPLOY_LABEL}": "not running",
+            f"user/{uid}/{ARTIFACT_LABEL}": "running",
         })
 
         self.assertEqual(self.check(), ["service auto deploy: does not set GH_CONFIG_DIR, PATH (part 12)"])
@@ -2916,6 +3008,7 @@ class CheckServicesTest(unittest.TestCase):
             f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
             f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
             f"gui/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
+            f"gui/{uid}/{ARTIFACT_LABEL}": "running",
         })
 
     def test_a_watcher_whose_lock_is_hermes_own_gateway_lock_is_reported(self) -> None:
