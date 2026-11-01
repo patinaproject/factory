@@ -56,7 +56,6 @@ REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.{1,2}$)[A-Za-z0-9._-]+")
 
 
 def label_named(repository: str, names: Sequence[str], name: str) -> str:
-    """The repository's one label that matches `name` whatever its case and punctuation."""
     match = [n for n in names if role_key(n) == role_key(name)]
     if len(match) > 1:
         raise LinearError(f"more than one label of {repository} matches {name!r}: {', '.join(match)}")
@@ -66,7 +65,6 @@ def label_named(repository: str, names: Sequence[str], name: str) -> str:
 
 
 def create_issue(repo: str, title: str, body: str, labels: Sequence[str] = (), gh: Gh = run_gh) -> dict:
-    """Create one issue in a public repository with one POST. It sets no assignee, and every label must already exist."""
     if not REPOSITORY.fullmatch(repo):
         raise LinearError(f"{repo!r} is not a repository; pass owner/name")
     visibility = json.loads(gh(["api", f"repos/{repo}"], None))["visibility"]

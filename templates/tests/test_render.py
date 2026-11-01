@@ -306,8 +306,6 @@ class TriageIntentContractTest(unittest.TestCase):
 
 
 class IssueWriteToolContractTest(unittest.TestCase):
-    """The prompt must name the tools that file an issue and post a comment, as the code defines them."""
-
     def test_the_linear_prompt_names_each_tool_and_each_requires_an_idempotency_key(self):
         plugin_dir = Path(__file__).resolve().parents[2] / "plugins" / "linear-agent-session"
         spec = importlib.util.spec_from_file_location(

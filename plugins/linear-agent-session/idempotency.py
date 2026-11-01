@@ -24,10 +24,7 @@ def check_key(key) -> str:
 
 
 def once(directory: Optional[str], tool: str, key: str, args: Mapping, send: Callable[[], dict]) -> dict:
-    """Run `send` at most once for `key`. A repeat returns the first result and sends nothing.
-
-    The record is created exclusively before the request, so a concurrent or crashed call finds it and refuses
-    instead of sending twice. A failed send deletes the record, so a failure is never cached."""
+    """A record left reserved by a crash refuses every later call, because a second send could duplicate the first."""
     check_key(key)
     if directory is None:
         raise LinearError("HERMES_HOME is not set, so there is no idempotency store")
@@ -47,7 +44,6 @@ def once(directory: Optional[str], tool: str, key: str, args: Mapping, send: Cal
     except BaseException:
         os.unlink(path)
         raise
-    # The temporary name keeps a reader from ever seeing a half-written result.
     with open(path + ".tmp", "w") as f:
         json.dump({"args_digest": digest, "state": "done", "result": result}, f)
     os.replace(path + ".tmp", path)
