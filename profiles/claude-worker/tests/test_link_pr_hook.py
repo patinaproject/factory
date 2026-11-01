@@ -21,6 +21,7 @@ HOOK = importlib.util.module_from_spec(_spec)
 _loader.exec_module(HOOK)
 
 URL = "https://github.com/example-org/example-repo/pull/42"
+REVIEW_URL = "https://linear.review/example-org/example-repo/pull/42"
 CREATED = {
     "hook_event_name": "PostToolUse",
     "tool_name": "Bash",
@@ -132,11 +133,11 @@ class LinkPrHookProcessTest(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         self.assertEqual(
             self.updates(),
-            [{"id": "live-session", "input": {"addedExternalUrls": [{"label": "Pull request #42", "url": URL}]}}],
+            [{"id": "live-session", "input": {"addedExternalUrls": [{"label": "Pull request #42", "url": REVIEW_URL}]}}],
         )
 
     def test_a_session_that_holds_the_pull_request_gets_no_update(self) -> None:
-        self.set_state(session_urls=[URL])
+        self.set_state(session_urls=[REVIEW_URL])
 
         result = self.run_hook(json.dumps(CREATED))
 
@@ -167,4 +168,4 @@ class LinkPrHookProcessTest(unittest.TestCase):
         result = self.run_hook(json.dumps(CREATED))
 
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(self.updates()[0]["input"]["addedExternalUrls"][0]["url"], URL)
+        self.assertEqual(self.updates()[0]["input"]["addedExternalUrls"][0]["url"], REVIEW_URL)

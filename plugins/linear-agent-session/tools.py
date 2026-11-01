@@ -5,7 +5,16 @@ import logging
 from typing import Callable, Optional
 
 from . import github_issue, triage_exit
-from .linear import ACTIVITY_TYPES, CLIENT_ERRORS, SESSION_VERBS, LinearClient, LinearError, activity_content, authority
+from .linear import (
+    ACTIVITY_TYPES,
+    CLIENT_ERRORS,
+    SESSION_VERBS,
+    LinearClient,
+    LinearError,
+    activity_content,
+    authority,
+    review_links,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +269,7 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
         result = {"ok": True, "agent_activity_id": activity_id}
         if args.get("external_urls"):
             client.add_external_urls(session_id, args["external_urls"])
-            result["external_urls"] = [u["url"] for u in args["external_urls"]]
+            result["external_urls"] = [review_links(u["url"]) for u in args["external_urls"]]
         if not args.get("ephemeral"):
             try:
                 result["closed_sessions"] = client.close_older_sessions(session_id)

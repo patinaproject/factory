@@ -22,6 +22,8 @@ version, session ID, and worktree lock.
 - Never change the Linear issue's status, assignee, or delegate. Claude Code
   moves the issue to In Progress through the target repository's own
   issue-start workflow.
+- When you write to Linear through the Linear MCP (`save_comment`, `save_issue`) and name a pull request, use
+  its `linear.review` URL, `https://linear.review/<owner>/<repo>/pull/<number>`, not the GitHub URL.
 - Never create, move, or remove worktrees. Hermes Kanban owns them.
 - Hand a merge-ready card to a person with `kanban_request_review`. Call
   `kanban_complete` only when the pull request is already merged. The
