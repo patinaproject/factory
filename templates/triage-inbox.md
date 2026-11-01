@@ -30,7 +30,8 @@ right after `kanban`, and pass `board: triage` to `kanban_comment`.
 ## Start triage
 
 This is the one place that creates a triage card. "Triage inbox" and
-"Delegation gate" both follow it.
+"Delegation gate" both follow it. Follow it at most once per turn. When it
+already ran in this turn, do not run it again, and use the session it chose.
 
 1. The issue's triage card is the intent's `triage_card`. When it exists and
    its status is `done`, the issue is back for triage after an earlier pass:

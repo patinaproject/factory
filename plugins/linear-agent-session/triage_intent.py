@@ -26,7 +26,7 @@ ACTIONS = {
     "gate_ready_for_human": "triage marked the issue for a person; create no card",
     "gate_needs_brief": "the issue carries the ready label but has no Agent brief; start a triage pass and create no card",
     "gate_start_triage": "the issue has not passed the readiness check and a person delegated it or replied; start a triage pass and create no implementation card",
-    "gate_not_ready": "the issue has not passed the readiness check; create no card",
+    "gate_not_ready": "an update that is not a delegation found the issue not ready; create no card",
     "foreign_cards": "cards the factory did not create work the issue; create no card",
     "create_card": "create the issue's implementation card",
     "reuse_card": "the issue has a card; move it to this session and handle its status",
@@ -49,6 +49,7 @@ GATE_ACTIONS = {
     "needs-brief": "gate_needs_brief",
     "not-ready": "gate_not_ready",
 }
+GATE_ACTION_NAMES = {*GATE_ACTIONS.values(), "gate_start_triage"}
 SESSION_ACTIONS = ("use_session", "open_session")
 
 
@@ -216,8 +217,7 @@ def decide(
     )
     if payload["type"] == "Issue":
         action = _issue_update(facts, payload.get("updatedFrom") or {})
-        gate_actions = {*GATE_ACTIONS.values(), "gate_start_triage"}
-        session = _open_session(issue, app_user_id) if action == "use_session" or action in gate_actions else None
+        session = _open_session(issue, app_user_id) if action == "use_session" or action in GATE_ACTION_NAMES else None
         then = _delegated(replace(facts, gate="pass"), delegation=False) if action in SESSION_ACTIONS else None
         return replace(facts, action=action, agent_session_id=session, then=then)
     session = payload["agentSession"]["id"]
