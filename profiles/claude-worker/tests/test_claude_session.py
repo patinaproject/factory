@@ -81,7 +81,10 @@ TODAYS_SYSTEM_PROMPT = (
     f"`python3 {(SCRIPTS / 'wait-for-checks').resolve()} <number> --repo <owner/repo>` in the foreground. It "
     "returns within 4 minutes, inside the 5-minute prompt cache: exit 0 means every check passed, 1 means a "
     "check failed, and 3 means checks are still running, so run it again. A hook refuses `gh pr checks "
-    "--watch`, `gh run watch`, and any sleep or polling loop that waits longer."
+    "--watch`, `gh run watch`, any sleep or polling loop that waits longer, and any `until` or `while` loop "
+    "that runs `sleep` with no limit. Bound such a loop with `timeout <N>`, a counter that breaks, or a "
+    "deadline in `$SECONDS`, or use `wait-for-checks` for CI. A background command's `timeout` must not "
+    "exceed 600 seconds."
 )
 ISSUE_ENDING = (
     "When a re-run fails again, do not block the card: file or find the issue that tracks the flaky check. "
@@ -882,11 +885,48 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(
             (status, report["session_links"]), (0, {"added": [TAKEOVER_REVIEW, REVIEW_PULL_9], "action": "linked"})
         )
-        self.assertEqual(self.link_updates(), [
-            self.linked(("Taken-over pull request #7", TAKEOVER_REVIEW)), self.linked(("Pull request #9", REVIEW_PULL_9)),
-        ])
+        self.assertEqual(self.link_updates(), [{"addedExternalUrls": [
+            {"label": "Taken-over pull request #7", "url": TAKEOVER_REVIEW}, {"label": "Pull request #9", "url": REVIEW_PULL_9},
+        ]}])
         urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
         self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_REVIEW, REVIEW_PULL_9])
+
+    def test_a_run_that_prints_no_json_still_links_the_branchs_pull_request(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.factory_pull()
+        self.configure_fake_claude(no_json=True)
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(report["session_links"], {"added": [REVIEW_PULL_9], "action": "linked"})
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+
+    def test_a_refused_adoption_still_links_the_branchs_existing_pull_request(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.publish_branch("tlmader")
+        self.factory_pull()
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertFalse(self.log.exists())
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+
+    def test_a_merged_pull_request_on_the_branch_is_added_unless_the_session_holds_it(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.github.add_pull(9, "abc-123-fix", state="closed", merged=True, author="person")
+        self.github.add_pull(10, "other-branch", author=BOT_LOGIN)
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["session_links"]), (0, {"added": [REVIEW_PULL_9], "action": "linked"}))
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+
+        self.set_linear_state(session_urls=[REVIEW_PULL_9])
+        self.run_session()
+
+        self.assertEqual(len(self.link_updates()), 1)
 
     def test_a_failed_session_link_is_reported_without_changing_the_run(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -2348,7 +2388,27 @@ class ClaudeSessionTest(GitFixture):
 
         commands = [hook["command"] for hook in self.claude_call()["settings"]["content"]["hooks"]["PreToolUse"][0]["hooks"]]
         self.assertEqual([command.rsplit("/", 1)[1].rstrip("'") for command in commands],
-                         ["guard-ci-wait", "guard-commit-closes"])
+                         ["guard-ci-wait 600", "guard-commit-closes"])
+
+    def test_the_guard_gets_the_effective_command_limit_and_only_an_explicit_one_reaches_claudes_env(self) -> None:
+        background = {"tool_name": "Bash", "tool_input": {"command": "make", "run_in_background": True, "timeout": 700_000}}
+
+        def guard_exit(settings: dict) -> int:
+            command = settings["content"]["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            return subprocess.run(command, shell=True, capture_output=True, text=True, input=json.dumps(background)).returncode
+
+        self.run_session()
+        default = self.claude_call()["settings"]
+        self.settings = self.write_settings([self.repository], {"max_turns": 40, "command_timeout_seconds": 900})
+        self.run_session()
+        explicit = self.claude_call()["settings"]
+
+        self.assertEqual((guard_exit(default), guard_exit(explicit)), (2, 0))
+        self.assertEqual(default["content"]["env"], {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true"})
+        self.assertEqual(
+            explicit["content"]["env"],
+            {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true", "BASH_MAX_TIMEOUT_MS": "900000"},
+        )
 
     def test_the_system_prompt_tells_the_worker_to_choose_closing_before_its_first_commit(self) -> None:
         self.run_session()
@@ -2720,6 +2780,62 @@ class ClaudeSessionTest(GitFixture):
         self.assert_process_gone(self.leftover_pid())
         listing = subprocess.run(["ps", "-Ao", "command="], capture_output=True, text=True, check=True).stdout
         self.assertNotIn(SESSION_ID, listing)
+
+    def set_idle_limit(self, seconds: int) -> Path:
+        self.settings = self.write_settings([self.repository], {"max_turns": 40, "idle_limit_seconds": seconds})
+        return self.claude_config / "projects" / "project-idle"
+
+    def test_a_claude_that_hangs_without_progress_is_ended_and_the_worktree_stays_usable(self) -> None:
+        project = self.set_idle_limit(2)
+        self.configure_fake_claude(
+            session_transcript=str(project / f"{SESSION_ID}.jsonl"), bash_command="until grep -q x f; do sleep 5; done",
+            leftover_pid_file=str(self.tmp / "leftover.pid"), hang_seconds=120,
+        )
+        started = time.monotonic()
+        status, report = self.run_session()
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(status, 1)
+        self.assertRegex(
+            report["error"],
+            r"^claude made no progress for \d+ s \(idle limit 2 s\); last command: until grep -q x f; do sleep 5; done$",
+        )
+        self.assertLess(elapsed, 2 + 10.0 + 8)
+        self.assert_process_gone(self.leftover_pid())
+
+        self.configure_fake_claude(session_transcript="", hang_seconds=0, leftover_pid_file="")
+        again_status, again = self.run_session()
+        self.assertEqual(again_status, 0)
+        self.assertNotIn("another claude-session holds", json.dumps(again))
+
+    def test_the_last_command_is_none_when_claude_never_wrote_a_transcript(self) -> None:
+        self.set_idle_limit(2)
+        self.configure_fake_claude(hang_seconds=120)
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 1)
+        self.assertRegex(report["error"], r"^claude made no progress for \d+ s \(idle limit 2 s\); last command: none$")
+
+    def test_a_subagent_transcript_that_keeps_growing_counts_as_progress(self) -> None:
+        project = self.set_idle_limit(2)
+        self.configure_fake_claude(
+            session_transcript=str(project / f"{SESSION_ID}.jsonl"), bash_command="true",
+            subagent_file=str(project / SESSION_ID / "subagents" / "x.jsonl"), subagent_seconds=5,
+        )
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["result"]), (0, "Opened the pull request."))
+
+    def test_a_resumed_session_with_an_old_transcript_is_not_ended_at_start(self) -> None:
+        self.set_idle_limit(3)
+        self.write_transcript(idle=3 * HOUR, context=(10, 50_000, 0))
+        self.configure_fake_claude(hold_seconds=2)
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["resumed"]), (0, True))
 
     def head(self) -> str:
         return git(self.worktree, "rev-parse", "HEAD")
@@ -3350,3 +3466,17 @@ class FencedPromptTest(unittest.TestCase):
         self.assertIn("`Needs input:`", self.texts()["reopen-conflicts comment"])
         self.assertIn("`Needs input:`", self.texts()["reopen-conflicts failed check comment"])
         self.assertIn("`Needs input:`", self.texts()["SYSTEM_PROMPT"])
+
+
+class ProgressTimeTest(unittest.TestCase):
+    def test_a_transcript_that_vanishes_mid_read_counts_as_progress(self) -> None:
+        loader = importlib.machinery.SourceFileLoader("claude_session_progress_under_test", str(SCRIPTS / "claude-session"))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            loader.exec_module(module)
+        gone = Path("/nonexistent/session.jsonl")
+
+        with mock.patch.object(module, "find_transcript", return_value=gone), mock.patch.object(module.time, "time", return_value=5000.0):
+            progress = module.progress_time("session", Path("/worktree"), started=1000.0)
+
+        self.assertEqual(progress, 5000.0)

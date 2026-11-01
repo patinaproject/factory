@@ -1,9 +1,10 @@
 ## Triage inbox
 
 Every issue that lands in the team's Triage status gets one triage card on the
-Triage board, whether or not anyone delegated it. Delegation, mentions, and
-other events never create one. A triage card runs the readiness check on its
-issue. It never implements the issue.
+Triage board, whether or not anyone delegated it. "Delegation gate" also
+starts triage, through "Start triage", for a delegated issue that is not
+ready. Mentions and other events never create one. A triage card runs the
+readiness check on its issue. It never implements the issue.
 
 Run every `hermes kanban` command for a triage card with `--board triage`
 right after `kanban`, and pass `board: triage` to `kanban_comment`.
@@ -21,21 +22,31 @@ right after `kanban`, and pass `board: triage` to `kanban_comment`.
    section. On any other event for an issue outside Triage, leave its triage
    card alone, because the delegation gate can create one there, and stop this
    section.
-3. If a triage card exists and its status is `done`, the issue is back in
-   Triage after an earlier triage. Archive that card as step 2 says and
-   continue at step 4. If a triage card exists with any other status, the
-   issue already has one. Stop this section.
-4. Create a triage card only when this event created the issue (action
+3. Create a triage card only when this event created the issue (action
    `create`) or changed its status (the previous status above is not a
-   dotted name in braces). Otherwise stop this section.
-5. Choose the agent session. When `delegated` is true and the issue has an
+   dotted name in braces). Otherwise stop this section. Then follow "Start
+   triage".
+
+## Start triage
+
+This is the one place that creates a triage card. "Triage inbox" and
+"Delegation gate" both follow it. Follow it at most once per turn. When it
+already ran in this turn, do not run it again, and use the session it chose.
+
+1. The issue's triage card is the intent's `triage_card`. When it exists and
+   its status is `done`, the issue is back for triage after an earlier pass:
+   archive that card with `<<archive_card>> --board triage <task id>` and
+   continue at step 2. When it exists with any other status, the issue already
+   has one. Create nothing and stop this section.
+2. Choose the agent session. When the intent's `agent_session_id` is set, use it.
+   Otherwise, when `delegated` is true and the issue has an
    `agentSessions` entry whose `appUserId` is `<<app_user_id>>`, use the newest
    such entry. Otherwise open one with
    `linear_agent_session_create` with `purpose` `triage` and use the
    `agent_session_id` it returns.
-6. Pick the repository and the priorities as "Implementation card" steps 2
+3. Pick the repository and the priorities as "Implementation card" steps 2
    and 3 say.
-7. Create the card with no assignee. `dispatch-triage` assigns it to the
+4. Create the card with no assignee. `dispatch-triage` assigns it to the
    worker while fewer triage cards run than the factory's cap. Use the
    repository's triage card flags:
 
@@ -61,6 +72,6 @@ right after `kanban`, and pass `board: triage` to `kanban_comment`.
    CARD
    ````
 
-8. Post one `action` activity on that agent session with `action`
+5. Post one `action` activity on that agent session with `action`
    `Queued for triage as <task id>` and `parameter`
    `<priorityName> · <repository full_name>`.

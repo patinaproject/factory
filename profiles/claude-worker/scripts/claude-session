@@ -191,7 +191,10 @@ FINISH_RULE = STOP_RULE + (
     "{wait_for_checks} <number> --repo <owner/repo>` in the foreground. It returns within 4 minutes, "
     "inside the 5-minute prompt cache: exit 0 means every check passed, 1 means a check failed, and 3 "
     "means checks are still running, so run it again. A hook refuses `gh pr checks --watch`, `gh run "
-    "watch`, and any sleep or polling loop that waits longer."
+    "watch`, any sleep or polling loop that waits longer, and any `until` or `while` loop that runs "
+    "`sleep` with no limit. Bound such a loop with `timeout <N>`, a counter that breaks, or a deadline "
+    "in `$SECONDS`, or use `wait-for-checks` for CI. A background command's `timeout` must not exceed "
+    "{command_limit} seconds."
 )
 CI_WAIT_GUARD = Path(__file__).resolve().with_name("guard-ci-wait")
 COMMIT_CLOSES_GUARD = Path(__file__).resolve().with_name("guard-commit-closes")
@@ -292,6 +295,7 @@ MODEL_USAGE_KEYS = (
 )
 QUIET_SECONDS = 1.0
 GRACE_SECONDS = 10.0
+LAST_COMMAND_CHARS = 200
 TOOLCHAIN_CHECK_SECONDS = 120
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
@@ -872,10 +876,10 @@ def title_agent_session(client, session_id: str | None, issue_id: str, triage: b
         return {"error": f"titling the agent session failed: {error}"}
 
 
-def link_pull_requests(client, session_id: str, report: dict, links: list[dict]) -> dict:
-    """Adds to the card's agent session and folds the outcome into the run's `session_links`. Never raises."""
+def sync_pull_requests(client, session_id: str, repo: str, branch: str, takeover_pr: str | None, report: dict) -> dict:
     linear = plugin_module("linear-agent-session", "linear")
-    return session_links.combine(report, session_links.add(linear, client, session_id, links))
+    step = session_links.sync_session_pull_requests(linear, client, session_id, repo, branch, takeover_pr)
+    return session_links.combine(report, step)
 
 
 def triage_mentions(client, issue_id: str, identifier: str) -> str:
@@ -1046,13 +1050,16 @@ def claude_settings(
     tiers = factory_settings.tier_models(transport)
     if transport.get("model"):
         env.update(model_environment(transport, tiers))
+    if transport.get("command_timeout_seconds") is not None:
+        env["BASH_MAX_TIMEOUT_MS"] = str(factory_settings.command_timeout_seconds(transport) * 1000)
     # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
     # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
     # A refused commit or publish keeps a commit from closing an issue the pull request body does not; see guard-commit-closes.
+    command_limit = factory_settings.command_timeout_seconds(transport)
     guards = [
-        {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"}
-        for script in (CI_WAIT_GUARD, COMMIT_CLOSES_GUARD)
+        {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}{argument}"}
+        for script, argument in ((CI_WAIT_GUARD, f" {command_limit}"), (COMMIT_CLOSES_GUARD, ""))
     ]
     settings = {"env": env, "hooks": {
         "SessionStart": [{"hooks": [remove]}],
@@ -1206,11 +1213,49 @@ def reply_watch(inbox: Path | None, client, args: argparse.Namespace, comments: 
     )
 
 
-def run_claude(command: list[str], worktree: Path, extra_env: dict) -> tuple[dict | None, int, str]:
+class Idle(NamedTuple):
+    """A run ended for making no progress."""
+
+    silent_seconds: int
+    last_command: str
+
+
+def progress_time(session_id: str, worktree: Path, started: float) -> float:
+    """The latest of the run's start and the newest write to the session's transcript or a subagent's.
+
+    A fresh session has no transcript until its first entry, and a resumed one can be hours old at start.
+    """
+    times = [started]
+    try:
+        transcript = find_transcript(session_id, worktree)
+        if transcript:
+            subagents = transcript.parent / session_id / "subagents"
+            times += [path.stat().st_mtime for path in (transcript, *subagents.glob("*.jsonl"))]
+    except OSError:
+        # A transcript that vanished between the listing and the read is a write in progress, not idleness.
+        return time.time()
+    return max(times)
+
+
+def last_bash_command(session_id: str, worktree: Path) -> str:
+    transcript = find_transcript(session_id, worktree)
+    command = "none"
+    for message in main_messages(transcript) if transcript else ():
+        for item in message.get("content") or ():
+            if isinstance(item, dict) and item.get("type") == "tool_use" and item.get("name") == "Bash":
+                command = str((item.get("input") or {}).get("command", "none"))
+    return command[:LAST_COMMAND_CHARS]
+
+
+def run_claude(
+    command: list[str], worktree: Path, session_id: str, idle_limit: int, extra_env: dict
+) -> tuple[dict | None, int, str, Idle | None]:
     """Run claude in its own process group, stop reading at its result, and end every process it leaves.
 
-    Returns the parsed result, claude's exit code, and the tail of its output for an error report.
+    Returns the parsed result, claude's exit code, the tail of its output for an error report, and, when claude
+    was ended for writing no transcript for `idle_limit` seconds, what it was doing.
     """
+    started = time.time()
     with tempfile.TemporaryFile() as stderr:
         proc = subprocess.Popen(
             command,
@@ -1223,17 +1268,22 @@ def run_claude(command: list[str], worktree: Path, extra_env: dict) -> tuple[dic
         )
         with proc:
             try:
-                output, stdout = read_result(proc)
+                output, stdout, silent = read_result(
+                    proc, lambda: time.time() - progress_time(session_id, worktree, started), idle_limit
+                )
+                idle = Idle(int(silent), last_bash_command(session_id, worktree)) if silent else None
             finally:
                 leftovers = end_run(proc)
         if leftovers:
             print(f"claude-session: ended {len(leftovers)} process(es) left by claude: {sorted(leftovers)}", file=sys.stderr)
         stderr.seek(0)
         detail = (stderr.read() or stdout).decode(errors="replace").strip()[-2000:]
-    return output, proc.returncode, detail
+    return output, proc.returncode, detail, idle
 
 
-def read_result(proc: subprocess.Popen) -> tuple[dict | None, bytes]:
+def read_result(proc: subprocess.Popen, silent_seconds, idle_limit: float) -> tuple[dict | None, bytes, float]:
+    """The result, the output read, and, when claude was still running after `idle_limit` seconds without
+    progress, how long it had been silent (else 0). `silent_seconds()` reads the time since the last progress."""
     # Stop at the first complete JSON document instead of waiting for EOF: claude may keep running
     # after it prints its result, and a child that inherited the pipe keeps it open after claude exits.
     fd = proc.stdout.fileno()
@@ -1242,18 +1292,20 @@ def read_result(proc: subprocess.Popen) -> tuple[dict | None, bytes]:
         readable, _, _ = select.select([fd], [], [], QUIET_SECONDS)
         if not readable:
             if proc.poll() is not None:
-                return None, buffer
+                return None, buffer, 0
+            if (silent := silent_seconds()) > idle_limit:
+                return None, buffer, silent
             continue
         chunk = os.read(fd, 65536)
         if not chunk:
-            return None, buffer
+            return None, buffer, 0
         buffer += chunk
         try:
             output = json.loads(buffer)
         except ValueError:
             continue
         if isinstance(output, dict):
-            return output, buffer
+            return output, buffer, 0
 
 
 def run_processes(root: int) -> set[int]:
@@ -1339,6 +1391,8 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         raise Refusal("; ".join(problems))
     transport = settings.get("claude_session") or {}
     turn_limit = max_turns_args(transport)
+    command_limit = factory_settings.command_timeout_seconds(transport)
+    idle_limit = factory_settings.idle_limit_seconds(transport)
     servers = factory_settings.mcp_servers(transport)
     threshold = factory_settings.fresh_after_tokens(transport)
     prefix = factory_settings.worker_entry(repo)
@@ -1370,6 +1424,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 push_signed=Path(__file__).resolve().with_name("push-signed"),
                 upload_image=Path(__file__).resolve().with_name("github-upload-image"),
                 wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
+                command_limit=command_limit,
             )
         plan = plan_session(session_key(args.issue_id, triage), worktree, threshold, time.time())
         session_id = plan.session_id
@@ -1385,21 +1440,20 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
 
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         login = (settings.get("github") or {}).get("login")
-        adopted = None if triage else adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
-        handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"), args.issue_identifier, triage)
         # A successful run marks this snapshot as seen, so a comment that lands mid-run goes to the next run.
         card = read_card(args.card_json, args.task_id)
+        card_session_id = reply_inbox.session_id_of(card["task"]["body"])
+        link_report = None
+        if card_session_id and not triage:
+            link_report = sync_pull_requests(
+                client, card_session_id, args.repo, branch, args.takeover_pr, {"added": [], "action": "unchanged"}
+            )
+        adopted = None if triage else adopt_existing_work(worktree, branch, args.repo, args.takeover_pr, login)
+        handoff = handoff_text(plan, branch, git(worktree, "rev-parse", "HEAD"), args.issue_identifier, triage)
         comments = card["comments"]
         seen_path = lock_path.with_name(COMMENTS_SEEN_NAME)
         seen = json.loads(seen_path.read_text()) if seen_path.exists() else []
-        card_session_id = reply_inbox.session_id_of(card["task"]["body"])
         session_title = title_agent_session(client, card_session_id, args.issue_id, triage)
-        link_report = None
-        if card_session_id and not triage:
-            link_report = {"added": [], "action": "unchanged"}
-            if args.takeover_pr:
-                takeover = session_links.pull_link(args.takeover_pr, "Taken-over pull request")
-                link_report = link_pull_requests(client, card_session_id, link_report, [takeover])
         inbox = None if triage else lock_path.with_name(INBOX_NAME)
         if inbox:
             answer_command = f"{helper_command(SESSION_REPLY)} --inbox {shlex.quote(str(inbox))}"
@@ -1431,8 +1485,8 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 transport, api_key, settings_path, triage, inbox, card_session_id, artifact_denials(settings),
             ))
             with reply_watch(inbox, client, args, comments, own):
-                output, exit_code, detail = run_claude(
-                    command, worktree, {artifact_service.CAPABILITY_ENV: capability.secret},
+                output, exit_code, detail, idle = run_claude(
+                    command, worktree, session_id, idle_limit, {artifact_service.CAPABILITY_ENV: capability.secret},
                 )
         finally:
             capability.revoke()
@@ -1448,10 +1502,8 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 links = link_issues(
                     args.repo, branch, login, args.issue_identifier, args.issue_url, github_issue_url(card)
                 )
-                if link_report and "pr" in links:
-                    link_report = link_pull_requests(
-                        client, card_session_id, link_report, [session_links.pull_link(links["pr"])]
-                    )
+            if link_report is not None:
+                link_report = sync_pull_requests(client, card_session_id, args.repo, branch, args.takeover_pr, link_report)
             documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
             first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
         except Exception as error:
@@ -1464,6 +1516,12 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
             superseded=superseded, issue_links=links, triage_documents=documents, session_title=session_title,
             session_links=link_report,
         )
+        if idle:
+            error = (
+                f"claude made no progress for {idle.silent_seconds} s (idle limit {idle_limit} s); "
+                f"last command: {idle.last_command}"
+            )
+            return 1, result_line.Failed(error, session, blocker_error=blocker_error)
         if output is None:
             error = f"claude exited {exit_code} without JSON output: {detail}"
             return 1, result_line.Failed(error, session, blocker_error=blocker_error)

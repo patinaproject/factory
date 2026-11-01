@@ -96,9 +96,30 @@ if options.get("leftover_pid_file"):
     leftover = subprocess.Popen(["sleep", "600"], start_new_session=bool(options.get("leftover_detached")))
     with open(options["leftover_pid_file"], "w") as pid_file:
         pid_file.write(str(leftover.pid))
+if options.get("session_transcript"):
+    # Like Claude Code, record the session where find_transcript looks, with a Bash call as its newest entry.
+    os.makedirs(os.path.dirname(options["session_transcript"]), exist_ok=True)
+    with open(options["session_transcript"], "a") as transcript:
+        transcript.write(json.dumps({"type": "user", "cwd": os.getcwd()}) + "\\n")
+        transcript.write(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": options["bash_command"]}},
+        ]}}) + "\\n")
+if options.get("subagent_file"):
+    import time
+    os.makedirs(os.path.dirname(options["subagent_file"]), exist_ok=True)
+    stop = time.time() + options["subagent_seconds"]
+    while time.time() < stop:
+        with open(options["subagent_file"], "a") as subagent:
+            subagent.write("{}\\n")
+        time.sleep(0.2)
+if options.get("hang_seconds"):
+    import time
+    time.sleep(options["hang_seconds"])
 for line in options.get("transcript_lines", []):
     with open(options["transcript"], "a") as transcript:
         transcript.write(json.dumps(line) + "\\n")
+if options.get("no_json"):
+    sys.exit(3)
 print(json.dumps({
     **options.get("output", {}),
     "type": "result",
@@ -151,7 +172,7 @@ elif parts[3] == "pulls" and len(parts) == 4:
     page = int(params.get("page", ["1"])[0])
     print(json.dumps([] if page > 1 else [
         {**pull, "number": int(number)} for number, pull in state["pulls"].items()
-        if pull["state"] == "open" and head in (None, pull["head"]["ref"])
+        if params.get("state", ["open"])[0] in ("all", pull["state"]) and head in (None, pull["head"]["ref"])
     ]))
 elif parts[3] == "compare":
     base, _, head = parts[4].partition("...")
