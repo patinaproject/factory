@@ -3399,3 +3399,17 @@ class FencedPromptTest(unittest.TestCase):
         self.assertIn("`Needs input:`", self.texts()["reopen-conflicts comment"])
         self.assertIn("`Needs input:`", self.texts()["reopen-conflicts failed check comment"])
         self.assertIn("`Needs input:`", self.texts()["SYSTEM_PROMPT"])
+
+
+class ProgressTimeTest(unittest.TestCase):
+    def test_a_transcript_that_vanishes_mid_read_counts_as_progress(self) -> None:
+        loader = importlib.machinery.SourceFileLoader("claude_session_progress_under_test", str(SCRIPTS / "claude-session"))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            loader.exec_module(module)
+        gone = Path("/nonexistent/session.jsonl")
+
+        with mock.patch.object(module, "find_transcript", return_value=gone), mock.patch.object(module.time, "time", return_value=5000.0):
+            progress = module.progress_time("session", Path("/worktree"), started=1000.0)
+
+        self.assertEqual(progress, 5000.0)

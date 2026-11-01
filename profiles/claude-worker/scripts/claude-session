@@ -1213,10 +1213,14 @@ def progress_time(session_id: str, worktree: Path, started: float) -> float:
     A fresh session has no transcript until its first entry, and a resumed one can be hours old at start.
     """
     times = [started]
-    transcript = find_transcript(session_id, worktree)
-    if transcript:
-        subagents = transcript.parent / session_id / "subagents"
-        times += [path.stat().st_mtime for path in (transcript, *subagents.glob("*.jsonl"))]
+    try:
+        transcript = find_transcript(session_id, worktree)
+        if transcript:
+            subagents = transcript.parent / session_id / "subagents"
+            times += [path.stat().st_mtime for path in (transcript, *subagents.glob("*.jsonl"))]
+    except OSError:
+        # A transcript that vanished between the listing and the read is a write in progress, not idleness.
+        return time.time()
     return max(times)
 
 
