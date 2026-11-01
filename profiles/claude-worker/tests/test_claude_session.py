@@ -156,7 +156,7 @@ WORKER_SECRETS = {
 ALLOWED_NAMES = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TZ", "NVM_DIR",
     "GH_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
-    "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "DEVELOPER_DIR",
+    "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "DEVELOPER_DIR", "FACTORY_ARTIFACT_CAPABILITY",
 }
 TOOLCHAIN = {
     "JAVA_HOME": "/opt/jdk", "ANDROID_HOME": "/opt/android-sdk", "ANDROID_SDK_ROOT": "/opt/android-sdk",
@@ -670,14 +670,44 @@ class ClaudeSessionTest(GitFixture):
         self.run_session(env=TRIAGE_ENV)
 
         push_signed = (SCRIPTS / "push-signed").resolve()
+        state = self.hermes_home / "claude-artifact"
         self.assertEqual(self.claude_call()["settings"]["content"]["permissions"], {"deny": [
             "Bash(git push:*)", f"Bash(python3 {push_signed}:*)", f"Bash({push_signed}:*)", "Bash(gh pr create:*)",
+            f"Read(/{state}/**)", f"Edit(/{state}/**)",
         ]})
 
-    def test_an_implementation_card_settings_deny_nothing(self) -> None:
-        self.run_session()
+    def test_every_card_denies_claudes_file_tools_the_proxy_logins_and_the_artifact_service_state(self) -> None:
+        settings = json.loads(self.settings.read_text())
+        settings["claude_artifact"] = {
+            "auth_dir": "/proxy/oauth", "organization_uuid": "11111111-2222-3333-4444-555555555555", "claude": "/bin/claude",
+        }
+        self.settings.write_text(json.dumps(settings))
+        state = self.hermes_home / "claude-artifact"
+        artifact = ["Read(//proxy/oauth/**)", "Edit(//proxy/oauth/**)", f"Read(/{state}/**)", f"Edit(/{state}/**)"]
 
-        self.assertNotIn("permissions", self.claude_call()["settings"]["content"])
+        self.run_session()
+        implementation = self.claude_call()["settings"]["content"]["permissions"]["deny"]
+        self.run_session(env=TRIAGE_ENV)
+        triage = self.claude_call()["settings"]["content"]["permissions"]["deny"]
+
+        self.assertEqual((implementation, triage[-4:]), (artifact, artifact))
+
+    def test_a_run_holds_an_artifact_capability_only_while_claude_runs(self) -> None:
+        self.configure_fake_claude(hold_seconds=3)
+        runs = self.hermes_home / "claude-artifact" / "runs"
+        proc = self.start_session()
+        deadline = time.time() + 30
+        while time.time() < deadline and not (runs.is_dir() and list(runs.iterdir())):
+            time.sleep(0.05)
+        records = [json.loads(path.read_text()) for path in runs.iterdir()]
+        proc.communicate(timeout=60)
+
+        capability = self.claude_call()["env"]["FACTORY_ARTIFACT_CAPABILITY"]
+        self.assertEqual(
+            [(r["card"], r["run"], r["triage"], r["root_pid"]) for r in records], [(TASK_ID, SESSION_ID, False, proc.pid)],
+        )
+        self.assertEqual([path.name for path in runs.iterdir()], [])
+        self.assertNotIn(capability, json.dumps(records))
 
     def test_a_triage_card_never_adopts_a_branch_or_closes_a_pull_request(self) -> None:
         self.github.add_pull(7, "abc-123-fix", author="person")

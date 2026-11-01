@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
+import artifact_service
 import blockers
 import card_branch
 import closing
@@ -719,7 +720,7 @@ CHILD_ENV_NAMES = frozenset({
 CHILD_ENV_PREFIXES = ("LC_",)
 
 
-def child_env(worktree: Path) -> dict:
+def child_env(worktree: Path, extra: dict | None = None) -> dict:
     env = {
         name: value for name, value in os.environ.items()
         if name in CHILD_ENV_NAMES or name.startswith(CHILD_ENV_PREFIXES)
@@ -727,7 +728,7 @@ def child_env(worktree: Path) -> dict:
     node_bin = node_bin_for(worktree)
     if node_bin:
         env["PATH"] = f"{node_bin}{os.pathsep}{env.get('PATH', '')}"
-    return env
+    return {**env, **(extra or {})}
 
 
 def check_toolchain(repo: dict, worktree: Path) -> None:
@@ -1018,9 +1019,22 @@ def publish_denials() -> list[str]:
     ]
 
 
+def artifact_denials(settings: dict) -> list[str]:
+    """The proxy's logins and the artifact service's state, which a run reaches only through claude-artifact.
+
+    Deny rules stop Claude's file tools, not Bash; the setup runbook states that accepted risk.
+    """
+    paths = [artifact_service.state_dir(Path(os.environ["HERMES_HOME"]))]
+    try:
+        paths.insert(0, factory_settings.artifact(settings).auth_dir)
+    except factory_settings.SettingsError:
+        pass  # check-install reports unusable artifact settings; the service state is still denied
+    return [f"{tool}(/{path}/**)" for path in paths for tool in ("Read", "Edit")]
+
+
 def claude_settings(
     transport: dict, api_key: str, path: Path, triage: bool = False, inbox: Path | None = None,
-    session_id: str | None = None,
+    session_id: str | None = None, denials: tuple = (),
 ) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
@@ -1057,9 +1071,8 @@ def claude_settings(
     disabled = factory_settings.disabled_mcp_servers(transport)
     if disabled:
         settings["disabledMcpjsonServers"] = disabled
-    if triage:
-        # Deny rules hold under --permission-mode bypassPermissions.
-        settings["permissions"] = {"deny": publish_denials()}
+    # Deny rules hold under --permission-mode bypassPermissions.
+    settings["permissions"] = {"deny": [*(publish_denials() if triage else []), *denials]}
     return settings
 
 
@@ -1193,7 +1206,7 @@ def reply_watch(inbox: Path | None, client, args: argparse.Namespace, comments: 
     )
 
 
-def run_claude(command: list[str], worktree: Path) -> tuple[dict | None, int, str]:
+def run_claude(command: list[str], worktree: Path, extra_env: dict) -> tuple[dict | None, int, str]:
     """Run claude in its own process group, stop reading at its result, and end every process it leaves.
 
     Returns the parsed result, claude's exit code, and the tail of its output for an error report.
@@ -1202,7 +1215,7 @@ def run_claude(command: list[str], worktree: Path) -> tuple[dict | None, int, st
         proc = subprocess.Popen(
             command,
             cwd=worktree,
-            env=child_env(worktree),
+            env=child_env(worktree, extra_env),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=stderr,
@@ -1410,11 +1423,19 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         trust_checkout(Path(repo["path"]).resolve())
         offset = plan.previous.stat().st_size if plan.resumed else 0
         before = worktree_state(worktree)
+        artifact_state = artifact_service.state_dir(Path(os.environ["HERMES_HOME"]))
+        # claude-artifact presents this, and the service accepts it only from a process under this one.
+        capability = artifact_service.issue_capability(artifact_state, args.task_id, session_id, triage, os.getpid())
         try:
-            write_private(settings_path, claude_settings(transport, api_key, settings_path, triage, inbox, card_session_id))
+            write_private(settings_path, claude_settings(
+                transport, api_key, settings_path, triage, inbox, card_session_id, artifact_denials(settings),
+            ))
             with reply_watch(inbox, client, args, comments, own):
-                output, exit_code, detail = run_claude(command, worktree)
+                output, exit_code, detail = run_claude(
+                    command, worktree, {artifact_service.CAPABILITY_ENV: capability.secret},
+                )
         finally:
+            capability.revoke()
             settings_path.unlink(missing_ok=True)
         try:
             progress = worktree_state(worktree) != before
