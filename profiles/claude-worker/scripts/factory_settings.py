@@ -16,6 +16,10 @@ from urllib.parse import parse_qsl, urlsplit
 
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
+# guard-ci-wait refuses a foreground wait over 270 s, so a lower command limit would cap `wait-for-checks`.
+MIN_COMMAND_TIMEOUT_SECONDS = 270
+DEFAULT_IDLE_LIMIT_SECONDS = 2700
 MODEL_TIERS = ("sonnet", "haiku", "fable")
 MCP_SERVER_KEYS = frozenset({"url", "token_env", "scheme", "headers"})
 # Fixed headers and the URL reach argv in --mcp-config, where ps shows them, so a name or value that could carry a secret is refused.
@@ -65,6 +69,37 @@ def max_turns(transport: dict) -> int | None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise SettingsError(f"claude_session.max_turns {value!r} must be a positive integer, or 0 for no limit")
+    return value
+
+
+def is_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def command_timeout_seconds(transport: dict) -> int:
+    """The longest a worker command may run, in seconds."""
+    value = transport.get("command_timeout_seconds")
+    if value is None:
+        return DEFAULT_COMMAND_TIMEOUT_SECONDS
+    if not is_count(value) or value < MIN_COMMAND_TIMEOUT_SECONDS:
+        raise SettingsError(
+            f"claude_session.command_timeout_seconds {value!r} must be an integer of at least {MIN_COMMAND_TIMEOUT_SECONDS} seconds"
+        )
+    return value
+
+
+def idle_limit_seconds(transport: dict) -> int:
+    """How long a run may go without writing to a transcript before claude-session ends it, in seconds."""
+    value = transport.get("idle_limit_seconds")
+    if value is None:
+        return DEFAULT_IDLE_LIMIT_SECONDS
+    if not is_count(value):
+        raise SettingsError(f"claude_session.idle_limit_seconds {value!r} must be a positive integer")
+    command = transport.get("command_timeout_seconds")
+    if is_count(command) and value <= command:
+        raise SettingsError(
+            f"claude_session.idle_limit_seconds {value} must be greater than claude_session.command_timeout_seconds {command}"
+        )
     return value
 
 
@@ -145,7 +180,9 @@ def toolchain_checks(repo: dict) -> list[str]:
     return checks
 
 
-GLOBAL_FIELDS = (fresh_after_tokens, max_turns, tier_models, mcp_servers, disabled_mcp_servers)
+GLOBAL_FIELDS = (
+    fresh_after_tokens, max_turns, command_timeout_seconds, idle_limit_seconds, tier_models, mcp_servers, disabled_mcp_servers,
+)
 REPOSITORY_FIELDS = (worker_entry, toolchain_checks)
 
 

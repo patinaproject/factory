@@ -7,6 +7,9 @@ sleeps over MAX_WAIT_SECONDS, and sleep loops over `gh pr checks`, and tells the
 `wait-for-checks` instead. A call to `wait-for-checks` gets a tool timeout above its own budget and
 below the cache lifetime.
 
+It also refuses an `until` or `while` loop that runs `sleep` with no limit, and a background call whose
+timeout is above the factory's command limit, which claude-session passes as the first argument.
+
 Exit 0 allows the call (printing an input rewrite when it sets a timeout), exit 2 refuses it and
 Claude Code shows stderr to the model.
 """
@@ -19,16 +22,115 @@ import sys
 
 MAX_WAIT_SECONDS = 270
 TOOL_TIMEOUT_MS = MAX_WAIT_SECONDS * 1000
+DEFAULT_COMMAND_LIMIT_SECONDS = 600
 HELPER = "wait-for-checks"
 UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 WATCH = re.compile(r"\bgh\s+(?:pr\s+checks\b.*?(?:--watch\b|\s-w\b)|run\s+watch\b)", re.DOTALL)
 CHECKS_LOOP = re.compile(r"\b(?:for|while|until)\b")
 SLEEP = re.compile(r"\bsleep\s+(\d+(?:\.\d+)?)([smhd]?)\b")
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+SLEEPS = re.compile(r"\bsleep\b")
+BOUNDING_CONDITION = re.compile(r"-(?:lt|le|gt|ge)\b|\(\(|\bSECONDS\b")
+READ_CONDITION = re.compile(r"(?:\w+=\S*\s+)*read\b")
+COUNTER_TEST = re.compile(r"-(?:lt|le|gt|ge|eq|ne)\b|\bSECONDS\b|\(\([^)]*(?:<|>|==|!=)")
+BREAK = re.compile(r"\bbreak\b")
+# A command starts after a separator, a command substitution, or a brace group's opening or closing brace.
+COMMAND_SPLIT = re.compile(r"[;&|\n`]+|\$\((?!\()|(?<![\w$])[{}](?=[\s;]|$)")
+# Words that can precede a loop keyword in the same command.
+PREFIX_WORDS = frozenset({"then", "else", "elif", "do", "time", "!"})
 REFUSAL = (
     "A foreground wait over {limit} seconds outlasts the 5-minute prompt cache, so the next call "
     "rewrites the whole context. To wait for CI, run `python3 <scripts>/{helper} <number> --repo <owner/repo>`. "
     "It returns within 4 minutes: exit 3 means checks are still running, so run it again."
 )
+LOOP_REFUSAL = (
+    "Refused: an `until` or `while` loop that runs `sleep` with no limit never ends when its condition "
+    "never holds. To wait for CI, run `python3 <scripts>/{helper} <number> --repo <owner/repo>`. To wait "
+    "for anything else, use a bounded loop: run it under `timeout <seconds>`, compare a counter or "
+    "`$SECONDS` in its condition, or test a counter in its body and `break`."
+)
+
+
+def shell_code(command: str) -> str:
+    """The command with quoted text and heredoc bodies blanked, so only code the shell runs is left to inspect."""
+    code: list[str] = []
+    heredocs: list[tuple[str, bool]] = []
+    i, end = 0, len(command)
+    while i < end:
+        char = command[i]
+        if char == "\\":
+            code.append(" ")
+            i += 2
+        elif char in "'\"":
+            i += 1
+            while i < end and command[i] != char:
+                i += 2 if char == '"' and command[i] == "\\" else 1
+            i += 1
+            code.append("Q")
+        elif command.startswith("<<", i) and not command.startswith("<<<", i) and (found := HEREDOC.match(command, i)):
+            heredocs.append((found.group(2), command[i + 2] == "-"))
+            code.append(" ")
+            i = found.end()
+        elif char == "\n":
+            code.append(char)
+            i += 1
+            for delimiter, tabs in heredocs:
+                while i < end:
+                    stop = command.find("\n", i)
+                    stop = end if stop < 0 else stop
+                    line = command[i:stop]
+                    i = min(stop + 1, end)
+                    if (line.lstrip("\t") if tabs else line) == delimiter:
+                        break
+            heredocs = []
+        else:
+            code.append(char)
+            i += 1
+    return "".join(code)
+
+
+class Loop:
+    def __init__(self, keyword: str, condition: str) -> None:
+        self.keyword = keyword
+        self.condition = [condition]
+        self.body: list[str] = []
+        self.in_body = False
+
+    def unbounded_wait(self) -> bool:
+        condition, body = " ".join(self.condition), " ".join(self.body)
+        if self.keyword not in ("while", "until") or not SLEEPS.search(body):
+            return False
+        bounded = (
+            BOUNDING_CONDITION.search(condition)
+            or READ_CONDITION.match(condition.lstrip())
+            or (BREAK.search(body) and COUNTER_TEST.search(body))
+        )
+        return not bounded
+
+
+def waits_without_limit(command: str) -> bool:
+    """Whether the shell code holds a `while` or `until` loop that runs `sleep` and nothing bounds."""
+    open_loops: list[Loop] = []
+    for segment in COMMAND_SPLIT.split(shell_code(command)):
+        words = segment.strip().lstrip("( \t").split()
+        while words and words[0] in PREFIX_WORDS:
+            if words.pop(0) == "do" and open_loops:
+                open_loops[-1].in_body = True
+        if not words:
+            continue
+        keyword, rest = words[0].rstrip(")"), " ".join(words[1:])
+        if keyword in ("while", "until", "for", "select"):
+            open_loops.append(Loop(keyword, rest))
+            continue
+        if keyword == "done" and open_loops:
+            if open_loops.pop().unbounded_wait():
+                return True
+            rest = ""
+        else:
+            rest = " ".join(words)
+        for loop in open_loops:
+            (loop.body if loop.in_body else loop.condition).append(rest)
+    return False
 
 
 def refusal(command: str) -> str | None:
@@ -42,7 +144,7 @@ def refusal(command: str) -> str | None:
     return None
 
 
-def decide(event: dict) -> tuple[int, str]:
+def decide(event: dict, command_limit_seconds: int = DEFAULT_COMMAND_LIMIT_SECONDS) -> tuple[int, str]:
     """The exit code and the text for stderr (refusal) or stdout (input rewrite)."""
     if event.get("tool_name") != "Bash":
         return 0, ""
@@ -51,6 +153,14 @@ def decide(event: dict) -> tuple[int, str]:
     reason = refusal(command)
     if reason:
         return 2, f"{reason}. " + REFUSAL.format(limit=MAX_WAIT_SECONDS, helper=HELPER)
+    if waits_without_limit(command):
+        return 2, LOOP_REFUSAL.format(helper=HELPER)
+    timeout = tool_input.get("timeout")
+    if tool_input.get("run_in_background") is True and isinstance(timeout, (int, float)) and timeout > command_limit_seconds * 1000:
+        return 2, (
+            f"Refused: a background command with a timeout of {timeout:g} ms is above the factory's command limit "
+            f"of {command_limit_seconds} seconds. Set `timeout` to {command_limit_seconds * 1000} or less, or leave it out."
+        )
     if HELPER in command:
         output = {"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -62,7 +172,8 @@ def decide(event: dict) -> tuple[int, str]:
 
 
 def main() -> int:
-    code, text = decide(json.load(sys.stdin))
+    limit = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_COMMAND_LIMIT_SECONDS
+    code, text = decide(json.load(sys.stdin), limit)
     if text:
         print(text, file=sys.stderr if code else sys.stdout)
     return code
