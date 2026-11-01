@@ -383,6 +383,12 @@ class HookDecisionTest(unittest.TestCase):
              "--repo", "example-org/example-repo"],
         )
 
+    def test_published_pr_stays_the_github_url_when_the_activity_links_the_same_pull_request(self):
+        shell = FakeShell()
+        args = {"metadata": {"published_pr": PR_URL}, "external_urls": [{"label": "Pull request", "url": PR_URL}]}
+        self.assertIsNone(call_hook(shell, args=args))
+        self.assertEqual(shell.gh_call()[0][3], PR_URL)
+
     def test_non_url_published_pr_falls_back_to_branch(self):
         shell = FakeShell()
         call_hook(shell, args={"metadata": {"published_pr": "#7"}})

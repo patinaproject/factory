@@ -17,7 +17,7 @@ from tests.test_kanban_board import COMMENTS_AND_EVENTS, TASKS
 from tests.test_dispatch_triage import BRIEF_SETTINGS, NO_BRIEF_PARK, IMPLEMENTATION_BODY, QUEUED_NOTE, TRIAGE_BODY, BriefHarness, task
 
 FAKE_HERMES = """#!/usr/bin/env python3
-import json, os, sys
+import json, os, sqlite3, sys
 path = os.environ["FAKE_STATE"]
 state = json.load(open(path))
 argv = sys.argv[1:]
@@ -33,10 +33,20 @@ state["boards"].append(board)
 state["calls"].append(argv)
 verb, task = argv[0], state["task"]
 if verb == "boards":
-    print(json.dumps([{"slug": "default", "db_path": "/nowhere"}, {"slug": "triage", "db_path": state["db_path"]}]))
+    print(json.dumps([{"slug": "default", "db_path": state["default_db"]}, {"slug": "triage", "db_path": state["db_path"]}]))
     sys.exit()
+def contract():
+    db = sqlite3.connect(state["default_db"])
+    row = db.execute("SELECT completion_contract FROM tasks WHERE id = ?", (task["id"],)).fetchone()
+    db.close()
+    return row[0]
 def save():
     json.dump(state, open(path, "w"))
+    if board is None and os.path.exists(state["default_db"]):
+        db = sqlite3.connect(state["default_db"])
+        db.execute("UPDATE tasks SET status = ? WHERE id = ?", (task["status"], task["id"]))
+        db.commit()
+        db.close()
 failures = state["fail"].get(verb, 0)
 if failures:
     state["fail"][verb] = failures - 1
@@ -61,11 +71,11 @@ elif verb == "edit":
 elif verb == "promote":
     task["status"] = "ready"
 elif verb == "complete":
-    if state["refuse_completion"]:
-        state["events"].append({"kind": "pr_acceptance", "payload": state["receipt"]})
+    if status not in ("running", "ready", "blocked", "review") or (state["acceptance_refuses"] and contract() != "local-only"):
         save()
         sys.exit(f"cannot complete {task['id']} (unknown id or terminal state)")
     task["status"] = "done"
+    state["events"].append({"kind": "completed", "payload": None})
 elif verb == "block":
     if status == "scheduled":
         save()
@@ -110,8 +120,15 @@ if state["gh_fail"]:
     state["gh_fail"] -= 1
     json.dump(state, open(path, "w"))
     sys.exit("gh: HTTP 502")
-if sys.argv[1:] == ["pr", "view", state["pr"]["url"], "--json", "headRefOid,statusCheckRollup"]:
-    print(json.dumps({"headRefOid": state["pr"]["head"], "statusCheckRollup": state["pr"]["rollup"]}))
+pr = state["pr"]
+if sys.argv[1:] == ["pr", "view", pr["requested"], "--json", "state,url,headRefOid,baseRefName,statusCheckRollup"]:
+    print(json.dumps({"state": pr["state"], "url": pr["url"], "headRefOid": pr["head"], "baseRefName": "main",
+                      "statusCheckRollup": pr["rollup"]}))
+elif sys.argv[1:] == ["api", "repos/example-org/app/rules/branches/main?per_page=100"]:
+    if pr["required"] is None:
+        sys.exit("gh: HTTP 403")
+    print(json.dumps([{"type": "required_status_checks", "parameters": {"required_status_checks": [
+        {"context": name} for name in pr["required"]]}}]))
 elif sys.argv[1:3] == ["pr", "view"] and "-R" in sys.argv:
     if not state["branch_has_pr"]:
         sys.exit('no pull requests found for branch "' + sys.argv[3] + '"')
@@ -126,24 +143,9 @@ HEAD = "abc123"
 TITLE = "PAT-1: Don't drop the user's work"
 BODY = "linear_issue_id: 1\nbranch: pat-1-work\nIt's the user's body."
 SUMMARY = ["--summary", f"Pull request {REF} merged.", "--metadata", json.dumps({"published_pr": URL})]
-REAL_REASON = (
-    f"Pull request {REF} merged, but required checks failed: Validate. Is the work done? If it is, mark the "
-    "Linear issue Done, and the card is archived."
-)
-SUPERSEDED_REASON = (
-    f"Pull request {REF} merged and its required checks passed on their newest runs. Hermes counted failed runs "
-    "that newer passing runs replaced: Validate, so it cannot finish the card. Mark the Linear issue Done, and "
-    "the card is archived."
-)
-NO_CHECKS_REASON = (
-    f"Pull request {REF} merged, but its base branch has no required checks, so Hermes cannot finish the card. "
-    "Is the work done? If it is, mark the Linear issue Done, and the card is archived."
-)
-REAL_MARKER = f"Merge refused by Hermes: required checks failed: Validate. {REF}"
-SUPERSEDED_MARKER = f"Merge refused by Hermes: Hermes counted failed runs that newer passing runs replaced: Validate. {REF}"
-NO_CHECKS_MARKER = f"Merge refused by Hermes: the base branch has no required checks. {REF}"
-UNREAD = " The Linear issue could not be read, so the card was not archived."
-COMPLETION_ERROR = "hermes kanban complete failed: cannot complete t_1 (unknown id or terminal state)"
+REPOSITORY_CONTRACT = "example-org/app"
+LOCAL_ONLY = "local-only"
+FAILED_NOTE = f"Merged past required checks: {REF}: Lint, Validate failed or had no run on the merged head."
 
 
 def check_run(conclusion: str, started: str) -> dict:
@@ -153,10 +155,6 @@ def check_run(conclusion: str, started: str) -> dict:
 
 FAILED_NEWEST = [check_run("SUCCESS", "2026-10-16T04:00:00Z"), check_run("FAILURE", "2026-10-16T05:00:00Z")]
 PASSED_NEWEST = [check_run("FAILURE", "2026-10-16T04:00:00Z"), check_run("SUCCESS", "2026-10-16T05:00:00Z")]
-FAILED_RECEIPT = {"ok": False, "classification": "failure", "pr_url": URL, "head_sha": HEAD,
-                  "checks": [{"name": "Validate", "classification": "failure"},
-                             {"name": "Lint", "classification": "success"}]}
-NO_CHECKS_RECEIPT = {"ok": False, "classification": "missing", "pr_url": URL, "head_sha": HEAD, "checks": []}
 
 
 class CardTransitionTest(unittest.TestCase):
@@ -173,10 +171,16 @@ class CardTransitionTest(unittest.TestCase):
             "task": {"id": "t_1", "status": "triage", "title": TITLE, "body": BODY, "assignee": "claude-worker",
                      "block_kind": None, "workspace_kind": "scratch", "workspace_path": None},
             "events": [], "comments": [], "comment_at": [], "calls": [], "boards": [], "gh_calls": [], "fail": {},
-            "gh_fail": 0, "db_path": str(self.dir / "triage.db"),
-            "specify_to": "todo", "refuse_completion": False, "receipt": FAILED_RECEIPT,
-            "pr": {"url": URL, "head": HEAD, "rollup": FAILED_NEWEST}, "branch_has_pr": True,
+            "gh_fail": 0, "db_path": str(self.dir / "triage.db"), "default_db": str(self.dir / "default.db"),
+            "specify_to": "todo", "acceptance_refuses": True,
+            "pr": {"requested": URL, "url": URL, "state": "MERGED", "head": HEAD, "rollup": PASSED_NEWEST,
+                   "required": ["Validate"]},
+            "branch_has_pr": True,
         }
+        with closing(sqlite3.connect(self.state["default_db"])) as db:
+            db.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, completion_contract TEXT)")
+            db.execute("INSERT INTO tasks VALUES ('t_1', 'triage', ?)", (REPOSITORY_CONTRACT,))
+            db.commit()
         self.home = self.dir / "hermes"
         (self.home / "plugins").mkdir(parents=True)
         (self.home / "plugins" / "linear-agent-session").symlink_to(REPO / "plugins" / "linear-agent-session")
@@ -194,8 +198,18 @@ class CardTransitionTest(unittest.TestCase):
         self.state["task"]["status"] = status
         self.state.update(changes)
 
+    def contract(self, value: str | None = None) -> str:
+        with closing(sqlite3.connect(self.state["default_db"])) as db:
+            if value is not None:
+                db.execute("UPDATE tasks SET completion_contract = ? WHERE id = 't_1'", (value,))
+                db.commit()
+            return db.execute("SELECT completion_contract FROM tasks WHERE id = 't_1'").fetchone()[0]
+
     def transition(self, *argv: str, reply: str = "") -> tuple[int, dict]:
         self.state_path.write_text(json.dumps(self.state))
+        with closing(sqlite3.connect(self.state["default_db"])) as db:
+            db.execute("UPDATE tasks SET status = ? WHERE id = 't_1'", (self.state["task"]["status"],))
+            db.commit()
         env = {**os.environ, "HERMES_BIN": str(self.dir / "bin" / "hermes"), "FAKE_STATE": str(self.state_path),
                "HERMES_HOME": str(self.home),
                "PATH": f"{self.dir / 'bin'}:{os.environ['PATH']}"}
@@ -541,162 +555,169 @@ class ReopenAndStopTest(CardTransitionTest):
 
 
 class MergedTest(CardTransitionTest):
-    def merged(self, linear_state: str = "started") -> tuple[int, dict]:
-        return self.transition("merged", "t_1", "--pr", URL, "--linear-state", linear_state)
+    """A merged pull request's card, on a board whose acceptance refuses every contract but `local-only`."""
 
-    def test_a_running_card_is_left_to_its_worker(self):
-        for status in ("running", "done", "archived"):
+    def merged(self, url: str = URL) -> tuple[int, dict]:
+        return self.transition("merged", "t_1", "--pr", url)
+
+    def failing(self, status: str, **changes) -> None:
+        self.given(status, **changes)
+        self.state["pr"].update(rollup=FAILED_NEWEST, required=["Validate", "Lint"])
+
+    def test_a_merged_card_ends_done_from_each_status_whatever_its_checks_say(self):
+        steps = {
+            "review": [], "blocked": [], "ready": [],
+            "todo": [["promote", "t_1", "pull", "request", "merged"]],
+            "triage": [["assign", "t_1", "none"], ["specify", "t_1"], ["edit", "t_1", "--title", TITLE, "--body", BODY],
+                       ["promote", "t_1", "pull", "request", "merged"]],
+            "scheduled": [["assign", "t_1", "none"], ["unblock", "t_1"]],
+        }
+        for status, before in steps.items():
             with self.subTest(status):
                 self.setUp()
-                self.given(status)
+                self.failing(status)
+                self.assertEqual(self.merged(), (0, {"action": "completed", "post": "response"}))
+                self.assertEqual(self.state_changes(), [["comment", "t_1", FAILED_NOTE], *before, ["complete", "t_1", *SUMMARY]])
+                self.assertEqual(self.state["task"]["status"], "done")
+                self.assertEqual([event["kind"] for event in self.state["events"]], ["completed"])
+                self.assertEqual(self.contract(), LOCAL_ONLY)
+
+    def test_a_pull_request_github_does_not_report_merged_changes_nothing(self):
+        for state in ("OPEN", "CLOSED"):
+            with self.subTest(state):
+                self.setUp()
+                self.given("review")
+                self.state["pr"]["state"] = state
+                self.assertEqual(self.merged(), (0, {"action": "not_merged", "post": None, "state": state}))
+                self.assertEqual(self.state_changes(), [])
+                self.assertEqual(self.contract(), REPOSITORY_CONTRACT)
+
+    def test_a_contract_that_names_another_pull_request_changes_nothing(self):
+        for contract, shown in (("https://github.com/example-org/app/pull/13", "example-org/app#13"),
+                                ("example-org/other", "example-org/other")):
+            with self.subTest(contract):
+                self.setUp()
+                self.given("review")
+                self.contract(contract)
+                self.assertEqual(self.merged(), (0, {"action": "other_pull", "post": None, "contract": shown}))
+                self.assertEqual(self.state_changes(), [])
+                self.assertEqual(self.contract(), contract)
+
+    def test_a_contract_hermes_bound_to_this_pull_request_is_written_whatever_its_case(self):
+        for contract in (URL, "https://github.com/Example-Org/App/pull/12", "https://github.com/example-org/app/pull/12/"):
+            with self.subTest(contract):
+                self.setUp()
+                self.given("review")
+                self.contract(contract)
+                self.assertEqual(self.merged(), (0, {"action": "completed", "post": "response"}))
+                self.assertEqual(self.contract(), LOCAL_ONLY)
+
+    def test_the_webhook_url_is_read_and_github_names_the_pull_request(self):
+        self.given("review")
+        self.state["pr"]["requested"] = "https://github.com/Example-Org/App/pull/12"
+        self.assertEqual(self.merged("https://github.com/Example-Org/App/pull/12"), (0, {"action": "completed", "post": "response"}))
+        self.assertEqual(self.state_changes(), [["complete", "t_1", *SUMMARY]])
+
+    def test_a_running_card_gets_the_write_and_is_left_to_its_worker(self):
+        self.failing("running")
+        self.assertEqual(self.merged(), (0, {"action": "worker_completes", "post": None}))
+        self.assertEqual(self.state_changes(), [["comment", "t_1", FAILED_NOTE]])
+        self.assertEqual(self.contract(), LOCAL_ONLY)
+        self.state["task"]["status"] = "review"
+        self.assertEqual(self.merged(), (0, {"action": "completed", "post": "response"}))
+        self.assertEqual(self.state["comments"], [FAILED_NOTE])
+
+    def test_a_done_or_archived_card_gets_no_write_and_no_second_comment(self):
+        self.failing("review")
+        self.merged()
+        for status in ("done", "archived"):
+            with self.subTest(status):
+                self.state.update(calls=[], gh_calls=[])
+                self.state["task"]["status"] = status
                 self.assertEqual(self.merged(), (0, {"action": "none", "post": None, "status": status}))
                 self.assertEqual(self.state_changes(), [])
+                self.assertEqual(self.state["gh_calls"], [])
+                self.assertEqual(self.state["comments"], [FAILED_NOTE])
 
-    def test_a_review_blocked_or_ready_card_is_only_completed(self):
-        for status in ("review", "blocked", "ready"):
-            with self.subTest(status):
-                self.setUp()
-                self.given(status)
-                self.assertEqual(self.merged(), (0, {"action": "completed", "post": "response"}))
-                self.assertEqual(self.state_changes(), [["complete", "t_1", *SUMMARY]])
+    def test_a_done_card_before_the_first_run_keeps_its_contract(self):
+        self.given("done")
+        self.assertEqual(self.merged(), (0, {"action": "none", "post": None, "status": "done"}))
+        self.assertEqual(self.contract(), REPOSITORY_CONTRACT)
 
-    def test_a_todo_card_is_promoted_before_it_is_completed(self):
-        self.given("todo")
+    def test_a_failed_complete_leaves_the_card_local_only_and_the_next_run_completes_it_without_a_second_comment(self):
+        self.failing("review", fail={"complete": 2})
+        error = (f"Pull request {REF} merged and the card's completion_contract is local-only, but hermes kanban "
+                 "complete failed: hermes: cannot complete t_1; the next finish-merged run completes it")
+        self.assertEqual(self.merged(), (1, {"error": error}))
+        self.assertEqual((self.state["task"]["status"], self.contract()), ("review", LOCAL_ONLY))
+        self.assertEqual(self.merged(), (1, {"error": error}))
         self.assertEqual(self.merged(), (0, {"action": "completed", "post": "response"}))
-        self.assertEqual(self.state_changes(), [
-            ["promote", "t_1", "pull", "request", "merged"], ["complete", "t_1", *SUMMARY],
+        self.assertEqual(self.state["comments"], [FAILED_NOTE])
+        self.assertEqual(self.state["task"]["status"], "done")
+
+    def test_a_merge_whose_required_checks_passed_on_their_newest_runs_posts_no_comment(self):
+        self.given("ready")
+        self.assertEqual(self.merged(), (0, {"action": "completed", "post": "response"}))
+        self.assertEqual(self.state_changes(), [["complete", "t_1", *SUMMARY]])
+
+    def test_unreadable_required_checks_are_commented_and_the_card_still_finishes(self):
+        self.given("ready")
+        self.state["pr"]["required"] = None
+        self.assertEqual(self.merged(), (0, {"action": "completed", "post": "response"}))
+        self.assertEqual(self.state["comments"], [
+            f"Merged past required checks: {REF}: its required checks could not be read: gh api "
+            "repos/example-org/app/rules/branches/main?per_page=100 failed: gh: HTTP 403",
         ])
 
-    def test_a_refused_promote_is_commented_and_stops(self):
+    def test_a_pull_request_github_cannot_read_twice_changes_nothing(self):
+        self.given("review", gh_fail=2)
+        code, out = self.merged()
+        self.assertEqual((code, out), (1, {"error": f"pull request {REF} could not be read: gh pr view failed: gh: HTTP 502"}))
+        self.assertEqual(self.state_changes(), [])
+        self.assertEqual(self.contract(), REPOSITORY_CONTRACT)
+
+    def test_a_pull_request_read_on_the_retry_finishes_the_card(self):
+        self.given("review", gh_fail=1)
+        self.assertEqual(self.merged(), (0, {"action": "completed", "post": "response"}))
+
+    def test_a_refused_promote_is_reported_and_the_next_run_finishes_the_card(self):
         self.given("todo", fail={"promote": 1})
         code, out = self.merged()
-        reason = f"Pull request {REF} merged, but Hermes refused to promote the card: hermes kanban promote failed: hermes: cannot promote t_1"
-        self.assertEqual((code, out), (0, {"action": "commented", "post": None, "reason": reason}))
-        self.assertEqual(self.state_changes(), [["promote", "t_1", "pull", "request", "merged"], ["comment", "t_1", reason]])
-
-    def test_a_triage_card_is_unparked_restored_promoted_and_completed_without_an_assignment(self):
+        self.assertEqual((code, out), (1, {"error": (
+            f"Pull request {REF} merged and the card's completion_contract is local-only, but hermes kanban promote "
+            "failed: hermes: cannot promote t_1; the next finish-merged run completes it")}))
         self.assertEqual(self.merged(), (0, {"action": "completed", "post": "response"}))
-        self.assertEqual(self.state_changes(), [
-            ["assign", "t_1", "none"],
-            ["specify", "t_1"],
-            ["edit", "t_1", "--title", TITLE, "--body", BODY],
-            ["promote", "t_1", "pull", "request", "merged"],
-            ["complete", "t_1", *SUMMARY],
-        ])
+
+    def test_a_triage_card_whose_specify_fails_is_reassigned_and_reported(self):
+        self.state["fail"]["specify"] = 1
+        code, out = self.merged()
+        self.assertEqual((code, out), (1, {"error": (
+            f"Pull request {REF} merged and the card's completion_contract is local-only, but hermes kanban specify "
+            "failed: hermes: cannot specify t_1; the card stays in triage; the next finish-merged run completes it")}))
+        self.assertEqual(self.state_changes(), [["assign", "t_1", "none"], ["specify", "t_1"], ["assign", "t_1", "claude-worker"]])
 
     def test_a_triage_card_that_specify_left_ready_is_completed_without_a_promote(self):
         self.state["specify_to"] = "ready"
         self.merged()
         self.assertEqual([call[0] for call in self.state_changes()], ["assign", "specify", "edit", "complete"])
 
-    def test_a_triage_card_whose_specify_fails_is_reassigned_and_commented(self):
-        self.state["fail"]["specify"] = 1
-        code, out = self.merged()
-        reason = (f"Pull request {REF} merged, but the card could not leave triage: hermes kanban specify failed: "
-                  "hermes: cannot specify t_1; the card stays in triage")
-        self.assertEqual((code, out), (0, {"action": "commented", "post": None, "reason": reason}))
-        self.assertEqual(self.state_changes(), [
-            ["assign", "t_1", "none"], ["specify", "t_1"], ["assign", "t_1", "claude-worker"], ["comment", "t_1", reason],
-        ])
-
     def test_after_specify_succeeds_a_triage_card_is_never_assigned(self):
-        paths = {
-            "completed": {},
-            "promote refused": {"fail": {"promote": 1}},
-            "completion refused": {"refuse_completion": True, "receipt": {**FAILED_RECEIPT, "head_sha": "other"}},
-            "refused merge blocked": {"refuse_completion": True},
-            "edit keeps failing": {"fail": {"edit": 2}},
-        }
-        for name, changes in paths.items():
+        for name, changes in {"completed": {}, "promote refused": {"fail": {"promote": 1}},
+                              "completion refused": {"fail": {"complete": 1}}, "edit keeps failing": {"fail": {"edit": 2}}}.items():
             with self.subTest(name):
                 self.setUp()
-                self.given("triage", **changes)
+                self.failing("triage", **changes)
                 self.merged()
                 after = self.state_changes()[self.state_changes().index(["specify", "t_1"]) + 1 :]
                 self.assertEqual([call for call in after if call[0] == "assign" and call[2] != "none"], [])
 
-
-class RefusedMergeTest(CardTransitionTest):
-    """Each refused completion of a merged pull request, with the card ready unless the case says otherwise."""
-
-    def refuse(self, status="ready", linear_state="started", receipt=FAILED_RECEIPT, rollup=FAILED_NEWEST, **changes):
-        self.given(status, refuse_completion=True, receipt=receipt, **changes)
-        self.state["pr"]["rollup"] = rollup
-        return self.transition("merged", "t_1", "--pr", URL, "--linear-state", linear_state)
-
-    def after_completion(self) -> list:
-        changes = self.state_changes()
-        return changes[changes.index(["complete", "t_1", *SUMMARY]) + 1 :]
-
-    def test_each_case_comments_its_marker_and_holds_or_archives_the_card(self):
-        cases = [
-            ("real failure, ready", {}, {"action": "held", "post": None, "reason": REAL_REASON},
-             [["comment", "t_1", REAL_MARKER], ["assign", "t_1", "none"], ["block", "t_1", REAL_REASON, "--kind", "needs_input"]]),
-            ("superseded only, ready", {"rollup": PASSED_NEWEST}, {"action": "held", "post": None, "reason": SUPERSEDED_REASON},
-             [["comment", "t_1", SUPERSEDED_MARKER], ["assign", "t_1", "none"],
-              ["block", "t_1", SUPERSEDED_REASON, "--kind", "needs_input"]]),
-            ("no required checks, ready", {"receipt": NO_CHECKS_RECEIPT}, {"action": "held", "post": None, "reason": NO_CHECKS_REASON},
-             [["comment", "t_1", NO_CHECKS_MARKER], ["assign", "t_1", "none"],
-              ["block", "t_1", NO_CHECKS_REASON, "--kind", "needs_input"]]),
-            ("Linear completed", {"linear_state": "completed"}, {"action": "archived", "post": None},
-             [["comment", "t_1", REAL_MARKER], ["archive", "t_1"]]),
-            ("no required checks, Linear completed", {"receipt": NO_CHECKS_RECEIPT, "linear_state": "completed"},
-             {"action": "archived", "post": None}, [["comment", "t_1", NO_CHECKS_MARKER], ["archive", "t_1"]]),
-            ("Linear unreadable", {"linear_state": "unreadable"}, {"action": "held", "post": None, "reason": REAL_REASON},
-             [["comment", "t_1", REAL_MARKER + UNREAD], ["assign", "t_1", "none"],
-              ["block", "t_1", REAL_REASON, "--kind", "needs_input"]]),
-            ("review card", {"status": "review"}, {"action": "held", "post": "elicitation", "reason": REAL_REASON},
-             [["comment", "t_1", REAL_MARKER], ["assign", "t_1", "none"]]),
-            ("blocked card with no block kind", {"status": "blocked"},
-             {"action": "held", "post": "elicitation", "reason": REAL_REASON},
-             [["comment", "t_1", REAL_MARKER], ["assign", "t_1", "none"], ["block", "t_1", REAL_REASON, "--kind", "needs_input"]]),
-            ("ready card whose block fails", {"fail": {"block": 1}},
-             {"action": "held", "post": "elicitation", "reason": REAL_REASON},
-             [["comment", "t_1", REAL_MARKER], ["assign", "t_1", "none"], ["block", "t_1", REAL_REASON, "--kind", "needs_input"]]),
-            ("event for an older head", {"receipt": {**FAILED_RECEIPT, "head_sha": "older"}},
-             {"action": "commented", "post": None,
-              "reason": f"Pull request {REF} merged, but Hermes refused to complete the card: {COMPLETION_ERROR}"},
-             [["comment", "t_1", f"Pull request {REF} merged, but Hermes refused to complete the card: {COMPLETION_ERROR}"]]),
-            ("event for another pull request", {"receipt": {**FAILED_RECEIPT, "pr_url": URL + "3"}},
-             {"action": "commented", "post": None,
-              "reason": f"Pull request {REF} merged, but Hermes refused to complete the card: {COMPLETION_ERROR}"},
-             [["comment", "t_1", f"Pull request {REF} merged, but Hermes refused to complete the card: {COMPLETION_ERROR}"]]),
-            ("only pending checks", {"receipt": {**FAILED_RECEIPT, "checks": [{"name": "Validate", "classification": "pending"}]}},
-             {"action": "commented", "post": None,
-              "reason": f"Pull request {REF} merged, but Hermes refused to complete the card: {COMPLETION_ERROR}"},
-             [["comment", "t_1", f"Pull request {REF} merged, but Hermes refused to complete the card: {COMPLETION_ERROR}"]]),
-            ("checks unreadable twice", {"gh_fail": 2},
-             {"action": "commented", "post": None,
-              "reason": f"Pull request {REF} merged, but its checks could not be read: gh pr view failed: gh: HTTP 502"},
-             [["comment", "t_1", f"Pull request {REF} merged, but its checks could not be read: gh pr view failed: gh: HTTP 502"]]),
-            ("checks read on the retry", {"gh_fail": 1}, {"action": "held", "post": None, "reason": REAL_REASON},
-             [["comment", "t_1", REAL_MARKER], ["assign", "t_1", "none"], ["block", "t_1", REAL_REASON, "--kind", "needs_input"]]),
-        ]
-        for name, changes, output, after in cases:
-            with self.subTest(name):
-                self.setUp()
-                self.assertEqual(self.refuse(**changes), (0, output))
-                self.assertEqual(self.after_completion(), after)
-
-    def test_a_blocked_card_that_already_has_a_kind_stays_blocked(self):
-        self.state["task"]["block_kind"] = "needs_input"
-        code, out = self.refuse(status="blocked")
-        self.assertEqual((code, out), (0, {"action": "held", "post": "elicitation", "reason": REAL_REASON}))
-        self.assertEqual(self.state["task"]["status"], "blocked")
-
     def test_no_comment_names_a_pull_request_by_url(self):
-        runs = [
-            dict(),
-            dict(linear_state="unreadable"),
-            dict(receipt={**FAILED_RECEIPT, "head_sha": "older"}),
-            dict(gh_fail=2),
-            dict(status="todo", fail={"promote": 1}),
-            dict(status="triage", fail={"specify": 1}),
-        ]
-        for changes in runs:
+        for changes in ({}, {"required": None}):
             with self.subTest(changes):
                 self.setUp()
-                self.refuse(**changes)
+                self.failing("review")
+                self.state["pr"].update(changes)
+                self.merged()
                 self.assertTrue(self.state["comments"])
                 for comment in self.state["comments"]:
                     self.assertIn(REF, comment)
@@ -704,7 +725,7 @@ class RefusedMergeTest(CardTransitionTest):
 
     def test_a_url_that_is_not_a_pull_request_is_refused_before_any_change(self):
         self.given("ready")
-        code, out = self.transition("merged", "t_1", "--pr", "https://github.com/example-org/app/issues/12", "--linear-state", "started")
+        code, out = self.merged("https://github.com/example-org/app/issues/12")
         self.assertEqual((code, out), (1, {"error": "https://github.com/example-org/app/issues/12 is not a GitHub pull request URL"}))
         self.assertEqual(self.calls(), [])
 

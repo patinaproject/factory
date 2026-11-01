@@ -67,13 +67,16 @@ timeout, or `OSError` leaves the card parked and is reported. `replied` never re
 - `stop`: block a card whatever it is doing. Hermes blocks only a `ready` or `running` card, so a
   `review` card is reopened first. A `scheduled` card stays `scheduled`, is unassigned, and gets a `stopped`
   comment, which has no reply prefix, so the next reply releases it like any wait.
-- `merged --pr <url> --linear-state <stateType or unreadable>`: finish a card whose pull request
-  merged. A refused completion is a refused merge when the newest `pr_acceptance` event is for this
-  pull request at its head and names a check that did not pass, or names no required checks. A
-  merged pull request never runs its checks again, so the card then waits for a person and is
-  archived once the Linear issue is completed. The card is never assigned once `specify` has
-  succeeded, because an assignment lifts the `active_pr` hold and a worker would start on a merged
-  pull request.
+- `merged --pr <url>`: finish a card whose pull request merged, whatever its check runs say. GitHub's
+  state is read, not the webhook's: a pull request GitHub does not report `MERGED` changes nothing.
+  Then `completion_contract.release` sets the card's contract to `local-only`, which Hermes' acceptance
+  skips, unless the contract names another pull request. A card whose required checks did not all
+  pass on the merged head gets one comment that names them. A running card is left to its worker,
+  whose own completion Hermes then accepts, and any other card is completed by the steps its status
+  needs. A card that is already `done` or `archived` gets no write and no comment. When a step after
+  the write fails, the next run, or `finish-merged`, finds `local-only`, skips the write, and
+  completes the card. The card is never assigned once `specify` has succeeded, because an assignment
+  lifts the `active_pr` hold and a worker would start on a merged pull request.
 
 Every command prints one JSON line. It exits 0 with `{"action", "post", ...}`, or `park-waiting`'s line, or 1
 with `{"error": reason}`. The actions:
@@ -85,13 +88,12 @@ with `{"error": reason}`. The actions:
 | `unblocked` | the card is ready for its worker again | `pull_request` |
 | `reopened` | the `review` card went back to its worker | |
 | `stopped` | the card is blocked, or was already, or waits unassigned in `scheduled` | `status` |
-| `completed` | Hermes accepted the merged pull request and the card is `done` | |
-| `commented` | the merge left the card as it was, with `reason` commented on it | `reason` |
-| `archived` | a refused merge whose Linear issue is completed | |
-| `held` | a refused merge waits for a person: a `ready` card is blocked, a `review` or `blocked` card stays | `reason` |
+| `completed` | the merged pull request's card is `done` | |
+| `worker_completes` | the running card's contract is `local-only`, and its worker completes it | |
+| `not_merged` | GitHub does not report the pull request `MERGED`, so nothing changed | `state` |
+| `other_pull` | the card's contract names another pull request, so nothing changed | `contract` |
 
-`post` names the Linear agent activity the caller still posts: `response` after `completed`,
-`elicitation` with `reason` as its body after a `held` that Hermes' block hook did not post, and
+`post` names the Linear agent activity the caller still posts: `response` after `completed`, and
 null otherwise. A card comment names a pull request as `<owner>/<name>#<number>`, never by URL,
 because Hermes treats a card whose comments hold a pull request URL as already having one.
 """
@@ -107,10 +109,10 @@ import sqlite3
 import subprocess
 import sys
 import time
-from enum import Enum
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+import completion_contract
 import factory_settings
 import factory_source
 import gh_login
@@ -128,7 +130,8 @@ READY_LABEL = "ready-for-agent"
 TRIAGE_QUEUED = "Queued for triage as"
 # Covers Hermes' _RESPAWN_GUARD_PR_URL_RE, which holds a `ready` card for a day after a comment that matches it.
 PULL_URL = re.compile(r"https?://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)(?:[/#?][^\s).,]*)?", re.IGNORECASE)
-NOT_REFUSED = frozenset({"success", "pending"})
+# Starts the one comment that names the required checks a merged head did not pass.
+CHECKS_NOTE = "Merged past required checks:"
 
 
 def pull_ref(text: str) -> str:
@@ -147,6 +150,7 @@ class Card:
     """One card on one board, with the `hermes kanban` calls triage makes on it."""
 
     def __init__(self, board: str | None, task_id: str):
+        self.board = board
         self.kanban = kanban_command(board)
         self.id = task_id
 
@@ -166,9 +170,6 @@ class Card:
         text = pull_ref(text)
         self.call("comment", text)
         return text
-
-    def archive(self) -> None:
-        archive(self.kanban, self.id)
 
 
 def plugin_module(plugin: str, name: str):
@@ -683,128 +684,60 @@ def stop(card: Card) -> dict:
     return result("stopped", status=status)
 
 
-class Case(Enum):
-    """Why Hermes refused a merged pull request: its card comment marker and the reason a person reads."""
-
-    REAL = (
-        "Merge refused by Hermes: required checks failed: {names}.",
-        "Pull request {ref} merged, but required checks failed: {names}. Is the work done? If it is, mark the "
-        "Linear issue Done, and the card is archived.",
-    )
-    SUPERSEDED = (
-        "Merge refused by Hermes: Hermes counted failed runs that newer passing runs replaced: {names}.",
-        "Pull request {ref} merged and its required checks passed on their newest runs. Hermes counted failed "
-        "runs that newer passing runs replaced: {names}, so it cannot finish the card. Mark the Linear issue "
-        "Done, and the card is archived.",
-    )
-    NO_REQUIRED_CHECKS = (
-        "Merge refused by Hermes: the base branch has no required checks.",
-        "Pull request {ref} merged, but its base branch has no required checks, so Hermes cannot finish the "
-        "card. Is the work done? If it is, mark the Linear issue Done, and the card is archived.",
-    )
-
-    def __init__(self, marker: str, reason: str):
-        self.marker = marker
-        self.reason = reason
-
-
 class Merge(NamedTuple):
     url: str
     ref: str
-    linear_state: str
 
 
 def read_pull_request(url: str) -> dict:
     try:
         return merged_checks.read_pull_request(url)
     except (merged_checks.Failed, ValueError):
-        return merged_checks.read_pull_request(url)
-
-
-def commented(card: Card, reason: str) -> dict:
-    return result("commented", reason=card.comment(reason))
-
-
-def refusal(card: Card, merge: Merge, error: str) -> dict:
-    return commented(card, f"Pull request {merge.ref} merged, but Hermes refused to complete the card: {error}")
-
-
-def refused_merge(card: Card, merge: Merge, error: str) -> dict:
+        pass
     try:
-        pull = read_pull_request(merge.url)
+        return merged_checks.read_pull_request(url)
     except (merged_checks.Failed, ValueError) as failure:
-        return commented(card, f"Pull request {merge.ref} merged, but its checks could not be read: {failure}")
-    events = [event for event in card.show()["events"] if event["kind"] == "pr_acceptance"]
-    receipt = events[-1]["payload"] if events else {}
-    if receipt.get("pr_url") != merge.url or receipt.get("head_sha") != pull["headRefOid"]:
-        return refusal(card, merge, error)
-    checks = receipt.get("checks") or []
-    refused = [check["name"] for check in checks if check["classification"] not in NOT_REFUSED]
-    if receipt.get("classification") == "missing" and not checks:
-        case, names = Case.NO_REQUIRED_CHECKS, []
-    elif refused:
-        sorted_checks = merged_checks.sort_checks(pull["statusCheckRollup"] or [], refused)
-        case = Case.REAL if sorted_checks["real"] else Case.SUPERSEDED
-        names = sorted_checks["real"] or sorted_checks["superseded"]
-    else:
-        return refusal(card, merge, error)
-    marker = f"{case.marker.format(names=', '.join(names))} {merge.ref}"
-    if merge.linear_state == "completed":
-        card.comment(marker)
-        card.archive()
-        return result("archived")
-    if merge.linear_state == "unreadable":
-        marker += " The Linear issue could not be read, so the card was not archived."
-    card.comment(marker)
-    return hold(card, case.reason.format(ref=merge.ref, names=", ".join(names)))
+        raise Failed(f"pull request {url} could not be read: {failure}") from failure
 
 
-def hold(card: Card, reason: str) -> dict:
-    card.call("assign", "none")
-    status = card.status()
-    if status == "ready":
-        try:
-            card.call("block", reason, "--kind", "needs_input")
-        except Failed:
-            return result("held", "elicitation", reason=reason)
-        return result("held", reason=reason)
-    if status == "blocked":
-        # Hermes types a blocked card's block only while it has no kind and refuses otherwise. Either way the
-        # card stays blocked and Hermes posts nothing, and `show --json` does not report the kind.
-        try:
-            card.call("block", reason, "--kind", "needs_input")
-        except Failed:
-            pass
-        return result("held", "elicitation", reason=reason)
-    if status == "review":
-        return result("held", "elicitation", reason=reason)
-    raise Failed(f"card {card.id} is {status} after Hermes refused the merge")
+def note_checks(card: Card, pull: dict, merge: Merge) -> None:
+    """Comment once which required checks of the merged head failed or have no run."""
+    marker = f"{CHECKS_NOTE} {merge.ref}"
+    if any(comment["body"].startswith(marker) for comment in card.show()["comments"]):
+        return
+    repo = PULL_URL.fullmatch(merge.url).group(1)
+    try:
+        names = merged_checks.required_checks(repo, pull["baseRefName"])
+    except (merged_checks.Failed, ValueError) as failure:
+        card.comment(f"{marker}: its required checks could not be read: {failure}")
+        return
+    real = merged_checks.sort_checks(pull["statusCheckRollup"] or [], names)["real"]
+    if real:
+        card.comment(f"{marker}: {', '.join(real)} failed or had no run on the merged head.")
 
 
 def complete(card: Card, merge: Merge) -> dict:
     metadata = json.dumps({"published_pr": merge.url})
-    try:
-        card.call("complete", "--summary", f"Pull request {merge.ref} merged.", "--metadata", metadata)
-    except Failed as failure:
-        return refused_merge(card, merge, str(failure))
+    card.call("complete", "--summary", f"Pull request {merge.ref} merged.", "--metadata", metadata)
     return result("completed", "response")
 
 
 def promote_then_complete(card: Card, merge: Merge) -> dict:
-    try:
-        card.call("promote", "pull", "request", "merged")
-    except Failed as failure:
-        return commented(card, f"Pull request {merge.ref} merged, but Hermes refused to promote the card: {failure}")
+    card.call("promote", "pull", "request", "merged")
     return complete(card, merge)
 
 
 def unpark_then_complete(card: Card, merge: Merge) -> dict:
-    try:
-        leave_triage(card)
-    except SpecifyFailed as failure:
-        return commented(card, f"Pull request {merge.ref} merged, but the card could not leave triage: {failure}")
+    leave_triage(card)
     if card.status() == "todo":
         return promote_then_complete(card, merge)
+    return complete(card, merge)
+
+
+def unschedule_then_complete(card: Card, merge: Merge) -> dict:
+    # Unassigned, the `ready` card that `unblock` leaves cannot be claimed before `complete`.
+    card.call("assign", "none")
+    card.call("unblock")
     return complete(card, merge)
 
 
@@ -814,18 +747,38 @@ MERGED_BY_STATUS: dict[str, Callable[[Card, Merge], dict]] = {
     "ready": complete,
     "todo": promote_then_complete,
     "triage": unpark_then_complete,
+    "scheduled": unschedule_then_complete,
 }
+# The worker of a running card completes it, and with `local-only` written Hermes accepts that completion.
+WORKER_COMPLETES = "running"
 
 
-def merged(card: Card, url: str, linear_state: str) -> dict:
-    match = PULL_URL.fullmatch(url)
-    if not match:
+def merged(card: Card, url: str) -> dict:
+    if not PULL_URL.fullmatch(url):
         raise Failed(f"{url} is not a GitHub pull request URL")
     status = card.status()
-    if status not in MERGED_BY_STATUS:
-        # A running card's worker completes it, and a done or archived card needs nothing.
+    if status not in MERGED_BY_STATUS and status != WORKER_COMPLETES:
         return result("none", status=status)
-    return MERGED_BY_STATUS[status](card, Merge(url, pull_ref(url), linear_state))
+    pull = read_pull_request(url)
+    if pull["state"] != "MERGED":
+        return result("not_merged", state=pull["state"])
+    merge = Merge(pull["url"], pull_ref(pull["url"]))
+    write, contract = completion_contract.release(board_database(card.board), card.id, merge.url)
+    if write is completion_contract.Write.OTHER:
+        return result("other_pull", contract=pull_ref(contract or ""))
+    status = card.status()
+    if write is completion_contract.Write.FINISHED or (status not in MERGED_BY_STATUS and status != WORKER_COMPLETES):
+        return result("none", status=status)
+    note_checks(card, pull, merge)
+    if status == WORKER_COMPLETES:
+        return result("worker_completes")
+    try:
+        return MERGED_BY_STATUS[status](card, merge)
+    except Failed as failure:
+        raise Failed(
+            f"Pull request {merge.ref} merged and the card's completion_contract is local-only, but {failure}; "
+            "the next finish-merged run completes it"
+        ) from failure
 
 
 def parser() -> argparse.ArgumentParser:
@@ -847,9 +800,7 @@ def parser() -> argparse.ArgumentParser:
     sub.add_argument("--branch", required=True)
     sub.add_argument("--reason", required=True)
     command("reopen").add_argument("--reason", required=True)
-    sub = command("merged")
-    sub.add_argument("--pr", required=True, help="the merged pull request's URL")
-    sub.add_argument("--linear-state", required=True, help="the Linear issue's stateType, or unreadable")
+    command("merged").add_argument("--pr", required=True, help="the merged pull request's URL")
     return root
 
 
@@ -863,11 +814,11 @@ def main(argv: list[str] | None = None) -> int:
         "unblock": lambda: unblock(card, args.repo, args.branch, args.reason),
         "reopen": lambda: reopen(card, args.reason),
         "stop": lambda: stop(card),
-        "merged": lambda: merged(card, args.pr, args.linear_state),
+        "merged": lambda: merged(card, args.pr),
     }
     try:
         output = commands[args.command]()
-    except (Failed, KeyError, ValueError, sqlite3.Error) as failure:
+    except (Failed, completion_contract.Failed, KeyError, ValueError, sqlite3.Error) as failure:
         print(json.dumps({"error": pull_ref(str(failure))}))
         return 1
     print(json.dumps(output))

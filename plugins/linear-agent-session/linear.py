@@ -281,6 +281,19 @@ TRIAGE_ROLES = ("needs-triage", "needs-info", "ready-for-agent", "ready-for-huma
 
 UrlOpen = Callable[..., Any]
 
+CODE_SPANS = re.compile(r"(```.*?(?:```|\Z)|~~~.*?(?:~~~|\Z)|`[^`\n]+`)", re.S)
+GITHUB_PULL_URL = re.compile(
+    r"(?<![\w/.])https://github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)/pull/([0-9]+)(?!\w|\.\w)"
+    r"(?:[/#?][^\s)\]>\"'`*<]*[^\s)\]>\"'`*<.,;:!?_]|/)?"
+)
+
+
+def review_links(text: str) -> str:
+    parts = CODE_SPANS.split(text)
+    for i in range(0, len(parts), 2):
+        parts[i] = GITHUB_PULL_URL.sub(r"https://linear.review/\1/\2/pull/\3", parts[i])
+    return "".join(parts)
+
 
 class LinearError(Exception):
     pass
@@ -347,6 +360,8 @@ class LinearClient:
         self._token: Optional[dict] = None
 
     def create_activity(self, agent_session_id: str, content: dict, *, ephemeral: bool = False) -> str:
+        if "body" in content:
+            content = {**content, "body": review_links(content["body"])}
         activity_input: dict = {"agentSessionId": agent_session_id, "content": content}
         if ephemeral:
             activity_input["ephemeral"] = True
@@ -383,8 +398,9 @@ class LinearClient:
             held = set()
         missing = {}
         for u in urls:
-            if u["url"] not in held and u["url"] not in missing:
-                missing[u["url"]] = {"label": u["label"], "url": u["url"]}
+            url = review_links(u["url"])
+            if url not in held and url not in missing:
+                missing[url] = {"label": u["label"], "url": url}
         if missing:
             self._update_session(agent_session_id, {"addedExternalUrls": list(missing.values())})
         return list(missing)
@@ -409,7 +425,7 @@ class LinearClient:
         session = self._graphql(SESSION_THREAD_QUERY, {"id": agent_session_id})["agentSession"]
         payload = self._graphql(
             COMMENT_CREATE_MUTATION,
-            {"input": {"issueId": session["issue"]["id"], "parentId": session["comment"]["id"], "body": body}},
+            {"input": {"issueId": session["issue"]["id"], "parentId": session["comment"]["id"], "body": review_links(body)}},
         )["commentCreate"]
         if not payload["success"]:
             raise LinearError("commentCreate reported success: false")
