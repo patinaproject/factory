@@ -18,7 +18,8 @@ sys.path.insert(0, str(SCRIPTS))
 import kanban_board  # noqa: E402
 
 TASKS = (
-    "CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, branch_name TEXT, status TEXT, assignee TEXT, block_kind TEXT)"
+    "CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, branch_name TEXT, status TEXT, assignee TEXT, block_kind TEXT, "
+    "completion_contract TEXT)"
 )
 INSERT = "INSERT INTO tasks (id, title, body, branch_name, status, assignee) VALUES"
 # Hermes' comment and event tables, from `hermes_cli/kanban_db.py`.
@@ -111,7 +112,8 @@ class KanbanBoardTest(unittest.TestCase):
 
         cards = kanban_board.cards(str(self.path))
 
-        self.assertEqual(cards, [{"id": "t_a", "title": "A", "body": "", "branch_name": "a-work", "status": "todo", "block_kind": None}])
+        self.assertEqual(cards, [{"id": "t_a", "title": "A", "body": "", "branch_name": "a-work", "status": "todo", "block_kind": None,
+                                  "completion_contract": None}])
         self.assertEqual(contents(), before)
 
     def test_a_wal_board_with_no_wal_files_is_read_without_changing_it(self) -> None:
@@ -233,7 +235,7 @@ class KanbanBoardTest(unittest.TestCase):
             board.commit()
 
         self.assertEqual(kanban_board.missing_columns(str(self.path)), [
-            "tasks.branch_name", "tasks.block_kind", "task_comments.body", "task_events.id", "task_events.task_id",
+            "tasks.branch_name", "tasks.block_kind", "tasks.completion_contract", "task_comments.body", "task_events.id", "task_events.task_id",
             "task_events.kind", "task_events.payload", "task_events.created_at",
         ])
 

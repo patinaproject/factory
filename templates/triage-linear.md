@@ -274,12 +274,7 @@ stop.
    `<owner>/<name>#<number>`, so the comment names no pull request URL.
 3. If the card's body names a different `linear_agent_session_id`, update it as
    "Implementation card" step 6 says.
-4. If a `body` in the `comments` of `hermes kanban show <task id> --json`
-   starts `Merge refused by Hermes:`, the pull request merged and Hermes refused
-   to complete the card, so a worker cannot finish it. Do not unblock, reopen, or resume it. Post
-   one `thought` on `agent_session_id` saying that the card ends when the
-   issue is marked Done, and stop.
-   If the card is `blocked` and `delegated` is true, unblock it as "Rules" says. If the card
+4. If the card is `blocked` and `delegated` is true, unblock it as "Rules" says. If the card
    is `review`, run
    `<<card_transition>> reopen <task id> --reason 'resumed from Linear; see the card comments'`
    so its worker reads the reply. If the card is `triage`, resume it as
@@ -459,14 +454,16 @@ Type `Issue`. The issue is the data change issue.
    - `issue_closed`: if the issue's `state_type` is `completed` and `card` is
      not `done`, read the pull request for the card's `branch:` and `repo:`
      lines with `gh pr view '<branch>' -R '<repo>' --json state,url`. If it is
-     merged and a `body` in the `comments` of `hermes kanban show <task id> --json`
-     starts `Merge refused by Hermes:`, Hermes refused to complete the
-     card, so archive it as "Rules" says, and stop.
-     Otherwise, if it is open or merged, comment on the card that the Linear
-     issue is done, and stop. Do not archive it. Merging the pull request usually
-     marks the issue done, and GitHub triage or the worker moves the card to
-     `done` on the merge. Hermes cannot complete an archived card, so archiving
-     first would leave it unfinished.
+     merged, run `<<card_transition>> merged <task id> --pr '<url>'`, which
+     finishes the card whatever its check runs say, and stop. When its line's
+     `post` is `response`, post a `response` on the card's
+     `linear_agent_session_id` saying the pull request merged, with one
+     `external_urls` link labeled `Pull request` to the URL. When it prints
+     `error`, post that error as one `thought` there. Never archive a card whose
+     pull request merged: Hermes cannot complete an archived card.
+     If it is open, comment on the card that the Linear issue is done, and stop.
+     Do not archive it. Merging the pull request usually marks the issue done,
+     and GitHub triage or the worker moves the card to `done` on the merge.
      In every other case, archive `card` as "Rules" says when there is one, and
      stop.
    - `undelegated`: the issue was un-delegated. If `card` exists and is not

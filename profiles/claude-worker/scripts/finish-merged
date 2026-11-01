@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Finish every card whose pull request merged, whatever its check runs say.
+
+A merged pull request's card can miss `card_transition.py merged`: its worker
+exits without completing, the merge webhook is lost or its triage turn fails,
+or the completion after the `local-only` write fails. A Hermes cron job runs
+this script every 5 minutes. On every board it reads each card that is not
+`done` or `archived` from the board database, then reads the card's pull
+request from GitHub: the one its `completion_contract` names once Hermes bound
+it to a pull request, or else the one for its `branch_name` in its repository,
+which is the contract's `<owner>/<name>`, or the card body's `repo:` line once
+the contract is `local-only`. A card with neither is skipped. When GitHub
+reports the pull request `MERGED`, the card goes through `card_transition.py
+merged`, which reads GitHub again, writes `local-only`, and completes it.
+
+Prints one line per merged card, `<task id> <pull request url> <action>`. A
+failure for one card goes to stderr and the others still run. Exits 1 when any
+failed, or 2 when HERMES_HOME is not set or Hermes cannot be found.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+
+import card_transition
+import completion_contract
+import factory_settings
+import kanban_board
+from archive_card import Failed, last_line
+
+REPO_LINE = re.compile(r"^repo:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+NO_PULL = "no pull requests found"
+
+
+def pull_target(card: dict) -> list[str] | None:
+    """The `gh pr view` arguments that name the card's pull request, or None when the card has none to name."""
+    contract = card.get("completion_contract") or ""
+    if completion_contract.pull_key(contract):
+        return [contract]
+    if not card.get("branch_name"):
+        return None
+    if completion_contract.REPOSITORY.fullmatch(contract):
+        return [card["branch_name"], "-R", contract]
+    line = REPO_LINE.search(card.get("body") or "")
+    return [card["branch_name"], "-R", line.group(1)] if line else None
+
+
+def merged_url(target: list[str]) -> str | None:
+    """The pull request's URL when GitHub reports it `MERGED`."""
+    try:
+        proc = subprocess.run(["gh", "pr", "view", *target, "--json", "state,url"], capture_output=True, text=True)
+    except OSError as failure:
+        raise Failed(f"gh could not run: {failure.strerror or failure}") from failure
+    if proc.returncode != 0:
+        if NO_PULL in proc.stderr:
+            return None
+        raise Failed(f"gh pr view failed: {last_line(proc.stderr)}")
+    pull = json.loads(proc.stdout)
+    return pull["url"] if pull["state"] == "MERGED" else None
+
+
+def finish(slug: str, card: dict) -> str | None:
+    target = pull_target(card)
+    url = merged_url(target) if target else None
+    if url is None:
+        return None
+    outcome = card_transition.merged(card_transition.Card(slug, card["id"]), url)
+    return f"{card['id']} {url} {outcome['action']}"
+
+
+def main() -> int:
+    argparse.ArgumentParser(description=__doc__.splitlines()[0]).parse_args()
+    if not os.environ.get("HERMES_HOME"):
+        print("finish-merged: HERMES_HOME is not set; point it at the claude-worker profile home", file=sys.stderr)
+        return 2
+    try:
+        os.environ["HERMES_BIN"] = factory_settings.find_hermes()
+    except factory_settings.SettingsError as exc:
+        print(f"finish-merged: {exc}", file=sys.stderr)
+        return 2
+    failed = False
+    try:
+        boards = card_transition.boards()
+    except (Failed, ValueError) as failure:
+        print(f"finish-merged: listing boards failed: {failure}", file=sys.stderr)
+        return 1
+    for each in boards:
+        slug, path = each["slug"], each["db_path"]
+        if not os.path.exists(path):
+            continue
+        try:
+            cards = kanban_board.cards(path)
+        except sqlite3.Error as failure:
+            print(f"finish-merged: {slug}: cannot read the board: {failure}", file=sys.stderr)
+            failed = True
+            continue
+        for card in cards:
+            if card["status"] in completion_contract.FINISHED:
+                continue
+            try:
+                line = finish(slug, card)
+            except (Failed, completion_contract.Failed, KeyError, ValueError, sqlite3.Error) as failure:
+                print(f"finish-merged: {card['id']}: {card_transition.pull_ref(str(failure))}", file=sys.stderr)
+                failed = True
+                continue
+            if line:
+                print(line)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
