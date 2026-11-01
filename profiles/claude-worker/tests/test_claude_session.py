@@ -855,11 +855,48 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(
             (status, report["session_links"]), (0, {"added": [TAKEOVER_REVIEW, REVIEW_PULL_9], "action": "linked"})
         )
-        self.assertEqual(self.link_updates(), [
-            self.linked(("Taken-over pull request #7", TAKEOVER_REVIEW)), self.linked(("Pull request #9", REVIEW_PULL_9)),
-        ])
+        self.assertEqual(self.link_updates(), [{"addedExternalUrls": [
+            {"label": "Taken-over pull request #7", "url": TAKEOVER_REVIEW}, {"label": "Pull request #9", "url": REVIEW_PULL_9},
+        ]}])
         urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
         self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_REVIEW, REVIEW_PULL_9])
+
+    def test_a_run_that_prints_no_json_still_links_the_branchs_pull_request(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.factory_pull()
+        self.configure_fake_claude(no_json=True)
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(report["session_links"], {"added": [REVIEW_PULL_9], "action": "linked"})
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+
+    def test_a_refused_adoption_still_links_the_branchs_existing_pull_request(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.publish_branch("tlmader")
+        self.factory_pull()
+
+        status, report = self.run_session()
+
+        self.assertEqual(status, 2)
+        self.assertFalse(self.log.exists())
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+
+    def test_a_merged_pull_request_on_the_branch_is_added_unless_the_session_holds_it(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.github.add_pull(9, "abc-123-fix", state="closed", merged=True, author="person")
+        self.github.add_pull(10, "other-branch", author=BOT_LOGIN)
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["session_links"]), (0, {"added": [REVIEW_PULL_9], "action": "linked"}))
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+
+        self.set_linear_state(session_urls=[REVIEW_PULL_9])
+        self.run_session()
+
+        self.assertEqual(len(self.link_updates()), 1)
 
     def test_a_failed_session_link_is_reported_without_changing_the_run(self) -> None:
         self.set_comments(body=SESSION_BODY)

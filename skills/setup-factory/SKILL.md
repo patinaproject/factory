@@ -1364,6 +1364,19 @@ A card that a person reopens from the dashboard after it reached `done` keeps
 its `local-only` contract, so its next completion skips Hermes' acceptance.
 This is an accepted limit. Archived cards stay archived and are never swept.
 
+**Session link backfill.** The worker links each pull request on a card's
+branch to the card's Linear agent session, and a new session keeps the links
+of the older one it replaces. Sessions from before that change lack them. Once
+after the install, run the backfill as the worker profile, outside any card:
+
+```sh
+HERMES_HOME=<worker home> python3 <worker home>/scripts/sync-session-links
+```
+
+It adds each missing pull request link and removes none. To see which sessions
+lack a link without changing anything, run it with `--check`. It exits 1 and
+prints one line per session that lacks a link.
+
 **Install drift check.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
 `origin/HEAD` of the checkout the profile was installed from. It also checks

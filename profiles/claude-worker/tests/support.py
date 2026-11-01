@@ -118,6 +118,8 @@ if options.get("hang_seconds"):
 for line in options.get("transcript_lines", []):
     with open(options["transcript"], "a") as transcript:
         transcript.write(json.dumps(line) + "\\n")
+if options.get("no_json"):
+    sys.exit(3)
 print(json.dumps({
     **options.get("output", {}),
     "type": "result",
@@ -170,7 +172,7 @@ elif parts[3] == "pulls" and len(parts) == 4:
     page = int(params.get("page", ["1"])[0])
     print(json.dumps([] if page > 1 else [
         {**pull, "number": int(number)} for number, pull in state["pulls"].items()
-        if pull["state"] == "open" and head in (None, pull["head"]["ref"])
+        if params.get("state", ["open"])[0] in ("all", pull["state"]) and head in (None, pull["head"]["ref"])
     ]))
 elif parts[3] == "compare":
     base, _, head = parts[4].partition("...")
