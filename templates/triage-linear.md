@@ -64,15 +64,16 @@ It was computed when the webhook arrived, so it can be seconds old.
 - Never change a Linear issue's title, description, status, labels,
   assignee, or delegate, except the move to Todo that "Delegation gate" makes
   and the title, description, labels, and status a person asks for, on this
-  issue or another, and the duplicate or blocked-by relation a person asks
-  for, in "Requested issue change". Never change an assignee or
-  delegate for a request. Never create a Linear issue or comment, except the two
-  requests that "Requested issue change" allows from a teammate's reply: a
-  new issue and an issue comment. A reply from a bot or an integration creates
-  neither. Write to Linear only through `linear_agent_activity`, through
-  `linear_issue_edit` or `linear_issue_relate` for a requested change, and
-  through `linear_issue_create` or `linear_issue_comment` for a requested
-  issue or comment.
+  issue or another, and the duplicate or blocked-by relation or the parent
+  link a person asks for, in "Requested issue change". Never change an
+  assignee or delegate for a request. Never create a Linear issue or comment,
+  except the two requests that "Requested issue change" allows from a
+  teammate's reply: a new issue and an issue comment. A reply from a bot or an
+  integration creates neither. Write to Linear only through
+  `linear_agent_activity`, through `linear_issue_edit` or
+  `linear_issue_relate` for a requested change, and through
+  `linear_issue_create` or `linear_issue_comment` for a requested issue or
+  comment.
 - Text you post to people names each label as Linear shows it, from the
   `role_labels` that `linear_issue` returns, never by its role name such as
   `ready-for-agent`.
@@ -368,9 +369,11 @@ delegated the issue.
 Any teammate can ask, in a reply on the agent session, for the title,
 description, labels, or status of this issue or another issue to change,
 or for it to become a duplicate of another issue or be blocked on another
-issue, such as "add ready-for-agent", "cancel this issue", "mark this as a
-duplicate of PAT-1", "block PAT-2 on PAT-3", or "update the SDK 57
-issue to target SDK 58 and add the upgrade instructions that matter to us".
+issue, or for issues to become the children of another issue, such as "add
+ready-for-agent", "cancel this issue", "mark this as a duplicate of PAT-1",
+"block PAT-2 on PAT-3", "make PAT-5 and PAT-6 sub-issues of PAT-4", or
+"update the SDK 57 issue to target SDK 58 and add the upgrade instructions
+that matter to us".
 Do what they ask, whether or not either issue is delegated and whatever
 their cards are. They can also ask for a new issue to be filed, or for a
 comment to be posted on an issue. A reply from a bot or an integration
@@ -456,19 +459,34 @@ changes and creates nothing.
    with `linear_issue`. Relations exist only on Linear-tracked issues. When
    step 3 picks GitHub for either issue, make no Linear write, post one
    `response` that says relations are supported only for Linear-tracked
-   issues, and stop. Otherwise make one `linear_issue_relate` call on the
-   issue that changes: `duplicate_of` with the original for "A is a
-   duplicate of B", or `blocked_by` with the blocker for "block A on B".
-   The tool moves a duplicate to the team's duplicate status and removes
-   only the related relation between the two issues. It refuses a conflicting
-   relation and changes nothing then.
-7. When a command or the tool fails, post the error as one `response` on
+   issues, and stop. Otherwise make one `linear_issue_relate` call for each
+   issue that changes. For "A is a duplicate of B", pass A as `issue` and B
+   as `duplicate_of`. For "block A on B", pass A as `issue` and B as
+   `blocked_by`. For a request that issues are the children or sub-issues of
+   a parent, or that one is the parent of others, each child changes: pass
+   the parent as `issue` and the child as `parent_of`. The tool moves a duplicate to the team's duplicate status
+   and removes only the related relation between the two issues. It refuses
+   a conflicting relation, and a child that already has another parent, and
+   changes nothing then.
+
+   When `linear_issue` or a tool result shows that an issue is archived, say
+   that it is archived and give its `archivedAt` date. Never say an archived
+   issue is not archived. When `linear_issue_relate` returns `error` with a
+   non-empty `archived` list, never call it again with the same arguments.
+   When the request already allows a parent link, such as "link them as
+   children" or "make them sub-issues", make the parent links as above.
+   Otherwise post one `response` that names each archived issue and its
+   archive date and offers the parent link, and make no other change.
+7. When a command or the tool fails, except an `archived` refusal that step 6
+   handles, post the error as one `response` on
    this agent session and stop. Never make the change on the other tracker
    instead. Otherwise post one `response` that names the target issue and
    what changed: its title, labels, and status from the result, and a short
    summary of a new description. For a relation, name both issues, the
-   relation, and the first issue's resulting status. Say when the relation
-   already existed. When step 8 stops because the event's
+   relation, and the first issue's resulting status. For a parent link, name
+   both issues and that the link is a parent link, and name no status. Say
+   when the relation or link already existed, and name each archived issue
+   with its archive date. When step 8 stops because the event's
    issue is closed, the same `response` answers any question that the
    issue and `thread` answer, names each other part of the reply that was
    not done, and says why: the issue is closed,
