@@ -39,6 +39,13 @@ releases the card once the brief exists or the issue no longer carries the label
 `goal_mode` card, and that card keeps the transient block the worker's prompt gives a `"transient": true`
 refusal.
 
+A finished run whose `result` starts with `Waiting for issue:` and a GitHub issue URL is a worker that filed or
+found the issue for a flaky required check. On every board the hook parks the card in `scheduled` with the reason
+`result_line.ISSUE_PARK` and the URL, which names no pull request, so Hermes' 24-hour hold after a comment that
+names one does not apply, and adds `issue_park` to the result. A URL that is not an issue's, or a card Hermes
+refuses to schedule such as a `goal_mode` card, gets the `needs_input` block above with the whole result as its
+reason. `card_transition.py` releases the card once the issue closes or a person replies.
+
 After any successful park on the `triage` board whose reason starts with `Needs input:`, its own or one the
 worker made with `kanban_schedule`, the hook posts the round once per task and run through
 `linear-agent-session`'s `linear_triage_round` tool, which no model sees. It posts after the park, so nobody is
@@ -150,6 +157,23 @@ def park_for_precondition(precondition: str, error: str, dispatch: Dispatch) -> 
         f"{PRECONDITION_PARKED[precondition][1]} Stop now: call no other tool, do not call kanban_block, do not "
         "post an activity, and do not run claude-session again."
     )}
+
+
+def park_for_issue(result: str, dispatch: Dispatch) -> dict:
+    """The result keys for a finished run that waits for a GitHub issue. A URL that is not an issue's, or a card
+    Hermes refuses to schedule (`goal_mode`), gets today's `needs_input` block with the whole result."""
+    url = result_line.issue_url(result)
+    if url is None:
+        return {"needs_input_block": block_for_input(result, dispatch)}
+    # The reason names no pull request, so Hermes' 24-hour hold after a comment that names one does not apply.
+    answer = _call(dispatch, SCHEDULE_TOOL, {"reason": f"{result_line.ISSUE_PARK} {url}"})
+    if not answer.get("ok"):
+        return {"needs_input_block": block_for_input(result, dispatch)}
+    os.environ[STOP_NUDGE] = "off"
+    return {"issue_park": {"parked": True, "instruction": (
+        f"This card waits in scheduled for {url} and goes back to the queue once that issue is closed or a person "
+        "replies. Stop now: call no other tool, do not call kanban_block, and do not run claude-session again."
+    )}}
 
 
 def park_round(task: str, run: Optional[str], reason: str, dispatch: Dispatch) -> dict:
@@ -288,6 +312,12 @@ def make_hook(ctx: Any):
         if payload is None:
             return None
         report = result_line.last(whole_output(payload, tool_name, args, ctx.dispatch_tool))
+        issue_result = result_line.waiting_for_issue(report)
+        if issue_result is not None:
+            key = (task, run, issue_result)
+            if key not in _handled:
+                _handled[key] = json.dumps({**payload, **park_for_issue(issue_result, ctx.dispatch_tool)})
+            return _handled[key]
         reason = result_line.needs_input(report)
         if reason is not None:
             key = (task, run, reason)

@@ -37,7 +37,11 @@ Only the Linear prompt includes `triage-inbox.md`, which creates and archives
 triage cards, through `<<triage_inbox>>`, and `triage-delegation-gate.md`, which
 creates no implementation card for an issue without `ready-for-agent`, through
 `<<delegation_gate>>`. `<<name>>` marks a value the renderer fills from settings, and `{dot.path}` is a
-Hermes payload placeholder that the webhook adapter fills per event.
+Hermes payload placeholder that the webhook adapter fills per event. Both prompts
+get `<<not_assignee_marker>>`, the card comment prefix for an event from someone
+other than the issue's assignee. The renderer reads it from
+`profiles/claude-worker/scripts/reply_inbox.py`, the worker script that acts on
+it, so `check-install` renders from a copy of `templates/` and that file.
 
 `GITHUB_EVENT_TABLE` in `render.py` lists each GitHub event and action triage
 acts on, and when the event belongs to the App's own work. The `github` route's

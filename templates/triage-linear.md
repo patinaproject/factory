@@ -30,6 +30,14 @@ the gate, or read the reply yourself. Its fields:
 - `reply` and `reply_source`: the person's reply on a `prompted` event, verbatim
   however short, and where it came from. A null `reply` means it arrived without
   text.
+- `reply_author_id`, `assignee`, `from_assignee`, and `not_assignee_reason`: on
+  a reply, the Linear user id of its author, the issue's assignee with its `id`,
+  `name`, and `gitHubUserId`, and whether the author is that assignee. Only the
+  assignee's reply starts work on the card. `not_assignee_reason` says why the
+  reply cannot be the assignee's: `no_assignee` when the issue has none,
+  `app_assignee` when an agent app holds it, and `no_author` when the author
+  could not be read. It is null when a person who is not the assignee replied.
+  All four are null on an event that carries no reply, such as a stop.
 - `thread` and `thread_source`: on a `prompted` event, the session's earlier
   activities, oldest first, without the reply itself. Each has `id`, `type`
   (`prompt`, `response`, `elicitation`, `thought`, `action`, or `error`),
@@ -230,9 +238,9 @@ Actions `create_card`, `foreign_cards`, and `reuse_card`, and the `then` of
 
 ## Prompt
 
-Actions `card_reply`, `triage_card_reply`, and `answer_reply`: a human replied
-in the agent session. A null `reply` means the reply arrived without its text,
-which the steps below handle.
+Actions `card_reply`, `card_reply_not_assignee`, `triage_card_reply`, and
+`answer_reply`: a human replied in the agent session. A null `reply` means the
+reply arrived without its text, which the steps below handle.
 
 A reply can refer to an earlier message, as "All of them" refers to a list of
 options and "the resolution" refers to a triage outcome. Read the reply in the
@@ -294,6 +302,29 @@ stop.
    In every case, never quote or summarize an earlier run's result, heartbeat,
    or card comment as the card's current status.
 
+### `card_reply_not_assignee`
+
+Someone other than the issue's assignee replied on an issue with a card. Only
+the assignee's reply starts work on the card, so this reply wakes no card and
+changes nothing on the branch. The card keeps it as context.
+
+1. When `reply` is null, post a `thought` on `agent_session_id` asking the
+   human to send the reply again, and stop.
+2. Comment on the card once with the reply, attributed to Linear. Start the
+   comment with `<<not_assignee_marker>>`, never with `Linear reply:`, and
+   replace each pull request URL as `card_reply` step 2 says. Do not unblock,
+   reopen, resume, or otherwise change the card.
+3. Post one `response` on `agent_session_id`. Say that the reply is on the card
+   as context, and that the worker changes the work for it only when the
+   assignee asks. Name the assignee by `assignee.name`. When
+   `not_assignee_reason` is set, say why instead:
+   - `no_assignee`: the issue has no assignee, so no one can ask for the change
+     until a person is assigned.
+   - `app_assignee`: an agent app is assigned, so no one can ask for the change
+     until a person is assigned.
+   - `no_author`: the factory could not tell who sent the reply. Name the
+     assignee, who must ask for the change.
+
 ### `triage_card_reply`
 
 Any teammate's reply resumes a triage card that is not `done`, whoever
@@ -318,8 +349,9 @@ delegated the issue.
    `triage` one, and leaves it unassigned, because `dispatch-triage` assigns it
    again when fewer triage cards run than the factory's cap.
 3. When `card` is not null and the command did not print `error`, comment the
-   reply on that implementation card once, as `card_reply` step 2 says,
-   starting `Linear reply:`.
+   reply on that implementation card once, as `card_reply` step 2 says. When
+   `from_assignee` is true, start it `Linear reply:`. Otherwise start it
+   `<<not_assignee_marker>>`, so the card's worker keeps it as context only.
 4. Post one `thought` on `agent_session_id` that names the triage card's
    task id and says that triage resumes with the reply when the line's
    `action` is `unblocked` or `resumed`, or, for `none`, that the reply is on
@@ -346,7 +378,27 @@ their cards are. A reply from a bot or an integration changes nothing.
    cannot see, change nothing and say you could not read the earlier thread.
    When `reply` is null, or asks for no title, description, label, status, or
    relation change on any issue, skip this section and handle the `action`.
-   A reply that asks only for a relation is a request, not a reason to skip.
+   A reply that asks only for a relation, or that approves listed
+   follow-ups, is a request, not a reason to skip.
+
+   A reply can approve the follow-ups that an earlier activity listed, such
+   as "do this yourself", "handle it", or "review A and B". When the `action`
+   is `triage_card_reply`, skip this section for that part: the resumed
+   triage run applies the follow-ups. Otherwise read the newest `Needs input:`
+   or triage-outcome activity in `thread`, never an earlier round, and apply
+   its recommendation for each item it lists. Take each item through steps 2
+   to 7 in turn. A step that stops ends only that item, and one `response` at
+   the end names each change and each item not done, with why. A cancel is
+   the canceled status, plus one appended description line that names the
+   superseding issue. A narrowing is an edited description. When an item
+   named two options with no preference, apply exactly one, the less
+   destructive, so narrowing before canceling, and name it and why in the
+   `response`. An item that files a new issue is not done here: name it in
+   the `response`. Ask nothing. When `thread_source` is `missing`, or the
+   thread holds no recommendation, change nothing and say so. On a public
+   GitHub issue, the approved recommendation counts as the reply's text,
+   and the appended line names a superseding issue only when that issue is
+   itself a public GitHub issue.
 2. Find the target issue. With no other issue named, it is the event's
    issue. An identifier or a Linear URL names the issue. For a
    GitHub issue URL, read its title with `gh issue view <url> --json title`,
@@ -386,8 +438,8 @@ their cards are. A reply from a bot or an integration changes nothing.
 6. In Linear, make the change with one `linear_issue_edit` call on the
    target: `title`, `description`, `add_labels` and `remove_labels` with the
    label names, and `state` with the status name. Use only the names the
-   reply gives or plainly means: "cancel" is the team's canceled status, and
-   "done" or "close" is its completed one.
+   reply or the recommendation it approves gives or plainly means: "cancel"
+   is the team's canceled status, and "done" or "close" is its completed one.
 
    For a relation request, find both issues as step 2 says, and read both
    with `linear_issue`. Relations exist only on Linear-tracked issues. When
@@ -426,7 +478,8 @@ their cards are. A reply from a bot or an integration changes nothing.
    `foreign_cards`, or a gate action: the intent read the labels before the
    change, and the label change sends an `Issue` event that applies the gate
    again with the new labels. Otherwise handle the `action` for the rest of
-   the reply.
+   the reply. An approval of listed follow-ups is part of the change, not
+   the rest of the reply.
 
 ## Stop
 

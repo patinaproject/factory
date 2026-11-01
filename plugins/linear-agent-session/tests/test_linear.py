@@ -91,13 +91,14 @@ class ActivityTest(unittest.TestCase):
 
     def test_external_urls_add_to_session_urls(self):
         urls = [{"label": "Pull request", "url": "https://github.com/example-org/example-repo/pull/1"}]
+        sent = [{"label": "Pull request", "url": "https://linear.review/example-org/example-repo/pull/1"}]
         fake, output = self.post_urls(["https://example.test/t_1"], urls)
-        self.assertEqual(output["external_urls"], ["https://github.com/example-org/example-repo/pull/1"])
+        self.assertEqual(output["external_urls"], ["https://linear.review/example-org/example-repo/pull/1"])
         self.assertIn("agentSession(id: $id)", fake.graphql_requests[1]["query"])
         self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "session-1"})
         update = fake.graphql_requests[2]
         self.assertIn("agentSessionUpdate(id: $id, input: $input)", update["query"])
-        self.assertEqual(update["variables"], {"id": "session-1", "input": {"addedExternalUrls": urls}})
+        self.assertEqual(update["variables"], {"id": "session-1", "input": {"addedExternalUrls": sent}})
 
     def test_external_urls_send_only_missing_urls(self):
         held = {"label": "Card", "url": "https://example.test/t_1"}
@@ -207,6 +208,13 @@ class ActivityTest(unittest.TestCase):
             fake.graphql_requests[1]["variables"],
             {"input": {"issueId": "issue-1", "parentId": "comment-1", "body": "https://linear.app/example/profiles/ted see above"}},
         )
+
+    def test_reply_in_session_sends_the_review_page_link(self):
+        thread = (200, {"data": {"agentSession": {"comment": {"id": "comment-1"}, "issue": {"id": "issue-1"}}}})
+        fake = FakeLinear([thread, (200, {"data": {"commentCreate": {"success": True}}})])
+        make_client(fake).reply_in_session("session-1", "Opened https://github.com/o/r/pull/1")
+        self.assertIn("commentCreate(input: $input)", fake.graphql_requests[1]["query"])
+        self.assertEqual(fake.graphql_requests[1]["variables"]["input"]["body"], "Opened https://linear.review/o/r/pull/1")
 
     def test_invalid_activity_is_an_error_without_calling_linear(self):
         fake, output = self.post({"agent_session_id": "session-1", "type": "thought"})
@@ -612,17 +620,24 @@ class IssueArgumentTest(unittest.TestCase):
                 self.assertIn("`issue`", schema["description"][:60])
 
 
-def prompt_node(activity_id, created_at, body, signal=None):
+def prompt_node(activity_id, created_at, body, signal=None, author="user-1"):
     return {
         "id": activity_id,
         "createdAt": created_at,
         "signal": signal,
+        "promptAuthor": {"id": author} if author else None,
         "content": {"__typename": "AgentActivityPromptContent", "body": body},
     }
 
 
 def thought_node(activity_id, created_at):
-    return {"id": activity_id, "createdAt": created_at, "signal": None, "content": {"__typename": "AgentActivityThoughtContent"}}
+    return {
+        "id": activity_id,
+        "createdAt": created_at,
+        "signal": None,
+        "promptAuthor": None,
+        "content": {"__typename": "AgentActivityThoughtContent"},
+    }
 
 
 def session_activities(*nodes):
@@ -639,7 +654,8 @@ class ActivityReadTest(unittest.TestCase):
         fake, output = self.read([(200, {"data": {"agentActivity": node}})], {"agent_activity_id": "activity-1"})
         self.assertEqual(
             output,
-            {"found": True, "id": "activity-1", "createdAt": "2026-10-18T16:57:29.889Z", "signal": None, "body": "yes"},
+            {"found": True, "id": "activity-1", "createdAt": "2026-10-18T16:57:29.889Z", "signal": None, "body": "yes",
+             "authorId": "user-1"},
         )
         self.assertIn("agentActivity(id: $id)", fake.graphql_requests[0]["query"])
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "activity-1"})
@@ -664,7 +680,9 @@ class ActivityReadTest(unittest.TestCase):
             {"agent_session_id": "session-1"},
         )
         self.assertEqual(
-            output, {"found": True, "id": "activity-2", "createdAt": "2026-10-18T16:57:29Z", "signal": None, "body": "yes"}
+            output,
+            {"found": True, "id": "activity-2", "createdAt": "2026-10-18T16:57:29Z", "signal": None, "body": "yes",
+             "authorId": "user-1"},
         )
         self.assertIn("agentSession(id: $id)", fake.graphql_requests[0]["query"])
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1"})
@@ -719,6 +737,7 @@ class IssueTest(unittest.TestCase):
                 "priority": 2.0,
                 "state": {"name": "Todo", "type": "unstarted"},
                 "delegate": {"id": "app-user-1"},
+                "assignee": {"id": "user-1", "name": "Ted Example", "gitHubUserId": "1001", "app": False},
                 "labels": {"nodes": [{"name": "ready-for-agent"}, {"name": "bug"}]},
                 "attachments": {
                     "nodes": [
@@ -766,6 +785,7 @@ class IssueTest(unittest.TestCase):
                 "description": "Checkout fails.",
                 "githubIssues": ["https://github.com/example-org/example-repo/issues/9"],
                 "delegate": "app-user-1",
+                "assignee": {"id": "user-1", "name": "Ted Example", "gitHubUserId": "1001", "app": False},
                 "labels": ["bug", "ready-for-agent"],
                 "role_labels": {"ready-for-agent": "Ready for agent"},
                 "attachments": [
@@ -1321,6 +1341,40 @@ class ReviewOwnerTest(unittest.TestCase):
         self.assertIn("no issue ABC-1", output["error"])
 
 
+class PrAuthorityTest(unittest.TestCase):
+    ANN = {"id": "user-ann", "name": "Ann", "gitHubUserId": "4242", "app": False}
+    CARD = "Work on it.\n```text\nlinear_issue_id: ABC-1\n```\n"
+
+    def authority(self, assignee, sender_id, body=CARD):
+        response = json.loads(json.dumps(IssueTest.RESPONSE))
+        response["data"]["issue"]["assignee"] = assignee
+        fake = FakeLinear([(200, response)])
+        output = tools.run_pr_authority(lambda: make_client(fake), {"t_work": body}.__getitem__, {"task": "t_work", "sender_id": sender_id})
+        return fake, json.loads(output)
+
+    def test_only_the_assignees_github_id_is_the_assignee(self):
+        for sender_id, from_assignee in (("4242", True), ("4243", False), ("0", False)):
+            with self.subTest(sender_id):
+                fake, output = self.authority(self.ANN, sender_id)
+                self.assertEqual(output, {"from_assignee": from_assignee, "assignee": "Ann", "reason": None})
+                self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
+
+    def test_an_issue_with_no_one_to_ask_says_why(self):
+        cases = {
+            "no_assignee": (None, None),
+            "app_assignee": ({**self.ANN, "name": "Some agent", "app": True}, "Some agent"),
+            "no_github_id": ({**self.ANN, "gitHubUserId": None}, "Ann"),
+        }
+        for reason, (assignee, name) in cases.items():
+            with self.subTest(reason):
+                _, output = self.authority(assignee, "4242")
+                self.assertEqual(output, {"from_assignee": False, "assignee": name, "reason": reason})
+
+    def test_a_card_that_names_no_issue_is_an_error(self):
+        _, output = self.authority(self.ANN, "4242", body="Work on it.")
+        self.assertEqual(output, {"error": "card t_work names no linear_issue_id"})
+
+
 class UndelegateTest(unittest.TestCase):
     def run_undelegate(self, responses):
         fake = FakeLinear(responses)
@@ -1357,6 +1411,76 @@ class CardTitleTest(unittest.TestCase):
 
     def test_dots_hyphens_and_digits_stay(self):
         self.assertEqual(linear.card_title("PAT-2", "  v1.2 - re-run  "), "PAT-2: v1.2 - re-run")
+
+
+class ReviewLinksTest(unittest.TestCase):
+    def test_a_pull_request_url_is_sent_as_its_review_page(self):
+        urls = [{"label": "Pull request", "url": "https://github.com/o/r/pull/1"}]
+        fake = FakeLinear([session_urls_ok(), session_update_ok()])
+        added = make_client(fake).add_external_urls("session-1", urls)
+        self.assertEqual(added, ["https://linear.review/o/r/pull/1"])
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"]["input"],
+            {"addedExternalUrls": [{"label": "Pull request", "url": "https://linear.review/o/r/pull/1"}]},
+        )
+        self.assertEqual(urls, [{"label": "Pull request", "url": "https://github.com/o/r/pull/1"}])
+
+    def test_a_session_holding_the_review_page_gets_no_update(self):
+        fake = FakeLinear([session_urls_ok("https://linear.review/o/r/pull/1")])
+        added = make_client(fake).add_external_urls(
+            "session-1", [{"label": "Pull request", "url": "https://github.com/o/r/pull/1"}]
+        )
+        self.assertEqual((added, len(fake.graphql_requests)), ([], 1))
+
+    def test_an_activity_body_is_sent_with_the_review_page(self):
+        fake = FakeLinear([activity_ok("activity-1")])
+        content = {"type": "response", "body": "Ready for review: [PR #1](https://github.com/o/r/pull/1)."}
+        make_client(fake).create_activity("session-1", content)
+        self.assertEqual(
+            fake.graphql_requests[0]["variables"]["input"]["content"],
+            {"type": "response", "body": "Ready for review: [PR #1](https://linear.review/o/r/pull/1)."},
+        )
+        self.assertEqual(content["body"], "Ready for review: [PR #1](https://github.com/o/r/pull/1).")
+
+    def test_an_action_parameter_is_sent_unchanged(self):
+        fake = FakeLinear([activity_ok("activity-1")])
+        content = {"type": "action", "action": "Ran", "parameter": "gh pr view https://github.com/o/r/pull/1"}
+        make_client(fake).create_activity("session-1", content)
+        self.assertEqual(fake.graphql_requests[0]["variables"]["input"]["content"], content)
+
+    def test_review_links_table(self):
+        gh, lr = "https://github.com/o/r/pull/1", "https://linear.review/o/r/pull/1"
+        changed = {
+            gh + "/files": lr,
+            gh + "#discussion_r9": lr,
+            f"**{gh}/files**": f"**{lr}**",
+            f"<{gh}#x>": f"<{lr}>",
+            f'"{gh}"': f'"{lr}"',
+            f"See {gh}.": f"See {lr}.",
+            f"Did you see {gh}?": f"Did you see {lr}?",
+            gh + "/": lr,
+            f"{gh} and https://github.com/O-x/r.y/pull/22": f"{lr} and https://linear.review/O-x/r.y/pull/22",
+        }
+        unchanged = [
+            "https://github.com/o/r/issues/1",
+            "https://github.com/o/r",
+            "https://github.com/o/r/pull/12abc",
+            "https://github.com/o/r/pull/1.diff",
+            f"`{gh}`",
+            f"```\n{gh}\n```",
+            f"~~~\n{gh}\n~~~",
+            lr,
+            "https://github.com.evil.example/o/r/pull/1",
+            "https://www.github.com/o/r/pull/1",
+            "xhttps://github.com/o/r/pull/1",
+        ]
+        for text, expected in changed.items():
+            with self.subTest(text):
+                self.assertEqual(linear.review_links(text), expected)
+                self.assertEqual(linear.review_links(expected), expected)
+        for text in unchanged:
+            with self.subTest(text):
+                self.assertEqual(linear.review_links(text), text)
 
 
 if __name__ == "__main__":

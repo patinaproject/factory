@@ -762,6 +762,79 @@ class NeedsBriefTest(GhLoginTest):
         self.assertNotIn("t_1", self.board.block_kind)
 
 
+class IssueParkTest(Hooked):
+    URL = "https://github.com/o/r/issues/7"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.board.add("t_1", "todo")
+        self.board.start("t_1")
+
+    def test_a_finished_run_that_waits_for_an_issue_parks_the_card_with_the_url_as_the_reason(self):
+        result = f"Waiting for issue: {self.URL}\n\nThe flaky check is tracked."
+
+        outcome = json.loads(self.call(process_result(report(result))))["issue_park"]
+
+        self.assertEqual(self.board.calls, [("kanban_schedule", {"reason": f"Waiting for an issue: {self.URL}"})])
+        self.assertEqual(self.board.status["t_1"], "scheduled")
+        self.assertNotIn("t_1", self.board.block_kind)
+        self.assertEqual(outcome["parked"], True)
+        self.assertEqual(os.environ[order.STOP_NUDGE], "off")
+
+    def test_the_same_report_read_twice_parks_once(self):
+        first = self.call(process_result(report(f"Waiting for issue: {self.URL}")))
+
+        self.assertEqual(self.call(process_result(report(f"Waiting for issue: {self.URL}"))), first)
+        self.assertEqual(len(self.board.calls), 1)
+
+    def test_a_url_in_angle_brackets_parks_with_the_bare_url(self):
+        self.call(process_result(report(f"Waiting for issue: <{self.URL}>")))
+
+        self.assertEqual(self.board.reasons["t_1"], f"Waiting for an issue: {self.URL}")
+
+    def test_a_pull_request_or_malformed_url_blocks_with_the_whole_result(self):
+        for url in ("https://github.com/o/r/pull/7", "https://github.com/o/r/issues/", "see the issue",
+                    f"{self.URL} and more", "http://github.com/o/r/issues/7"):
+            with self.subTest(url):
+                self.board.calls.clear()
+                result = f"Waiting for issue: {url}"
+                order._handled.clear()
+                self.board.status["t_1"] = "running"
+
+                outcome = json.loads(self.call(process_result(report(result))))
+
+                self.assertEqual(self.board.calls, [("kanban_block", {"reason": result, "kind": "needs_input"})])
+                self.assertNotIn("issue_park", outcome)
+                self.assertTrue(outcome["needs_input_block"]["blocked"])
+
+    def test_a_refused_schedule_blocks_with_the_whole_result_that_names_the_issue(self):
+        self.board.goal_mode.add("t_1")
+        result = f"Waiting for issue: {self.URL}"
+
+        outcome = json.loads(self.call(process_result(report(result))))
+
+        self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule", "kanban_block"])
+        self.assertEqual(self.board.calls[1][1], {"reason": result, "kind": "needs_input"})
+        self.assertTrue(outcome["needs_input_block"]["blocked"])
+
+    def test_a_failed_run_never_parks_on_an_issue_and_still_blocks_on_needs_input(self):
+        failed = result_line.Failed("claude run ended with error_max_turns", SESSION, outcome(f"Waiting for issue: {self.URL}"))
+        self.assertIsNone(self.call(process_result(result_line.line(failed))))
+        self.assertEqual(self.board.calls, [])
+
+        failed = result_line.Failed("claude run ended with error_max_turns", SESSION, outcome("Needs input: which?"))
+        self.call(process_result(result_line.line(failed)))
+        self.assertEqual(self.board.calls, [("kanban_block", {"reason": "Needs input: which?", "kind": "needs_input"})])
+
+    def test_the_workers_own_schedule_of_the_park_is_recognised_as_a_machine_park(self):
+        args = {"reason": f"Waiting for an issue: {self.URL}"}
+
+        self.assertIsNone(order.worker_park("t_1", "r1", args, json.dumps({"ok": True}), self.board.dispatch_tool))
+        self.assertEqual(os.environ[order.STOP_NUDGE], "off")
+        self.assertIn("Waiting for an issue:", result_line.MACHINE_PARKS)
+        self.assertNotIn("Waiting for an issue:", result_line.PRECONDITION_PARKS.values())
+
+
 class Factory(Hooked):
     """Triage creates one card per delegated issue, the dispatcher runs ready cards, and each run first asks
     claude-session's blocker check, then the hook, the way a worker does. A card's run ends with its merge."""

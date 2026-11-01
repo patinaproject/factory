@@ -51,6 +51,15 @@ on the parked card, and posts one `thought` on the card's agent session. A wait 
 card posts nothing more, even once that card ends without a brief. A failed Linear read leaves the card parked
 and is reported.
 
+The issue release rule: a card whose newest park reason starts with `result_line.ISSUE_PARK` and a GitHub issue
+URL waits for that issue, which a worker filed or found for a flaky required check. `sweep_issue` handles each such
+card still assigned to `claude-worker` that no `stopped` comment follows. It releases the card once the issue is
+closed or not found, or once a `Linear reply:` comment is newer than the park, after commenting the reason on the
+card for the resumed run to read. Otherwise, on its first pass, it comments `result_line.ISSUE_NOTED` and the URL on
+the card and posts one `thought` naming the issue on the card's agent session. It reads the issue with `gh` and the
+worker's `GH_CONFIG_DIR`, once per URL, only while such a card waits and only with a fresh gh login. A `gh` error,
+timeout, or `OSError` leaves the card parked and is reported. `replied` never releases it.
+
 - `unblock --repo <r> --branch <b> --reason <text>`: unblock a card. When the branch has a pull
   request, Hermes holds the `ready` card for 24 hours after a comment that names it, and only the
   review reopen lifts the hold, so the card is unblocked, sent to review, and reopened.
@@ -507,6 +516,113 @@ def sweep_brief() -> dict:
             elif action == "queued":
                 queued[task_id] = triage_id
     return {"released": released, "queued": queued, "failed": failed}
+
+
+ISSUE_READ_SECONDS = 30
+# What a closed issue's `stateReason` says about the wait; a reason GitHub adds later reads as plain "closed".
+CLOSED_AS = {"COMPLETED": "completed", "NOT_PLANNED": "not planned"}
+
+
+def read_issue(url: str) -> str | None:
+    """Why the issue releases a card waiting for it, or None while it is open."""
+    env = {**os.environ, "GH_CONFIG_DIR": str(Path(os.environ["HERMES_HOME"]) / "gh")}
+    try:
+        proc = subprocess.run(["gh", "issue", "view", url, "--json", "state,stateReason"],
+                              capture_output=True, text=True, env=env, timeout=ISSUE_READ_SECONDS)
+    except OSError as failure:
+        raise Failed(f"gh could not run: {failure.strerror or failure}") from failure
+    except subprocess.TimeoutExpired:
+        raise Failed(f"gh issue view {url} timed out after {ISSUE_READ_SECONDS} seconds") from None
+    if proc.returncode != 0:
+        if "Could not resolve to" in proc.stderr or "HTTP 404" in proc.stderr:
+            return "the issue was not found"
+        raise Failed(f"gh issue view {url} failed: {last_line(proc.stderr)}")
+    try:
+        issue = json.loads(proc.stdout)
+        state, why = issue["state"], issue.get("stateReason")
+    except (ValueError, KeyError, TypeError):
+        raise Failed(f"gh issue view {url} printed no issue state") from None
+    if state != "CLOSED":
+        return None
+    return f"the issue closed as {CLOSED_AS[why]}" if why in CLOSED_AS else "the issue closed"
+
+
+def wait_for_issue(card: Card, board: str, show: dict, url: str, closed: Callable[[str], str | None],
+                   post: Callable[[str, str], None]) -> str:
+    """The issue release rule for one parked card: `released` or `waiting`. `closed` gives the reason the issue
+    releases the card, and `post` puts a thought on the card's agent session."""
+    task = card.show()["task"]
+    if task["assignee"] != WORKER:
+        return "waiting"
+    park = [event for event in show["events"] if event["kind"] == "scheduled"][-1]
+    after = [comment["body"] for comment in show["comments"] if comment["created_at"] >= park["created_at"]]
+    why = "a person replied" if any(reply_inbox.is_reply(body) for body in after) else closed(url)
+    noted = f"{plugin_module('blocker-order', 'result_line').ISSUE_NOTED} {url}"
+    if why is not None:
+        # The note starts with the marker, so a run released on the first pass still sees it parked here once.
+        note = f"{noted}, and {why}."
+        if note not in after:
+            card.comment(note)
+        return "released" if release_parked(card, board) else "waiting"
+    if not any(body.startswith(noted) for body in after):
+        card.comment(f"{noted}. This card continues once the issue closes or a person replies.")
+        post(card_field(task["body"], "linear_agent_session_id"),
+             f"A required check keeps failing, so this card waits for {url} and continues when it closes.")
+    return "waiting"
+
+
+def sweep_issue() -> dict:
+    """Apply the issue release rule to every card parked for a GitHub issue, on every board. `dispatch-triage`
+    runs it each minute. GitHub is read only while such a card waits, once per issue, and only with a fresh gh
+    login; Linear only for a card's first pass."""
+    prefix = getattr(plugin_module("blocker-order", "result_line"), "ISSUE_PARK", None)
+    released, failed = [], {}
+    if prefix is None or not gh_login.is_fresh(Path(os.environ["HERMES_HOME"]) / "gh", time.time()):
+        return {"released": released, "failed": failed}
+    reads: dict[str, str | Failed | None] = {}
+    linear = []
+
+    def closed(url: str) -> str | None:
+        if url not in reads:
+            try:
+                reads[url] = read_issue(url)
+            except Failed as failure:
+                reads[url] = failure
+        if isinstance(reads[url], Failed):
+            raise reads[url]
+        return reads[url]
+
+    def post(session_id: str, text: str) -> None:
+        if not linear:
+            module = plugin_module("linear-agent-session", "linear")
+            linear.extend([module, module.client_from_env()])
+        module, client = linear
+        try:
+            client.create_activity(session_id, module.activity_content("thought", text))
+        except (*module.CLIENT_ERRORS, OSError) as error:
+            raise Failed(f"posting the note on Linear failed: {error}") from None
+
+    for each in boards():
+        slug, path = each["slug"], each["db_path"]
+        if not os.path.exists(path):
+            continue
+        try:
+            waiting = kanban_board.scheduled(path)
+        except sqlite3.Error as failure:
+            failed[slug] = f"cannot read the board: {failure}"
+            continue
+        for task_id, show in sorted(waiting.items()):
+            if not wait_over(show, prefix):
+                continue
+            reason = [event for event in show["events"] if event["kind"] == "scheduled"][-1]["payload"]["reason"]
+            try:
+                action = wait_for_issue(Card(slug, task_id), slug, show, reason[len(prefix):].strip(), closed, post)
+            except Failed as failure:
+                failed[task_id] = str(failure)
+                continue
+            if action == "released":
+                released.append(task_id)
+    return {"released": released, "failed": failed}
 
 
 def park_waiting(board: str | None) -> dict:

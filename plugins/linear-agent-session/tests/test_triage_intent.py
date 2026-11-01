@@ -17,6 +17,8 @@ Thread = intent_module.Thread
 
 APP = "app-user-1"
 PERSON = "user-ted"
+ASSIGNEE = "user-assignee"
+OTHER = "user-other"
 ISSUE_ID = "issue-uuid-1"
 BRANCH = "pat-1-fix-it"
 NOW = dt.datetime(2026, 10, 27, 12, 0, tzinfo=dt.timezone.utc)
@@ -33,6 +35,7 @@ def issue(**overrides):
         "gitBranchName": BRANCH,
         "stateType": "backlog",
         "delegate": APP,
+        "assignee": {"id": ASSIGNEE, "name": "Ann Assignee", "gitHubUserId": "1001", "app": False},
         "labels": ["Ready for agent"],
         "agentSessions": [],
     }
@@ -51,10 +54,10 @@ def id_line(issue_id=ISSUE_ID):
     return f"```text\nlinear_issue_id: {issue_id}\n```\n"
 
 
-def session_event(action, creator=PERSON, signal=None, body=None):
+def session_event(action, creator=PERSON, signal=None, body=None, author=ASSIGNEE):
     payload = {"type": "AgentSessionEvent", "action": action, "agentSession": {"id": "session-1", "creatorId": creator, "issue": {"id": ISSUE_ID}}}
     if action == "prompted":
-        payload["agentActivity"] = {"id": "activity-1", "signal": signal, "content": {"body": body}}
+        payload["agentActivity"] = {"id": "activity-1", "signal": signal, "content": {"body": body}, "userId": author}
     return payload
 
 
@@ -78,6 +81,14 @@ def expected(action, **overrides):
         agent_session_id="session-1",
     )
     return replace(base, **overrides)
+
+
+ASSIGNEE_FIELDS = {"id": ASSIGNEE, "name": "Ann Assignee", "gitHubUserId": "1001"}
+
+
+def replied(action, **overrides):
+    fields = dict(reply="yes", reply_source="payload", reply_author_id=ASSIGNEE, assignee=ASSIGNEE_FIELDS, from_assignee=True)
+    return expected(action, **{**fields, **overrides})
 
 
 class CardLookupTest(unittest.TestCase):
@@ -239,7 +250,8 @@ class SessionCreatedTest(unittest.TestCase):
 
 
 class SessionPromptedTest(unittest.TestCase):
-    def prompted(self, live=None, triage=(), work=(), reply=Reply("yes", "payload"), **event):
+    def prompted(self, live=None, triage=(), work=(), reply=None, **event):
+        reply = reply or Reply("yes", "payload", event.get("author", ASSIGNEE))
         return decide(session_event("prompted", **event), live, triage, work, reply)
 
     def test_a_reply_resumes_a_live_triage_card_before_any_other_card(self):
@@ -247,12 +259,10 @@ class SessionPromptedTest(unittest.TestCase):
         work = [card("t_work", branch=BRANCH)]
         self.assertEqual(
             self.prompted(triage=triage, work=work),
-            expected(
+            replied(
                 "triage_card_reply",
                 triage_card={"id": "t_triage", "status": "blocked"},
                 card={"id": "t_work", "status": "todo", "matched_by": "branch"},
-                reply="yes",
-                reply_source="payload",
             ),
         )
 
@@ -263,14 +273,12 @@ class SessionPromptedTest(unittest.TestCase):
                 with self.subTest(delegate=delegate, card=bool(work)):
                     self.assertEqual(
                         self.prompted(live=issue(delegate=delegate, stateType="unstarted"), triage=triage, work=work),
-                        expected(
+                        replied(
                             "triage_card_reply",
                             issue={"id": ISSUE_ID, "identifier": "PAT-1", "state_type": "unstarted"},
                             delegated=delegate is not None,
                             triage_card={"id": "t_triage", "status": "scheduled"},
                             card=work_card,
-                            reply="yes",
-                            reply_source="payload",
                         ),
                     )
 
@@ -283,18 +291,56 @@ class SessionPromptedTest(unittest.TestCase):
     def test_a_reply_on_an_issue_with_a_card_is_a_card_reply(self):
         self.assertEqual(
             self.prompted(work=[card("t_work", status="blocked", title="PAT-1: Fix it")]),
-            expected(
-                "card_reply",
-                card={"id": "t_work", "status": "blocked", "matched_by": "title"},
-                reply="yes",
-                reply_source="payload",
+            replied("card_reply", card={"id": "t_work", "status": "blocked", "matched_by": "title"}),
+        )
+
+    def test_only_the_assignees_reply_is_a_card_reply(self):
+        work = [card("t_work", status="review", branch=BRANCH)]
+        self.assertEqual(self.prompted(work=work, author=OTHER).action, "card_reply_not_assignee")
+        self.assertEqual(self.prompted(work=work, author=ASSIGNEE).action, "card_reply")
+
+    def test_a_reply_from_someone_else_carries_the_assignee_and_wakes_no_card(self):
+        work = [card("t_work", status="review", branch=BRANCH)]
+        self.assertEqual(
+            self.prompted(work=work, author=OTHER),
+            replied(
+                "card_reply_not_assignee",
+                card={"id": "t_work", "status": "review", "matched_by": "branch"},
+                reply_author_id=OTHER,
+                from_assignee=False,
             ),
         )
+
+    def test_a_reply_without_an_authority_or_author_wakes_no_card_and_says_why(self):
+        work = [card("t_work", status="blocked", branch=BRANCH)]
+        app_assignee = {"id": "app-user-2", "name": "Other agent", "gitHubUserId": None, "app": True}
+        cases = {
+            "no_assignee": (issue(assignee=None), ASSIGNEE),
+            "app_assignee": (issue(assignee=app_assignee), "app-user-2"),
+            "no_author": (issue(), None),
+        }
+        for reason, (live, author) in cases.items():
+            with self.subTest(reason):
+                result = self.prompted(live=live, work=work, author=author)
+                self.assertEqual(
+                    (result.action, result.from_assignee, result.not_assignee_reason, result.reply_author_id),
+                    ("card_reply_not_assignee", False, reason, author),
+                )
+
+    def test_any_teammates_reply_resumes_a_live_triage_card(self):
+        triage = [card("t_triage", status="blocked", body=id_line())]
+        result = self.prompted(triage=triage, work=[card("t_work", branch=BRANCH)], author=OTHER)
+        self.assertEqual((result.action, result.from_assignee), ("triage_card_reply", False))
+
+    def test_anyones_stop_stops_the_card(self):
+        work = [card("t_work", branch=BRANCH)]
+        result = self.prompted(work=work, reply=intent_module.NO_REPLY, signal="stop", author=OTHER)
+        self.assertEqual((result.action, result.from_assignee, result.assignee), ("stop_card", None, None))
 
     def test_a_reply_on_an_undelegated_issue_with_no_card_is_answered(self):
         self.assertEqual(
             self.prompted(live=issue(delegate=None)),
-            expected("answer_reply", delegated=False, reply="yes", reply_source="payload"),
+            replied("answer_reply", delegated=False),
         )
 
     def test_a_reply_on_a_delegated_issue_with_no_card_follows_the_creation_chain(self):
@@ -305,11 +351,11 @@ class SessionPromptedTest(unittest.TestCase):
         for action, (live, extra) in cases.items():
             with self.subTest(action):
                 self.assertEqual(
-                    self.prompted(live=live), expected(action, reply="yes", reply_source="payload", **extra)
+                    self.prompted(live=live), replied(action, **extra)
                 )
 
     def test_a_reply_that_arrived_without_text_keeps_its_action(self):
-        result = self.prompted(work=[card("t_work", branch=BRANCH)], reply=Reply(None, "missing"))
+        result = self.prompted(work=[card("t_work", branch=BRANCH)], reply=Reply(None, "missing", ASSIGNEE))
         self.assertEqual((result.action, result.reply, result.reply_source), ("card_reply", None, "missing"))
 
     def test_a_stop_stops_the_triage_card_first_then_the_card(self):
@@ -425,12 +471,12 @@ class ReplyTest(unittest.TestCase):
 
     def test_the_payloads_text_is_the_reply_however_short(self):
         client = self.Client()
-        self.assertEqual(self.resolve(session_event("prompted", body="yes"), client), Reply("yes", "payload"))
+        self.assertEqual(self.resolve(session_event("prompted", body="yes"), client), Reply("yes", "payload", ASSIGNEE))
         self.assertEqual(client.calls, [])
 
     def test_a_payload_without_text_is_read_from_linear_by_activity(self):
         client = self.Client({"found": True, "body": "go ahead"})
-        self.assertEqual(self.resolve(session_event("prompted"), client), Reply("go ahead", "linear"))
+        self.assertEqual(self.resolve(session_event("prompted"), client), Reply("go ahead", "linear", ASSIGNEE))
         self.assertEqual(client.calls, [{"agent_activity_id": "activity-1", "agent_session_id": None}])
 
     def test_without_an_activity_id_the_session_is_read(self):
@@ -443,7 +489,19 @@ class ReplyTest(unittest.TestCase):
     def test_a_reply_linear_cannot_find_is_missing(self):
         for client in (self.Client({"found": False}), self.Client(error=RuntimeError("down"))):
             with self.subTest(client.result):
-                self.assertEqual(self.resolve(session_event("prompted"), client), Reply(None, "missing"))
+                self.assertEqual(self.resolve(session_event("prompted"), client), Reply(None, "missing", ASSIGNEE))
+
+    def test_a_payload_without_its_author_reads_the_prompt_author_from_linear(self):
+        client = self.Client({"found": True, "body": "go ahead", "authorId": OTHER})
+        self.assertEqual(self.resolve(session_event("prompted", body="yes", author=None), client), Reply("yes", "payload", OTHER))
+        self.assertEqual(self.resolve(session_event("prompted", author=None), client), Reply("go ahead", "linear", OTHER))
+        self.assertEqual(client.calls, [{"agent_activity_id": "activity-1", "agent_session_id": None}] * 2)
+
+    def test_an_author_linear_cannot_read_is_none(self):
+        for client in (self.Client({"found": False}), self.Client(error=RuntimeError("down"))):
+            with self.subTest(client.result):
+                payload = session_event("prompted", body="yes", author=None)
+                self.assertEqual(self.resolve(payload, client), Reply("yes", "payload", None))
 
     def test_events_without_a_reply_have_none(self):
         client = self.Client()
@@ -565,6 +623,13 @@ class ComputeTest(unittest.TestCase):
         self.assertEqual(
             (result.action, result.triage_card["id"], result.card["id"], result.reply), ("triage_card_reply", "t_triage", "t_work", "yes")
         )
+
+    def test_the_payloads_author_decides_whether_a_reply_wakes_the_card(self):
+        boards = {"triage": [], None: [card("t_work", status="review", branch=BRANCH)]}
+        for author, action in ((ASSIGNEE, "card_reply"), (OTHER, "card_reply_not_assignee")):
+            with self.subTest(author):
+                result = self.compute(session_event("prompted", body="fix it", author=author), FakeLinearClient(issue()), boards)
+                self.assertEqual((result.action, result.reply_author_id), (action, author))
 
     def test_a_reply_keeps_its_action_and_text_when_the_thread_cannot_be_read(self):
         client = FakeLinearClient(issue(), thread_error=RuntimeError("down"))

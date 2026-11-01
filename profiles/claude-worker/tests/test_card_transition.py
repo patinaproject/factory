@@ -7,11 +7,13 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
 
 from tests.support import REPO, SCRIPTS, FakeBroker, granted, with_interpreter
+from tests.test_kanban_board import COMMENTS_AND_EVENTS, TASKS
 from tests.test_dispatch_triage import BRIEF_SETTINGS, NO_BRIEF_PARK, IMPLEMENTATION_BODY, QUEUED_NOTE, TRIAGE_BODY, BriefHarness, task
 
 FAKE_HERMES = """#!/usr/bin/env python3
@@ -388,6 +390,14 @@ class ReleaseRuleTest(CardTransitionTest):
 
     def test_a_comment_that_is_not_a_reply_past_the_count_does_not(self):
         out = self.reply(["Linear reply: Again.", "SCHEDULED: Needs input: which screen?", "stopped"], [park(1)])
+        self.assertEqual(out["action"], "none")
+
+    def test_a_comment_not_from_the_assignee_past_the_count_does_not(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import reply_inbox
+
+        marked = f"{reply_inbox.NOT_ASSIGNEE_MARKER} Linear reply: rename the button."
+        out = self.reply(["Linear reply: Again.", marked], [park(1)])
         self.assertEqual(out["action"], "none")
 
     def test_the_newest_park_sets_the_count(self):
@@ -822,6 +832,211 @@ class BriefWaitTest(BriefHarness):
                                  "failed": {"t_impl": "reading Linear issue ABC-123 failed: Entity not found"}})
         self.assertEqual((self.hermes_calls(), self.activities()), ([], []))
         self.assertEqual(self.statuses()["t_impl"], ("scheduled", "claude-worker"))
+
+
+FAKE_ISSUE_GH = """#!/usr/bin/env python3
+import json, os, sys, time
+path = os.environ["FAKE_GH_ISSUES"]
+with open(path + ".log", "a") as log:
+    log.write(json.dumps({"argv": sys.argv[1:], "config": os.environ.get("GH_CONFIG_DIR")}) + "\\n")
+answer = json.load(open(path))[sys.argv[3]]
+time.sleep(answer.get("sleep", 0))
+if "error" in answer:
+    sys.stderr.write(answer["error"] + "\\n")
+    sys.exit(1)
+print(json.dumps(answer))
+"""
+ISSUE = "https://github.com/example-org/app/issues/7"
+ISSUE_PARKED = f"Waiting for an issue: {ISSUE}"
+OPEN = {"state": "OPEN", "stateReason": None}
+NOT_FOUND = {"error": "GraphQL: Could not resolve to an issue or pull request with the number of 7. (repository.issue)"}
+
+
+class IssueWaitTest(BriefHarness):
+    """`sweep_issue` against fake boards, a fake gh, and the real Linear client on a fake Linear."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.default_board.unlink()
+        with closing(sqlite3.connect(self.default_board)) as db:
+            db.execute(TASKS)
+            db.executescript(COMMENTS_AND_EVENTS)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "gh").write_text(with_interpreter(FAKE_ISSUE_GH))
+        os.chmod(bin_dir / "gh", 0o755)
+        self.bin = bin_dir
+        self.issues = self.tmp / "issues.json"
+        self.issues.write_text(json.dumps({ISSUE: OPEN}))
+        self.login(30 * 60)
+        self.tasks: dict[str, list] = {"default": [], "triage": []}
+
+    def login(self, seconds_left: float | None) -> None:
+        gh = self.home / "gh"
+        gh.mkdir(exist_ok=True)
+        (gh / "token-expiry.json").unlink(missing_ok=True)
+        if seconds_left is not None:
+            (gh / "token-expiry.json").write_text(json.dumps({"expires_at": time.time() + seconds_left}))
+
+    def wait(self, board: str, task_id: str, reason: str = ISSUE_PARKED, assignee: str | None = "claude-worker",
+             comments: tuple = ()) -> None:
+        self.park(self.default_board if board == "default" else self.board, task_id, reason, assignee, comments)
+        self.tasks[board].append({**task(task_id, "scheduled", assignee), "body": IMPLEMENTATION_BODY})
+
+    def sweep(self, seconds: float | None = None) -> dict:
+        self.state_path.write_text(json.dumps({
+            "default_tasks": self.tasks["default"], "tasks": self.tasks["triage"], "settings": BRIEF_SETTINGS,
+            "db_path": str(self.board), "default_db": str(self.default_board),
+        }))
+        limit = "" if seconds is None else f"card_transition.ISSUE_READ_SECONDS = {seconds}; "
+        env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path),
+               "HERMES_HOME": str(self.home), "FAKE_GH_ISSUES": str(self.issues),
+               "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
+        proc = subprocess.run(
+            [sys.executable, "-c", f"import json, card_transition; {limit}print(json.dumps(card_transition.sweep_issue()))"],
+            cwd=SCRIPTS, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def gh_calls(self) -> list:
+        log = Path(f"{self.issues}.log")
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def comments(self) -> list:
+        log = Path(f"{self.state_path}.log")
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return [call[2:] for call in calls if call[:2] == ["kanban", "--board"] and call[3] == "comment"]
+
+    def read_issue(self, answer: dict) -> None:
+        self.issues.write_text(json.dumps({ISSUE: answer}))
+
+    def assert_released_on_both_boards(self, reason: str, comments: tuple = ()) -> None:
+        self.wait("default", "t_default", comments=comments)
+        self.wait("triage", "t_triage", comments=comments)
+
+        swept = self.sweep()
+
+        self.assertEqual(swept, {"released": ["t_default", "t_triage"], "failed": {}})
+        self.assertEqual(self.statuses()["t_default"], ("ready", "claude-worker"))
+        self.assertEqual(self.statuses()["t_triage"], ("ready", None))
+        note = f"Parked on issue {ISSUE}, and {reason}."
+        self.assertEqual(self.comments(), [["default", "comment", "t_default", note], ["triage", "comment", "t_triage", note]])
+
+    def test_an_open_issue_keeps_the_card_parked_and_posts_one_thought_across_sweeps(self) -> None:
+        self.wait("default", "t_default")
+        self.wait("triage", "t_triage")
+
+        first = self.sweep()
+        second = self.sweep()
+
+        self.assertEqual((first, second), ({"released": [], "failed": {}}, {"released": [], "failed": {}}))
+        self.assertEqual(self.statuses()["t_default"], ("scheduled", "claude-worker"))
+        self.assertEqual(self.statuses()["t_triage"], ("scheduled", "claude-worker"))
+        self.assertEqual([activity["content"] for activity in self.activities()], [
+            {"type": "thought", "body": f"A required check keeps failing, so this card waits for {ISSUE} and continues when it closes."},
+        ] * 2)
+        self.assertEqual(
+            [(call[0], call[2]) for call in self.comments()], [("default", "t_default"), ("triage", "t_triage")],
+        )
+        self.assertEqual({call[3] for call in self.comments()}, {
+            f"Parked on issue {ISSUE}. This card continues once the issue closes or a person replies.",
+        })
+
+    def test_each_issue_is_read_once_per_sweep_with_the_workers_gh_login(self) -> None:
+        self.wait("default", "t_default")
+        self.wait("triage", "t_triage")
+
+        self.sweep()
+
+        self.assertEqual(self.gh_calls(), [{
+            "argv": ["issue", "view", ISSUE, "--json", "state,stateReason"], "config": str(self.home / "gh"),
+        }])
+
+    def test_an_issue_closed_as_completed_releases_the_card_on_both_boards(self) -> None:
+        self.read_issue({"state": "CLOSED", "stateReason": "COMPLETED"})
+        self.assert_released_on_both_boards("the issue closed as completed")
+
+    def test_an_issue_closed_as_not_planned_releases_the_card(self) -> None:
+        self.read_issue({"state": "CLOSED", "stateReason": "NOT_PLANNED"})
+        self.assert_released_on_both_boards("the issue closed as not planned")
+
+    def test_an_issue_that_is_not_found_releases_the_card(self) -> None:
+        self.read_issue(NOT_FOUND)
+        self.assert_released_on_both_boards("the issue was not found")
+
+    def test_a_reply_newer_than_the_park_releases_the_card_with_an_open_issue(self) -> None:
+        self.assert_released_on_both_boards("a person replied", comments=("Linear reply: go on without it",))
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_a_reply_older_than_the_park_does_not_release_the_card(self) -> None:
+        self.wait("default", "t_default")
+        with closing(sqlite3.connect(self.default_board)) as db:
+            db.execute("INSERT INTO task_comments (task_id, author, body, created_at) VALUES ('t_default', 'default', "
+                       "'Linear reply: before the park', 100)")
+            db.commit()
+
+        self.assertEqual(self.sweep(), {"released": [], "failed": {}})
+        self.assertEqual(self.statuses()["t_default"], ("scheduled", "claude-worker"))
+
+    def test_a_stopped_or_unassigned_card_is_not_released(self) -> None:
+        self.read_issue({"state": "CLOSED", "stateReason": "COMPLETED"})
+        self.wait("default", "t_stopped", comments=("stopped",))
+        self.wait("default", "t_unassigned", assignee=None)
+
+        self.assertEqual(self.sweep(), {"released": [], "failed": {}})
+        self.assertEqual({status for status, _ in self.statuses().values()}, {"scheduled"})
+        self.assertEqual(self.comments(), [])
+
+    def test_a_gh_failure_or_timeout_releases_nothing_and_is_reported(self) -> None:
+        self.wait("default", "t_default")
+        for name, answer, seconds, error in (
+            ("error", {"error": "gh: HTTP 502"}, None, "gh issue view " + ISSUE + " failed: gh: HTTP 502"),
+            ("timeout", {"state": "CLOSED", "stateReason": "COMPLETED", "sleep": 5}, 0.3,
+             f"gh issue view {ISSUE} timed out after 0.3 seconds"),
+        ):
+            with self.subTest(name):
+                self.read_issue(answer)
+
+                swept = self.sweep(seconds)
+
+                self.assertEqual(swept, {"released": [], "failed": {"t_default": error}})
+                self.assertEqual(self.statuses()["t_default"], ("scheduled", "claude-worker"))
+
+    def test_a_login_that_is_not_fresh_leaves_the_card_parked_and_reads_nothing(self) -> None:
+        self.read_issue({"state": "CLOSED", "stateReason": "COMPLETED"})
+        self.wait("default", "t_default")
+        self.login(14 * 60)
+
+        self.assertEqual(self.sweep(), {"released": [], "failed": {}})
+        self.assertEqual((self.gh_calls(), self.statuses()["t_default"]), ([], ("scheduled", "claude-worker")))
+
+    def test_dispatch_triage_reports_a_failed_read_and_still_assigns_the_waiting_card(self) -> None:
+        self.read_issue({"error": "gh: HTTP 502"})
+        self.wait("default", "t_default")
+        self.tasks["triage"].append(task("t_ready", "ready"))
+
+        proc = self.run_script(
+            self.tasks["triage"], settings=BRIEF_SETTINGS, default_tasks=self.tasks["default"],
+            default_db=str(self.default_board),
+            _env={"FAKE_GH_ISSUES": str(self.issues), "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"},
+        )
+
+        self.assertEqual((proc.returncode, proc.stdout), (1, "assigned t_ready\n"))
+        self.assertIn(f"releasing t_default for a GitHub issue failed: gh issue view {ISSUE} failed: gh: HTTP 502", proc.stderr)
+        self.assertEqual(self.statuses()["t_default"], ("scheduled", "claude-worker"))
+
+    def test_dispatch_triage_releases_a_card_whose_issue_closed(self) -> None:
+        self.read_issue({"state": "CLOSED", "stateReason": "COMPLETED"})
+        self.wait("default", "t_default")
+
+        proc = self.run_script(
+            self.tasks["triage"], settings=BRIEF_SETTINGS, default_tasks=self.tasks["default"],
+            default_db=str(self.default_board),
+            _env={"FAKE_GH_ISSUES": str(self.issues), "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"},
+        )
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "released t_default\n", ""))
 
 
 if __name__ == "__main__":

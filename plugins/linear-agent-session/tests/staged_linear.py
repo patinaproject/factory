@@ -70,7 +70,7 @@ def _fake_urlopen(request, timeout=None):
                 "id": "issue-uuid", "identifier": "ABC-123", "title": state.get("issue_title", "Fix checkout"),
                 "description": None, "url": "https://linear.app/example/issue/ABC-123", "branchName": "abc-123-fix",
                 "priority": state.get("priority", 0), "state": {"name": "Todo", "type": state_type},
-                "delegate": {"id": state["delegate"]} if state.get("delegate") else None,
+                "delegate": {"id": state["delegate"]} if state.get("delegate") else None, "assignee": None,
                 "labels": {"nodes": []}, "attachments": {"nodes": []}, "agentSessions": {"nodes": []},
                 "inverseRelations": {"nodes": []},
             }

@@ -43,7 +43,7 @@ THIRD_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-issue:{ISSUE_ID}:
 TRIAGE_SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, f"linear-triage:{ISSUE_ID}"))
 TRIAGE_ENV = {"HERMES_KANBAN_BOARD": "triage"}
 HOUR = 3600
-SYSTEM_PROMPT = (
+TODAYS_SYSTEM_PROMPT = (
     f"Publish commits only by running {(SCRIPTS / 'push-signed').resolve()} from the worktree, never `git push`. "
     "It creates commits that the GitHub App signs, which repositories requiring verified signatures need. "
     "To bring in the base branch, run `gh pr update-branch`. When GitHub reports the pull request as "
@@ -83,6 +83,27 @@ SYSTEM_PROMPT = (
     "check failed, and 3 means checks are still running, so run it again. A hook refuses `gh pr checks "
     "--watch`, `gh run watch`, and any sleep or polling loop that waits longer."
 )
+ISSUE_ENDING = (
+    "When a re-run fails again, do not block the card: file or find the issue that tracks the flaky check. "
+    "Name the failing check and the test or step, and build the marker line `Failing check: <check name> / "
+    "<test or step>`. Search the pull request's base repository, the `--repo` you pass to `gh`, for issues open "
+    "or closed with `gh issue list --repo <owner/repo> --state all --search '\"<marker line>\" in:body' --json "
+    "number,url,state,stateReason,body`, and keep only issues whose body contains that exact line. When one is "
+    "open, link it and file nothing. When none is open and none closed as completed, run `gh issue create --repo "
+    "<owner/repo>` with a body that holds the marker line, both run URLs, and the first actionable error. When "
+    "one closed as completed, run `gh pr update-branch <number>` first, since the fix may be on the base "
+    "branch, wait for the new run with `wait-for-checks`, and judge it; only a failure after that counts as a "
+    "second failure. Then run `gh pr comment <number> --body <issue url>` and make the first line of your final "
+    "message `Waiting for issue: <issue url>`. The worker reads that line and parks the card until the issue closes. "
+    "Make the first line `Needs input:` followed by both attempts' URLs instead when a card comment starts "
+    "`Parked on issue <issue url>`, because this card already parked on that issue once, or when the matching issue "
+    "closed as not planned."
+)
+TODAYS_ENDING = (
+    "When a re-run fails again, stop, "
+    "and make the first line of your final message `Needs input:` followed by both attempts' URLs."
+)
+SYSTEM_PROMPT = TODAYS_SYSTEM_PROMPT.replace(TODAYS_ENDING, ISSUE_ENDING)
 REPO = "example-org/example-repo"
 LINEAR_MCP_CONFIG = (
     '{"mcpServers": {"linear": {"type": "http", "url": "https://mcp.linear.app/mcp", '
@@ -108,6 +129,9 @@ TRIAGE_ENTRY = (
     "Do not implement it."
 )
 TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
+TAKEOVER_REVIEW = "https://linear.review/Example-Org/example-repo/pull/7"
+REVIEW_PULL_9 = f"https://linear.review/{REPO}/pull/9"
+REVIEW_PULL_42 = f"https://linear.review/{REPO}/pull/42"
 LINEAR_URL = "https://linear.app/example/issue/ABC-123"
 CARD_BODY = f"```text\nlinear_issue_identifier: ABC-123\n```\ngithub_issue_url: https://github.com/{REPO}/issues/12"
 CLOSING_LINE = f"Closes #12, closes [ABC-123]({LINEAR_URL})"
@@ -403,6 +427,9 @@ class ClaudeSessionTest(GitFixture):
                                 f"patina-mode's triage playbook at `{playbook}`", "`## Priority rubric`",
                                 "`Priority: <value>, set by triage`", "`Priority: none`",
                                 "Never change the issue's status, assignee, or delegate",
+                                "`blockedBy`", "dependencies/blocked_by", "`gh issue create`",
+                                "Never change any issue's assignee or delegate",
+                                "never cancel, close, or narrow another issue",
                                 "Title them exactly `ABC-123 Triage notes` and `ABC-123 Agent brief`"):
             self.assertIn(triage_contract, system)
         self.assertTrue(playbook.is_absolute() and playbook.is_file())
@@ -597,6 +624,22 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual((status, report), (2, {"error": NO_BRIEF, "transient": True}))
         self.assertFalse(self.log.exists())
 
+    def test_a_blocker_order_copy_without_the_issue_park_keeps_the_needs_input_ending(self) -> None:
+        module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
+        text = module.read_text()
+        self.assertIn('ISSUE_PARK = "Waiting for an issue:"\n', text)
+        self.assertIn("(*PRECONDITION_PARKS.values(), ISSUE_PARK)", text)
+        module.unlink()
+        module.write_text(text.replace('ISSUE_PARK = "Waiting for an issue:"\n', "").replace(
+            "(*PRECONDITION_PARKS.values(), ISSUE_PARK)", "tuple(PRECONDITION_PARKS.values())"))
+        self.set_documents(("d1", "ABC-123 Agent brief", "someone-else"))
+
+        status, _ = self.run_session()
+
+        self.assertEqual(status, 0)
+        argv = self.claude_call()["argv"]
+        self.assertEqual(argv[argv.index("--append-system-prompt") + 1], TODAYS_SYSTEM_PROMPT)
+
     def test_an_implementation_card_with_the_agent_brief_starts(self) -> None:
         self.set_documents(("d1", "ABC-123 Agent brief", "someone-else"))
 
@@ -766,15 +809,15 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session()
 
-        self.assertEqual((status, report["session_links"]), (0, {"added": [pull], "action": "linked"}))
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", pull))])
+        self.assertEqual((status, report["session_links"]), (0, {"added": [REVIEW_PULL_9], "action": "linked"}))
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
         urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
-        self.assertEqual(urls, ["https://kanban.test/t_1", pull])
+        self.assertEqual(urls, ["https://kanban.test/t_1", REVIEW_PULL_9])
 
     def test_a_pull_request_the_session_already_holds_is_not_added_again(self) -> None:
         self.set_comments(body=SESSION_BODY)
         pull = self.factory_pull()
-        self.set_linear_state(session_urls=[pull])
+        self.set_linear_state(session_urls=[REVIEW_PULL_9])
 
         status, report = self.run_session()
 
@@ -794,10 +837,10 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
-        self.assertEqual((status, report["session_links"]), (0, {"added": [TAKEOVER_PR], "action": "linked"}))
+        self.assertEqual((status, report["session_links"]), (0, {"added": [TAKEOVER_REVIEW], "action": "linked"}))
         started = [json.loads(line) for line in self.claude_call()["linear_log"].splitlines()]
         before = [e["session_update"]["input"] for e in started if "session_update" in e]
-        self.assertIn(self.linked(("Taken-over pull request #7", TAKEOVER_PR)), before)
+        self.assertIn(self.linked(("Taken-over pull request #7", TAKEOVER_REVIEW)), before)
 
     def test_a_takeover_and_the_replacement_pull_request_both_stay_on_the_session(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -807,13 +850,13 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
         self.assertEqual(
-            (status, report["session_links"]), (0, {"added": [TAKEOVER_PR, replacement], "action": "linked"})
+            (status, report["session_links"]), (0, {"added": [TAKEOVER_REVIEW, REVIEW_PULL_9], "action": "linked"})
         )
         self.assertEqual(self.link_updates(), [
-            self.linked(("Taken-over pull request #7", TAKEOVER_PR)), self.linked(("Pull request #9", replacement)),
+            self.linked(("Taken-over pull request #7", TAKEOVER_REVIEW)), self.linked(("Pull request #9", REVIEW_PULL_9)),
         ])
         urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
-        self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_PR, replacement])
+        self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_REVIEW, REVIEW_PULL_9])
 
     def test_a_failed_session_link_is_reported_without_changing_the_run(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -874,7 +917,7 @@ class ClaudeSessionTest(GitFixture):
         self.reply_run({"hook": "PostToolUse", "event": event})
 
         self.assertEqual(self.hook_log()[0]["codes"], [0, 0])
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #42", pull))])
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #42", REVIEW_PULL_42))])
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(
@@ -970,6 +1013,26 @@ class ClaudeSessionTest(GitFixture):
         self.run_session()
 
         self.assertEqual(self.prompt(), f"{COMMENTS_HEADING}\n\noperator wrote:\n> Next.")
+
+    def test_comments_not_from_the_assignee_come_in_their_own_context_only_block(self) -> None:
+        module = self.session_module()
+        marked = f"{module.reply_inbox.NOT_ASSIGNEE_MARKER} Rename the button."
+        self.set_comments((100, "default", marked), (101, "operator", "Use the branch head."))
+
+        self.run_session()
+
+        self.assertEqual(self.prompt(), (
+            f"{DEFAULT_ENTRY}\n\n{COMMENTS_HEADING}\n\noperator wrote:\n> Use the branch head.\n\n"
+            f"{module.NOT_ASSIGNEE_INTRO}\n\ndefault wrote:\n> {marked}"
+        ))
+
+    def test_only_comments_not_from_the_assignee_leave_the_usual_block_out(self) -> None:
+        module = self.session_module()
+        marked = f"{module.reply_inbox.NOT_ASSIGNEE_MARKER} Rename the button."
+
+        text = module.unseen_comments([{"created_at": 100, "author": "default", "body": marked}], [], "claude-worker")
+
+        self.assertEqual(text, f"{module.NOT_ASSIGNEE_INTRO}\n\ndefault wrote:\n> {marked}")
 
     def hook_log(self) -> list[dict]:
         return [json.loads(line) for line in Path(f"{self.log}.hooks").read_text().splitlines()]

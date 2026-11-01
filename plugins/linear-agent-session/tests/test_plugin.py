@@ -566,6 +566,23 @@ class CliTest(unittest.TestCase):
             code = cli.main(argv)
         return code, json.loads(out.getvalue())
 
+    def test_pr_authority_reads_the_cards_issue_and_compares_the_senders_github_id(self):
+        from tests.test_linear import IssueTest
+
+        issue = json.loads(json.dumps(IssueTest.RESPONSE))
+        issue["data"]["issue"]["assignee"] = {"id": "user-ann", "name": "Ann", "gitHubUserId": "4242", "app": False}
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes = Path(tmp) / "hermes"
+            show = {"task": {"id": "t_work", "body": "linear_issue_id: ABC-1\n"}}
+            hermes.write_text(f"#!/bin/sh\n[ \"$*\" = 'kanban show t_work --json' ] && printf '%s' '{json.dumps(show)}'\n")
+            hermes.chmod(0o755)
+            for sender, from_assignee in (("4242", True), ("99", False)):
+                with self.subTest(sender), mock.patch.dict(os.environ, {"HERMES_BIN": str(hermes)}):
+                    fake = FakeLinear([(200, issue)])
+                    code, output = self.run_cli(["pr-authority", "--task", "t_work", "--sender-id", sender], fake)
+                    self.assertEqual((code, output), (0, {"from_assignee": from_assignee, "assignee": "Ann", "reason": None}))
+                    self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
+
     def test_review_owner_runs_in_an_interpreter_that_cannot_see_hermes(self):
         cli_path = Path(PLUGIN_DIR) / "cli.py"
         wrapper = """

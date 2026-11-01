@@ -56,7 +56,7 @@ ISSUE_SESSIONS_QUERY = """query AgentSessionSiblings($id: String!) {
 # An awaitingInput session never goes stale and may hold questions a person has yet to answer.
 OPEN_SESSION_STATUSES = ("pending", "active", "stale")
 
-ACTIVITY_FIELDS = "id createdAt signal content { __typename ... on AgentActivityPromptContent { body } }"
+ACTIVITY_FIELDS = "id createdAt signal promptAuthor { id } content { __typename ... on AgentActivityPromptContent { body } }"
 
 ACTIVITY_QUERY = f"""query AgentActivity($id: String!) {{
   agentActivity(id: $id) {{ {ACTIVITY_FIELDS} }}
@@ -141,6 +141,7 @@ ISSUE_QUERY = """query Issue($id: String!) {
     id identifier title description url branchName priority
     state { name type }
     delegate { id }
+    assignee { id name gitHubUserId app }
     labels { nodes { name } }
     attachments { nodes { url sourceType } }
     agentSessions(first: 20) { nodes { id status createdAt appUser { id } creator { id } } }
@@ -276,6 +277,19 @@ TRIAGE_ROLES = ("needs-triage", "needs-info", "ready-for-agent", "ready-for-huma
 
 UrlOpen = Callable[..., Any]
 
+CODE_SPANS = re.compile(r"(```.*?(?:```|\Z)|~~~.*?(?:~~~|\Z)|`[^`\n]+`)", re.S)
+GITHUB_PULL_URL = re.compile(
+    r"(?<![\w/.])https://github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)/pull/([0-9]+)(?!\w|\.\w)"
+    r"(?:[/#?][^\s)\]>\"'`*<]*[^\s)\]>\"'`*<.,;:!?_]|/)?"
+)
+
+
+def review_links(text: str) -> str:
+    parts = CODE_SPANS.split(text)
+    for i in range(0, len(parts), 2):
+        parts[i] = GITHUB_PULL_URL.sub(r"https://linear.review/\1/\2/pull/\3", parts[i])
+    return "".join(parts)
+
 
 class LinearError(Exception):
     pass
@@ -310,6 +324,18 @@ def card_title(identifier: str, title: str) -> str:
     return f"{identifier}: {' '.join(kept.split())}"
 
 
+def authority(assignee: Optional[dict], sender_id: Optional[str], key: str) -> tuple[bool, Optional[str]]:
+    if assignee is None:
+        return False, "no_assignee"
+    if assignee["app"]:
+        return False, "app_assignee"
+    if assignee[key] is None:
+        return False, "no_github_id"
+    if sender_id is None:
+        return False, "no_author"
+    return str(assignee[key]) == str(sender_id), None
+
+
 class LinearClient:
     def __init__(
         self,
@@ -330,6 +356,8 @@ class LinearClient:
         self._token: Optional[dict] = None
 
     def create_activity(self, agent_session_id: str, content: dict, *, ephemeral: bool = False) -> str:
+        if "body" in content:
+            content = {**content, "body": review_links(content["body"])}
         activity_input: dict = {"agentSessionId": agent_session_id, "content": content}
         if ephemeral:
             activity_input["ephemeral"] = True
@@ -366,8 +394,9 @@ class LinearClient:
             held = set()
         missing = {}
         for u in urls:
-            if u["url"] not in held and u["url"] not in missing:
-                missing[u["url"]] = {"label": u["label"], "url": u["url"]}
+            url = review_links(u["url"])
+            if url not in held and url not in missing:
+                missing[url] = {"label": u["label"], "url": url}
         if missing:
             self._update_session(agent_session_id, {"addedExternalUrls": list(missing.values())})
         return list(missing)
@@ -392,7 +421,7 @@ class LinearClient:
         session = self._graphql(SESSION_THREAD_QUERY, {"id": agent_session_id})["agentSession"]
         payload = self._graphql(
             COMMENT_CREATE_MUTATION,
-            {"input": {"issueId": session["issue"]["id"], "parentId": session["comment"]["id"], "body": body}},
+            {"input": {"issueId": session["issue"]["id"], "parentId": session["comment"]["id"], "body": review_links(body)}},
         )["commentCreate"]
         if not payload["success"]:
             raise LinearError("commentCreate reported success: false")
@@ -412,6 +441,7 @@ class LinearClient:
                     "createdAt": node["createdAt"],
                     "signal": node["signal"],
                     "body": node["content"]["body"],
+                    "authorId": node["promptAuthor"]["id"] if node["promptAuthor"] else None,
                 }
         return {"found": False}
 
@@ -481,6 +511,7 @@ class LinearClient:
             "description": issue["description"] or "",
             "githubIssues": [a["url"] for a in issue["attachments"]["nodes"] if GITHUB_ISSUE_URL.fullmatch(a["url"])],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
+            "assignee": issue["assignee"],
             "labels": _label_names(issue),
             "blockedBy": _blocking_issues(issue["inverseRelations"]),
             "agentSessions": sorted(
