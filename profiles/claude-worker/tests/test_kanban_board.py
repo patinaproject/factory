@@ -205,7 +205,7 @@ class KanbanBoardTest(unittest.TestCase):
         )
         self.addCleanup(writer.kill)
         snapshots, torn, reads, failed = set(), [], 0, 0
-        while len(snapshots) < 3 or reads < 5 or time.monotonic() - started < 1.5:
+        while len(snapshots) < 3 or reads < 5 or time.monotonic() - started < 2.5:
             if time.monotonic() - started > 60:
                 self.fail(f"saw {len(snapshots)} statuses in {reads} reads, {failed} reads raised")
             if writer.poll() is not None:
@@ -223,7 +223,13 @@ class KanbanBoardTest(unittest.TestCase):
             snapshots |= statuses
             time.sleep(0.01)
         stop.touch()
-        writer.wait(timeout=60)
+        try:
+            writer.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            self.fail(
+                f"the writer did not exit after the stop file; saw {sorted(snapshots)} statuses "
+                f"in {reads} successful reads, {failed} reads raised"
+            )
 
         self.assertEqual(writer.returncode, 0)
         self.assertGreater(len(snapshots), 2)
