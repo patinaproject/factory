@@ -119,9 +119,13 @@ Revisit a disabled server when its service adds a token or a service account.
 
 ## Root agent
 
-The root agent answers in chat and Linear. It does not run `claude-session`,
-so it gets none of the servers above. Give it a static-token HTTP server
-through native Hermes `mcp_servers` in the root home's `config.yaml`:
+The root agent answers in Slack and Linear. It does not run `claude-session`,
+so it gets none of the servers above. Only its Slack turns use MCP servers, and
+they run in the Slack profile, `<slack>`, that
+[Slack](slack.md#route-slack-to-the-slack-profile) sets up. Give it a
+static-token HTTP server through native Hermes `mcp_servers` in the Slack
+profile's `config.yaml`. The default home's `config.yaml` holds no
+`mcp_servers` entry, so a webhook turn sees none of them:
 
 ```yaml
 mcp_servers:
@@ -135,8 +139,10 @@ mcp_servers:
 
 - Use the `token_env` of the matching `claude_session.mcp_servers` entry, and
   the same scheme word. The header holds only a `${VAR}` reference. Hermes
-  fills it from the home's secret source, the `factory-secrets` helper, and
-  fails closed when the variable is unset. `config.yaml` never holds a token.
+  fills it from the Slack profile's own `<slack>/.env`, and fails closed when
+  the variable is unset. `config.yaml` never holds a token. The default home
+  keeps its copy of the token too, because the gateway's broker serves it to
+  worker runs from there.
 - Set `sampling.enabled` to `false`, so the server cannot ask the factory's
   model for inference.
 - The `<org>` in the Sentry URL limits the server to one organization. That URL
@@ -146,9 +152,16 @@ mcp_servers:
 Set and check it from a shell outside Hermes:
 
 ```sh
-HERMES_HOME=<home> hermes config set mcp_servers.<server> '<json>' </dev/null
-HERMES_HOME=<home> hermes mcp test <server>
+HERMES_HOME=<slack> hermes config set mcp_servers.<server> '<json>' </dev/null
+HERMES_HOME=<slack> hermes mcp test <server>
 python3 <repo>/skills/setup-factory/scripts/restart-gateway
+```
+
+To move a server that the default home still holds, set it in `<slack>` as
+above, then remove it from the default home:
+
+```sh
+HERMES_HOME=<home> hermes config unset mcp_servers.<server> </dev/null
 ```
 
 `<json>` is the server entry as JSON, with the same keys as the YAML above.
@@ -167,9 +180,9 @@ python3 <repo>/skills/setup-factory/scripts/restart-gateway
   `disabled_mcp_servers` gets an `mcp <server> in <owner>/<name>` line. It
   prints no value.
 
-- `check-install` prints no `root mcp` line. For each root-home `mcp_servers`
-  entry that is not `enabled: false`, it runs `hermes mcp test <server>` with
-  the root home. It reports a server that does not connect, a server whose
+- `check-install` prints no `root mcp` line. For each Slack-profile
+  `mcp_servers` entry that is not `enabled: false`, it runs
+  `hermes mcp test <server>` with the Slack profile's home. It reports a server that does not connect, a server whose
   `sampling.enabled` is not `false`, and a header whose value is anything but
   one `${VAR}` reference, after at most one scheme word. It reports a
   `config.yaml` it cannot read as one `root mcp` line. It prints no header

@@ -134,7 +134,9 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `plugins.entries.work.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
 | `kanban.max_in_progress`, `kanban.max_spawn`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
-| `platforms.slack.channel_overrides`, when the operator chose a Slack conversation model | `<home>/config.yaml` of the root home only. The channel IDs and aliases are private, so they go in the private record and never enter this repository |
+| The Slack profile's name and its `model.default`, the Slack model | The profile name in `gateway.profile_routes` of `<home>/config.yaml`, and the model in `<slack>/config.yaml`, where `<slack>` is `<home>/profiles/<slack profile>`. Both are private, so they go in the private record and never enter this repository. See [Slack](references/slack.md#route-slack-to-the-slack-profile) |
+| The root agent's native `mcp_servers` | `<slack>/config.yaml` only. The default home holds none |
+| The proxy token and each MCP token that the Slack profile's `config.yaml` references | `<slack>/.env`, entered by the operator, in addition to the default home's copy |
 | The `default` and `triage` boards' `default_workdir` | Kanban board metadata, not `config.yaml` |
 | `claude_artifact.auth_dir`, `claude_artifact.organization_uuid`, and `claude_artifact.claude` in `plugins.entries.linear-agent-session.settings` | `config.yaml` of both homes, with the rest of the factory settings. The real values go only in the private record, never in this repository |
 
@@ -271,8 +273,8 @@ minimum:
 | `haiku` | 2.1.293 |
 
 The check uses the higher of `2.1.263` and the minimum for every alias the
-factory uses, in `model.default`, in `claude_session.model`, and in each
-`model` under `platforms.slack.channel_overrides`.
+factory uses, in `model.default`, in `claude_session.model`, and in the Slack
+profile's `model.default`.
 
 **Install or upgrade.** Use the operator's install method, either Anthropic's
 native installer or the npm package. Run the check again.
@@ -378,8 +380,8 @@ hermes config get providers.<proxy provider>.transport  # anthropic_messages
 hermes config get providers.<proxy provider>.key_env    # <token variable>
 ```
 
-Every `model` in `platforms.slack.channel_overrides` is also a model id the
-endpoint serves (see [Slack](references/slack.md#choose-the-conversation-model)).
+The Slack profile's `model.default` is also a model id the endpoint serves
+(see [Slack](references/slack.md#route-slack-to-the-slack-profile)).
 
 When the proxy requires a token, `<token variable>` is `CLAUDE_PROXY_TOKEN`,
 and `env_has <home>/.env CLAUDE_PROXY_TOKEN` prints `1` or the Infisical folder
@@ -425,8 +427,8 @@ hermes config get providers.<api provider>.key_env      # CLAUDE_PROXY_TOKEN
 ```
 
 Hermes resolves a short alias such as `sonnet` only for the `/model` command,
-so write a full model id in `model.default` and in every `model` in
-`platforms.slack.channel_overrides`. In both homes,
+so write a full model id in `model.default` and in the Slack profile's
+`model.default`. In both homes,
 `plugins.entries.linear-agent-session.settings.claude_session.auth_token_env`
 is `CLAUDE_PROXY_TOKEN` and `base_url` is empty. `env_has <home>/.env
 CLAUDE_PROXY_TOKEN` prints `1` or the Infisical folder holds it, and
@@ -951,10 +953,10 @@ identities](references/mcp-identities.md) describes. Both stay empty until
 the operator creates the first identity. `check-install` reports each
 repository server that a worker run does not see connected and that
 `disabled_mcp_servers` does not list. The root agent gets a static-token
-server through `mcp_servers` in the root home's `config.yaml`, with sampling
-off (see "Root agent" in the same reference). `check-install` reports each
-root server that does not connect, has sampling on, or holds a literal header
-value.
+server through `mcp_servers` in the Slack profile's `config.yaml`, with
+sampling off (see "Root agent" in the same reference). `check-install` reports
+each such server that does not connect, has sampling on, or holds a literal
+header value, and any `mcp_servers` entry left in the root home.
 
 A card that waits in review leaves its Claude session idle past the 5-minute
 prompt cache, and a resumed large session re-writes its whole context at the

@@ -27,10 +27,20 @@ proxy token, and the token of each server in claude_session.mcp_servers
 present. That check sends only {"op": "status"}, never uploads or asks for a
 token, and prints no value. For each configured repository, it runs the
 installed claude-session --mcp-status and reports each MCP server that is not
-connected and not in claude_session.disabled_mcp_servers. For each root-home mcp_servers entry that is
-not enabled: false, it runs hermes mcp test with the root home and reports a server that does not connect,
-one whose sampling.enabled is not false, and one whose header value is anything but one ${VAR} reference
-after at most one scheme word. It prints no header value. It also checks that the Triage board exists and anchors its worktrees at the
+connected and not in claude_session.disabled_mcp_servers.
+
+It checks that every Slack message reaches the Slack profile, the root home's one gateway.profile_routes
+entry for platform slack. It reports a missing, disabled, or second Slack route, one that sets chat_id,
+thread_id, guild_id, user_id, or bot_profile, one that names the default or worker profile, and a
+gateway.multiplex_profiles that is not true. It reports a Slack profile that is missing, parked, or
+standalone, that has a platforms.slack block or a SLACK_* variable in its .env, or whose .env lacks a
+variable its config.yaml references when it has no secrets.command. Its model.provider must equal the root
+home's, and with a custom provider its model.default must be listed by that provider's /v1/models, asked
+with the profile's own token or the broker's proxy token, sent in memory only. It reports each root-home
+mcp_servers entry and any platforms.slack.channel_overrides. For each Slack-profile mcp_servers entry that
+is not enabled: false, it runs hermes mcp test with the Slack profile's home and reports a server that does
+not connect, one whose sampling.enabled is not false, and one whose header value is anything but one ${VAR}
+reference after at most one scheme word. It prints no header value and no secret. It also checks that the Triage board exists and anchors its worktrees at the
 default repository, that the source checkout vendors the triage playbook that
 claude-session gives triage cards, and that the triage refs file is as fresh as
 the owned refs. It checks that the default board cannot take the worker slots triage needs
@@ -534,31 +544,6 @@ def check_config(homes: Homes, table: tuple = CONFIG) -> list:
                 "config", entry.key, f"differs between {between} (part {entry.part})",
                 Manual(f"find which home is right with the operator and set the other as part {entry.part} describes"),
             ))
-    return drifts
-
-
-SLACK_OVERRIDES_KEY = "platforms.slack.channel_overrides"
-
-
-def check_slack_overrides(root: Path, hermes: str) -> list:
-    """Hermes silently drops a non-mapping override, so the Slack model choice would revert to model.default."""
-    overrides = config_value(root, hermes, SLACK_OVERRIDES_KEY)
-    if overrides is None:
-        return []
-
-    def drift(key: str, detail: str) -> list:
-        return [Drift("config", f"{key} in {root}", f"is not {detail} (part 13)",
-                      Manual("set the Slack channel overrides as part 13 describes"))]
-
-    if not isinstance(overrides, dict):
-        return drift(SLACK_OVERRIDES_KEY, "a mapping")
-    drifts = []
-    for channel, entry in overrides.items():
-        key = f"{SLACK_OVERRIDES_KEY}.{channel}"
-        if not isinstance(entry, dict):
-            drifts += drift(key, "a mapping")
-        elif "model" in entry and not (isinstance(entry["model"], str) and entry["model"].strip()):
-            drifts += drift(f"{key}.model", "a non-empty model alias")
     return drifts
 
 
@@ -1728,10 +1713,10 @@ ROOT_MCP_SECONDS = 120
 HEADER_REFERENCE = re.compile(r"(?:[A-Za-z][A-Za-z0-9-]* )?\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
-def root_mcp_connects(root: Path, hermes: str, server: str) -> bool:
+def root_mcp_connects(home: Path, hermes: str, server: str) -> bool:
     try:
         proc = subprocess.run(
-            [hermes, "mcp", "test", server], env={**os.environ, "HERMES_HOME": str(root)},
+            [hermes, "mcp", "test", server], env={**os.environ, "HERMES_HOME": str(home)},
             capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=ROOT_MCP_SECONDS,
         )
     except subprocess.TimeoutExpired:
@@ -1739,35 +1724,76 @@ def root_mcp_connects(root: Path, hermes: str, server: str) -> bool:
     return proc.returncode == 0
 
 
-READ_MCP_SERVERS = (
-    "import json, sys\n"
-    "sys.path.insert(0, sys.argv[1])\n"
-    "try:\n"
-    "    from ruamel.yaml import YAML\n"
-    "    cfg = YAML(typ='safe', pure=True).load(open(sys.argv[2])) or {}\n"
-    "except Exception as error:\n"
-    "    sys.exit(type(error).__name__)\n"
-    "if not isinstance(cfg, dict):\n"
-    "    sys.exit('config.yaml is not a mapping')\n"
-    "print(json.dumps(cfg.get('mcp_servers')))\n"
-)
+READ_CONFIG = r'''
+import json, re, sys
+sys.path.insert(0, sys.argv[1])
+try:
+    from ruamel.yaml import YAML
+    cfg = YAML(typ="safe", pure=True).load(open(sys.argv[2])) or {}
+except Exception as error:
+    sys.exit(type(error).__name__)
+if not isinstance(cfg, dict):
+    sys.exit("config.yaml is not a mapping")
+REFERENCE = re.compile(r"\$\{\s*(?:env:)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}")
 
 
-def root_mcp_servers(root: Path):
-    """The root home's mcp_servers as config.yaml writes it, with no ${VAR} expansion.
+def strings(node):
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from strings(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from strings(value)
+    elif isinstance(node, str):
+        yield node
+
+
+def section(key):
+    value = cfg.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+command = section("secrets").get("command")
+print(json.dumps({
+    "mcp_servers": cfg.get("mcp_servers"),
+    "references": sorted({name for text in strings(cfg) for name in REFERENCE.findall(text)}),
+    "key_envs": sorted({
+        provider["key_env"] for provider in section("providers").values()
+        if isinstance(provider, dict) and isinstance(provider.get("key_env"), str) and provider["key_env"]
+    }),
+    "slack": "slack" in cfg or "slack" in section("platforms"),
+    "standalone": section("gateway").get("standalone"),
+    "secrets_command": isinstance(command, dict) and command.get("enabled") is True,
+}))
+'''
+
+
+class HomeConfig(NamedTuple):
+    """What the checks read from a home's config.yaml. `references` and `key_envs` are variable names. A header
+    value in `mcp_servers` is a ${VAR} reference unless root_mcp_drifts reports a literal, which it never prints."""
+    mcp_servers: object
+    references: list
+    key_envs: list
+    slack: bool
+    standalone: object
+    secrets_command: bool
+
+
+def read_config(root: Path, home: Path) -> HomeConfig | None:
+    """`home`'s config.yaml as the file writes it, with no ${VAR} expansion.
 
     `hermes config get` expands every ${VAR} to its value, so it cannot show whether a header holds a
-    reference or a literal. Parses the file with the Hermes environment's ruamel.yaml, which has no PyYAML.
-    A parse error names only its class, because ruamel quotes the offending line, which can hold a token.
-    A missing file is check_config's to report. Raises Refusal on a failure.
+    reference or a literal. Parses the file with the root's Hermes environment's ruamel.yaml, which has no
+    PyYAML. A parse error names only its class, because ruamel quotes the offending line, which can hold a
+    token. Returns None when the file is missing. Raises Refusal on a failure.
     """
-    config = root / "config.yaml"
+    config = home / "config.yaml"
     if not config.is_file():
         return None
     python, site = hermes_python(root)
     try:
         proc = subprocess.run(
-            [str(python), "-I", "-B", "-c", READ_MCP_SERVERS, str(site), str(config)],
+            [str(python), "-I", "-B", "-c", READ_CONFIG, str(site), str(config)],
             env={"PATH": os.environ.get("PATH", "")}, capture_output=True, text=True, timeout=HERMES_TOOLS_SECONDS,
         )
     except subprocess.TimeoutExpired:
@@ -1775,34 +1801,36 @@ def root_mcp_servers(root: Path):
     if proc.returncode != 0:
         lines = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
         raise Refusal(f"cannot read config.yaml: {lines[-1] if lines else proc.returncode}")
-    return json.loads(proc.stdout)
+    return HomeConfig(**json.loads(proc.stdout))
 
 
-def check_root_mcp_servers(root: Path, hermes: str) -> list:
-    """Report each enabled root-home MCP server that does not connect, samples, or holds a literal header.
+def check_root_mcp_servers(root: Path, home: Path, hermes: str) -> list:
+    """Report each enabled MCP server of the root agent that does not connect, samples, or holds a literal header.
 
-    Reads mcp_servers from the root home's config.yaml without env expansion, so a ${VAR} reference stays
-    a reference and no secret enters this process. Prints a server and header name, never a header value.
-    A config it cannot read or a shape Hermes would not load is one drift, so the other checks still report.
+    The root agent's servers live in the Slack profile, `home`. Reads its mcp_servers from config.yaml without
+    env expansion, so a ${VAR} reference stays a reference and no secret enters this process. Prints a server
+    and header name, never a header value. A config it cannot read or a shape Hermes would not load is one
+    drift, so the other checks still report.
     """
     try:
-        return root_mcp_drifts(root, hermes)
+        return root_mcp_drifts(root, home, hermes)
     except Refusal as error:
-        return [Drift("root mcp", str(root), f"cannot check: {error} (part 10)", ADVISORY)]
+        return [Drift("root mcp", str(home), f"cannot check: {error} (part 10)", ADVISORY)]
 
 
-ROOT_MCP_FIX = Manual("change the server in the root home's mcp_servers as references/mcp-identities.md describes")
+ROOT_MCP_FIX = Manual("change the server in the Slack profile's mcp_servers as references/mcp-identities.md describes")
 
 
-def root_mcp_drifts(root: Path, hermes: str) -> list:
-    servers = root_mcp_servers(root)
+def root_mcp_drifts(root: Path, home: Path, hermes: str) -> list:
+    config = read_config(root, home)
+    servers = config.mcp_servers if config else None
     if servers is None:
         return []
     if not isinstance(servers, dict):
         raise Refusal("mcp_servers is not a mapping")
     drifts = []
     for name, server in servers.items():
-        where = f"{name} in {root}"
+        where = f"{name} in {home}"
         if not isinstance(server, dict):
             raise Refusal(f"mcp_servers.{name} is not a mapping")
         if server.get("enabled") is False:
@@ -1822,9 +1850,154 @@ def root_mcp_drifts(root: Path, hermes: str) -> list:
                 ))
         if (sampling or {}).get("enabled") is not False:
             drifts.append(Drift("root mcp", where, "does not set sampling.enabled to false (part 10)", ROOT_MCP_FIX))
-        if not root_mcp_connects(root, hermes, name):
+        if not root_mcp_connects(home, hermes, name):
             drifts.append(Drift("root mcp", where, f"does not connect: run hermes mcp test {name} (part 10)", ADVISORY))
     return drifts
+
+
+PROFILE_ROUTES_KEY = "gateway.profile_routes"
+MULTIPLEX_KEY = "gateway.multiplex_profiles"
+OVERRIDES_KEY = "platforms.slack.channel_overrides"
+# Hermes matches a route only where each of these that it sets holds, so a route with one covers part of Slack.
+ROUTE_DISCRIMINATORS = ("guild_id", "chat_id", "thread_id", "user_id", "bot_profile")
+PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")  # Hermes' PROFILE_ID_RE
+TRUTHY = frozenset({"1", "true", "yes", "on"})  # Hermes' _TRUTHY_STRINGS
+SLACK_ROUTE_FIX = Manual("route every Slack message to the Slack profile as references/slack.md describes")
+SLACK_PROFILE_FIX = Manual("build the Slack profile as references/slack.md describes")
+SLACK_MCP_FIX = Manual("move the root home's mcp_servers to the Slack profile as references/mcp-identities.md describes")
+OVERRIDES_FIX = Manual(f"remove {OVERRIDES_KEY} from the root home as references/slack.md describes")
+MODELS_SECONDS = 10
+
+
+class SlackRoute(NamedTuple):
+    """The root home's one profile route for Slack. `home` is None when the route names no Slack profile."""
+    profile: str | None
+    home: Path | None
+    problems: tuple
+
+
+def slack_route(routes, root: Path, worker: Path) -> SlackRoute:
+    slack = [r for r in routes if isinstance(r, dict) and r.get("platform") == "slack"] if isinstance(routes, list) else []
+    if len(slack) != 1:
+        return SlackRoute(None, None, (f"has {len(slack)} routes for platform slack, not one",))
+    route = slack[0]
+    problems = [f"sets {key} on the Slack route, so it covers only part of Slack" for key in ROUTE_DISCRIMINATORS if key in route]
+    if route.get("enabled", True) is not True:
+        problems.append("disables the Slack route")
+    name = route.get("profile")
+    name = name.strip().lower() if isinstance(name, str) else ""
+    if not PROFILE_ID.match(name):
+        return SlackRoute(None, None, (*problems, "names no valid profile on the Slack route"))
+    if name in ("default", worker.name):
+        return SlackRoute(name, None, (*problems, f"routes Slack to the {name} profile, not to a Slack profile"))
+    return SlackRoute(name, root / "profiles" / name, tuple(problems))
+
+
+def served_models(api: str, token: str | None) -> list:
+    """The model ids that the Anthropic-compatible endpoint `api` lists at /v1/models. Sends `token` as x-api-key."""
+    base = api.rstrip("/")
+    url = f"{base if base.endswith('/v1') else base + '/v1'}/models?limit=1000"
+    headers = {"anthropic-version": "2023-06-01", **({"x-api-key": token} if token else {})}
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=MODELS_SECONDS) as response:
+        body = json.load(response)
+    if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+        raise ValueError("the reply is not a model list")
+    return [entry.get("id") for entry in body["data"] if isinstance(entry, dict)]
+
+
+def broker_proxy_token(root: Path) -> str:
+    """The proxy token from the root home's broker, the copy every worker run uses. Callers never print it."""
+    spec = importlib.util.spec_from_file_location("broker_client", root / BROKER_CLIENT)
+    client = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(client)
+    try:
+        return client.request(str(root / client.SOCKET_NAME), "proxy_token")["token"]
+    except client.BrokerError as error:
+        raise OSError(f"the gateway's broker gave no proxy token: {error}") from None
+
+
+def check_slack_profile(
+    root: Path, hermes: str, route: SlackRoute,
+    list_models: Callable[[str, str | None], list] = served_models, proxy_token: Callable[[Path], str] = broker_proxy_token,
+) -> list:
+    """Report what keeps a Slack message from reaching the Slack profile and its model.
+
+    The root home routes Slack with one profile route that sets no discriminator, so it matches every
+    channel, thread, and direct message. The Slack profile holds its own model, its own secrets, and the
+    root agent's MCP servers, and no Slack bot. No line holds a secret value: the profile's .env and the
+    broker's token are read and sent in memory only.
+    """
+    try:
+        return slack_profile_drifts(root, hermes, route, list_models, proxy_token)
+    except Refusal as error:
+        return [Drift("slack profile", str(route.home or root), f"cannot check: {error} (part 13)", ADVISORY)]
+
+
+def slack_profile_drifts(root: Path, hermes: str, route: SlackRoute, list_models, proxy_token) -> list:
+    drifts = []
+
+    def drift(where: str, detail: str, remedy=SLACK_PROFILE_FIX) -> None:
+        drifts.append(Drift("slack profile", where, f"{detail} (part 13)", remedy))
+
+    if config_value(root, hermes, MULTIPLEX_KEY) is not True:
+        drift(f"{MULTIPLEX_KEY} in {root}", "is not true, so the gateway serves no profile but the default", SLACK_ROUTE_FIX)
+    if config_value(root, hermes, OVERRIDES_KEY):
+        drift(f"{OVERRIDES_KEY} in {root}", "is set; the Slack profile's model.default replaces it", OVERRIDES_FIX)
+    root_config = read_config(root, root)
+    if root_config and root_config.mcp_servers:
+        names = ", ".join(sorted(map(str, root_config.mcp_servers)))
+        drift(f"mcp_servers in {root}", f"holds {names}, which belong in the Slack profile", SLACK_MCP_FIX)
+    for problem in route.problems:
+        drift(f"{PROFILE_ROUTES_KEY} in {root}", problem, SLACK_ROUTE_FIX)
+    if route.home is None:
+        return drifts
+    home = route.home
+    config = read_config(root, home)
+    if config is None:
+        drift(str(home), "is missing, so the gateway drops every Slack message")
+        return drifts
+    if (home / "gateway.parked").exists():
+        drift(str(home), "is parked, so the gateway drops every Slack message")
+    standalone = config.standalone
+    if standalone is True or isinstance(standalone, str) and standalone.strip().lower() in TRUTHY:
+        drift(str(home), "sets gateway.standalone, so the host gateway does not serve it")
+    if config.slack:
+        drift(str(home), "has a platforms.slack block; only the default profile runs the Slack bot")
+    env = env_file(home)
+    for name in sorted(name for name in env if name.startswith("SLACK_")):
+        drift(f"{name} in {home}/.env", "is set; only the default profile holds a Slack token")
+    if not config.secrets_command:
+        for name in sorted({*config.references, *config.key_envs} - set(env)):
+            drift(f"{name} in {home}/.env", "is not set, but the profile's config.yaml uses it")
+    drifts.extend(slack_model_drifts(root, home, hermes, env, list_models, proxy_token))
+    return drifts
+
+
+def slack_model_drifts(root: Path, home: Path, hermes: str, env: dict, list_models, proxy_token) -> list:
+    provider, model = config_value(home, hermes, "model.provider"), config_value(home, hermes, "model.default")
+
+    def drift(key: str, detail: str, remedy=SLACK_PROFILE_FIX) -> list:
+        return [Drift("slack profile", f"{key} in {home}", f"{detail} (part 13)", remedy)]
+
+    if provider != config_value(root, hermes, "model.provider"):
+        return drift("model.provider", "differs from the root home's, so Slack turns leave the factory's transport")
+    if not isinstance(model, str) or not model.strip():
+        return drift("model.default", "is not set to the operator's Slack model")
+    if not isinstance(provider, str) or not provider.startswith("custom:"):
+        return []  # DirectSDK runs on the subscription, which has no model list to ask.
+    name = provider.removeprefix("custom:")
+    api = config_value(home, hermes, f"providers.{name}.api")
+    if not isinstance(api, str) or not api:
+        return drift(f"providers.{name}.api", "is not set")
+    key_env = config_value(home, hermes, f"providers.{name}.key_env")
+    try:
+        token = (env.get(key_env) or proxy_token(root)) if key_env else None
+        served = list_models(api, token)
+    except (OSError, ValueError) as error:
+        return drift("model.default", f"cannot be checked: {api} lists no models: {error}", ADVISORY)
+    if model not in served:
+        return drift("model.default", f"is {model}, which {api}/v1/models does not list")
+    return []
 
 
 HERMES_TOOLS_SECONDS = 60
@@ -2058,11 +2231,11 @@ def main() -> int:
         launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))
         launchctl = os.environ.get("LAUNCHCTL_BIN", "launchctl")
         broker = broker_user_config(launchd_root) if sys.platform == "darwin" else None
+        slack = slack_route(config_value(root, hermes, PROFILE_ROUTES_KEY), root, worker)
         drifts = [
             *check_profile(commit, homes_),
             *check_plugins(commit, homes_),
             *check_config(homes_, CONFIG if broker is None else BROKER_USER_CONFIG),
-            *check_slack_overrides(root, hermes),
             *check_worker_secrets(commit, worker, hermes, settings),
             *check_upload_broker(root, *factory_settings.token_variables(settings)),
             *check_cron(commit, homes_),
@@ -2092,7 +2265,8 @@ def main() -> int:
             *check_app_events(settings),
             *check_model_tiers(settings, worker),
             *check_mcp_servers(settings, worker),
-            *check_root_mcp_servers(root, hermes),
+            *check_slack_profile(root, hermes, slack),
+            *(check_root_mcp_servers(root, slack.home, hermes) if slack.home else ()),
             *check_hermes_tools(root, worker / "plugins" / "blocker-order" / "__init__.py"),
             *check_plugin_status(commit, homes_),
             *check_plugin_imports(commit, [root, worker], root),
