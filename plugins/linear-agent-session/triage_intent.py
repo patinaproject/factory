@@ -247,7 +247,7 @@ def decide(
 def _with_authority(
     facts: Intent, approvers: list[dict], author_id: Optional[str], author_kind: Optional[str], operators_configured: bool
 ) -> Intent:
-    role, reason = linear.authority(approvers, author_id, "id", operators_configured)
+    role, reason = linear.authority(approvers, author_id, "id", operators_configured or author_kind != "person")
     assignee = next((person for person in approvers if person["role"] == "assignee"), None)
     return replace(
         facts,

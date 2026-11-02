@@ -807,7 +807,7 @@ def delegation(actor, to=APP):
 
 class ApproverTest(unittest.TestCase):
     def reply(self, author, history=(), operators=(), live=None, **client_overrides):
-        client = FakeLinearClient(live or issue(), history=history, users=USERS, **client_overrides)
+        client = FakeLinearClient(live or issue(), history=history, **{"users": USERS, **client_overrides})
         return ComputeTest().compute(
             session_event("prompted", body="go", author=author), client, BOARDS, operators=operators
         )
@@ -853,6 +853,15 @@ class ApproverTest(unittest.TestCase):
             with self.subTest(operators=operators):
                 result = self.reply(OTHER, operators=operators)
                 self.assertEqual((result.action, result.from_assignee, result.not_assignee_reason), ("card_reply_not_assignee", False, reason))
+
+    def test_an_app_or_unknown_author_is_not_told_no_operators_are_configured(self):
+        users = {**USERS, OTHER: person(OTHER, "Some agent", None, app=True)}
+        for author, kind in ((OTHER, "app"), ("user-ghost", "unknown")):
+            with self.subTest(kind):
+                result = self.reply(author, users=users)
+                self.assertEqual(
+                    (result.action, result.reply_author_kind, result.not_assignee_reason), ("card_reply_not_assignee", kind, None)
+                )
 
     def test_the_assignee_and_the_delegator_are_approvers_whatever_the_operator_list(self):
         for author, role in ((ASSIGNEE, "assignee"), (DELEGATOR, "delegator")):
