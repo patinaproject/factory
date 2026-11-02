@@ -221,6 +221,8 @@ def decide(
     if payload["type"] == "Issue":
         action = _issue_update(facts, payload.get("updatedFrom") or {})
         session = _open_session(issue, app_user_id) if action == "use_session" or action in GATE_ACTION_NAMES else None
+        if found and action in GATE_ACTION_NAMES:
+            session = blocks.session_id(found[0].body) or session
         then = _delegated(replace(facts, gate="pass"), delegation=False) if action in SESSION_ACTIONS else None
         return replace(facts, action=action, agent_session_id=session, then=then)
     session = payload["agentSession"]["id"]
