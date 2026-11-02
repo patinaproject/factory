@@ -94,6 +94,7 @@ import argparse
 import concurrent.futures
 import glob
 import grp
+import http.client
 import importlib.util
 import json
 import os
@@ -551,12 +552,17 @@ UPLOAD_STATUS_SECONDS = 5
 BROKER_CLIENT = Path("plugins/linear-agent-session/broker_client.py")
 
 
+def load_broker_client(root: Path):
+    spec = importlib.util.spec_from_file_location("broker_client", root / BROKER_CLIENT)
+    client = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(client)
+    return client
+
+
 def check_upload_broker(root: Path, token_env: str, mcp_envs: dict) -> list:
     """Ask the root home's broker for its status. Sends no upload, asks for no token, and reports no value."""
     try:
-        spec = importlib.util.spec_from_file_location("broker_client", root / BROKER_CLIENT)
-        client = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(client)
+        client = load_broker_client(root)
     except (OSError, SyntaxError, ImportError):
         return [Drift("upload broker", str(root / BROKER_CLIENT), "cannot be loaded, so the broker is not asked (part 5)", ADVISORY)]
     path = root / client.SOCKET_NAME
@@ -1882,7 +1888,7 @@ def slack_route(routes, root: Path, worker: Path) -> SlackRoute:
         return SlackRoute(None, None, (f"has {len(slack)} routes for platform slack, not one",))
     route = slack[0]
     problems = [f"sets {key} on the Slack route, so it covers only part of Slack" for key in ROUTE_DISCRIMINATORS if key in route]
-    if route.get("enabled", True) is not True:
+    if not route.get("enabled", True):
         problems.append("disables the Slack route")
     name = route.get("profile")
     name = name.strip().lower() if isinstance(name, str) else ""
@@ -1907,13 +1913,17 @@ def served_models(api: str, token: str | None) -> list:
 
 def broker_proxy_token(root: Path) -> str:
     """The proxy token from the root home's broker, the copy every worker run uses. Callers never print it."""
-    spec = importlib.util.spec_from_file_location("broker_client", root / BROKER_CLIENT)
-    client = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(client)
     try:
-        return client.request(str(root / client.SOCKET_NAME), "proxy_token")["token"]
+        client = load_broker_client(root)
+    except (SyntaxError, ImportError) as error:
+        raise OSError(f"the broker client cannot be loaded: {type(error).__name__}") from None
+    try:
+        token = client.request(str(root / client.SOCKET_NAME), "proxy_token").get("token")
     except client.BrokerError as error:
         raise OSError(f"the gateway's broker gave no proxy token: {error}") from None
+    if not isinstance(token, str) or not token:
+        raise OSError("the gateway's broker gave no proxy token")
+    return token
 
 
 def check_slack_profile(
@@ -1990,10 +2000,12 @@ def slack_model_drifts(root: Path, home: Path, hermes: str, env: dict, list_mode
     if not isinstance(api, str) or not api:
         return drift(f"providers.{name}.api", "is not set")
     key_env = config_value(home, hermes, f"providers.{name}.key_env")
+    if key_env is not None and not isinstance(key_env, str):
+        return drift(f"providers.{name}.key_env", "is not a variable name")
     try:
         token = (env.get(key_env) or proxy_token(root)) if key_env else None
         served = list_models(api, token)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, http.client.HTTPException) as error:
         return drift("model.default", f"cannot be checked: {api} lists no models: {error}", ADVISORY)
     if model not in served:
         return drift("model.default", f"is {model}, which {api}/v1/models does not list")
@@ -2231,7 +2243,10 @@ def main() -> int:
         launchd_root = Path(os.environ.get("LAUNCHD_ROOT", "/"))
         launchctl = os.environ.get("LAUNCHCTL_BIN", "launchctl")
         broker = broker_user_config(launchd_root) if sys.platform == "darwin" else None
-        slack = slack_route(config_value(root, hermes, PROFILE_ROUTES_KEY), root, worker)
+        try:
+            slack = slack_route(config_value(root, hermes, PROFILE_ROUTES_KEY), root, worker)
+        except Refusal as error:
+            slack = SlackRoute(None, None, (f"cannot be read: {error}",))
         drifts = [
             *check_profile(commit, homes_),
             *check_plugins(commit, homes_),

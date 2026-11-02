@@ -5,6 +5,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import atexit
+import http.client
 import io
 import json
 import os
@@ -2722,6 +2723,9 @@ class SlackRouteTest(unittest.TestCase):
     def test_a_disabled_route_is_a_problem(self) -> None:
         self.assertEqual(self.route([{**SLACK_ROUTE, "enabled": False}]).problems, ("disables the Slack route",))
 
+    def test_a_truthy_enabled_value_is_enabled_as_hermes_reads_it(self) -> None:
+        self.assertEqual(self.route([{**SLACK_ROUTE, "enabled": "true"}]).problems, ())
+
     def test_a_route_to_no_valid_profile_has_no_home(self) -> None:
         for profile in (None, "", "../root", 5):
             with self.subTest(profile=profile):
@@ -2940,6 +2944,20 @@ class CheckSlackProfileTest(unittest.TestCase):
         ])
         self.assertNotIn(PROXY_TOKEN, "".join(lines))
 
+    def test_a_proxy_reply_cut_short_is_advisory(self) -> None:
+        self.proxy_configs()
+        self.listed = http.client.IncompleteRead(b"")
+
+        self.assertEqual(self.check(), [
+            f"slack profile model.default in {self.home}: cannot be checked: {PROXY_API} lists no models: "
+            "IncompleteRead(0 bytes read) (part 13)",
+        ])
+
+    def test_a_key_env_that_is_not_a_name_is_reported(self) -> None:
+        self.proxy_configs(**{"providers.proxy.key_env": ["CLAUDE_PROXY_TOKEN"]})
+
+        self.assertEqual(self.check(), [f"slack profile providers.proxy.key_env in {self.home}: is not a variable name (part 13)"])
+
     def test_a_proxy_provider_without_an_api_is_reported(self) -> None:
         self.proxy_configs(**{"providers.proxy.api": ""})
 
@@ -2951,6 +2969,30 @@ class CheckSlackProfileTest(unittest.TestCase):
         lines = self.check()
 
         self.assertEqual(lines, [f"slack profile {self.home}: cannot check: cannot read config.yaml: ValueError (part 13)"])
+
+
+class BrokerProxyTokenTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.root)
+        client = self.root / check_install.BROKER_CLIENT
+        client.parent.mkdir(parents=True)
+        shutil.copy(REPO / check_install.BROKER_CLIENT, client)
+
+    def broker(self, reply: dict) -> None:
+        broker = FakeBroker(self.root / "factory-uploads.sock", proxy_token=[reply])
+        self.addCleanup(broker.close)
+
+    def test_the_brokers_token_is_returned(self) -> None:
+        self.broker({"ok": True, "token": PROXY_TOKEN})
+
+        self.assertEqual(check_install.broker_proxy_token(self.root), PROXY_TOKEN)
+
+    def test_a_reply_without_a_token_is_an_os_error(self) -> None:
+        self.broker({"ok": True})
+
+        with self.assertRaisesRegex(OSError, "^the gateway's broker gave no proxy token$"):
+            check_install.broker_proxy_token(self.root)
 
 
 FAKE_REGISTRY = """import json
