@@ -345,8 +345,9 @@ def compute(
         issue = linear_client.get_issue(_issue_id(payload))
         documents = linear_client.issue_documents(issue["id"])["documents"]
         app = app_user_id()
-        operators = operator_user_ids()
-        people = [] if carries_no_reply(payload) else linear.lookup_approvers(linear_client, issue, app, operators)
+        no_reply = carries_no_reply(payload)
+        operators = [] if no_reply else operator_user_ids()
+        people = [] if no_reply else linear.lookup_approvers(linear_client, issue, app, operators)
         return decide(
             payload,
             issue,

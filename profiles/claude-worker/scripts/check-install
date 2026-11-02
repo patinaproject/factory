@@ -1654,7 +1654,7 @@ def check_operators(settings, worker: Path) -> list:
         return []
     return [Drift(
         "config", f"operator_user_ids in {worker}",
-        "is empty, so an operator's replies on issues assigned to others are context only until the operators' Linear user ids "
+        "is empty or not set, so an operator's replies on issues assigned to others are context only until the operators' Linear user ids "
         "are added to the setting from the factory's private configuration record",
         ADVISORY,
     )]

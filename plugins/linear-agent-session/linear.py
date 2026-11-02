@@ -393,7 +393,7 @@ def authority(
         if sender_id is None:
             return None, "no_author"
         role = next((p["role"] for p in usable if str(p[key]) == str(sender_id)), None)
-        return role, None if role or operators_configured else "no_operators_configured"
+        return role, (None if role or operators_configured else "no_operators_configured")
     assignee = next((person for person in people if person["role"] == "assignee"), None)
     if assignee is None:
         return None, "no_assignee"

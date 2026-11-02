@@ -932,6 +932,23 @@ class ApproverTest(unittest.TestCase):
                 client = FakeLinearClient(issue(), lookup_error=AssertionError("no lookup expected"))
                 self.assertNotEqual(ComputeTest().compute(payload, client, BOARDS, operators=[OPERATOR]).action, "error")
 
+    def test_only_a_reply_reads_the_operator_setting(self):
+        def unreadable():
+            raise ValueError("operator_user_ids must be a list of Linear user ids")
+
+        for payload in (issue_event(), session_event("created"), session_event("prompted", signal="stop")):
+            with self.subTest(type=payload["type"], action=payload.get("action")):
+                result = intent_module.compute(
+                    payload,
+                    app_user_id=lambda: APP,
+                    operator_user_ids=unreadable,
+                    client=lambda: FakeLinearClient(issue()),
+                    cards=lambda board: BOARDS[board],
+                    now=NOW,
+                    redact=lambda text: text,
+                )
+                self.assertNotEqual(result.action, "error")
+
     def test_a_stop_from_anyone_and_a_reply_to_a_live_triage_card_keep_their_handling(self):
         triage = {"triage": [card("t_triage", status="running", body=id_line())], None: BOARDS[None]}
         client = FakeLinearClient(issue(), history=[delegation(DELEGATOR)], users=USERS)

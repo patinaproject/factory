@@ -3264,7 +3264,7 @@ class CheckOperatorsTest(unittest.TestCase):
 
     def test_an_empty_or_unset_list_is_one_advisory_naming_the_setting(self) -> None:
         advisory = (
-            "config operator_user_ids in /worker: is empty, so an operator's replies on issues assigned to others are context "
+            "config operator_user_ids in /worker: is empty or not set, so an operator's replies on issues assigned to others are context "
             "only until the operators' Linear user ids are added to the setting from the factory's private configuration record"
         )
 
