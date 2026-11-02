@@ -210,9 +210,8 @@ marker. It is context only. It is never on its own a reason to resume, and
 `claude-session` gives it to Claude in a separate block that says so. Change
 the branch for one only when a later instruction from an approver asks for it.
 
-A card that a Linear reply reopened has the comment `Resumed for a Linear
-reply; see the card comments` and a `Linear reply:` comment. It carries no
-`CHANGES REQUESTED` comment, so do what the reply asks. When that changes
+A card that Linear triage reopened for a reply has a `Linear reply:` comment
+and no new `CHANGES REQUESTED` comment, so do what the reply asks. When that changes
 nothing on the branch and the pull request still passes `pr-ready-gate`, call
 `kanban_request_review` again with step 5's handoff. Block with `needs_input`
 only when the reply asks for a decision or a change you cannot make. A Linear

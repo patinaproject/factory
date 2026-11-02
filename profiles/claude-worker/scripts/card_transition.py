@@ -67,7 +67,7 @@ timeout, or `OSError` leaves the card parked and is reported. `replied` never re
   clears the card's `last_failure_error` when its newest ended run is `review_requested` or `completed`, because
   Hermes holds a `ready` card as `blocker_auth` for an old quota or auth error that the reopen leaves in place.
   `--reason` makes Hermes write a `CHANGES REQUESTED: <text>` comment, which the worker reads as a request for
-  changes. `--comment` reopens with no reason and posts the text as one plain card comment, for a reply that
+  changes. `--comment` posts the text as one plain card comment, then reopens with no reason, for a reply that
   requests no change.
 - `stop`: block a card whatever it is doing. Hermes blocks only a `ready` or `running` card, so a
   `review` card is reopened first. A `scheduled` card stays `scheduled`, is unassigned, and gets a `stopped`
@@ -662,12 +662,13 @@ def has_pull_request(repo: str, branch: str) -> bool:
 
 
 def reopen_review(card: Card, reason: str | None, comment: str | None) -> None:
-    """`--reason` is Hermes' `CHANGES REQUESTED` comment; `--comment` reopens with none and posts `comment` plain."""
+    """`--reason` is Hermes' `CHANGES REQUESTED` comment. `--comment` is posted plain first, so a worker that
+    starts as soon as the card is `ready` already reads it, then the card reopens with no reason."""
     if reason is not None:
         card.call("reopen-review", "--reason", reason)
     else:
-        card.call("reopen-review")
         card.call("comment", comment)
+        card.call("reopen-review")
 
 
 def unblock(card: Card, repo: str, branch: str, reason: str | None, comment: str | None) -> dict:

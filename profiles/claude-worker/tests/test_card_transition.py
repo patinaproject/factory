@@ -512,8 +512,8 @@ class UnblockTest(CardTransitionTest):
                                     "--comment", "Resumed for a Linear reply")
         self.assertEqual((code, out), (0, {"action": "unblocked", "post": None, "pull_request": True}))
         self.assertEqual(self.state_changes(), [
-            ["unblock", "t_1"], ["request-review", "t_1"], ["reopen-review", "t_1"],
-            ["comment", "t_1", "Resumed for a Linear reply"],
+            ["unblock", "t_1"], ["request-review", "t_1"],
+            ["comment", "t_1", "Resumed for a Linear reply"], ["reopen-review", "t_1"],
         ])
 
     def test_a_comment_on_a_card_without_a_pull_request_posts_nothing(self):
@@ -542,7 +542,7 @@ class ReopenAndStopTest(CardTransitionTest):
         code, out = self.transition("reopen", "t_1", "--comment", "Resumed for a Linear reply; see the card comments")
         self.assertEqual((code, out), (0, {"action": "reopened", "post": None}))
         self.assertEqual(self.state_changes(), [
-            ["reopen-review", "t_1"], ["comment", "t_1", "Resumed for a Linear reply; see the card comments"],
+            ["comment", "t_1", "Resumed for a Linear reply; see the card comments"], ["reopen-review", "t_1"],
         ])
 
     QUOTA_ERROR = "pid 1 exited rate-limited (quota wall) — requeued without counting a failure"
