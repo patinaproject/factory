@@ -23,6 +23,11 @@ Its title comes from `issue_title`, "Fix checkout" when unset, and its priority 
 `session_update` with its variables, and `session_update_error` makes it fail. The session's
 links are its `session_urls` list, which an update's `addedExternalUrls` extends, and `session_urls_error` fails the read.
 The app's own user id is app-user.
+An OpenTitledIssues read is logged as `open_titled` with its variables and answers with the `open_issues` list of
+{identifier, title, url}, none when unset; `open_titled_http_status` makes it fail with that HTTP status.
+A TeamForCreate read answers a team ABC whose workflow states come from `team_states` (a triage and an unstarted state
+when unset) and whose labels come from `team_labels` and `workspace_labels`, each name's id being label-<name>.
+An IssueCreate is logged as `issue_create` with its variables and answers ABC-900.
 """
 from __future__ import annotations
 
@@ -93,6 +98,24 @@ def _fake_urlopen(request, timeout=None):
             state["session_urls"] = [*state.get("session_urls", []), *(u["url"] for u in added)]
             state_path.write_text(json.dumps(state))
             response = _Response(200, {"data": {"agentSessionUpdate": {"success": True}}})
+        elif "OpenTitledIssues" in query and state.get("open_titled_http_status"):
+            entry["open_titled"] = body["variables"]
+            response = _Response(state["open_titled_http_status"], {"errors": [{"message": "Internal Server Error"}]})
+        elif "OpenTitledIssues" in query:
+            entry["open_titled"] = body["variables"]
+            response = _Response(200, {"data": {"issues": {"nodes": state.get("open_issues", [])}}})
+        elif "TeamForCreate" in query:
+            def labels(names):
+                return [{"id": f"label-{n}", "name": n, "isGroup": False, "parent": None} for n in names]
+            states = state.get("team_states", [{"id": "state-triage", "type": "triage"}, {"id": "state-todo", "type": "unstarted"}])
+            team = {"id": "team-ABC", "key": "ABC", "states": {"nodes": states},
+                    "labels": {"nodes": labels(state.get("team_labels", []))}}
+            response = _Response(200, {"data": {"viewer": {"id": "app-user"}, "teams": {"nodes": [team]},
+                                                "issueLabels": {"nodes": labels(state.get("workspace_labels", []))}}})
+        elif "mutation IssueCreate" in query:
+            entry["issue_create"] = body["variables"]
+            created = {"identifier": "ABC-900", "url": "https://linear.app/example/issue/ABC-900"}
+            response = _Response(200, {"data": {"issueCreate": {"success": True, "issue": created}}})
         elif "IssueRoleLabels" in query:
             def nodes(names):
                 return [{"name": n, "isGroup": False, "retiredAt": None, "archivedAt": None} for n in names]

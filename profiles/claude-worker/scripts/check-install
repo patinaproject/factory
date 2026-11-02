@@ -249,6 +249,10 @@ CONFIG = (
         10, f"{SETTINGS_KEY}.triage.max_running", BOTH, positive_int("a positive limit on running triage cards"),
         same_in_homes=True,
     ),
+    ConfigKey(
+        10, f"{SETTINGS_KEY}.dependency_updates", BOTH, declared("set to the weekly dependency update's repository, team, and labels"),
+        same_in_homes=True,
+    ),
     ConfigKey(10, "kanban.max_in_progress", (ROOT,), positive_int("a positive card limit")),
     ConfigKey(10, "kanban.max_spawn", (ROOT,), positive_int("a positive limit on worker spawns per board")),
     ConfigKey(10, "kanban.review_dispatch", (ROOT,), equal(False)),
@@ -280,6 +284,7 @@ CRON = (
     CronJob(12, "reopen-conflicts", 5, equal("local")),
     CronJob(12, "finish-merged", 5, equal("local")),
     CronJob(12, "dispatch-triage", 1, equal("local")),
+    CronJob(12, "file-dependency-update", 10080, equal("local")),
     CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
     CronJob(12, "report-deploy", 5, declared("the operator's chat platform", besides=("local",)), home=ROOT),
 )

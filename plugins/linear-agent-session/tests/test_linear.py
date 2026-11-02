@@ -1351,6 +1351,43 @@ class CreateTest(unittest.TestCase):
                 self.assertEqual(fake.graphql_requests, [])
 
 
+class CreateInStateDelegatedTest(unittest.TestCase):
+    def test_a_state_type_and_self_delegation_add_the_state_and_the_delegate(self):
+        team = {"id": "team-ABC", "key": "ABC", "labels": {"nodes": TEAM_LABELS},
+                "states": {"nodes": [{"id": "state-todo", "type": "unstarted"}, {"id": "state-triage", "type": "triage"}]}}
+        data = {"viewer": {"id": "app-user"}, "teams": {"nodes": [team]}, "issueLabels": {"nodes": WORKSPACE_LABELS}}
+        fake = FakeLinear([(200, {"data": data}), CREATE_OK])
+        make_client(fake).create_issue("ABC", "A title", "Text.", ["Factory"], state_type="triage", delegate_self=True)
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"],
+            {"input": {"teamId": "team-ABC", "title": "A title", "description": "Text.", "stateId": "state-triage",
+                       "labelIds": ["label-Factory"], "delegateId": "app-user"}},
+        )
+
+    def test_a_team_without_that_state_type_creates_nothing(self):
+        team = {"id": "team-ABC", "key": "ABC", "labels": {"nodes": []}, "states": {"nodes": []}}
+        data = {"viewer": {"id": "app-user"}, "teams": {"nodes": [team]}, "issueLabels": {"nodes": []}}
+        fake = FakeLinear([(200, {"data": data})])
+        with self.assertRaises(linear.LinearError) as raised:
+            make_client(fake).create_issue("ABC", "A title", state_type="triage")
+        self.assertEqual(str(raised.exception), "team 'ABC' has no workflow state of type 'triage'")
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+
+class OpenIssuesTitledTest(unittest.TestCase):
+    def test_filters_by_team_creator_title_prefix_and_open_state(self):
+        node = {"identifier": "ABC-4", "title": "Update x (week of 2026-11-02)", "url": "https://linear.app/x/issue/ABC-4"}
+        fake = FakeLinear([(200, {"data": {"issues": {"nodes": [node]}}})])
+        found = make_client(fake).open_issues_titled("ABC", "Update x")
+        self.assertEqual(found, [node])
+        self.assertEqual(
+            fake.graphql_requests[0]["variables"],
+            {"filter": {"team": {"key": {"eq": "ABC"}}, "creator": {"isMe": {"eq": True}},
+                        "title": {"startsWith": "Update x"},
+                        "state": {"type": {"nin": ["completed", "canceled", "duplicate"]}}}},
+        )
+
+
 class SearchTest(unittest.TestCase):
     def search(self, responses, args):
         fake = FakeLinear(responses)

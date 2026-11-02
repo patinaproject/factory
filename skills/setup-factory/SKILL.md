@@ -914,6 +914,7 @@ key file but does not contain the key.
   "kanban_url": "https://<hostname>/kanban",
   "factory_repository": {"full_name": "<owner>/<factory>", "default_branch": "<branch>"},
   "triage": {"max_running": <n>},
+  "dependency_updates": {"repository": "<owner>/<name>", "team_key": "<Linear team key>", "theme_label": "<label name>", "type_label": "<label name>"},
   "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0, "command_timeout_seconds": 600, "idle_limit_seconds": 2700}
 }
 ```
@@ -991,6 +992,15 @@ record. Hermes caps workers per host and per profile, but has no per-board
 cap, so the factory applies this one itself: triage creates each triage card
 with no assignee, and the `dispatch-triage` cron job from part 12 assigns
 waiting cards only while fewer than `max_running` run or wait assigned.
+
+`dependency_updates` configures the weekly `file-dependency-update` job from
+part 12. All four keys are required, and the real values belong in the private
+record. `repository` is the `<owner>/<name>` whose npm dependencies the issue
+asks the agent to update. `team_key` is the Linear team that gets the issue.
+`theme_label` is the one label the issue carries, such as the Theme group's
+Security label. `type_label` is the type the issue's description tells triage
+to use, such as the Tools label. The job refuses to run, and `check-install`
+reports the section, when it is missing.
 
 `operator_user_ids` is an optional input the operator supplies, default `[]`: the
 Linear user ids of operators who, like an issue's assignee and the person who
@@ -1283,7 +1293,7 @@ belongs to the worker profile.
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
 jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`,
-`finish-merged`, and `dispatch-triage`.
+`finish-merged`, `dispatch-triage`, and `file-dependency-update`.
 A copy there runs without the worker's scripts and settings, so remove it the
 same way. The default home holds two jobs, `retry-failed-webhooks` and
 `report-deploy`, described below. A second setup session runs this check before it
@@ -1338,6 +1348,28 @@ job when `cron list` has no `dispatch-triage` job:
 
 ```sh
 hermes -p claude-worker cron create "every 1m" --name dispatch-triage --no-agent --script dispatch-triage </dev/null
+```
+
+**Dependency update job.** `file-dependency-update` runs once a week. It reads
+`dependency_updates` from the factory settings (part 10) and asks Linear, as
+the agent app, for the team's open issues that the app created and whose title
+starts with `Update npm dependencies within declared ranges (week of`. When
+one is open it files nothing. Otherwise it files one issue titled
+`Update npm dependencies within declared ranges (week of <YYYY-MM-DD>)` with the
+Monday of the current UTC week, in the team's Triage status, with the theme
+label only, delegated to the agent app, with no assignee and no priority. Its
+description gives the fix contract: `pnpm update` within the declared ranges,
+no `--latest`, no major bump, no `minimumReleaseAgeExclude` entry, no new
+dependency, no `overrides` entry, a halt for a person when the native app
+fingerprint changes, and the configured type label with a `chore(deps)` commit.
+A failed Linear read or write exits 1 with the failure on standard error and
+files nothing after a failed read. Missing or malformed settings exit 2 before
+any Linear call. It uses the factory's existing Linear access and needs no new
+credential. Create the job when `cron list` has no `file-dependency-update`
+job:
+
+```sh
+hermes -p claude-worker cron create "every 168h" --name file-dependency-update --no-agent --script file-dependency-update </dev/null
 ```
 
 **Conflict job.** GitHub sends no webhook when a pull request starts to
@@ -2423,6 +2455,11 @@ Hermes process starts. The new helper also writes
      profile as in part 12.
    - A `cron job dispatch-triage` line: after the profile update, create the
      job with the part 12 `cron create` command.
+   - A `cron job file-dependency-update` line: after the profile update, create
+     the job with the part 12 `cron create` command.
+   - A `config plugins.entries.linear-agent-session.settings.dependency_updates`
+     line: add the `dependency_updates` section to the factory settings and set
+     them in both homes as in part 10, before the profile update.
    - A `waiting triage card <task id>: is blocked with block kind needs_input`
      or `is triage with block kind needs_input` line: the card waits for a
      reply the way triage cards waited before a round parked in `scheduled`.
