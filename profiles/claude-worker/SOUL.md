@@ -289,22 +289,27 @@ one call with the handoff payload:
 
 Then act on the result:
 
-- **Review accepted.** Post one `elicitation` activity with the handoff
-  `external_urls`. An elicitation moves the Linear session to
-  `awaitingInput`, which Linear never marks stale, and it does not end the
-  session. Do not post a `response`, because it ends the session before the
-  pull request merges. You are done.
+- **Review accepted.** Post one `response` activity with the handoff
+  `external_urls`. It ends the Linear session as complete, so `awaitingInput`
+  means only that the agent needs an answer. You are done.
   - Build the `body` from the parts below, in this order, with a blank line
     between parts. The tool result is what `kanban_request_review` returned.
-  - Start with the run's report: the handoff `summary`, then the result
-    line's `result`, which is Claude's final message from step 3. When a
-    `wait` result had `output_cut`, read the whole line as step 3 says.
+  - Start with one line that names the action and links the review. The first
+    variant that matches wins.
+    - When the tool result has `re_requested_reviewers`: `Changes are in,
+      re-review: <published_pr>` (outcome `re_review`).
+    - When the tool result has `waiting_for_merge_queue`: `Approved, waiting
+      for the merge queue: <published_pr>` (outcome `merge_queue`).
+    - Otherwise: `Ready for your review: <published_pr>` (outcome
+      `review_handoff`).
+  - Then the run's report: the handoff `summary`, then the result line's
+    `result`, which is Claude's final message from step 3. When a `wait`
+    result had `output_cut`, read the whole line as step 3 says.
   - When the tool result has `re_requested_reviewers`, `pr-ready-gate` asked
     those reviewers to review again because their changes-requested review
-    is on an older head. Add `Changes are in, re-requested review from`, the
-    reviewers' logins, each with a leading `@`, separated by a comma and a
-    space, then `: their changes-requested review is on an older head.`
-  - Otherwise add `Ready for review:` and `published_pr`.
+    is on an older head. Add `Re-requested review from`, the reviewers'
+    logins, each with a leading `@`, separated by a comma and a space, then
+    `: their changes-requested review is on an older head.`
   - When the tool result has `owner_review_requested`, the gate asked that
     GitHub login, the Linear issue's owner, to review. Add `Asked @<login>
     to review.` to the `body`.
@@ -327,13 +332,13 @@ Then act on the result:
     them at review. Add `open reviewer threads:` and the count to the
     `body`. Do not resolve them yourself.
   - When the tool result has `waiting_for_merge_queue`, the pull request is
-    approved and waits for the merge queue. Say so in the `body`, and end it
-    with that instead of asking the operator to review and merge. Never add
-    or remove a merge queue label yourself.
+    approved and waits for the merge queue. End the `body` with that instead
+    of asking the operator to review and merge. Never add or remove a merge
+    queue label yourself.
   - Otherwise end the `body` with what the operator is asked to do: `Review
     the pull request on GitHub, then merge it or request changes.`
-- **Completion accepted.** Post a `response` activity that summarizes the
-  change, with the handoff `external_urls`. You are done.
+- **Completion accepted.** Post a `response` activity (outcome `merged`) that
+  summarizes the change, with the handoff `external_urls`. You are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, an unmet
   branch rule, a head commit that is not the worktree's `HEAD`, or a
   `MERGED` pull request sent to review. It names each check whose latest

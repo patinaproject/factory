@@ -199,6 +199,49 @@ class NeedsBriefTest(unittest.TestCase):
         self.assertEqual(self.needs(issue_event(), titles=BRIEF).action, "open_session")
 
 
+class CardSessionTest(unittest.TestCase):
+    GATES = {
+        "gate_ready_for_human": {"labels": ["Ready for human"]},
+        "gate_needs_brief": {"stateType": "triage"},
+        "gate_start_triage": {"labels": [], "stateType": "unstarted"},
+        "gate_not_ready": {"labels": []},
+    }
+
+    PREVIOUS = {
+        "gate_ready_for_human": {"stateId": "old"},
+        "gate_needs_brief": {"stateId": "old"},
+        "gate_start_triage": {"delegateId": None},
+        "gate_not_ready": {"labelIds": []},
+    }
+
+    def decided(self, action, work, **overrides):
+        live = issue(agentSessions=[session("s-done", 30, creator=None, status="complete")], **self.GATES[action], **overrides)
+        titles = [] if action == "gate_needs_brief" else BRIEF
+        result = decide(issue_event(self.PREVIOUS[action]), live, work=work, titles=titles)
+        self.assertEqual(result.action, action)
+        return result
+
+    def test_a_gate_action_uses_the_session_the_card_names_whatever_its_status(self):
+        work = [card("t_work", branch=BRANCH, body="linear_agent_session_id: s-card\n")]
+        for action in self.GATES:
+            with self.subTest(action):
+                self.assertEqual(self.decided(action, work).agent_session_id, "s-card")
+
+    def test_a_gate_action_with_no_card_opens_no_complete_session(self):
+        for action in self.GATES:
+            with self.subTest(action):
+                self.assertIsNone(self.decided(action, []).agent_session_id)
+
+    def test_a_card_without_the_session_line_keeps_the_open_session_lookup(self):
+        work = [card("t_work", branch=BRANCH, body="repo: o/r\n")]
+        for action in self.GATES:
+            with self.subTest(action):
+                self.assertIsNone(self.decided(action, work).agent_session_id)
+                live_open = [session("s-open", 20, creator=None)]
+                result = decide(issue_event(self.PREVIOUS[action]), issue(agentSessions=live_open, **self.GATES[action]), work=work, titles=[] if action == "gate_needs_brief" else BRIEF)
+                self.assertEqual(result.agent_session_id, "s-open")
+
+
 class StartTriageTest(unittest.TestCase):
     NOT_READY = {"labels": [], "stateType": "unstarted"}
 
@@ -354,6 +397,11 @@ class SessionPromptedTest(unittest.TestCase):
             self.prompted(work=[card("t_work", status="blocked", title="PAT-1: Fix it")]),
             replied("card_reply", card={"id": "t_work", "status": "blocked", "matched_by": "title"}),
         )
+
+    def test_a_reply_on_a_complete_session_of_an_issue_with_a_card_is_a_card_reply_on_that_session(self):
+        live = issue(agentSessions=[session("session-1", 30, creator=None, status="complete")])
+        result = self.prompted(live, work=[card("t_work", status="blocked", branch=BRANCH)])
+        self.assertEqual((result.action, result.agent_session_id), ("card_reply", "session-1"))
 
     def test_only_the_assignees_reply_is_a_card_reply(self):
         work = [card("t_work", status="review", branch=BRANCH)]

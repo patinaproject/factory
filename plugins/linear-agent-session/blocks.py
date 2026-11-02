@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from . import linear
+from . import linear, outcomes
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def activity_for(task_id: str, card: Card, reason: Optional[str], redact: Callab
             return None
         cause = f" ({card.block_kind})"
         return _activity(
-            "elicitation",
+            outcomes.activity_type("parked_in_triage"),
             f"Card {task_id} is parked in triage. It blocked twice in a row for the same reason{cause}, "
             "so Hermes stopped retrying it.",
             reason,
@@ -71,7 +71,7 @@ def activity_for(task_id: str, card: Card, reason: Optional[str], redact: Callab
         )
     if card.status == "blocked" and card.block_kind == "needs_input":
         return _activity(
-            "elicitation",
+            outcomes.activity_type("needs_input"),
             f"Card {task_id} is blocked and needs a person to decide.",
             reason,
             "Reply here with your answer to resume it.",
@@ -79,7 +79,7 @@ def activity_for(task_id: str, card: Card, reason: Optional[str], redact: Callab
         )
     if card.status == "blocked" and card.block_kind == "capability":
         return _activity(
-            "error",
+            outcomes.activity_type("capability"),
             f"Card {task_id} is blocked: the worker lacks something it needs.",
             reason,
             "Fix the cause, then reply here to resume it.",
