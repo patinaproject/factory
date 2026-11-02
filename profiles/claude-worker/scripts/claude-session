@@ -829,10 +829,10 @@ def child_env(worktree: Path, extra: dict | None = None) -> dict:
     return {**env, **(extra or {})}
 
 
-def group_commands(pgid: int, leader: int) -> list[str]:
-    listing = subprocess.run(["ps", "-axww", "-o", "pid=,pgid=,command="], capture_output=True, text=True).stdout
+def group_commands(pgid: int) -> list[str]:
+    listing = subprocess.run(["ps", "-axww", "-o", "pid=,pgid=,command="], capture_output=True, text=True, check=True).stdout
     members = (line.split(None, 2) for line in listing.splitlines())
-    return [command for pid, group, command in members if int(group) == pgid and int(pid) != leader]
+    return [command for pid, group, command in members if int(group) == pgid and int(pid) != pgid]
 
 
 def signal_group(pgid: int, sig: int) -> None:
@@ -859,10 +859,10 @@ def run_in_own_group(check: str, worktree: Path, env: dict, seconds: float) -> C
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.05)
-        running = [] if exited else group_commands(shell.pid, shell.pid)
+        running = [] if exited else group_commands(shell.pid)
         signal_group(shell.pid, signal.SIGTERM)
         deadline = time.monotonic() + TOOLCHAIN_KILL_GRACE_SECONDS
-        while group_commands(shell.pid, shell.pid) and time.monotonic() < deadline:
+        while group_commands(shell.pid) and time.monotonic() < deadline:
             time.sleep(0.1)
         signal_group(shell.pid, signal.SIGKILL)
         code = shell.wait()

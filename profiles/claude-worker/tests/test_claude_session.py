@@ -2088,14 +2088,7 @@ class ClaudeSessionTest(GitFixture):
     def assert_gone(self, pids: list[int]) -> None:
         self.assertTrue(pids)
         for pid in pids:
-            deadline = time.monotonic() + 2
-            while True:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    break
-                self.assertLess(time.monotonic(), deadline, f"process {pid} is still alive")
-                time.sleep(0.05)
+            self.assert_process_gone(pid)
 
     def kill_recorded_children(self) -> None:
         for pid in self.check_pids():
