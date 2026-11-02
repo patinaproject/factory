@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -1117,6 +1118,209 @@ class IssueWaitTest(BriefHarness):
         )
 
         self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "released t_default\n", ""))
+
+
+WORKTREE_PARK = "Waiting for the worktree: another claude-session holds /w for card t_old (running)"
+SERVER_PARK = "Waiting after a server error: gh api repos/o/r failed: gh: Server Error (HTTP 500)"
+PARK_AT = 200
+
+
+class CauseWaitTest(BriefHarness):
+    """`sweep_worktree` and `sweep_server_error` against fake boards and the real Linear client on a fake Linear."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.default_board.unlink()
+        with closing(sqlite3.connect(self.default_board)) as db:
+            db.execute(TASKS)
+            db.executescript(COMMENTS_AND_EVENTS)
+        self.tasks: dict[str, list] = {"default": [], "triage": []}
+
+    def wait(self, board: str, task_id: str, reason: str, assignee: str | None = "claude-worker",
+             comments: tuple = (), parked_at: int = PARK_AT, workspace: Path | None = None) -> None:
+        database = self.default_board if board == "default" else self.board
+        self.park(database, task_id, reason, assignee, comments)
+        with closing(sqlite3.connect(database)) as db:
+            db.execute("UPDATE task_events SET created_at = ? WHERE task_id = ?", (parked_at, task_id))
+            db.commit()
+        self.tasks[board].append({
+            **task(task_id, "scheduled", assignee), "body": IMPLEMENTATION_BODY,
+            "workspace_path": str(workspace) if workspace else None,
+        })
+
+    def worktree(self, name: str) -> tuple[Path, Path]:
+        path = self.tmp / name
+        path.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(path)], check=True)
+        return path, path / ".git" / "claude-session.lock"
+
+    def call(self, expression: str, now: float | None = None) -> object:
+        self.state_path.write_text(json.dumps({
+            "default_tasks": self.tasks["default"], "tasks": self.tasks["triage"], "settings": BRIEF_SETTINGS,
+            "db_path": str(self.board), "default_db": str(self.default_board),
+        }))
+        clock = "" if now is None else f"card_transition.time.time = lambda: {now}; "
+        env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path),
+               "HERMES_HOME": str(self.home)}
+        proc = subprocess.run(
+            [sys.executable, "-c", f"import json, card_transition; {clock}print(json.dumps({expression}))"],
+            cwd=SCRIPTS, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        state = json.loads(self.state_path.read_text())
+        self.tasks = {"default": state["default_tasks"], "triage": state["tasks"]}
+        for database, cards in ((self.default_board, self.tasks["default"]), (self.board, self.tasks["triage"])):
+            with closing(sqlite3.connect(database)) as db:
+                db.executemany("UPDATE tasks SET status = ? WHERE id = ?", [(card["status"], card["id"]) for card in cards])
+                db.commit()
+        return json.loads(proc.stdout)
+
+    def worktree_sweep(self) -> dict:
+        return self.call("card_transition.sweep_worktree()")
+
+    def server_sweep(self, now: float) -> dict:
+        return self.call("card_transition.sweep_server_error()", now)
+
+    def thoughts(self) -> list:
+        return [activity["content"] for activity in self.activities()]
+
+    def comments(self) -> list:
+        log = Path(f"{self.state_path}.log")
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return [call[2:] for call in calls if call[:2] == ["kanban", "--board"] and call[3] == "comment"]
+
+    def test_a_free_worktree_releases_the_card_with_one_thought_and_a_second_sweep_posts_nothing(self) -> None:
+        for board, assigned in (("default", "claude-worker"), ("triage", None)):
+            with self.subTest(board):
+                self.setUp()
+                path, lock = self.worktree(f"w-{board}")
+                lock.write_text("")
+                self.wait(board, "t_1", WORKTREE_PARK, workspace=path)
+
+                first = self.worktree_sweep()
+                second = self.worktree_sweep()
+
+                self.assertEqual((first, second), ({"released": ["t_1"], "failed": {}}, {"released": [], "failed": {}}))
+                self.assertEqual(self.statuses()["t_1"], ("ready", assigned))
+                self.assertEqual(self.thoughts(), [{"type": "thought", "body": "The worktree is free, so this card runs again."}])
+                self.assertEqual(self.comments(), [[board, "comment", "t_1", "Resumed: the worktree is free."]])
+
+    def test_a_card_whose_worktree_has_no_lock_file_yet_is_released(self) -> None:
+        path, _ = self.worktree("w")
+        self.wait("default", "t_1", WORKTREE_PARK, workspace=path)
+
+        self.assertEqual(self.worktree_sweep(), {"released": ["t_1"], "failed": {}})
+
+    def test_a_held_lock_keeps_the_card_parked_and_posts_nothing_until_it_is_dropped(self) -> None:
+        path, lock = self.worktree("w")
+        self.wait("default", "t_1", WORKTREE_PARK, workspace=path)
+        with open(lock, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            during = self.worktree_sweep()
+
+            self.assertEqual(during, {"released": [], "failed": {}})
+            self.assertEqual((self.statuses()["t_1"], self.thoughts(), self.comments()), (("scheduled", "claude-worker"), [], []))
+
+        self.assertEqual(self.worktree_sweep(), {"released": ["t_1"], "failed": {}})
+
+    def test_a_held_worktree_does_not_stop_the_release_of_a_free_one(self) -> None:
+        busy, busy_lock = self.worktree("busy")
+        free, free_lock = self.worktree("free")
+        free_lock.write_text("")
+        self.wait("default", "t_a_busy", WORKTREE_PARK, workspace=busy)
+        self.wait("default", "t_b_free", WORKTREE_PARK, workspace=free)
+        with open(busy_lock, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            self.assertEqual(self.worktree_sweep(), {"released": ["t_b_free"], "failed": {}})
+
+        self.assertEqual(self.statuses()["t_a_busy"], ("scheduled", "claude-worker"))
+
+    def test_a_thought_that_cannot_be_posted_still_releases_the_card_and_is_recorded_on_it(self) -> None:
+        path, _ = self.worktree("w")
+        self.wait("default", "t_1", WORKTREE_PARK, workspace=path)
+        self.linear({"activity_error": "Linear is down"})
+
+        swept = self.worktree_sweep()
+
+        self.assertEqual(swept, {"released": ["t_1"], "failed": {}})
+        self.assertEqual(self.statuses()["t_1"], ("ready", "claude-worker"))
+        self.assertEqual(self.thoughts(), [])
+        self.assertEqual(len(self.comments()), 1)
+        self.assertRegex(self.comments()[0][3], r"^Resumed: the worktree is free, but the note on the agent session was not posted")
+
+    def test_the_server_error_wait_ends_at_300_seconds_and_not_before(self) -> None:
+        self.wait("default", "t_1", SERVER_PARK)
+
+        before = self.server_sweep(PARK_AT + 299)
+        self.assertEqual((before, self.statuses()["t_1"], self.thoughts()), (
+            {"released": [], "failed": {}}, ("scheduled", "claude-worker"), [],
+        ))
+
+        after = self.server_sweep(PARK_AT + 300)
+
+        self.assertEqual(after, {"released": ["t_1"], "failed": {}})
+        self.assertEqual(self.statuses()["t_1"], ("ready", "claude-worker"))
+        self.assertEqual(self.thoughts(), [{"type": "thought", "body": "The server-error wait is over, so this card runs again."}])
+        self.assertEqual(self.server_sweep(PARK_AT + 400), {"released": [], "failed": {}})
+        self.assertEqual(len(self.thoughts()), 1)
+
+    def test_a_card_still_inside_its_wait_does_not_stop_the_release_of_one_whose_wait_is_over(self) -> None:
+        self.wait("default", "t_a_recent", SERVER_PARK, parked_at=PARK_AT + 250)
+        self.wait("default", "t_b_old", SERVER_PARK)
+        self.wait("triage", "t_c_old", SERVER_PARK)
+
+        swept = self.server_sweep(PARK_AT + 300)
+
+        self.assertEqual(swept, {"released": ["t_b_old", "t_c_old"], "failed": {}})
+        self.assertEqual(self.statuses()["t_a_recent"], ("scheduled", "claude-worker"))
+
+    def test_a_stopped_or_unassigned_card_is_released_by_neither_sweep(self) -> None:
+        path, _ = self.worktree("w")
+        self.wait("default", "t_stopped", WORKTREE_PARK, comments=("stopped",), workspace=path)
+        self.wait("default", "t_unassigned", WORKTREE_PARK, assignee=None, workspace=path)
+        self.wait("triage", "t_stopped_server", SERVER_PARK, comments=("stopped",))
+        self.wait("triage", "t_unassigned_server", SERVER_PARK, assignee=None)
+
+        swept = [self.worktree_sweep(), self.server_sweep(PARK_AT + 1000)]
+
+        self.assertEqual(swept, [{"released": [], "failed": {}}] * 2)
+        self.assertEqual({status for status, _ in self.statuses().values()}, {"scheduled"})
+        self.assertEqual((self.thoughts(), self.comments()), ([], []))
+
+    def test_a_card_parked_with_another_prefix_is_released_by_neither_sweep(self) -> None:
+        path, _ = self.worktree("w")
+        for at, reason in enumerate((
+            "Needs input: which screen?", "Waiting for a factory deploy: install differs", f"Waiting for an issue: {ISSUE}",
+        )):
+            self.wait("default", f"t_{at}", reason, workspace=path)
+
+        swept = [self.worktree_sweep(), self.server_sweep(PARK_AT + 1000)]
+
+        self.assertEqual(swept, [{"released": [], "failed": {}}] * 2)
+        self.assertEqual({status for status, _ in self.statuses().values()}, {"scheduled"})
+
+    def test_dispatch_triage_releases_both_kinds_of_parked_card(self) -> None:
+        path, _ = self.worktree("w")
+        self.wait("default", "t_worktree", WORKTREE_PARK, workspace=path)
+        self.wait("default", "t_server", SERVER_PARK, parked_at=int(time.time()) - 301)
+
+        proc = self.run_script(
+            [], settings=BRIEF_SETTINGS, default_tasks=self.tasks["default"], default_db=str(self.default_board),
+        )
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "released t_worktree\nreleased t_server\n", ""))
+        self.assertEqual({self.statuses()[each][0] for each in ("t_worktree", "t_server")}, {"ready"})
+
+    def test_a_person_replying_does_not_release_a_card_parked_with_a_new_prefix(self) -> None:
+        for reason in (WORKTREE_PARK, SERVER_PARK):
+            show = {
+                "events": [{"kind": "scheduled", "payload": {"reason": reason}, "created_at": PARK_AT}],
+                "comments": [{"author": "x", "body": "Linear reply: go on", "created_at": PARK_AT + 5}],
+            }
+            with self.subTest(reason):
+                self.assertIs(self.call(f"card_transition.replied({show!r})"), False)
 
 
 if __name__ == "__main__":
