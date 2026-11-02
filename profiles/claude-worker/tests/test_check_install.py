@@ -1297,6 +1297,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("reopen-conflicts", 5),
             cron_job("finish-merged", 5),
             cron_job("dispatch-triage", 1),
+            cron_job("file-dependency-update", 10080),
         ])
         self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local"), ROOT_JOBS[1]])
 
