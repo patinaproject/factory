@@ -42,10 +42,10 @@ class FakeXcode:
         self.command_line_tools = self.dir / "CommandLineTools"
         for developer in (self.developer, self.command_line_tools):
             (developer / "usr" / "bin").mkdir(parents=True)
-            for name, body in (("xcrun", "exit 0"), ("git", 'exec /usr/bin/env -u DEVELOPER_DIR git "$@"')):
-                tool = developer / "usr" / "bin" / name
-                tool.write_text(f"#!/bin/sh\n{body}\n")
-                os.chmod(tool, 0o755)
+            # /usr/bin/git is an xcrun shim: it runs DEVELOPER_DIR's xcrun with `git` as the first argument.
+            xcrun = developer / "usr" / "bin" / "xcrun"
+            xcrun.write_text('#!/bin/sh\nif [ "$1" = git ]; then shift; exec /usr/bin/env -u DEVELOPER_DIR git "$@"; fi\nexit 0\n')
+            os.chmod(xcrun, 0o755)
         self.xcodebuild = self.dir / "xcodebuild"
         self.calls = self.dir / "calls"
         self.answer(status, hang)

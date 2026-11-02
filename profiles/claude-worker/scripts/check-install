@@ -77,6 +77,13 @@ It checks that each repository plugin installed in a home is enabled there, from
 --user --json`, and imports each installed plugin the way Hermes does with import-plugins, in the same
 store Python, so a plugin Hermes would skip or fail to load is reported. Hermes only logs both.
 
+On macOS, it checks that the App Store (com.apple.commerce AutoUpdate) and macOS
+(com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates) automatic installs are off, a managed
+preference winning over the local one, and that the active full Xcode has no first launch pending, from
+`xcodebuild -checkFirstLaunchStatus` with a 10 second limit, a hang counting as pending. The
+Command Line Tools alone skip the Xcode check. PREFERENCES_ROOT (default /Library), XCODEBUILD_BIN
+(default xcodebuild), and DEVELOPER_DIR (default xcode-select -p) override where it looks.
+
 On macOS, while no auto-deploy run is alive, it reports a missing or unreadable <root>/auto-deploy.json, a
 stale run lock, kanban.dispatch_profiles set in the root home, a hermes pause and a factory-gateway.lock that a
 dead run left, a gateway restart that auto-deploy recorded and that has not succeeded, and a default-branch commit that auto-deploy has not deployed a day after it was committed. The
@@ -120,6 +127,7 @@ import gh_login
 import install_plan
 import kanban_board
 import stale_failure
+import xcode
 from factory_settings import SETTINGS_KEY, find_hermes
 from install_drift import PROFILE, Commit, GitError, compare_files
 from install_plan import ADVISORY, Drift, Homes, Install, Manual
@@ -1000,6 +1008,45 @@ def auto_deploy_state(root: Path) -> dict | None:
 def hold_engaged(root: Path) -> bool:
     state = auto_deploy_state(root)
     return bool(state and state.get("hold"))
+
+
+DISABLE_UPDATES = "skills/setup-factory/scripts/disable-auto-updates"
+# (kind, domain, key) of each setting that must be off.
+UPDATE_SETTINGS = (
+    ("app auto-update", "com.apple.commerce", "AutoUpdate"),
+    ("macos auto-update", "com.apple.SoftwareUpdate", "AutomaticallyInstallMacOSUpdates"),
+)
+
+
+def preference_value(root: Path, domain: str, key: str):
+    """The value macOS uses: a managed preference that sets the key wins over the local one. None when unset."""
+    for folder in ("Managed Preferences", "Preferences"):
+        try:
+            values = plistlib.loads((root / folder / f"{domain}.plist").read_bytes())
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            continue
+        if key in values:
+            return values[key]
+    return None
+
+
+def check_host_updates(preferences_root: Path, xcodebuild: str, env: dict) -> list:
+    """Report App Store and macOS automatic installs that are on or unset, and a pending Xcode first launch."""
+    drifts = []
+    for kind, domain, key in UPDATE_SETTINGS:
+        if preference_value(preferences_root, domain, key) is not False:
+            drifts.append(Drift(
+                kind, domain, f"{key} is on or unset; run sudo python3 {DISABLE_UPDATES}",
+                Manual(f"run sudo python3 {DISABLE_UPDATES} in the operator's terminal"),
+            ))
+    developer = xcode.first_launch_pending(xcodebuild, env)
+    if developer is not None:
+        drifts.append(Drift(
+            "xcode first launch", str(developer),
+            f"xcodebuild -checkFirstLaunchStatus reports a first launch pending; run {xcode.FIRST_LAUNCH_FIX}",
+            Manual(f"run {xcode.FIRST_LAUNCH_FIX} in the operator's terminal"),
+        ))
+    return drifts
 
 
 def check_auto_deploy(
@@ -2292,6 +2339,9 @@ def main() -> int:
             *check_plugin_imports(commit, [root, worker], root),
         ]
         if sys.platform == "darwin":
+            drifts.extend(check_host_updates(
+                Path(os.environ.get("PREFERENCES_ROOT", "/Library")), os.environ.get("XCODEBUILD_BIN", "xcodebuild"), os.environ,
+            ))
             drifts.extend(check_services(launchd_root, launchctl))
             drifts.extend(check_gh_login(launchd_root, worker, time.time()))
             drifts.extend(check_auto_deploy(
