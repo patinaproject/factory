@@ -17,7 +17,7 @@ import uuid
 from unittest import mock
 from pathlib import Path
 
-from tests.support import BOT_LOGIN, REPO as FACTORY, SCRIPTS, FakeBroker, FakeGithub, GitFixture, git, granted
+from tests.support import BOT_LOGIN, REPO as FACTORY, SCRIPTS, FakeBroker, FakeGithub, FakeXcode, GitFixture, git, granted
 
 _result_line_spec = importlib.util.spec_from_file_location(
     "result_line", FACTORY / "plugins" / "blocker-order" / "result_line.py"
@@ -2069,6 +2069,68 @@ class ClaudeSessionTest(GitFixture):
             "in the environment Claude Code gets: no JAVA_HOME",
         })
         self.assertFalse(self.log.exists())
+
+    def xcode_session(self, status: int = 0, check: str = "xcrun simctl help"):
+        xcode = FakeXcode(self.tmp, status)
+        marker = self.tmp / "toolchain-ran"
+        self.repository["toolchain_checks"] = [f"touch {marker}; {check}"]
+        self.settings = self.write_settings([self.repository])
+        return xcode, marker, {"XCODEBUILD_BIN": str(xcode.xcodebuild), "DEVELOPER_DIR": str(xcode.developer)}
+
+    def test_a_pending_first_launch_refuses_a_run_that_needs_xcrun(self) -> None:
+        xcode, marker, env = self.xcode_session(status=1)
+
+        status, report = self.run_session(env=env)
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {
+            "error": "the active Xcode has a first launch pending; run sudo xcodebuild -runFirstLaunch",
+        })
+        self.assertEqual(xcode.called(), ["-checkFirstLaunchStatus"])
+        self.assertFalse(marker.exists())
+        self.assertFalse(self.log.exists())
+
+    def test_a_first_launch_check_that_hangs_refuses_the_run(self) -> None:
+        xcode, marker, env = self.xcode_session()
+        xcode.answer(hang=True)
+        module = self.session_module()
+
+        with mock.patch.object(module.xcode, "FIRST_LAUNCH_SECONDS", 0.5), \
+                mock.patch.dict(os.environ, env), self.assertRaises(module.Refusal) as refused:
+            module.check_first_launch(self.repository, self.worktree)
+
+        self.assertEqual(
+            str(refused.exception), "the active Xcode has a first launch pending; run sudo xcodebuild -runFirstLaunch"
+        )
+        self.assertFalse(marker.exists())
+
+    def test_the_first_launch_check_waits_ten_seconds(self) -> None:
+        self.assertEqual(self.session_module().xcode.FIRST_LAUNCH_SECONDS, 10)
+
+    def test_a_first_launch_that_is_done_lets_the_toolchain_checks_run(self) -> None:
+        xcode, marker, env = self.xcode_session(status=0, check="true # xcrun")
+
+        status, report = self.run_session(env=env)
+
+        self.assertEqual((status, report.get("error"), marker.exists()), (0, None, True))
+        self.assertEqual(xcode.called(), ["-checkFirstLaunchStatus"])
+
+    def test_a_repository_without_an_xcrun_check_never_runs_xcodebuild(self) -> None:
+        xcode, marker, env = self.xcode_session(status=1, check="true")
+
+        status, report = self.run_session(env=env)
+
+        self.assertEqual((status, report.get("error"), marker.exists()), (0, None, True))
+        self.assertEqual(xcode.called(), [])
+
+    def test_command_line_tools_alone_never_run_xcodebuild(self) -> None:
+        xcode, marker, env = self.xcode_session(status=1, check="true # xcrun")
+        env["DEVELOPER_DIR"] = str(xcode.command_line_tools)
+
+        status, report = self.run_session(env=env)
+
+        self.assertEqual((status, report.get("error"), marker.exists()), (0, None, True))
+        self.assertEqual(xcode.called(), [])
 
     def test_toolchain_checks_must_be_a_list_of_commands(self) -> None:
         self.repository["toolchain_checks"] = "xcrun simctl help"
