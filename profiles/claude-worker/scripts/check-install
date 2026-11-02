@@ -1011,11 +1011,7 @@ def hold_engaged(root: Path) -> bool:
 
 
 DISABLE_UPDATES = "skills/setup-factory/scripts/disable-auto-updates"
-# (kind, domain, key) of each setting that must be off.
-UPDATE_SETTINGS = (
-    ("app auto-update", "com.apple.commerce", "AutoUpdate"),
-    ("macos auto-update", "com.apple.SoftwareUpdate", "AutomaticallyInstallMacOSUpdates"),
-)
+DISABLE_UPDATES_FIX = Manual(f"run sudo python3 {DISABLE_UPDATES} in the operator's terminal")
 
 
 def preference_value(root: Path, domain: str, key: str):
@@ -1033,12 +1029,16 @@ def preference_value(root: Path, domain: str, key: str):
 def check_host_updates(preferences_root: Path, xcodebuild: str, env: dict) -> list:
     """Report App Store and macOS automatic installs that are on or unset, and a pending Xcode first launch."""
     drifts = []
-    for kind, domain, key in UPDATE_SETTINGS:
-        if preference_value(preferences_root, domain, key) is not False:
-            drifts.append(Drift(
-                kind, domain, f"{key} is on or unset; run sudo python3 {DISABLE_UPDATES}",
-                Manual(f"run sudo python3 {DISABLE_UPDATES} in the operator's terminal"),
-            ))
+    if preference_value(preferences_root, "com.apple.commerce", "AutoUpdate") is not False:
+        drifts.append(Drift(
+            "app auto-update", "com.apple.commerce",
+            f"AutoUpdate is on or unset; run sudo python3 {DISABLE_UPDATES}", DISABLE_UPDATES_FIX,
+        ))
+    if preference_value(preferences_root, "com.apple.SoftwareUpdate", "AutomaticallyInstallMacOSUpdates") is not False:
+        drifts.append(Drift(
+            "macos auto-update", "com.apple.SoftwareUpdate",
+            f"AutomaticallyInstallMacOSUpdates is on or unset; run sudo python3 {DISABLE_UPDATES}", DISABLE_UPDATES_FIX,
+        ))
     developer = xcode.first_launch_pending(xcodebuild, env)
     if developer is not None:
         drifts.append(Drift(
