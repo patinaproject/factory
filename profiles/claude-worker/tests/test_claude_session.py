@@ -2070,6 +2070,108 @@ class ClaudeSessionTest(GitFixture):
         })
         self.assertFalse(self.log.exists())
 
+    def toolchain_check_run(self, check: str, seconds: str = "2"):
+        self.repository["toolchain_checks"] = [check]
+        self.settings = self.write_settings([self.repository])
+        sentinel = subprocess.Popen(["sleep", "3010"], start_new_session=True)
+        self.addCleanup(lambda: (sentinel.kill(), sentinel.wait()))
+        started = time.monotonic()
+        status, report = self.run_session(env={"CLAUDE_SESSION_TOOLCHAIN_CHECK_SECONDS": seconds})
+        elapsed = time.monotonic() - started
+        self.assertIsNone(sentinel.poll())
+        return status, report, elapsed
+
+    def check_pids(self) -> list[int]:
+        path = self.tmp / "children"
+        return [int(line) for line in path.read_text().split()] if path.exists() else []
+
+    def assert_gone(self, pids: list[int]) -> None:
+        self.assertTrue(pids)
+        for pid in pids:
+            self.assert_process_gone(pid)
+
+    def kill_recorded_children(self) -> None:
+        for pid in self.check_pids():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def test_a_timed_out_toolchain_check_stops_its_background_child(self) -> None:
+        self.addCleanup(self.kill_recorded_children)
+        check = f"n=3001; sleep $n & echo $! >> {self.tmp}/children; wait"
+
+        status, report, elapsed = self.toolchain_check_run(check)
+
+        self.assertEqual(status, 2)
+        self.assertFalse(self.log.exists())
+        self.assertLess(elapsed, 30)
+        self.assert_gone(self.check_pids())
+
+    def test_a_timeout_refusal_names_the_processes_still_running(self) -> None:
+        self.addCleanup(self.kill_recorded_children)
+        check = f"n=3002; sleep $n & echo $! >> {self.tmp}/children; wait"
+
+        status, report, _ = self.toolchain_check_run(check)
+
+        self.assertEqual(status, 2)
+        self.assertTrue(
+            report["error"].startswith(f"toolchain check {check!r} did not finish in 2s; still running: "),
+            report["error"],
+        )
+        self.assertIn("sleep 3002", report["error"])
+        self.assertNotIn("/bin/sh -c", report["error"])
+
+    def test_a_timed_out_toolchain_check_stops_a_child_that_ignores_sigterm(self) -> None:
+        self.addCleanup(self.kill_recorded_children)
+        check = f"n=3003; (trap '' TERM; sleep $n) & echo $! >> {self.tmp}/children; wait"
+
+        status, _, elapsed = self.toolchain_check_run(check)
+
+        self.assertEqual(status, 2)
+        self.assertLess(elapsed, 30)
+        self.assert_gone(self.check_pids())
+
+    def test_a_passing_toolchain_check_leaves_no_background_child(self) -> None:
+        self.addCleanup(self.kill_recorded_children)
+        holders = {
+            "stdout": ("3004", "2>/dev/null"),
+            "stderr": ("3005", ">/dev/null"),
+            "nothing": ("3006", ">/dev/null 2>&1"),
+            "everything": ("3007", ""),
+        }
+        for held, (seconds, redirect) in holders.items():
+            with self.subTest(child_holds=held):
+                (self.tmp / "children").unlink(missing_ok=True)
+                check = f"n={seconds}; sleep $n {redirect} </dev/null & echo $! >> {self.tmp}/children; exit 0"
+
+                status, report, elapsed = self.toolchain_check_run(check)
+
+                self.assertEqual((status, "error" in report), (0, False), report)
+                self.assertLess(elapsed, 30)
+                self.assert_gone(self.check_pids())
+
+    def test_a_failing_toolchain_check_leaves_no_background_child(self) -> None:
+        self.addCleanup(self.kill_recorded_children)
+        check = f"n=3008; sleep $n </dev/null >&2 & echo $! >> {self.tmp}/children; echo broken >&2; exit 3"
+
+        status, report, elapsed = self.toolchain_check_run(check)
+
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {
+            "error": f"toolchain check {check!r} failed with exit 3 in the environment Claude Code gets: broken",
+        })
+        self.assertLess(elapsed, 30)
+        self.assert_gone(self.check_pids())
+
+    def test_a_toolchain_check_runs_in_its_own_process_group(self) -> None:
+        check = f"ps -o pgid= -p $$ > {self.tmp}/pgid"
+
+        status, _, _ = self.toolchain_check_run(check)
+
+        self.assertEqual(status, 0)
+        self.assertNotEqual(int((self.tmp / "pgid").read_text()), os.getpgid(0))
+
     def test_toolchain_checks_must_be_a_list_of_commands(self) -> None:
         self.repository["toolchain_checks"] = "xcrun simctl help"
         self.settings = self.write_settings([self.repository])
