@@ -109,8 +109,8 @@ It was computed when the webhook arrived, so it can be seconds old.
   for the issue. The command also frees that branch. It prints one JSON line.
   When it prints `error`, post that error as one `thought` on this agent session.
 - Add free-text card comments with the `kanban_comment` tool, not the shell.
-- To unblock a card, follow "Unblock a card" below, with the reason
-  `resumed from Linear; see the card comments`.
+- To unblock a card, follow "Unblock a card" below, with the comment
+  `Resumed for a Linear reply; see the card comments`.
 - To resume a card in `triage`, follow "Resume a parked card" below.
 - Apart from `hermes kanban create` and `<<archive_card>>`, change a card's
   status or assignee only through `<<card_transition>>`, as this prompt says.
@@ -302,7 +302,7 @@ stop.
    "Implementation card" step 6 says.
 4. If the card is `blocked` and `delegated` is true, unblock it as "Rules" says. If the card
    is `review`, run
-   `<<card_transition>> reopen <task id> --reason 'resumed from Linear; see the card comments'`
+   `<<card_transition>> reopen <task id> --comment 'Resumed for a Linear reply; see the card comments'`
    so its worker reads the reply. If the card is `triage`, resume it as
    "Rules" says.
 5. Post one `thought` on `agent_session_id`, so the human sees that the reply

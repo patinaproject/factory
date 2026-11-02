@@ -60,12 +60,15 @@ the card and posts one `thought` naming the issue on the card's agent session. I
 worker's `GH_CONFIG_DIR`, once per URL, only while such a card waits and only with a fresh gh login. A `gh` error,
 timeout, or `OSError` leaves the card parked and is reported. `replied` never releases it.
 
-- `unblock --repo <r> --branch <b> --reason <text>`: unblock a card. When the branch has a pull
+- `unblock --repo <r> --branch <b> (--reason <text> | --comment <text>)`: unblock a card. When the branch has a pull
   request, Hermes holds the `ready` card for 24 hours after a comment that names it, and only the
   review reopen lifts the hold, so the card is unblocked, sent to review, and reopened.
-- `reopen --reason <text>`: hand a `review` card back to its worker. First `stale_failure.clear_after_review`
+- `reopen (--reason <text> | --comment <text>)`: hand a `review` card back to its worker. First `stale_failure.clear_after_review`
   clears the card's `last_failure_error` when its newest ended run is `review_requested` or `completed`, because
   Hermes holds a `ready` card as `blocker_auth` for an old quota or auth error that the reopen leaves in place.
+  `--reason` makes Hermes write a `CHANGES REQUESTED: <text>` comment, which the worker reads as a request for
+  changes. `--comment` posts the text as one plain card comment, then reopens with no reason, for a reply that
+  requests no change.
 - `stop`: block a card whatever it is doing. Hermes blocks only a `ready` or `running` card, so a
   `review` card is reopened first. A `scheduled` card stays `scheduled`, is unassigned, and gets a `stopped`
   comment, which has no reply prefix, so the next reply releases it like any wait.
@@ -658,18 +661,28 @@ def has_pull_request(repo: str, branch: str) -> bool:
     raise Failed(f"gh pr view failed: {last_line(proc.stderr)}")
 
 
-def unblock(card: Card, repo: str, branch: str, reason: str) -> dict:
+def reopen_review(card: Card, reason: str | None, comment: str | None) -> None:
+    """`--reason` is Hermes' `CHANGES REQUESTED` comment. `--comment` is posted plain first, so a worker that
+    starts as soon as the card is `ready` already reads it, then the card reopens with no reason."""
+    if reason is not None:
+        card.call("reopen-review", "--reason", reason)
+    else:
+        card.call("comment", comment)
+        card.call("reopen-review")
+
+
+def unblock(card: Card, repo: str, branch: str, reason: str | None, comment: str | None) -> dict:
     pull_request = has_pull_request(repo, branch)
     card.call("unblock")
     if pull_request:
         card.call("request-review")
-        card.call("reopen-review", "--reason", reason)
+        reopen_review(card, reason, comment)
     return result("unblocked", pull_request=pull_request)
 
 
-def reopen(card: Card, reason: str) -> dict:
+def reopen(card: Card, reason: str | None, comment: str | None) -> dict:
     stale_failure.clear_after_review(board_database(card.board), card.id)
-    card.call("reopen-review", "--reason", reason)
+    reopen_review(card, reason, comment)
     return result("reopened")
 
 
@@ -799,11 +812,18 @@ def parser() -> argparse.ArgumentParser:
     command("resume")
     command("triage-reply")
     command("stop")
-    sub = command("unblock")
+
+    def handback(name: str) -> argparse.ArgumentParser:
+        sub = command(name)
+        why = sub.add_mutually_exclusive_group(required=True)
+        why.add_argument("--reason")
+        why.add_argument("--comment")
+        return sub
+
+    sub = handback("unblock")
     sub.add_argument("--repo", required=True)
     sub.add_argument("--branch", required=True)
-    sub.add_argument("--reason", required=True)
-    command("reopen").add_argument("--reason", required=True)
+    handback("reopen")
     command("merged").add_argument("--pr", required=True, help="the merged pull request's URL")
     return root
 
@@ -815,8 +835,8 @@ def main(argv: list[str] | None = None) -> int:
         "park-waiting": lambda: park_waiting(args.board),
         "resume": lambda: resume(card),
         "triage-reply": lambda: triage_reply(card, sys.stdin.read()),
-        "unblock": lambda: unblock(card, args.repo, args.branch, args.reason),
-        "reopen": lambda: reopen(card, args.reason),
+        "unblock": lambda: unblock(card, args.repo, args.branch, args.reason, args.comment),
+        "reopen": lambda: reopen(card, args.reason, args.comment),
         "stop": lambda: stop(card),
         "merged": lambda: merged(card, args.pr),
     }
