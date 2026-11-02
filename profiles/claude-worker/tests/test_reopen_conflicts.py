@@ -17,6 +17,7 @@ from tests.support import BOT_LOGIN, SCRIPTS, with_interpreter
 sys.path.insert(0, str(SCRIPTS))
 from stale_reviews import REVIEWS_QUERY  # noqa: E402
 
+ROOT = SCRIPTS.parents[2]
 REPO = "example-org/example-repo"
 OTHER_REPO = "example-org/other-repo"
 HEAD = "a" * 40
@@ -157,6 +158,7 @@ class ReopenConflictsTest(unittest.TestCase):
         cli = self.dir / "profiles" / "claude-worker" / "plugins" / "linear-agent-session" / "cli.py"
         cli.parent.mkdir(parents=True)
         cli.write_text(with_interpreter(FAKE_CLI))
+        (cli.parent / "outcomes.py").symlink_to(ROOT / "plugins" / "linear-agent-session" / "outcomes.py")
         for fake in (self.hermes, self.gh):
             os.chmod(fake, 0o755)
         self.state_path = self.dir / "state.json"
@@ -350,9 +352,10 @@ class ReopenConflictsTest(unittest.TestCase):
             ["api", "-X", "POST", f"repos/{REPO}/pulls/7/requested_reviewers", "-f", "reviewers[]=rev"],
         ])
         self.assertEqual(self.cli_calls(), [[
-            "activity", "--agent-session-id", SESSION, "--type", "elicitation",
+            "activity", "--agent-session-id", SESSION, "--type", "response",
             "--body", (
-                f"Changes are in, re-requested review from @rev: their changes-requested review is on an older head than the current head {HEAD}. "
+                f"Changes are in, re-review: https://github.com/{REPO}/pull/7\n\n"
+                f"Re-requested review from @rev: their changes-requested review is on an older head than the current head {HEAD}. "
                 "Review the pull request on GitHub, then merge it or request changes."
             ),
             "--external-url", f"Pull request=https://github.com/{REPO}/pull/7",
@@ -370,7 +373,8 @@ class ReopenConflictsTest(unittest.TestCase):
         self.assertEqual(proc.stdout, f"t_1 https://github.com/{REPO}/pull/7 re-requested a,b\n")
         self.assertEqual(self.gh_calls()[-1], ["api", "-X", "POST", f"repos/{REPO}/pulls/7/requested_reviewers", "-f", "reviewers[]=a", "-f", "reviewers[]=b"])
         self.assertEqual(self.cli_calls()[0][6], (
-            f"Changes are in, re-requested review from @a, @b: their changes-requested review is on an older head than the current head {HEAD}. "
+            f"Changes are in, re-review: https://github.com/{REPO}/pull/7\n\n"
+            f"Re-requested review from @a, @b: their changes-requested review is on an older head than the current head {HEAD}. "
             "Review the pull request on GitHub, then merge it or request changes."
         ))
 
