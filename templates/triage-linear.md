@@ -30,14 +30,19 @@ the gate, or read the reply yourself. Its fields:
 - `reply` and `reply_source`: the person's reply on a `prompted` event, verbatim
   however short, and where it came from. A null `reply` means it arrived without
   text.
-- `reply_author_id`, `assignee`, `from_assignee`, and `not_assignee_reason`: on
-  a reply, the Linear user id of its author, the issue's assignee with its `id`,
-  `name`, and `gitHubUserId`, and whether the author is that assignee. Only the
-  assignee's reply starts work on the card. `not_assignee_reason` says why the
-  reply cannot be the assignee's: `no_assignee` when the issue has none,
-  `app_assignee` when an agent app holds it, and `no_author` when the author
-  could not be read. It is null when a person who is not the assignee replied.
-  All four are null on an event that carries no reply, such as a stop.
+- `reply_author_id`, `assignee`, `from_assignee`, `authorized_as`, `approvers`,
+  and `not_assignee_reason`: on a reply, the Linear user id of its author, the
+  issue's assignee with its `id`, `name`, and `gitHubUserId`, and whether the
+  author is an approver. The approvers are the assignee, the person who
+  delegated the issue to the agent app, and the operators the factory lists.
+  Only an approver's reply starts work on the card. `from_assignee` is true for
+  any approver, and `authorized_as` says which: `assignee`, `delegator`, or
+  `operator`. `approvers` lists each approver as `id`, `name`, and `role`,
+  assignee first. `not_assignee_reason` says why no one could be matched:
+  `no_assignee` when the issue has no assignee and no other approver has a
+  Linear id, `app_assignee` when an agent app holds it, and `no_author` when
+  the author could not be read. It is null when the author is simply someone
+  else. All of them are null on an event that carries no reply, such as a stop.
 - `thread` and `thread_source`: on a `prompted` event, the session's earlier
   activities, oldest first, without the reply itself. Each has `id`, `type`
   (`prompt`, `response`, `elicitation`, `thought`, `action`, or `error`),
@@ -311,26 +316,30 @@ stop.
 
 ### `card_reply_not_assignee`
 
-Someone other than the issue's assignee replied on an issue with a card. Only
-the assignee's reply starts work on the card, so this reply wakes no card and
-changes nothing on the branch. The card keeps it as context.
+Someone who is not an approver replied on an issue with a card. Only the
+reply of the assignee, the delegator, or a listed operator starts work on the
+card, so this reply wakes no card and changes nothing on the branch. The card
+keeps it as context.
 
 1. When `reply` is null, post a `thought` on `agent_session_id` asking the
    human to send the reply again, and stop.
 2. Comment on the card once with the reply, attributed to Linear. Start the
    comment with `<<not_assignee_marker>>`, never with `Linear reply:`, and
-   replace each pull request URL as `card_reply` step 2 says. Do not unblock,
-   reopen, resume, or otherwise change the card.
+   replace each pull request URL as `card_reply` step 2 says. After the marker,
+   name each person in `approvers` and their role. Do not unblock, reopen,
+   resume, or otherwise change the card.
 3. Post one `response` on `agent_session_id`. Say that the reply is on the card
-   as context, and that the worker changes the work for it only when the
-   assignee asks. Name the assignee by `assignee.name`. When
+   as context, and that the worker changes the work for it only when an
+   approver asks. Name each person in `approvers` by `name` and `role`. When
    `not_assignee_reason` is set, say why instead:
-   - `no_assignee`: the issue has no assignee, so no one can ask for the change
-     until a person is assigned.
-   - `app_assignee`: an agent app is assigned, so no one can ask for the change
-     until a person is assigned.
+   - `no_assignee`: the issue has no assignee, and no delegator or operator
+     could be matched, so no one can ask for the change until a person is
+     assigned.
+   - `app_assignee`: an agent app is assigned, and no delegator or operator
+     could be matched, so no one can ask for the change until a person is
+     assigned.
    - `no_author`: the factory could not tell who sent the reply. Name the
-     assignee, who must ask for the change.
+     approvers, who must ask for the change.
 
 ### `triage_card_reply`
 
@@ -357,7 +366,8 @@ delegated the issue.
    again when fewer triage cards run than the factory's cap.
 3. When `card` is not null and the command did not print `error`, comment the
    reply on that implementation card once, as `card_reply` step 2 says. When
-   `from_assignee` is true, start it `Linear reply:`. Otherwise start it
+   `from_assignee` is true, meaning the author is an approver, start it
+   `Linear reply:`. Otherwise start it
    `<<not_assignee_marker>>`, so the card's worker keeps it as context only.
 4. Post one `thought` on `agent_session_id` that names the triage card's
    task id and says that triage resumes with the reply when the line's

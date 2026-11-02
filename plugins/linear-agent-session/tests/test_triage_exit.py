@@ -472,5 +472,17 @@ class TriageExitCliTest(unittest.TestCase):
         self.assertEqual((code, output), (0, {"handled": False, "action": "failed", "task_id": None}))
 
 
+class OperatorUserIdsTest(unittest.TestCase):
+    def test_a_list_of_ids_or_nothing_is_read(self):
+        self.assertEqual(plugin.triage_exit.operator_user_ids(["user-1", "user-2"]), ["user-1", "user-2"])
+        self.assertEqual(plugin.triage_exit.operator_user_ids([]), [])
+        self.assertEqual(plugin.triage_exit.operator_user_ids(None), [])
+
+    def test_anything_else_is_refused_by_naming_the_setting(self):
+        for value in ("user-1", {"id": "user-1"}, 7, [1], [""], ["user-1", None]):
+            with self.subTest(value), self.assertRaisesRegex(ValueError, "operator_user_ids"):
+                plugin.triage_exit.operator_user_ids(value)
+
+
 if __name__ == "__main__":
     unittest.main()

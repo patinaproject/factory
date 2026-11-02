@@ -30,8 +30,8 @@ ACTIONS = {
     "foreign_cards": "cards the factory did not create work the issue; create no card",
     "create_card": "create the issue's implementation card",
     "reuse_card": "the issue has a card; move it to this session and handle its status",
-    "card_reply": "the issue's assignee replied on an issue with a card",
-    "card_reply_not_assignee": "someone other than the issue's assignee replied on an issue with a card; wake no card",
+    "card_reply": "the issue's assignee, its delegator, or a configured operator replied on an issue with a card",
+    "card_reply_not_assignee": "someone who is none of the issue's assignee, delegator, or configured operators replied on an issue with a card; wake no card",
     "triage_card_reply": "a reply on an issue whose triage card is live",
     "answer_reply": "a reply on an undelegated issue with no card; answer once",
     "stop_triage_card": "stop the live triage card",
@@ -87,6 +87,8 @@ class Intent:
     reply_author_id: Optional[str] = None
     assignee: Optional[dict] = None
     from_assignee: Optional[bool] = None
+    authorized_as: Optional[str] = None
+    approvers: Optional[list] = None
     not_assignee_reason: Optional[str] = None
     thread: Optional[list] = None
     thread_source: Optional[str] = None
@@ -197,6 +199,7 @@ def decide(
     reply: Reply,
     thread: Thread,
     document_titles: list[str],
+    approvers: list[dict],
 ) -> Intent:
     found = triage_exit.find_card(work_cards, issue["id"], issue["identifier"], issue["gitBranchName"])
     triage_card = find_triage_card(triage_cards, issue["id"])
@@ -226,18 +229,21 @@ def decide(
     elif (payload.get("agentActivity") or {}).get("signal") == "stop":
         action = _session_prompted(facts, stop=True)
     else:
-        facts = _with_authority(facts, issue["assignee"], reply.author_id)
+        facts = _with_authority(facts, approvers, reply.author_id)
         action = _session_prompted(facts, stop=False)
     return replace(facts, action=action, agent_session_id=session)
 
 
-def _with_authority(facts: Intent, assignee: Optional[dict], author_id: Optional[str]) -> Intent:
-    from_assignee, reason = linear.authority(assignee, author_id, "id")
+def _with_authority(facts: Intent, approvers: list[dict], author_id: Optional[str]) -> Intent:
+    role, reason = linear.authority(approvers, author_id, "id")
+    assignee = next((person for person in approvers if person["role"] == "assignee"), None)
     return replace(
         facts,
         reply_author_id=author_id,
         assignee={key: assignee[key] for key in ("id", "name", "gitHubUserId")} if assignee else None,
-        from_assignee=from_assignee,
+        from_assignee=role is not None,
+        authorized_as=role,
+        approvers=linear.approver_summary(approvers),
         not_assignee_reason=reason,
     )
 
@@ -299,6 +305,7 @@ def compute(
     payload: Any,
     *,
     app_user_id: Callable[[], str],
+    operator_user_ids: Callable[[], list[str]],
     client: Callable[[], Any],
     cards: Callable[[Optional[str]], list[Card]],
     now: Optional[dt.datetime] = None,
@@ -311,16 +318,19 @@ def compute(
         linear_client = client()
         issue = linear_client.get_issue(_issue_id(payload))
         documents = linear_client.issue_documents(issue["id"])["documents"]
+        app = app_user_id()
+        people = [] if carries_no_reply(payload) else linear.lookup_approvers(linear_client, issue, app, operator_user_ids())
         return decide(
             payload,
             issue,
             cards(TRIAGE_BOARD),
             cards(None),
-            app_user_id(),
+            app,
             now or delivery_time(payload),
             resolve_reply(payload, linear_client),
             resolve_thread(payload, linear_client),
             [document["title"] for document in documents],
+            people,
         )
     except Exception as failure:
         return error_intent(redact(f"{type(failure).__name__}: {failure}"))

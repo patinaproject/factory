@@ -1523,34 +1523,148 @@ class ReviewOwnerTest(unittest.TestCase):
         self.assertIn("no issue ABC-1", output["error"])
 
 
+def history_page(*entries, next_cursor=None):
+    page = {"nodes": list(entries), "pageInfo": {"hasNextPage": next_cursor is not None, "endCursor": next_cursor}}
+    return 200, {"data": {"issue": {"history": page}}}
+
+
+def delegated_by(actor, to="app-user-1"):
+    return {"toDelegate": {"id": to} if to else None, "actor": actor}
+
+
+def users_page(*users):
+    return 200, {"data": {"users": {"nodes": list(users)}}}
+
+
 class PrAuthorityTest(unittest.TestCase):
     ANN = {"id": "user-ann", "name": "Ann", "gitHubUserId": "4242", "app": False}
+    DEE = {"id": "user-dee", "name": "Dee", "gitHubUserId": "5151", "app": False}
+    OLIVE = {"id": "user-olive", "name": "Olive", "gitHubUserId": "6161", "app": False}
     CARD = "Work on it.\n```text\nlinear_issue_id: ABC-1\n```\n"
 
-    def authority(self, assignee, sender_id, body=CARD):
+    def roles(self, *people):
+        return [{"id": p["id"], "name": p["name"], "role": role} for p, role in people]
+
+    def authority(self, assignee, sender_id, body=CARD, history=(), operators=(), users=()):
+        """`history` is the pages the delegator lookup reads, each a history_page; `users` answers the operator ids."""
         response = json.loads(json.dumps(IssueTest.RESPONSE))
         response["data"]["issue"]["assignee"] = assignee
-        fake = FakeLinear([(200, response)])
-        output = tools.run_pr_authority(lambda: make_client(fake), {"t_work": body}.__getitem__, {"task": "t_work", "sender_id": sender_id})
+        replies = [(200, response), *(history or [history_page()])]
+        if operators:
+            replies.append(users_page(*users))
+        fake = FakeLinear(replies)
+        output = tools.run_pr_authority(
+            lambda: make_client(fake), {"t_work": body}.__getitem__, lambda: "app-user-1", lambda: list(operators), {"task": "t_work", "sender_id": sender_id}
+        )
         return fake, json.loads(output)
 
     def test_only_the_assignees_github_id_is_the_assignee(self):
         for sender_id, from_assignee in (("4242", True), ("4243", False), ("0", False)):
             with self.subTest(sender_id):
                 fake, output = self.authority(self.ANN, sender_id)
-                self.assertEqual(output, {"from_assignee": from_assignee, "assignee": "Ann", "reason": None})
+                self.assertEqual(
+                    output,
+                    {
+                        "from_assignee": from_assignee,
+                        "assignee": "Ann",
+                        "reason": None,
+                        "authorized_as": "assignee" if from_assignee else None,
+                        "approvers": self.roles((self.ANN, "assignee")),
+                    },
+                )
                 self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
 
     def test_an_issue_with_no_one_to_ask_says_why(self):
         cases = {
-            "no_assignee": (None, None),
-            "app_assignee": ({**self.ANN, "name": "Some agent", "app": True}, "Some agent"),
-            "no_github_id": ({**self.ANN, "gitHubUserId": None}, "Ann"),
+            "no_assignee": (None, None, []),
+            "app_assignee": ({**self.ANN, "name": "Some agent", "app": True}, "Some agent", []),
+            "no_github_id": ({**self.ANN, "gitHubUserId": None}, "Ann", self.roles(({**self.ANN, "gitHubUserId": None}, "assignee"))),
         }
-        for reason, (assignee, name) in cases.items():
+        for reason, (assignee, name, approvers) in cases.items():
             with self.subTest(reason):
                 _, output = self.authority(assignee, "4242")
-                self.assertEqual(output, {"from_assignee": False, "assignee": name, "reason": reason})
+                self.assertEqual(
+                    output,
+                    {"from_assignee": False, "assignee": name, "reason": reason, "authorized_as": None, "approvers": approvers},
+                )
+
+    def test_a_configured_operator_is_authorized_as_an_operator(self):
+        _, output = self.authority(self.ANN, "6161", history=[history_page(delegated_by(self.ANN))], operators=["user-olive"], users=[self.OLIVE])
+        self.assertEqual((output["from_assignee"], output["authorized_as"], output["reason"]), (True, "operator", None))
+
+    def test_the_delegator_is_authorized_as_the_delegator(self):
+        fake, output = self.authority(self.ANN, "5151", history=[history_page(delegated_by(self.DEE))])
+        self.assertEqual((output["from_assignee"], output["authorized_as"]), (True, "delegator"))
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "2f9a6f0e-0000-4000-8000-000000000001", "after": None})
+
+    def test_a_stranger_gets_every_approver_in_order(self):
+        _, output = self.authority(
+            self.ANN, "9999", history=[history_page(delegated_by(self.DEE))], operators=["user-olive"], users=[self.OLIVE]
+        )
+        self.assertEqual(
+            (output["from_assignee"], output["authorized_as"], output["reason"], output["approvers"]),
+            (False, None, None, self.roles((self.ANN, "assignee"), (self.DEE, "delegator"), (self.OLIVE, "operator"))),
+        )
+
+    def test_the_delegator_approves_an_issue_with_no_assignee_or_an_app_assignee(self):
+        history = [history_page(delegated_by(self.DEE))]
+        for assignee in (None, {**self.ANN, "app": True}):
+            for sender_id, authorized_as in (("5151", "delegator"), ("9999", None)):
+                with self.subTest(assignee=assignee, sender=sender_id):
+                    _, output = self.authority(assignee, sender_id, history=history)
+                    self.assertEqual((output["authorized_as"], output["reason"]), (authorized_as, None))
+
+    def test_a_delegation_nobody_can_name_authorizes_only_the_assignee_and_operators(self):
+        app_actor = {"id": "user-bot", "name": "Bot", "gitHubUserId": "7", "app": True}
+        deep = [history_page(delegated_by(None, to=None), next_cursor=str(n)) for n in (1, 2, 3)]
+        cases = {
+            "null actor": [history_page(delegated_by(None))],
+            "app actor": [history_page(delegated_by(app_actor))],
+            "no entry": [history_page(delegated_by(self.DEE, to=None))],
+            "past the third page": deep,
+        }
+        for name, history in cases.items():
+            with self.subTest(name):
+                fake, output = self.authority(self.ANN, "5151", history=history, operators=["user-olive"], users=[self.OLIVE])
+                self.assertEqual(output["authorized_as"], None)
+                self.assertEqual(
+                    output["approvers"], self.roles((self.ANN, "assignee"), (self.OLIVE, "operator"))
+                )
+        self.assertEqual(len(fake.graphql_requests), 1 + 3 + 1)
+        self.assertEqual([r["variables"].get("after") for r in fake.graphql_requests[1:4]], [None, "1", "2"])
+
+    def test_a_redelegation_replaces_the_earlier_delegator(self):
+        newest_first = history_page(delegated_by(self.OLIVE), delegated_by(self.DEE, to=None), delegated_by(self.DEE))
+        _, newest = self.authority(self.ANN, "6161", history=[newest_first])
+        _, earlier = self.authority(self.ANN, "5151", history=[newest_first])
+        self.assertEqual((newest["authorized_as"], earlier["authorized_as"]), ("delegator", None))
+
+    def test_a_failed_lookup_leaves_the_assignee_alone(self):
+        failure = (200, {"errors": [{"message": "history unavailable"}]})
+        for sender_id, authorized_as in (("4242", "assignee"), ("5151", None), ("6161", None)):
+            with self.subTest(sender_id), self.assertLogs("linear_agent_session.linear", "WARNING"):
+                _, output = self.authority(self.ANN, sender_id, history=[failure], operators=["user-olive"])
+                self.assertEqual((output["authorized_as"], output["approvers"]), (authorized_as, self.roles((self.ANN, "assignee"))))
+
+    def test_an_operator_id_that_resolves_to_nobody_or_to_an_app_matches_nobody(self):
+        app_user = {"id": "user-bot", "name": "Bot", "gitHubUserId": "7", "app": True}
+        with self.assertLogs("linear_agent_session.linear", "WARNING"):
+            _, output = self.authority(self.ANN, "7", operators=["user-bot", "user-ghost"], users=[app_user])
+        self.assertEqual((output["authorized_as"], output["approvers"]), (None, self.roles((self.ANN, "assignee"))))
+
+    def test_a_person_with_no_github_id_never_matches(self):
+        nameless = {**self.DEE, "gitHubUserId": None}
+        olive = {**self.OLIVE, "gitHubUserId": None}
+        for sender_id in ("None", "", "0"):
+            with self.subTest(sender_id):
+                _, output = self.authority(
+                    {**self.ANN, "gitHubUserId": None},
+                    sender_id,
+                    history=[history_page(delegated_by(nameless))],
+                    operators=["user-olive"],
+                    users=[olive],
+                )
+                self.assertEqual((output["from_assignee"], output["authorized_as"], output["reason"]), (False, None, "no_github_id"))
 
     def test_a_card_that_names_no_issue_is_an_error(self):
         _, output = self.authority(self.ANN, "4242", body="Work on it.")
