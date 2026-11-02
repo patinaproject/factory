@@ -1,6 +1,6 @@
 """Read a Hermes board database without writing to it.
 
-`claude-session` reads the cards for its blocker check, `dispatch-triage` and `check-install` read the cards that
+`claude-session` reads the cards for its blocker check and the status of the card each run serves, `dispatch-triage` and `check-install` read the cards that
 wait for a reply, `finish-merged` reads the cards whose pull request may have merged, and `check-install` probes
 that every read still works, so all of them read the board here. `completion_contract.py` and `stale_failure.py`
 make the only writes. The columns are Hermes' internal `tasks`, `task_comments`, and `task_events` schema, which
@@ -35,6 +35,7 @@ SELECT e.task_id, 'events', NULL, e.payload, e.kind, e.created_at, e.id
   FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE t.status = 'scheduled' AND e.kind = 'scheduled'
 ORDER BY task_id, list, created_at, row
 """
+RUN_STATE_QUERY = "SELECT status, current_run_id FROM tasks WHERE id = ?"
 ATTEMPTS = 5
 
 
@@ -53,13 +54,13 @@ def file_state(path: str) -> FileState:
     )
 
 
-def run(path: str, mode: str, sql: str) -> list[dict]:
+def run(path: str, mode: str, sql: str, params: tuple = ()) -> list[dict]:
     with closing(sqlite3.connect(f"file:{quote(path)}?mode={mode}", uri=True)) as board:
         board.row_factory = sqlite3.Row
-        return [dict(row) for row in board.execute(sql)]
+        return [dict(row) for row in board.execute(sql, params)]
 
 
-def read(path: str, sql: str) -> list[dict]:
+def read(path: str, sql: str, params: tuple = ()) -> list[dict]:
     """The rows of one consistent snapshot of the board, or `sqlite3.OperationalError`.
 
     A `mode=ro` connection takes SQLite's normal locks, so it reads one snapshot in either journal mode, and
@@ -74,7 +75,7 @@ def read(path: str, sql: str) -> list[dict]:
         if attempt:
             time.sleep(0.05 * attempt)
         try:
-            return run(path, "ro", sql)
+            return run(path, "ro", sql, params)
         except sqlite3.OperationalError as refused:
             if not os.path.exists(path):
                 raise
@@ -83,7 +84,7 @@ def read(path: str, sql: str) -> list[dict]:
         if before.wal or before.journal:
             continue
         try:
-            rows = run(path, "ro&immutable=1", sql)
+            rows = run(path, "ro&immutable=1", sql, params)
         except sqlite3.DatabaseError as torn:
             if file_state(path) == before:
                 raise
@@ -97,6 +98,12 @@ def read(path: str, sql: str) -> list[dict]:
 
 def cards(path: str) -> list[dict]:
     return read(path, BOARD_QUERY)
+
+
+def run_state(path: str, task_id: str) -> tuple[str, int | None] | None:
+    """The card's status and current run id, or None when the board has no such card."""
+    rows = read(path, RUN_STATE_QUERY, (task_id,))
+    return (rows[0]["status"], rows[0]["current_run_id"]) if rows else None
 
 
 def blocked_for_input(path: str) -> list[dict]:

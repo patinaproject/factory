@@ -21,6 +21,11 @@ never enter Claude Code's environment: the settings point apiKeyHelper at
 proxy-token, each such server's headersHelper is mcp-headers, and both ask the
 gateway's broker.
 
+While claude runs, claude-session reads its own card on the board every few seconds and stops claude when the
+card is no longer the live one, such as when it is archived, which Hermes does by signaling only the worker. A
+claude-session that finds the worktree lock or the Claude session id held by a run whose card is no longer live
+stops that run and starts. `run_owner.py` keeps the record of each run that makes both possible.
+
 --mcp-status --repo <full_name> starts Claude Code once in the repository's
 main checkout with a run's environment, settings, and MCP config, reads its
 init event, and prints each MCP server's status. It never reaches the model.
@@ -39,6 +44,7 @@ import re
 import shlex
 import select
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -59,6 +65,7 @@ import gh_login
 import install_drift
 import kanban_board
 import reply_inbox
+import run_owner
 import session_links
 
 DEFAULT_WORKER_ENTRY = (
@@ -295,7 +302,7 @@ MODEL_USAGE_KEYS = (
     ("output_tokens", "outputTokens"),
 )
 QUIET_SECONDS = 1.0
-GRACE_SECONDS = 10.0
+GRACE_SECONDS = run_owner.GRACE_SECONDS
 LAST_COMMAND_CHARS = 200
 TOOLCHAIN_CHECK_SECONDS = 120
 LOCK_NAME = "claude-session.lock"
@@ -344,6 +351,14 @@ class SessionPlan(NamedTuple):
     previous_id: str | None
     previous: Path | None
     last_result: str | None
+
+
+class CardEnded(Exception):
+    """The run's card stopped being the live one while claude ran."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class Stopped(BaseException):
@@ -691,6 +706,81 @@ def session_process_running(session_id: str) -> bool:
         if pid != str(os.getpid()) and session_id in command:
             return True
     return False
+
+
+def reclaim(stops: list[tuple[str, str]], **match: str) -> tuple[bool, str]:
+    """Stop the run that holds the lock or session id when its card is no longer the live one.
+
+    Returns whether it stopped one, and the text that names the holder for a refusal. `stops` collects
+    (card, reason) of each stop, so the issue's session hears of it once."""
+    record = run_owner.owner(**match)
+    if record is None:
+        return False, "; no run record names its card"
+    status, reason = run_owner.judge(record)
+    named = f" for card {record.task_id}" + (f" ({status})" if status else "")
+    if reason and run_owner.claim(record):
+        run_owner.stop(record)
+        stops.append((record.task_id, reason))
+        return True, named
+    return False, named
+
+
+def lock_worktree(lock, worktree: Path, stops: list[tuple[str, str]]) -> None:
+    def acquire() -> bool:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+    if acquire():
+        return
+    freed, named = reclaim(stops, worktree=str(worktree))
+    if freed and acquire():
+        return
+    raise Refusal(f"another claude-session holds {worktree}{named}")
+
+
+def require_session_free(session_id: str, stops: list[tuple[str, str]]) -> None:
+    if not session_process_running(session_id):
+        return
+    freed, named = reclaim(stops, session_id=session_id)
+    if freed and not session_process_running(session_id):
+        return
+    raise Refusal(f"a process for Claude session {session_id} is already running{named}")
+
+
+def stop_note(task_id: str, reason: str) -> str:
+    return f"Stopped the Claude run of card {task_id} because {reason}, so the issue's newest card can run."
+
+
+def post_stop_notes(client, session_id: str | None, stops: list[tuple[str, str]]) -> None:
+    """One thought per stopped run. A note that cannot be posted is logged, never a failure of the run."""
+    if not stops:
+        return
+    linear = plugin_module("linear-agent-session", "linear")
+    for task_id, reason in stops:
+        try:
+            if session_id is None:
+                raise ValueError("the card has no linear_agent_session_id line")
+            reply_inbox.post_thought(linear, client, session_id, stop_note(task_id, reason))
+        except Exception as error:
+            print(f"claude-session: noting the stop of card {task_id} failed: {type(error).__name__}: {error}", file=sys.stderr)
+    stops.clear()
+
+
+def issue_session_id(issue_id: str, own_task_id: str, own_session_id: str | None) -> str | None:
+    """The agent session of the issue's newest other live card on this board, else the card's own session."""
+    board = os.environ.get("HERMES_KANBAN_DB")
+    try:
+        cards = kanban_board.cards(board) if board else []
+    except sqlite3.Error:
+        return own_session_id
+    sessions = [
+        reply_inbox.session_id_of(card["body"]) for card in cards
+        if card["id"] != own_task_id and f"linear_issue_id: {issue_id}" in (card["body"] or "").splitlines()
+    ]
+    return ([each for each in sessions if each] or [own_session_id])[-1]
 
 
 def version_key(name: str) -> tuple:
@@ -1249,12 +1339,13 @@ def last_bash_command(session_id: str, worktree: Path) -> str:
 
 
 def run_claude(
-    command: list[str], worktree: Path, session_id: str, idle_limit: int, extra_env: dict
+    command: list[str], worktree: Path, session_id: str, idle_limit: int, extra_env: dict, watch: run_owner.Watch,
 ) -> tuple[dict | None, int, str, Idle | None]:
     """Run claude in its own process group, stop reading at its result, and end every process it leaves.
 
     Returns the parsed result, claude's exit code, the tail of its output for an error report, and, when claude
-    was ended for writing no transcript for `idle_limit` seconds, what it was doing.
+    was ended for writing no transcript for `idle_limit` seconds, what it was doing. Raises `CardEnded`, after
+    ending claude, when the run's card stops being the live one.
     """
     started = time.time()
     with tempfile.TemporaryFile() as stderr:
@@ -1267,10 +1358,13 @@ def run_claude(
             stderr=stderr,
             start_new_session=True,
         )
+        watch.record.claude_pid = proc.pid
+        watch.record.save()
         with proc:
             try:
                 output, stdout, silent = read_result(
-                    proc, lambda: time.time() - progress_time(session_id, worktree, started), idle_limit
+                    proc, lambda: time.time() - progress_time(session_id, worktree, started), idle_limit,
+                    watch.stale_reason,
                 )
                 idle = Idle(int(silent), last_bash_command(session_id, worktree)) if silent else None
             finally:
@@ -1282,14 +1376,19 @@ def run_claude(
     return output, proc.returncode, detail, idle
 
 
-def read_result(proc: subprocess.Popen, silent_seconds, idle_limit: float) -> tuple[dict | None, bytes, float]:
+def read_result(
+    proc: subprocess.Popen, silent_seconds, idle_limit: float, stale_reason
+) -> tuple[dict | None, bytes, float]:
     """The result, the output read, and, when claude was still running after `idle_limit` seconds without
-    progress, how long it had been silent (else 0). `silent_seconds()` reads the time since the last progress."""
+    progress, how long it had been silent (else 0). `silent_seconds()` reads the time since the last progress.
+    `stale_reason()` is a reason to stop, else None, and raises `CardEnded` when it has one."""
     # Stop at the first complete JSON document instead of waiting for EOF: claude may keep running
     # after it prints its result, and a child that inherited the pipe keeps it open after claude exits.
     fd = proc.stdout.fileno()
     buffer = b""
     while True:
+        if reason := stale_reason():
+            raise CardEnded(reason)
         readable, _, _ = select.select([fd], [], [], QUIET_SECONDS)
         if not readable:
             if proc.poll() is not None:
@@ -1400,11 +1499,12 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     worktree = resolve_worktree(workspace, repo["path"])
     check_toolchain(repo, worktree)
     lock_path = Path(git(worktree, "rev-parse", "--absolute-git-dir")) / LOCK_NAME
-    with open(lock_path, "w") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise Refusal(f"another claude-session holds {worktree}") from None
+    stops: list[tuple[str, str]] = []
+    # The stack exits first, so the run's record is gone before the lock is released.
+    with open(lock_path, "w") as lock, contextlib.ExitStack() as owned:
+        lock_worktree(lock, worktree, stops)
+        record = run_owner.register(args.task_id, worktree)
+        owned.callback(run_owner.unregister, record)
         settings_path = lock_path.with_name(SETTINGS_FILE_NAME)
         # A killed run leaves its file behind; os.open would also keep that file's mode.
         settings_path.unlink(missing_ok=True)
@@ -1429,9 +1529,15 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
             )
         plan = plan_session(session_key(args.issue_id, triage), worktree, threshold, time.time())
         session_id = plan.session_id
-        for running_id in filter(None, [plan.previous_id, session_id]):
-            if session_process_running(running_id):
-                raise Refusal(f"a process for Claude session {running_id} is already running")
+        card = read_card(args.card_json, args.task_id)
+        card_session_id = reply_inbox.session_id_of(card["task"]["body"])
+        try:
+            for running_id in filter(None, [plan.previous_id, session_id]):
+                require_session_free(running_id, stops)
+        finally:
+            post_stop_notes(client, card_session_id, stops)
+        record.session_id = session_id
+        record.save()
 
         blocker_error = None
         if not triage and plan.reason == "new":
@@ -1442,8 +1548,6 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         login = (settings.get("github") or {}).get("login")
         # A successful run marks this snapshot as seen, so a comment that lands mid-run goes to the next run.
-        card = read_card(args.card_json, args.task_id)
-        card_session_id = reply_inbox.session_id_of(card["task"]["body"])
         link_report = None
         if card_session_id and not triage:
             link_report = sync_pull_requests(
@@ -1481,17 +1585,26 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         artifact_state = artifact_service.state_dir(Path(os.environ["HERMES_HOME"]))
         # claude-artifact presents this, and the service accepts it only from a process under this one.
         capability = artifact_service.issue_capability(artifact_state, args.task_id, session_id, triage, os.getpid())
+        watch = run_owner.Watch(record, float(os.environ.get(run_owner.CARD_POLL_ENV, run_owner.CARD_POLL_SECONDS)))
+        card_ended = None
         try:
             write_private(settings_path, claude_settings(
                 transport, api_key, settings_path, triage, inbox, card_session_id, artifact_denials(settings),
             ))
             with reply_watch(inbox, client, args, comments, own):
-                output, exit_code, detail, idle = run_claude(
-                    command, worktree, session_id, idle_limit, {artifact_service.CAPABILITY_ENV: capability.secret},
-                )
+                try:
+                    output, exit_code, detail, idle = run_claude(
+                        command, worktree, session_id, idle_limit,
+                        {artifact_service.CAPABILITY_ENV: capability.secret}, watch,
+                    )
+                except CardEnded as ended:
+                    output, exit_code, detail, idle, card_ended = None, None, "", None, ended
         finally:
             capability.revoke()
             settings_path.unlink(missing_ok=True)
+        if card_ended and run_owner.claim(record):
+            stops.append((record.task_id, card_ended.reason))
+            post_stop_notes(client, issue_session_id(args.issue_id, record.task_id, card_session_id), stops)
         try:
             progress = worktree_state(worktree) != before
             if output is not None:
@@ -1523,6 +1636,8 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 f"last command: {idle.last_command}"
             )
             return 1, result_line.Failed(error, session, blocker_error=blocker_error)
+        if card_ended:
+            return 1, result_line.Failed(f"{card_ended.reason}, so its run was stopped", session, blocker_error=blocker_error)
         if output is None:
             error = f"claude exited {exit_code} without JSON output: {detail}"
             return 1, result_line.Failed(error, session, blocker_error=blocker_error)

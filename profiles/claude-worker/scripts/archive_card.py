@@ -1,6 +1,8 @@
 """Archive a Kanban card and free the branch its worktree holds.
 
-Archiving ends a running worker, and Hermes removes the card's worktree only when
+Archiving signals only the Hermes worker. The card's `claude-session` and its Claude
+run end when they see the card is no longer running, or when the issue's next
+`claude-session` finds them holding the session (see `run_owner.py`). Hermes removes the card's worktree only when
 the worktree is clean and every commit is on a remote. Otherwise the worktree
 stays and keeps the card's branch checked out. Git refuses to check out one
 branch in two worktrees, so the next card for the same issue could not start.
