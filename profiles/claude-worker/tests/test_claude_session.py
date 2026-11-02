@@ -2073,7 +2073,8 @@ class ClaudeSessionTest(GitFixture):
     def toolchain_check_run(self, check: str, seconds: str = "2"):
         self.repository["toolchain_checks"] = [check]
         self.settings = self.write_settings([self.repository])
-        sentinel = self.start_sentinel(3010)
+        sentinel = subprocess.Popen(["sleep", "3010"], start_new_session=True)
+        self.addCleanup(lambda: (sentinel.kill(), sentinel.wait()))
         started = time.monotonic()
         status, report = self.run_session(env={"CLAUDE_SESSION_TOOLCHAIN_CHECK_SECONDS": seconds})
         elapsed = time.monotonic() - started
@@ -2095,11 +2096,6 @@ class ClaudeSessionTest(GitFixture):
                     break
                 self.assertLess(time.monotonic(), deadline, f"process {pid} is still alive")
                 time.sleep(0.05)
-
-    def start_sentinel(self, seconds: int) -> subprocess.Popen:
-        sentinel = subprocess.Popen(["sleep", str(seconds)], start_new_session=True)
-        self.addCleanup(lambda: (sentinel.kill(), sentinel.wait()))
-        return sentinel
 
     def kill_recorded_children(self) -> None:
         for pid in self.check_pids():

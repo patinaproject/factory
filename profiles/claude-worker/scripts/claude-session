@@ -830,7 +830,6 @@ def child_env(worktree: Path, extra: dict | None = None) -> dict:
 
 
 def group_commands(pgid: int, leader: int) -> list[str]:
-    """Command lines of the live processes in a process group, apart from its leader."""
     listing = subprocess.run(["ps", "-axww", "-o", "pid=,pgid=,command="], capture_output=True, text=True).stdout
     members = (line.split(None, 2) for line in listing.splitlines())
     return [command for pid, group, command in members if int(group) == pgid and int(pid) != leader]
@@ -843,23 +842,33 @@ def signal_group(pgid: int, sig: int) -> None:
         pass
 
 
-def stop_group(pgid: int, leader: int) -> None:
-    """Stop a check's process group, called while the unreaped leader still holds the group id."""
-    signal_group(pgid, signal.SIGTERM)
-    deadline = time.monotonic() + TOOLCHAIN_KILL_GRACE_SECONDS
-    while group_commands(pgid, leader) and time.monotonic() < deadline:
-        time.sleep(0.1)
-    signal_group(pgid, signal.SIGKILL)
+class CheckRun(NamedTuple):
+    code: int | None
+    running: list[str]
+    output: str
 
 
-def wait_for_exit(pid: int, seconds: float) -> bool:
-    """Wait for a child to exit without reaping it, so its process group id stays reserved."""
-    deadline = time.monotonic() + seconds
-    while os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.05)
-    return True
+def run_in_own_group(check: str, worktree: Path, env: dict, seconds: float) -> CheckRun:
+    with tempfile.TemporaryFile("w+", errors="replace") as out, tempfile.TemporaryFile("w+", errors="replace") as err:
+        shell = subprocess.Popen(
+            ["/bin/sh", "-c", check], cwd=worktree, env=env, stdin=subprocess.DEVNULL,
+            stdout=out, stderr=err, start_new_session=True,
+        )
+        deadline = time.monotonic() + seconds
+        while (exited := os.waitid(os.P_PID, shell.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)) is None:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        running = [] if exited else group_commands(shell.pid, shell.pid)
+        signal_group(shell.pid, signal.SIGTERM)
+        deadline = time.monotonic() + TOOLCHAIN_KILL_GRACE_SECONDS
+        while group_commands(shell.pid, shell.pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        signal_group(shell.pid, signal.SIGKILL)
+        code = shell.wait()
+        out.seek(0)
+        err.seek(0)
+        return CheckRun(code if exited else None, running, err.read() or out.read())
 
 
 def check_toolchain(repo: dict, worktree: Path) -> None:
@@ -867,27 +876,16 @@ def check_toolchain(repo: dict, worktree: Path) -> None:
     env = child_env(worktree)
     seconds = float(os.environ.get(TOOLCHAIN_CHECK_ENV, TOOLCHAIN_CHECK_SECONDS))
     for check in factory_settings.toolchain_checks(repo):
-        # Files, not pipes, so a child that outlives the shell cannot keep the run waiting for end of output.
-        with tempfile.TemporaryFile("w+", errors="replace") as out, tempfile.TemporaryFile("w+", errors="replace") as err:
-            shell = subprocess.Popen(
-                ["/bin/sh", "-c", check], cwd=worktree, env=env, stdin=subprocess.DEVNULL,
-                stdout=out, stderr=err, start_new_session=True,
+        run = run_in_own_group(check, worktree, env, seconds)
+        if run.code is None:
+            suffix = f"; still running: {', '.join(run.running)[:STILL_RUNNING_CHARS]}" if run.running else ""
+            raise Refusal(f"toolchain check {check!r} did not finish in {seconds:g}s{suffix}")
+        if run.code != 0:
+            output = run.output.strip()[-500:] or "no output"
+            raise Refusal(
+                f"toolchain check {check!r} failed with exit {run.code} "
+                f"in the environment Claude Code gets: {output}"
             )
-            finished = wait_for_exit(shell.pid, seconds)
-            running = [] if finished else group_commands(shell.pid, shell.pid)
-            stop_group(shell.pid, shell.pid)
-            code = shell.wait()
-            if not finished:
-                suffix = f"; still running: {', '.join(running)[:STILL_RUNNING_CHARS]}" if running else ""
-                raise Refusal(f"toolchain check {check!r} did not finish in {seconds:g}s{suffix}")
-            if code != 0:
-                out.seek(0)
-                err.seek(0)
-                output = (err.read() or out.read()).strip()[-500:] or "no output"
-                raise Refusal(
-                    f"toolchain check {check!r} failed with exit {code} "
-                    f"in the environment Claude Code gets: {output}"
-                )
 
 
 def plugin_module(plugin: str, name: str):
