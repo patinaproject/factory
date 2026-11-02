@@ -384,13 +384,16 @@ def approver_summary(people: list[dict]) -> list[dict]:
     return [{key: person[key] for key in ("id", "name", "role")} for person in people if not person["app"]]
 
 
-def authority(people: list[dict], sender_id: Optional[str], key: str) -> tuple[Optional[str], Optional[str]]:
-    """The role that matched the sender, or None, and why nobody could match when no approver has a value for `key`."""
+def authority(
+    people: list[dict], sender_id: Optional[str], key: str, operators_configured: bool
+) -> tuple[Optional[str], Optional[str]]:
+    """The role that matched the sender, or None, and why no one could match: no approver has a value for `key`, or the sender is a stranger and no operators are configured."""
     usable = [person for person in people if not person["app"] and person[key] is not None]
     if usable:
         if sender_id is None:
             return None, "no_author"
-        return next((p["role"] for p in usable if str(p[key]) == str(sender_id)), None), None
+        role = next((p["role"] for p in usable if str(p[key]) == str(sender_id)), None)
+        return role, (None if role or operators_configured else "no_operators_configured")
     assignee = next((person for person in people if person["role"] == "assignee"), None)
     if assignee is None:
         return None, "no_assignee"

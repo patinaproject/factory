@@ -1634,7 +1634,7 @@ class PrAuthorityTest(unittest.TestCase):
                     {
                         "from_assignee": from_assignee,
                         "assignee": "Ann",
-                        "reason": None,
+                        "reason": None if from_assignee else "no_operators_configured",
                         "authorized_as": "assignee" if from_assignee else None,
                         "approvers": self.roles((self.ANN, "assignee")),
                     },
@@ -1659,6 +1659,14 @@ class PrAuthorityTest(unittest.TestCase):
         _, output = self.authority(self.ANN, "6161", history=[history_page(delegated_by(self.ANN))], operators=["user-olive"], users=[self.OLIVE])
         self.assertEqual((output["from_assignee"], output["authorized_as"], output["reason"]), (True, "operator", None))
 
+    def test_a_configured_operator_list_leaves_a_stranger_without_a_reason(self):
+        _, output = self.authority(self.ANN, "9999", operators=["user-olive"], users=[self.OLIVE])
+        self.assertEqual((output["from_assignee"], output["reason"]), (False, None))
+
+    def test_an_issue_with_no_one_to_ask_keeps_its_reason_whatever_the_operator_list(self):
+        _, output = self.authority(None, "4242")
+        self.assertEqual(output["reason"], "no_assignee")
+
     def test_the_delegator_is_authorized_as_the_delegator(self):
         fake, output = self.authority(self.ANN, "5151", history=[history_page(delegated_by(self.DEE))])
         self.assertEqual((output["from_assignee"], output["authorized_as"]), (True, "delegator"))
@@ -1679,7 +1687,10 @@ class PrAuthorityTest(unittest.TestCase):
             for sender_id, authorized_as in (("5151", "delegator"), ("9999", None)):
                 with self.subTest(assignee=assignee, sender=sender_id):
                     _, output = self.authority(assignee, sender_id, history=history)
-                    self.assertEqual((output["authorized_as"], output["reason"]), (authorized_as, None))
+                    self.assertEqual(
+                        (output["authorized_as"], output["reason"]),
+                        (authorized_as, None if authorized_as else "no_operators_configured"),
+                    )
 
     def test_a_delegation_nobody_can_name_authorizes_only_the_assignee_and_operators(self):
         app_actor = {"id": "user-bot", "name": "Bot", "gitHubUserId": "7", "app": True}
@@ -1712,6 +1723,7 @@ class PrAuthorityTest(unittest.TestCase):
             with self.subTest(sender_id), self.assertLogs("linear_agent_session.linear", "WARNING"):
                 _, output = self.authority(self.ANN, sender_id, history=[failure], operators=["user-olive"])
                 self.assertEqual((output["authorized_as"], output["approvers"]), (authorized_as, self.roles((self.ANN, "assignee"))))
+                self.assertIsNone(output["reason"])
 
     def test_an_operator_id_that_resolves_to_nobody_or_to_an_app_matches_nobody(self):
         app_user = {"id": "user-bot", "name": "Bot", "gitHubUserId": "7", "app": True}

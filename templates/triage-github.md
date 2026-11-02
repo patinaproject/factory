@@ -88,7 +88,8 @@ approver, and `authorized_as` says which: `assignee`, `delegator`, or
 `operator`. `approvers` lists each approver as `id`, `name`, and `role`,
 assignee first. Otherwise `assignee` names the assignee or is null, and
 `reason` is `no_assignee`, `app_assignee`, or `no_github_id` when no one can be
-matched, or null when the sender is simply someone else. When it prints
+matched, `no_operators_configured` when the sender is someone else and the
+`operator_user_ids` setting is empty, or null when the sender is simply someone else. When it prints
 `error`, treat the sender as not an approver, with that error as the reason.
 
 The sender is not an approver when the command ran and `from_assignee` is not
@@ -104,7 +105,9 @@ event keep the steps below unchanged.
    `<<not_assignee_marker>>`. Name each person in `approvers` and their role,
    or, when `reason` is set, say why the event woke nothing, for example that
    the issue has no assignee or that the assignee has not connected GitHub to
-   Linear.
+   Linear. For `no_operators_configured`, say that no operators are configured,
+   name the `operator_user_ids` setting of the `linear-agent-session` plugin,
+   and say its value belongs in the factory's private configuration record.
 2. For `pull_request` action `closed` with merged `True`, complete the card as
    "Complete a card whose pull request merged" says, whatever its status.
 3. For `pull_request_review` action `submitted` with review state
