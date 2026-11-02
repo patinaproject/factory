@@ -1,4 +1,4 @@
-"""Set a merged card's `completion_contract` to `local-only`, the one write the factory makes to a board database.
+"""Set a merged card's `completion_contract` to `local-only`, the one write the factory makes to a card's contract.
 
 Hermes refuses `hermes kanban complete` on a card whose contract names a repository or pull request unless every
 required check on the head passed, and it counts check runs per suite, so a merged pull request whose old runs

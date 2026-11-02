@@ -34,6 +34,9 @@ second, and the reopen lands in the same second as the comment. Prints one
 line per card sent back, `<task id> <pull request url>`. A failure for one
 repository or card goes to stderr and the others still run.
 
+Before each reopen the script clears the card's `last_failure_error` when its newest ended run is
+`review_requested` or `completed`, so Hermes' dispatcher does not hold the card for an old quota or auth error.
+
 A mergeable pull request whose review decision is `CHANGES_REQUESTED`, and that
 was not sent back for a failed check, gets the review sweep, which
 `stale_reviews.decide` judges. A changes request on the current head, or an
@@ -65,6 +68,7 @@ import json
 import os
 import re
 import subprocess
+import sqlite3
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -73,8 +77,9 @@ from urllib.parse import quote
 import card_branch
 import factory_settings
 import merged_checks
+import stale_failure
 import stale_reviews
-from card_transition import pull_ref
+from card_transition import Failed as BoardFailed, board_database, pull_ref
 
 REPO_LINE = re.compile(r"^repo:\s*(\S+)\s*$", re.MULTILINE)
 SESSION_LINE = re.compile(r"^linear_agent_session_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
@@ -277,6 +282,7 @@ def send_back(hermes: str, task: dict, handback: Handback, sent: bool) -> None:
         run(hermes, "kanban", "request-review", task_id)
     if not sent:
         run(hermes, "kanban", "comment", task_id, pull_ref(handback.text))
+    stale_failure.clear_after_review(board_database(None), task_id)
     run(hermes, "kanban", "reopen-review", task_id, "--reason", handback.reason)
 
 
@@ -374,7 +380,7 @@ def main() -> int:
                 if sent and task["status"] == "blocked":
                     continue
                 send_back(hermes, task, handback, sent)
-            except (Failed, ValueError) as failure:
+            except (Failed, BoardFailed, ValueError, sqlite3.Error) as failure:
                 print(f"reopen-conflicts: {task['id']}: {failure}", file=sys.stderr)
                 failed = True
                 continue
