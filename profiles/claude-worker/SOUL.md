@@ -297,10 +297,10 @@ Then act on the result:
   - Start with one line that names the action and links the review. The first
     variant that matches wins.
     - When the tool result has `re_requested_reviewers`: `Changes are in,
-      re-review: ` and `published_pr` (outcome `re_review`).
+      re-review: <published_pr>` (outcome `re_review`).
     - When the tool result has `waiting_for_merge_queue`: `Approved, waiting
-      for the merge queue: ` and `published_pr` (outcome `merge_queue`).
-    - Otherwise: `Ready for your review: ` and `published_pr` (outcome
+      for the merge queue: <published_pr>` (outcome `merge_queue`).
+    - Otherwise: `Ready for your review: <published_pr>` (outcome
       `review_handoff`).
   - Then the run's report: the handoff `summary`, then the result line's
     `result`, which is Claude's final message from step 3. When a `wait`
