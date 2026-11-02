@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.machinery
 import importlib.util
 import atexit
@@ -14,9 +15,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -147,6 +150,29 @@ WORKER_CONFIG = {
     )},
     "terminal.timeout": 400,
 }
+
+
+@contextlib.contextmanager
+def models_server(models: list):
+    """An Anthropic-compatible endpoint on 127.0.0.1 whose /v1/models lists `models`. Yields its base URL."""
+    body = json.dumps({"data": [{"id": model} for model in models]}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200 if self.path.startswith("/v1/models") else 404)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def cron_job(name: str, minutes: int, deliver: str = "local", **fields) -> dict:
@@ -776,6 +802,8 @@ class CheckInstallTest(unittest.TestCase):
 
         reason = f"no Hermes Python in {self.root / 'tools' / 'facts.json'}"
         self.assertEqual(self.check(), (1, (
+            f"slack profile {self.slack}: cannot check: {reason} (part 13)\n"
+            f"root mcp {self.slack}: cannot check: {reason} (part 10)\n"
             f"plugin import {self.root}: cannot import the plugins: {reason}\n"
             f"plugin import {self.worker}: cannot import the plugins: {reason}\n"
         )))
@@ -1060,12 +1088,15 @@ class CheckInstallTest(unittest.TestCase):
     def test_proxy_provider_from_part_3_is_accepted(self) -> None:
         self.config(self.root, {**ROOT_CONFIG, "model.provider": "custom:proxy"})
         self.config(self.worker, {**WORKER_CONFIG, "model.provider": "custom:proxy"})
+        with models_server(["opus"]) as api:
+            self.config(self.slack, {"model.provider": "custom:proxy", "model.default": "opus", "providers.proxy.api": api})
 
-        self.assertEqual(self.check(), (0, ""))
+            self.assertEqual(self.check(), (0, ""))
 
     def test_provider_the_runbook_does_not_document(self) -> None:
         self.config(self.root, {**ROOT_CONFIG, "model.provider": "openrouter"})
         self.config(self.worker, {**WORKER_CONFIG, "model.provider": "openrouter"})
+        self.config(self.slack, {"model.provider": "openrouter", "model.default": "opus"})
 
         self.assertEqual(
             self.check(),
