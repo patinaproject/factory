@@ -256,6 +256,17 @@ class KanbanBoardTest(unittest.TestCase):
             "task_events.kind", "task_events.payload", "task_events.created_at",
         ])
 
+    def test_run_state_is_the_cards_status_and_current_run_or_none_for_an_unknown_card(self) -> None:
+        with closing(sqlite3.connect(self.path)) as board:
+            board.execute("CREATE TABLE tasks (id TEXT, status TEXT, current_run_id INTEGER)")
+            board.execute("INSERT INTO tasks VALUES ('t_1', 'running', 7), ('t_2', 'archived', NULL)")
+            board.commit()
+
+        self.assertEqual(
+            [kanban_board.run_state(str(self.path), each) for each in ("t_1", "t_2", "t_3")],
+            [("running", 7), ("archived", None), None],
+        )
+
     def test_a_board_with_every_column_is_missing_none(self) -> None:
         wal_board(self.path, [])
         with closing(sqlite3.connect(self.path)) as board:

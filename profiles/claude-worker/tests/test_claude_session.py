@@ -1489,7 +1489,7 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session()
 
         self.assertEqual(status, 2)
-        self.assertEqual(report, {"error": f"a process for Claude session {SESSION_ID} is already running"})
+        self.assertEqual(report, {"error": f"a process for Claude session {SESSION_ID} is already running; no run record names its card"})
 
     def test_invalid_fresh_after_tokens_is_refused(self) -> None:
         for value in (0, -1, "100000", True, 1.5):
@@ -1571,7 +1571,7 @@ class ClaudeSessionTest(GitFixture):
             status, report = self.run_session()
 
         self.assertEqual(status, 2)
-        self.assertEqual(report, {"error": f"another claude-session holds {self.worktree}"})
+        self.assertEqual(report, {"error": f"another claude-session holds {self.worktree}; no run record names its card"})
         self.assertFalse(self.log.exists())
 
     def test_refuses_while_a_process_runs_the_session(self) -> None:
@@ -1582,7 +1582,215 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session()
 
         self.assertEqual(status, 2)
-        self.assertEqual(report, {"error": f"a process for Claude session {SESSION_ID} is already running"})
+        self.assertEqual(report, {"error": f"a process for Claude session {SESSION_ID} is already running; no run record names its card"})
+
+    BOARD_COLUMNS = "id, title, body, branch_name, status, block_kind, completion_contract, current_run_id"
+
+    def make_board(self, **cards: tuple[str, int]) -> Path:
+        database = self.tmp / "run-board.db"
+        with sqlite3.connect(database) as db:
+            db.execute(f"CREATE TABLE tasks ({self.BOARD_COLUMNS})")
+            for task_id, (status, run) in cards.items():
+                db.execute("INSERT INTO tasks VALUES (?, '', ?, NULL, ?, NULL, NULL, ?)", (task_id, SESSION_BODY, status, run))
+        db.close()
+        return database
+
+    @staticmethod
+    def set_card(database: Path, task_id: str, status: str, run: int | None = None) -> None:
+        with sqlite3.connect(database) as db:
+            db.execute("UPDATE tasks SET status = ?, current_run_id = COALESCE(?, current_run_id) WHERE id = ?", (status, run, task_id))
+        db.close()
+
+    def start_held_session(self, database: Path, task_id: str, *, workspace: Path | None = None, poll: str = "0.2") -> subprocess.Popen:
+        """A claude-session whose fake claude runs until signaled, for `task_id` on the board."""
+        self.configure_fake_claude(hold_seconds=600, group_child_pid_file=str(self.tmp / f"{task_id}.child"))
+        self.log.unlink(missing_ok=True)
+        env = {
+            "HERMES_KANBAN_DB": str(database), "HERMES_KANBAN_RUN_ID": "", "CLAUDE_SESSION_CARD_POLL_SECONDS": poll,
+            "CLAUDE_SESSION_GRACE_SECONDS": "2",
+        }
+        command, env = self.session_command("--task-id", task_id, workspace=workspace, env=env)
+        proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.wait)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        self.held_pids(task_id)
+        return proc
+
+    def held_pids(self, task_id: str) -> tuple[int, int]:
+        """The fake claude's pid and its group child's, once both are written."""
+        child = self.tmp / f"{task_id}.child"
+        deadline = time.time() + 30
+        while time.time() < deadline and not (child.exists() and child.read_text().strip() and self.log.exists()):
+            time.sleep(0.05)
+        return self.claude_call()["pid"], int(child.read_text())
+
+    def stop_thoughts(self) -> list[str]:
+        return [
+            entry["activity"]["content"]["body"] for entry in self.linear_requests(self.hermes_home)
+            if "activity" in entry and "Stopped the Claude run" in json.dumps(entry["activity"])
+        ]
+
+    def test_archiving_a_runs_card_ends_claude_and_its_group_and_frees_the_worktree(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        database = self.make_board(t_old=("running", 5))
+        proc = self.start_held_session(database, "t_old")
+        claude, child = self.held_pids("t_old")
+        started = time.monotonic()
+
+        self.set_card(database, "t_old", "archived")
+        stdout, _ = proc.communicate(timeout=30)
+
+        self.assertLess(time.monotonic() - started, 2 + 2 + 3)
+        report = json.loads(stdout)
+        self.assertEqual((proc.returncode, report["error"]), (1, "the card is archived, so its run was stopped"))
+        self.assert_process_gone(claude)
+        self.assert_process_gone(child)
+        self.assertEqual(self.stop_thoughts(), [
+            "Stopped the Claude run of card t_old because the card is archived, so the issue's newest card can run."
+        ])
+        self.configure_fake_claude(hold_seconds=0, group_child_pid_file="")
+        status, _ = self.run_session()
+        self.assertEqual(status, 0)
+
+    def test_a_run_whose_card_stays_live_is_not_stopped(self) -> None:
+        database = self.make_board(t_old=("running", 5), t_other=("running", 1))
+        proc = self.start_held_session(database, "t_old")
+        claude, child = self.held_pids("t_old")
+
+        self.set_card(database, "t_other", "archived")
+        time.sleep(1.5)
+
+        self.assertIsNone(proc.poll())
+        for pid in (claude, child):
+            os.kill(pid, 0)
+        proc.terminate()
+        proc.communicate(timeout=30)
+        self.assertEqual(self.stop_thoughts(), [])
+
+    def test_a_run_whose_card_started_a_newer_run_is_stopped(self) -> None:
+        database = self.make_board(t_old=("running", 5))
+        proc = self.start_held_session(database, "t_old")
+
+        self.set_card(database, "t_old", "running", 6)
+        stdout, _ = proc.communicate(timeout=30)
+
+        self.assertEqual(json.loads(stdout)["error"], "the card started a newer run, so its run was stopped")
+
+    def test_a_card_that_cannot_be_read_does_not_stop_its_run(self) -> None:
+        database = self.make_board(t_old=("running", 5))
+        proc = self.start_held_session(database, "t_old")
+
+        database.unlink()
+        time.sleep(1.5)
+
+        self.assertIsNone(proc.poll())
+        proc.terminate()
+        proc.communicate(timeout=30)
+
+    def test_a_new_card_stops_the_run_of_an_archived_card_that_holds_the_worktree(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        database = self.make_board(t_old=("running", 5), t_new=("running", 1))
+        old = self.start_held_session(database, "t_old", poll="600")
+        claude, child = self.held_pids("t_old")
+        self.set_card(database, "t_old", "archived")
+        self.configure_fake_claude(hold_seconds=0, group_child_pid_file="")
+
+        status, report = self.run_session("--task-id", "t_new", env={"HERMES_KANBAN_DB": str(database), "CLAUDE_SESSION_GRACE_SECONDS": "2"})
+
+        self.assertEqual((status, report["subtype"]), (0, "success"))
+        old.communicate(timeout=30)
+        self.assert_process_gone(claude)
+        self.assert_process_gone(child)
+        self.assertEqual(self.stop_thoughts(), [
+            "Stopped the Claude run of card t_old because the card is archived, so the issue's newest card can run."
+        ])
+
+    def test_a_new_card_stops_the_run_of_an_archived_card_that_holds_the_session(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        database = self.make_board(t_old=("running", 5), t_new=("running", 1))
+        old = self.start_held_session(database, "t_old", poll="600")
+        claude, _ = self.held_pids("t_old")
+        self.set_card(database, "t_old", "archived")
+        self.configure_fake_claude(hold_seconds=0, group_child_pid_file="")
+        elsewhere = self.add_worktree("abc-124-next")
+
+        status, report = self.run_session(
+            "--task-id", "t_new", workspace=elsewhere,
+            env={"HERMES_KANBAN_DB": str(database), "CLAUDE_SESSION_GRACE_SECONDS": "2"},
+        )
+
+        self.assertEqual((status, report["subtype"]), (0, "success"))
+        old.communicate(timeout=30)
+        self.assert_process_gone(claude)
+        self.assertEqual(len(self.stop_thoughts()), 1)
+
+    def test_a_new_card_refuses_naming_the_live_card_that_holds_the_worktree_or_session(self) -> None:
+        database = self.make_board(t_old=("running", 5), t_new=("running", 1))
+        old = self.start_held_session(database, "t_old", poll="600")
+        elsewhere = self.add_worktree("abc-124-next")
+        env = {"HERMES_KANBAN_DB": str(database), "CLAUDE_SESSION_GRACE_SECONDS": "2"}
+
+        by_lock = self.run_session("--task-id", "t_new", env=env)
+        by_session = self.run_session("--task-id", "t_new", workspace=elsewhere, env=env)
+
+        self.assertEqual(by_lock, (2, {"error": f"another claude-session holds {self.worktree} for card t_old (running)"}))
+        self.assertEqual(by_session, (2, {
+            "error": f"a process for Claude session {SESSION_ID} is already running for card t_old (running)"
+        }))
+        self.assertIsNone(old.poll())
+        self.assertEqual(self.stop_thoughts(), [])
+        old.terminate()
+        old.communicate(timeout=30)
+
+    def test_a_stop_that_does_not_free_the_session_is_retried_once_then_refused_naming_the_owner(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        database = self.make_board(t_old=("archived", 5), t_new=("running", 1))
+        holder = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "--resume", SESSION_ID])
+        recorded = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.addCleanup(recorded.wait)
+        self.addCleanup(recorded.kill)
+        started = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(recorded.pid)], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        runs = self.hermes_home / "claude-session-runs"
+        runs.mkdir()
+        (runs / f"{recorded.pid}.json").write_text(json.dumps({
+            "pid": recorded.pid, "started": started, "task_id": "t_old", "run_id": "5", "board": str(database),
+            "session_id": SESSION_ID, "worktree": "/elsewhere", "claude_pid": None,
+        }))
+
+        status, report = self.run_session(
+            "--task-id", "t_new", env={"HERMES_KANBAN_DB": str(database), "CLAUDE_SESSION_GRACE_SECONDS": "2"},
+        )
+
+        self.assertEqual((status, report), (2, {
+            "error": f"a process for Claude session {SESSION_ID} is already running for card t_old (archived)"
+        }))
+        self.assertIsNotNone(recorded.wait(timeout=10))
+        self.assertIsNone(holder.poll())
+        self.assertEqual(len(self.stop_thoughts()), 1)
+        self.assertFalse(self.log.exists())
+
+    def test_a_record_of_a_recycled_pid_is_ignored_and_its_process_left_alone(self) -> None:
+        database = self.make_board(t_old=("archived", 5))
+        bystander = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(bystander.wait)
+        self.addCleanup(bystander.kill)
+        runs = self.hermes_home / "claude-session-runs"
+        runs.mkdir()
+        (runs / f"{bystander.pid}.json").write_text(json.dumps({
+            "pid": bystander.pid, "started": "Thu Jan  1 00:00:00 1970", "task_id": "t_old", "run_id": "5",
+            "board": str(database), "session_id": SESSION_ID, "worktree": str(self.worktree), "claude_pid": None,
+        }))
+        lock_path = self.worktree_git_dir() / "claude-session.lock"
+        with open(lock_path, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            status, report = self.run_session(env={"HERMES_KANBAN_DB": str(database)})
+
+        self.assertEqual((status, report), (2, {"error": f"another claude-session holds {self.worktree}; no run record names its card"}))
+        self.assertIsNone(bystander.poll())
 
     def test_refuses_without_a_kanban_workspace(self) -> None:
         status, report = self.run_session(env={"HERMES_KANBAN_WORKSPACE": ""})

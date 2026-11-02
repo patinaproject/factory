@@ -87,6 +87,10 @@ if "init" in options:
     print(json.dumps({"type": "system", "subtype": "init", "mcp_servers": options["init"]}), flush=True)
     import time
     time.sleep(600)
+if options.get("group_child_pid_file"):
+    import subprocess
+    with open(options["group_child_pid_file"], "w") as pid_file:
+        pid_file.write(str(subprocess.Popen(["sleep", "600"]).pid))
 if options.get("hold_seconds"):
     import time
     time.sleep(options["hold_seconds"])
