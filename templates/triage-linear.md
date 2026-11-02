@@ -47,8 +47,9 @@ the gate, or read the reply yourself. Its fields:
   assignee first. `not_assignee_reason` says why no one could be matched:
   `no_assignee` when the issue has no assignee and no other approver has a
   Linear id, `app_assignee` when an agent app holds it, and `no_author` when
-  the author could not be read. It is null when the author is simply someone
-  else. All of them are null on an event that carries no reply, such as a stop.
+  the author could not be read. `no_operators_configured` means the author is
+  someone else and the `operator_user_ids` setting is empty. It is null when
+  the author is simply someone else. All of them are null on an event that carries no reply, such as a stop.
 - `thread` and `thread_source`: on a `prompted` event, the session's earlier
   activities, oldest first, without the reply itself. Each has `id`, `type`
   (`prompt`, `response`, `elicitation`, `thought`, `action`, or `error`),
@@ -349,6 +350,10 @@ keeps it as context.
      assigned.
    - `no_author`: the factory could not tell who sent the reply. Name the
      approvers, who must ask for the change.
+   - `no_operators_configured`: no operators are configured, so only the
+     assignee and the delegator can ask for the change. Name the
+     `operator_user_ids` setting of the `linear-agent-session` plugin, and say
+     its value belongs in the factory's private configuration record.
 
 ### `triage_card_reply`
 

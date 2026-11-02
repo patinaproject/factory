@@ -644,7 +644,7 @@ class CliTest(unittest.TestCase):
                 expected = {
                     "from_assignee": from_assignee,
                     "assignee": "Ann",
-                    "reason": None,
+                    "reason": None if from_assignee else "no_operators_configured",
                     "authorized_as": role,
                     "approvers": approvers,
                 }

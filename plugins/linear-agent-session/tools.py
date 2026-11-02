@@ -409,7 +409,7 @@ def run_pr_authority(
             logger.warning("linear-agent-session: reading operator_user_ids failed: %s", failure)
             operators, lookup_failed = [], True
         people = lookup_approvers(client, issue, app_user_id(), operators)
-        role, reason = authority(people, args["sender_id"], "gitHubUserId")
+        role, reason = authority(people, args["sender_id"], "gitHubUserId", lookup_failed or bool(operators))
         if reason is None and lookup_failed:
             reason = "operator_lookup_failed"
         assignee = issue["assignee"]

@@ -306,6 +306,9 @@ QUIET_SECONDS = 1.0
 GRACE_SECONDS = run_owner.GRACE_SECONDS
 LAST_COMMAND_CHARS = 200
 TOOLCHAIN_CHECK_SECONDS = 120
+TOOLCHAIN_KILL_GRACE_SECONDS = 2
+TOOLCHAIN_CHECK_ENV = "CLAUDE_SESSION_TOOLCHAIN_CHECK_SECONDS"
+STILL_RUNNING_CHARS = 500
 LOCK_NAME = "claude-session.lock"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
 POLL_ENV = "CLAUDE_SESSION_REPLY_POLL_SECONDS"
@@ -836,21 +839,61 @@ def check_first_launch(repo: dict, worktree: Path) -> None:
         raise Refusal(f"the active Xcode has a first launch pending; run {xcode.FIRST_LAUNCH_FIX}")
 
 
+def group_commands(pgid: int) -> list[str]:
+    listing = subprocess.run(["ps", "-axww", "-o", "pid=,pgid=,command="], capture_output=True, text=True, check=True).stdout
+    members = (line.split(None, 2) for line in listing.splitlines())
+    return [command for pid, group, command in members if int(group) == pgid and int(pid) != pgid]
+
+
+def signal_group(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+class CheckRun(NamedTuple):
+    code: int | None
+    running: list[str]
+    output: str
+
+
+def run_in_own_group(check: str, worktree: Path, env: dict, seconds: float) -> CheckRun:
+    with tempfile.TemporaryFile("w+", errors="replace") as out, tempfile.TemporaryFile("w+", errors="replace") as err:
+        shell = subprocess.Popen(
+            ["/bin/sh", "-c", check], cwd=worktree, env=env, stdin=subprocess.DEVNULL,
+            stdout=out, stderr=err, start_new_session=True,
+        )
+        deadline = time.monotonic() + seconds
+        while (exited := os.waitid(os.P_PID, shell.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)) is None:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        running = [] if exited else group_commands(shell.pid)
+        signal_group(shell.pid, signal.SIGTERM)
+        deadline = time.monotonic() + TOOLCHAIN_KILL_GRACE_SECONDS
+        while group_commands(shell.pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        signal_group(shell.pid, signal.SIGKILL)
+        code = shell.wait()
+        out.seek(0)
+        err.seek(0)
+        return CheckRun(code if exited else None, running, err.read() or out.read())
+
+
 def check_toolchain(repo: dict, worktree: Path) -> None:
     """Run the repository's toolchain checks in the environment Claude Code gets, and refuse on a failure."""
     env = child_env(worktree)
+    seconds = float(os.environ.get(TOOLCHAIN_CHECK_ENV, TOOLCHAIN_CHECK_SECONDS))
     for check in factory_settings.toolchain_checks(repo):
-        try:
-            result = subprocess.run(
-                ["/bin/sh", "-c", check], cwd=worktree, env=env, stdin=subprocess.DEVNULL,
-                capture_output=True, text=True, timeout=TOOLCHAIN_CHECK_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            raise Refusal(f"toolchain check {check!r} did not finish in {TOOLCHAIN_CHECK_SECONDS}s") from None
-        if result.returncode != 0:
-            output = (result.stderr or result.stdout).strip()[-500:] or "no output"
+        run = run_in_own_group(check, worktree, env, seconds)
+        if run.code is None:
+            suffix = f"; still running: {', '.join(run.running)[:STILL_RUNNING_CHARS]}" if run.running else ""
+            raise Refusal(f"toolchain check {check!r} did not finish in {seconds:g}s{suffix}")
+        if run.code != 0:
+            output = run.output.strip()[-500:] or "no output"
             raise Refusal(
-                f"toolchain check {check!r} failed with exit {result.returncode} "
+                f"toolchain check {check!r} failed with exit {run.code} "
                 f"in the environment Claude Code gets: {output}"
             )
 

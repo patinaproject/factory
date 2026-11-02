@@ -68,10 +68,10 @@ def issue_event(updated_from=None):
 BRIEF = ["PAT-1 Agent brief"]
 
 
-def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD, titles=BRIEF, approvers=None):
+def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD, titles=BRIEF, approvers=None, operators_configured=True):
     live = live or issue()
     people = plugin.linear.approvers(live["assignee"], None, []) if approvers is None else approvers
-    return intent_module.decide(payload, live, list(triage), list(work), APP, NOW, reply, thread, list(titles), people)
+    return intent_module.decide(payload, live, list(triage), list(work), APP, NOW, reply, thread, list(titles), people, operators_configured)
 
 
 def expected(action, **overrides):
@@ -561,7 +561,7 @@ class IssueUpdateTest(unittest.TestCase):
 
     def test_the_duplicate_is_judged_at_the_delivery_time(self):
         live = issue(agentSessions=[session("s-1", 60)])
-        replay = intent_module.decide(issue_event(), live, [], [], APP, NOW - dt.timedelta(minutes=57), intent_module.NO_REPLY, intent_module.NO_THREAD, BRIEF, [])
+        replay = intent_module.decide(issue_event(), live, [], [], APP, NOW - dt.timedelta(minutes=57), intent_module.NO_REPLY, intent_module.NO_THREAD, BRIEF, [], True)
         self.assertEqual(replay.action, "session_created_handles_it")
         self.assertEqual(self.update(live).action, "open_session")
 
@@ -807,7 +807,7 @@ def delegation(actor, to=APP):
 
 class ApproverTest(unittest.TestCase):
     def reply(self, author, history=(), operators=(), live=None, **client_overrides):
-        client = FakeLinearClient(live or issue(), history=history, users=USERS, **client_overrides)
+        client = FakeLinearClient(live or issue(), history=history, **{"users": USERS, **client_overrides})
         return ComputeTest().compute(
             session_event("prompted", body="go", author=author), client, BOARDS, operators=operators
         )
@@ -847,6 +847,36 @@ class ApproverTest(unittest.TestCase):
                 with self.subTest(assignee=live["assignee"], author=author):
                     result = self.reply(author, [delegation(DELEGATOR)], [OPERATOR], live=live)
                     self.assertEqual((result.action, result.not_assignee_reason), (action, None))
+
+    def test_a_stranger_is_told_no_operators_are_configured_only_while_the_list_is_empty(self):
+        for operators, reason in (([], "no_operators_configured"), ([OPERATOR], None)):
+            with self.subTest(operators=operators):
+                result = self.reply(OTHER, operators=operators)
+                self.assertEqual((result.action, result.from_assignee, result.not_assignee_reason), ("card_reply_not_assignee", False, reason))
+
+    def test_an_app_or_unknown_author_is_not_told_no_operators_are_configured(self):
+        users = {**USERS, OTHER: person(OTHER, "Some agent", None, app=True)}
+        for author, kind in ((OTHER, "app"), ("user-ghost", "unknown")):
+            with self.subTest(kind):
+                result = self.reply(author, users=users)
+                self.assertEqual(
+                    (result.action, result.reply_author_kind, result.not_assignee_reason), ("card_reply_not_assignee", kind, None)
+                )
+
+    def test_the_assignee_and_the_delegator_are_approvers_whatever_the_operator_list(self):
+        for author, role in ((ASSIGNEE, "assignee"), (DELEGATOR, "delegator")):
+            with self.subTest(role):
+                result = self.reply(author, [delegation(DELEGATOR)], [])
+                self.assertEqual((result.action, result.authorized_as, result.not_assignee_reason), ("card_reply", role, None))
+
+    def test_the_earlier_reasons_win_over_an_empty_operator_list(self):
+        no_author = self.reply(None)
+        no_assignee = self.reply(OTHER, live=issue(assignee=None))
+        self.assertEqual((no_author.not_assignee_reason, no_assignee.not_assignee_reason), ("no_author", "no_assignee"))
+
+    def test_a_configured_list_whose_lookup_fails_never_says_no_operators_are_configured(self):
+        result = self.reply(OTHER, operators=[OPERATOR], lookup_error=RuntimeError("down"))
+        self.assertEqual((result.action, result.not_assignee_reason), ("card_reply_not_assignee", None))
 
     def test_a_delegation_nobody_can_name_authorizes_only_the_assignee_and_operators(self):
         app_actor = person("app-user-3", "Some agent", None, app=True)
@@ -901,6 +931,23 @@ class ApproverTest(unittest.TestCase):
             with self.subTest(type=payload["type"], action=payload.get("action")):
                 client = FakeLinearClient(issue(), lookup_error=AssertionError("no lookup expected"))
                 self.assertNotEqual(ComputeTest().compute(payload, client, BOARDS, operators=[OPERATOR]).action, "error")
+
+    def test_only_a_reply_reads_the_operator_setting(self):
+        def unreadable():
+            raise ValueError("operator_user_ids must be a list of Linear user ids")
+
+        for payload in (issue_event(), session_event("created"), session_event("prompted", signal="stop")):
+            with self.subTest(type=payload["type"], action=payload.get("action")):
+                result = intent_module.compute(
+                    payload,
+                    app_user_id=lambda: APP,
+                    operator_user_ids=unreadable,
+                    client=lambda: FakeLinearClient(issue()),
+                    cards=lambda board: BOARDS[board],
+                    now=NOW,
+                    redact=lambda text: text,
+                )
+                self.assertNotEqual(result.action, "error")
 
     def test_a_stop_from_anyone_and_a_reply_to_a_live_triage_card_keep_their_handling(self):
         triage = {"triage": [card("t_triage", status="running", body=id_line())], None: BOARDS[None]}

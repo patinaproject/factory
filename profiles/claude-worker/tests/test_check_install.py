@@ -124,7 +124,7 @@ artifact_tools("Artifact", "Read")
 
 DEPENDENCY_UPDATES = {"repository": "example-org/example-repo", "team_key": "ABC", "theme_label": "Security", "type_label": "Tools"}
 SETTINGS = {
-    "app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}, "claude_artifact": ARTIFACT_SETTINGS,
+    "operator_user_ids": ["user-operator-1"], "app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}, "claude_artifact": ARTIFACT_SETTINGS,
     "dependency_updates": DEPENDENCY_UPDATES,
 }
 DEPENDENCY_UPDATES_KEY = "plugins.entries.linear-agent-session.settings.dependency_updates"
@@ -3400,6 +3400,26 @@ class ImportPluginsTest(unittest.TestCase):
         result = self.run_helper({"p": {"__init__.py": "def register(ctx):\n    raise RuntimeError('called')\n"}})
 
         self.assertEqual(result, {"p": None})
+
+
+class CheckOperatorsTest(unittest.TestCase):
+    def check(self, settings) -> list:
+        return [str(drift) for drift in check_install.check_operators(settings, Path("/worker"))]
+
+    def test_an_empty_or_unset_list_is_one_advisory_naming_the_setting(self) -> None:
+        advisory = (
+            "config operator_user_ids in /worker: is empty or not set, so an operator's replies on issues assigned to others are context "
+            "only until the operators' Linear user ids are added to the setting from the factory's private configuration record"
+        )
+
+        self.assertEqual([self.check({"operator_user_ids": []}), self.check({})], [[advisory], [advisory]])
+        self.assertIs(check_install.check_operators({}, Path("/worker"))[0].remedy, check_install.ADVISORY)
+
+    def test_a_configured_list_is_silent(self) -> None:
+        self.assertEqual(self.check({"operator_user_ids": ["user-operator-1"]}), [])
+
+    def test_settings_that_cannot_be_read_are_left_to_the_other_checks(self) -> None:
+        self.assertEqual(self.check(None), [])
 
 
 class CheckArtifactTest(unittest.TestCase):
