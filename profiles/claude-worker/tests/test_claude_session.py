@@ -2073,9 +2073,12 @@ class ClaudeSessionTest(GitFixture):
     def toolchain_check_run(self, check: str, seconds: str = "2"):
         self.repository["toolchain_checks"] = [check]
         self.settings = self.write_settings([self.repository])
+        sentinel = self.start_sentinel(3010)
         started = time.monotonic()
         status, report = self.run_session(env={"CLAUDE_SESSION_TOOLCHAIN_CHECK_SECONDS": seconds})
-        return status, report, time.monotonic() - started
+        elapsed = time.monotonic() - started
+        self.assertIsNone(sentinel.poll())
+        return status, report, elapsed
 
     def check_pids(self) -> list[int]:
         path = self.tmp / "children"
@@ -2107,7 +2110,6 @@ class ClaudeSessionTest(GitFixture):
 
     def test_a_timed_out_toolchain_check_stops_its_background_child(self) -> None:
         self.addCleanup(self.kill_recorded_children)
-        sentinel = self.start_sentinel(3010)
         check = f"n=3001; sleep $n & echo $! >> {self.tmp}/children; wait"
 
         status, report, elapsed = self.toolchain_check_run(check)
@@ -2116,7 +2118,6 @@ class ClaudeSessionTest(GitFixture):
         self.assertFalse(self.log.exists())
         self.assertLess(elapsed, 30)
         self.assert_gone(self.check_pids())
-        self.assertIsNone(sentinel.poll())
 
     def test_a_timeout_refusal_names_the_processes_still_running(self) -> None:
         self.addCleanup(self.kill_recorded_children)
@@ -2144,7 +2145,6 @@ class ClaudeSessionTest(GitFixture):
 
     def test_a_passing_toolchain_check_leaves_no_background_child(self) -> None:
         self.addCleanup(self.kill_recorded_children)
-        sentinel = self.start_sentinel(3011)
         holders = {
             "stdout": ("3004", "2>/dev/null"),
             "stderr": ("3005", ">/dev/null"),
@@ -2161,7 +2161,6 @@ class ClaudeSessionTest(GitFixture):
                 self.assertEqual((status, "error" in report), (0, False), report)
                 self.assertLess(elapsed, 30)
                 self.assert_gone(self.check_pids())
-        self.assertIsNone(sentinel.poll())
 
     def test_a_failing_toolchain_check_leaves_no_background_child(self) -> None:
         self.addCleanup(self.kill_recorded_children)
