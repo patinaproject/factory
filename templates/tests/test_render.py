@@ -500,6 +500,28 @@ class MergedCardTest(unittest.TestCase):
                 self.assertEqual((args.task_id, args.pr[0]), ("t_1", "<"))
 
 
+class ReviewHandbackTest(unittest.TestCase):
+    """A Linear reply reopens a card with a plain comment, so the worker never reads it as CHANGES REQUESTED."""
+
+    def setUp(self):
+        routes = render.build_routes(SETTINGS)
+        self.github = routes["github"]["prompt"]
+        self.linear = routes["linear"]["prompt"]
+
+    def reopen_args(self, prompt: str):
+        commands = re.findall(r"card_transition\.py reopen ([^`]+)`", prompt)
+        self.assertEqual(len(commands), 1)
+        return card_transition.parser().parse_args(["reopen", *shlex.split(commands[0].replace("<task id>", "t_1"))])
+
+    def test_the_linear_route_reopens_with_a_comment_and_the_github_route_with_a_reason(self):
+        linear = self.reopen_args(self.linear)
+        self.assertEqual((linear.reason, linear.comment),
+                         (None, "Resumed for a Linear reply; see the card comments"))
+        github = self.reopen_args(self.github)
+        self.assertEqual((github.reason, github.comment),
+                         ("changes requested on GitHub; see the card comments", None))
+
+
 class TransitionCommandTest(unittest.TestCase):
     """A card's status and assignee change only through card_transition.py, whose tests pin each sequence."""
 

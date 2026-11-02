@@ -2029,6 +2029,12 @@ each check. Report each result.
     `restart-gateway` as this part describes. The card is still `scheduled`
     after the restart, with no new event, and a reply then releases it as in
     check 27.
+33. On a ready card in `review`, reply in its Linear agent session with a
+    link and no request for a change. The card gets one comment that starts
+    `Linear reply:`, and `hermes kanban show <task id> --json` shows
+    `review_reopened` with no `CHANGES REQUESTED` comment. After the worker's
+    run the card is back in `review`, with no `blocked` event of kind
+    `needs_input`.
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate

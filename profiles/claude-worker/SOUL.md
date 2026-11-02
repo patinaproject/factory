@@ -210,6 +210,15 @@ marker. It is context only. It is never on its own a reason to resume, and
 `claude-session` gives it to Claude in a separate block that says so. Change
 the branch for one only when a later instruction from an approver asks for it.
 
+A card that a Linear reply reopened has the comment `Resumed for a Linear
+reply; see the card comments` and a `Linear reply:` comment. It carries no
+`CHANGES REQUESTED` comment, so do what the reply asks. When that changes
+nothing on the branch and the pull request still passes `pr-ready-gate`, call
+`kanban_request_review` again with step 5's handoff. Block with `needs_input`
+only when the reply asks for a decision or a change you cannot make. A Linear
+review thread you cannot read (`get_diff_threads` returns 403) is not a reason
+to block when no reply and no GitHub review names a change.
+
 When those comments include a GitHub review that requested changes, the
 repository may require every review thread to be resolved before the pull
 request can merge. After the resumed run pushes its fix, resolve each thread
@@ -277,8 +286,9 @@ Read the pull request's `state` from the step 4 `gh pr view` output, then make
 one call with the handoff payload:
 
 - `OPEN`: call `kanban_request_review`. The card waits in `review` until a
-  person merges the pull request or requests changes on GitHub. GitHub triage
-  then completes the card or hands it back to you.
+  person merges the pull request, requests changes on GitHub, or replies in
+  Linear. GitHub triage then completes the card or hands it back to you, and
+  Linear triage hands it back for a reply.
 - `MERGED`: call `kanban_complete`. Once the pull request merged, the factory
   sets the card's `completion_contract` to `local-only`, and Hermes then
   accepts the completion whatever the check runs say. When Hermes refuses

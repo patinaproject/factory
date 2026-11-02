@@ -2,7 +2,8 @@
 
 Read the card's `branch:` and `repo:` lines and run
 `<<card_transition>> unblock <task id> --repo '<repo>' --branch '<branch>' --reason '<reason>'`,
-with the reason the rule that sent you here names. When the branch has a pull
+with the reason the rule that sent you here names. When that rule names a
+comment instead, pass it as `--comment '<comment>'` in place of `--reason`. When the branch has a pull
 request, it also hands the card through review, because Hermes holds a `ready`
 card for 24 hours after a card comment that names a pull request and only the
 review reopen lifts the hold. It prints one JSON line. When it prints `error`,

@@ -506,6 +506,23 @@ class UnblockTest(CardTransitionTest):
         ])
         self.assertEqual(self.state["task"]["status"], "ready")
 
+    def test_a_comment_reopens_the_review_with_no_reason_and_posts_it_plain(self):
+        self.given("blocked")
+        code, out = self.transition("unblock", "t_1", "--repo", "example-org/app", "--branch", "pat-1-work",
+                                    "--comment", "Resumed for a Linear reply")
+        self.assertEqual((code, out), (0, {"action": "unblocked", "post": None, "pull_request": True}))
+        self.assertEqual(self.state_changes(), [
+            ["unblock", "t_1"], ["request-review", "t_1"], ["reopen-review", "t_1"],
+            ["comment", "t_1", "Resumed for a Linear reply"],
+        ])
+
+    def test_a_comment_on_a_card_without_a_pull_request_posts_nothing(self):
+        self.given("blocked", branch_has_pr=False)
+        code, out = self.transition("unblock", "t_1", "--repo", "example-org/app", "--branch", "pat-1-work",
+                                    "--comment", "Resumed for a Linear reply")
+        self.assertEqual((code, out), (0, {"action": "unblocked", "post": None, "pull_request": False}))
+        self.assertEqual(self.state_changes(), [["unblock", "t_1"]])
+
     def test_a_failed_pull_request_lookup_changes_nothing(self):
         self.given("blocked", gh_fail=1)
         code, out = self.transition(*self.ARGS)
@@ -519,6 +536,14 @@ class ReopenAndStopTest(CardTransitionTest):
         code, out = self.transition("reopen", "t_1", "--reason", "changes requested on GitHub; see the card comments")
         self.assertEqual((code, out), (0, {"action": "reopened", "post": None}))
         self.assertEqual(self.state_changes(), [["reopen-review", "t_1", "--reason", "changes requested on GitHub; see the card comments"]])
+
+    def test_reopen_with_a_comment_hands_the_card_back_with_no_reason(self):
+        self.given("review")
+        code, out = self.transition("reopen", "t_1", "--comment", "Resumed for a Linear reply; see the card comments")
+        self.assertEqual((code, out), (0, {"action": "reopened", "post": None}))
+        self.assertEqual(self.state_changes(), [
+            ["reopen-review", "t_1"], ["comment", "t_1", "Resumed for a Linear reply; see the card comments"],
+        ])
 
     QUOTA_ERROR = "pid 1 exited rate-limited (quota wall) — requeued without counting a failure"
 
