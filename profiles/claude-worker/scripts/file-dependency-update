@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""File the weekly issue that asks the agent to update npm dependencies within their declared ranges.
+"""File the weekly dependency-update issue.
 
-A Hermes cron job runs this script once a week. It reads `dependency_updates` from the factory settings
-(`repository`, `team_key`, `theme_label`, `type_label`), then asks Linear for the team's open issues that
-the agent app created and whose title starts with `dependency_update.TITLE_PREFIX`. When one is open it
-files nothing and prints `open <identifier> <url>`. Otherwise it files one issue in the team's triage
-state with the theme label only, delegated to the agent app, with no assignee and no priority, and prints
-`filed <identifier> <url>`. A failed Linear read ends the run before any write.
-Exits 1 when Linear or the broker fails, or 2 when the settings or HERMES_HOME are wrong.
+Reads `dependency_updates` from the factory settings. Prints `open <identifier> <url>` when the agent app
+already has an open issue titled with `dependency_update.TITLE_PREFIX`, else files one and prints
+`filed <identifier> <url>`. Exits 1 when Linear or the broker fails, or 2 when the settings or HERMES_HOME are wrong.
 """
 from __future__ import annotations
 

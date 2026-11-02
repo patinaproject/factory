@@ -1,8 +1,3 @@
-"""The weekly dependency-update issue: its settings, title, and description.
-
-`file-dependency-update` files the issue. The title prefix is how the job finds its own open issue
-again, so the prefix and the title builder live together here.
-"""
 from __future__ import annotations
 
 import re
