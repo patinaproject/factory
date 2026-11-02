@@ -669,12 +669,12 @@ class IssueArgumentTest(unittest.TestCase):
                 self.assertIn("`issue`", schema["description"][:60])
 
 
-def prompt_node(activity_id, created_at, body, signal=None, author="user-1"):
+def prompt_node(activity_id, created_at, body, signal=None, author="user-1", app=False):
     return {
         "id": activity_id,
         "createdAt": created_at,
         "signal": signal,
-        "promptAuthor": {"id": author} if author else None,
+        "promptAuthor": {"id": author, "app": app} if author else None,
         "content": {"__typename": "AgentActivityPromptContent", "body": body},
     }
 
@@ -693,6 +693,26 @@ def session_activities(*nodes):
     return (200, {"data": {"agentSession": {"activities": {"nodes": list(nodes)}}}})
 
 
+class UserIsAppTest(unittest.TestCase):
+    def ask(self, user):
+        fake = FakeLinear([(200, {"data": {"user": user}})])
+        return fake, make_client(fake).user_is_app("user-1")
+
+    def test_a_person_is_not_an_app_and_an_app_is(self):
+        self.assertIs(self.ask({"app": False})[1], False)
+        self.assertIs(self.ask({"app": True})[1], True)
+
+    def test_the_query_asks_for_the_user_by_id(self):
+        fake, _ = self.ask({"app": False})
+        self.assertIn("user(id: $id)", fake.graphql_requests[0]["query"])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "user-1"})
+
+    def test_a_missing_user_or_a_non_bool_app_is_a_linear_error(self):
+        for user in (None, {"app": None}, {"app": "yes"}):
+            with self.subTest(user), self.assertRaises(linear.LinearError):
+                self.ask(user)
+
+
 class ActivityReadTest(unittest.TestCase):
     def read(self, responses, args):
         fake = FakeLinear(responses)
@@ -704,7 +724,7 @@ class ActivityReadTest(unittest.TestCase):
         self.assertEqual(
             output,
             {"found": True, "id": "activity-1", "createdAt": "2026-10-18T16:57:29.889Z", "signal": None, "body": "yes",
-             "authorId": "user-1"},
+             "authorId": "user-1", "authorApp": False},
         )
         self.assertIn("agentActivity(id: $id)", fake.graphql_requests[0]["query"])
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "activity-1"})
@@ -731,10 +751,20 @@ class ActivityReadTest(unittest.TestCase):
         self.assertEqual(
             output,
             {"found": True, "id": "activity-2", "createdAt": "2026-10-18T16:57:29Z", "signal": None, "body": "yes",
-             "authorId": "user-1"},
+             "authorId": "user-1", "authorApp": False},
         )
         self.assertIn("agentSession(id: $id)", fake.graphql_requests[0]["query"])
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "session-1"})
+
+    def test_a_prompt_with_no_author_has_no_author_app(self):
+        node = prompt_node("activity-1", "2026-10-18T16:57:29.889Z", "yes", author=None)
+        _, output = self.read([(200, {"data": {"agentActivity": node}})], {"agent_activity_id": "activity-1"})
+        self.assertEqual((output["authorId"], output["authorApp"]), (None, None))
+
+    def test_an_app_author_is_reported(self):
+        node = prompt_node("activity-1", "2026-10-18T16:57:29.889Z", "yes", author="app-1", app=True)
+        _, output = self.read([(200, {"data": {"agentActivity": node}})], {"agent_activity_id": "activity-1"})
+        self.assertEqual((output["authorId"], output["authorApp"]), ("app-1", True))
 
     def test_a_session_without_a_prompt_is_not_found(self):
         _, output = self.read(
