@@ -1649,6 +1649,17 @@ def check_settings(settings, worker: Path) -> list:
     ]
 
 
+def check_operators(settings, worker: Path) -> list:
+    if not isinstance(settings, dict) or settings.get("operator_user_ids"):
+        return []
+    return [Drift(
+        "config", f"operator_user_ids in {worker}",
+        "is empty, so an operator's replies on issues assigned to others are context only until the operators' Linear user ids "
+        "are added to the setting from the factory's private configuration record",
+        ADVISORY,
+    )]
+
+
 ARTIFACT_FIX = Manual("fix the artifact settings or the proxy's Team login as part 18 describes")
 
 
@@ -2281,6 +2292,7 @@ def main() -> int:
                 config_value(root, hermes, "plugins.entries.work.settings.allow"),
             ),
             *check_settings(settings, worker),
+            *check_operators(settings, worker),
             *check_artifact(settings),
             *check_app_events(settings),
             *check_model_tiers(settings, worker),
