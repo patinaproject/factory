@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.machinery
 import importlib.util
 import atexit
+import http.client
 import io
 import json
 import os
@@ -14,9 +16,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -144,6 +148,8 @@ ROOT_CONFIG = {
     "platforms.factory_uploads.enabled": True,
     "platforms.factory_uploads.extra.repositories": ["example-org/example-repo"],
     WORK_KEY: str(WORK_SKILLS),
+    "gateway.multiplex_profiles": True,
+    "gateway.profile_routes": [{"platform": "slack", "profile": "slack"}],
 }
 WORKER_CONFIG = {
     **{key: ROOT_CONFIG[key] for key in (
@@ -152,6 +158,29 @@ WORKER_CONFIG = {
     )},
     "terminal.timeout": 400,
 }
+
+
+@contextlib.contextmanager
+def models_server(models: list):
+    """An Anthropic-compatible endpoint on 127.0.0.1 whose /v1/models lists `models`. Yields its base URL."""
+    body = json.dumps({"data": [{"id": model} for model in models]}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200 if self.path.startswith("/v1/models") else 404)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def cron_job(name: str, minutes: int, deliver: str = "local", **fields) -> dict:
@@ -234,6 +263,8 @@ REMEDY_CLASSES = (
     ("mcp", "", "advisory"),
     ("root mcp", "cannot check|does not connect", "advisory"),
     ("root mcp", "", "manual"),
+    ("slack profile", "cannot check|cannot be checked", "advisory"),
+    ("slack profile", "", "manual"),
     ("hermes tool", "cannot read", "advisory"),
     ("hermes tool", "", "manual"),
     ("github app", "", "manual"),
@@ -342,6 +373,9 @@ class CheckInstallTest(unittest.TestCase):
 
         self.config(self.root, ROOT_CONFIG)
         self.config(self.worker, WORKER_CONFIG)
+        self.slack = self.root / "profiles" / "slack"
+        self.install(self.slack, "config.yaml", '{"model": {"default": "opus"}}')
+        self.config(self.slack, {"model.provider": ROOT_CONFIG["model.provider"], "model.default": "opus"})
         self.cron(self.worker, WORKER_JOBS)
         self.cron(self.root, ROOT_JOBS)
         self.launchd = Launchd(self.tmp)
@@ -777,6 +811,8 @@ class CheckInstallTest(unittest.TestCase):
 
         reason = f"no Hermes Python in {self.root / 'tools' / 'facts.json'}"
         self.assertEqual(self.check(), (1, (
+            f"slack profile {self.slack}: cannot check: {reason} (part 13)\n"
+            f"root mcp {self.slack}: cannot check: {reason} (part 10)\n"
             f"plugin import {self.root}: cannot import the plugins: {reason}\n"
             f"plugin import {self.worker}: cannot import the plugins: {reason}\n"
         )))
@@ -921,51 +957,19 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (0, ""))
 
-    def slack_overrides(self, value) -> None:
-        self.config(self.root, {**ROOT_CONFIG, "platforms.slack.channel_overrides": value})
+    def test_a_slack_message_with_no_profile_route_is_reported(self) -> None:
+        self.config(self.root, {k: v for k, v in ROOT_CONFIG.items() if k != "gateway.profile_routes"})
 
-    def test_slack_overrides_that_are_absent(self) -> None:
-        self.assertEqual(self.check(), (0, ""))
+        self.assertEqual(self.check(), (
+            1, f"slack profile gateway.profile_routes in {self.root}: has 0 routes for platform slack, not one (part 13)\n",
+        ))
 
-    def test_valid_slack_overrides(self) -> None:
-        self.slack_overrides({
-            "C0000000001": {"model": "example-model", "provider": "custom:example"},
-            "C0000000002": {"provider": "custom:example"},
-            "C0000000003": {"system_prompt": "Be brief."},
-        })
+    def test_a_slack_channel_override_is_reported(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "platforms.slack.channel_overrides": {"C0000000001": {"model": "x"}}})
 
-        self.assertEqual(self.check(), (0, ""))
-
-    def test_slack_overrides_that_are_not_a_mapping(self) -> None:
-        self.slack_overrides(["C0000000001"])
-
-        self.assertEqual(
-            self.check(), (1, f"config platforms.slack.channel_overrides in {self.root}: is not a mapping (part 13)\n")
-        )
-
-    def test_slack_override_entry_that_is_not_a_mapping(self) -> None:
-        self.slack_overrides({"C0000000001": "example-model", "C0000000002": {"model": "example-model"}})
-
-        self.assertEqual(
-            self.check(),
-            (1, f"config platforms.slack.channel_overrides.C0000000001 in {self.root}: is not a mapping (part 13)\n"),
-        )
-
-    def test_slack_override_with_an_empty_model(self) -> None:
-        self.slack_overrides({"C0000000001": {"model": ""}})
-
-        self.assertEqual(
-            self.check(),
-            (1, f"config platforms.slack.channel_overrides.C0000000001.model in {self.root}: is not a non-empty model alias (part 13)\n"),
-        )
-
-    def test_slack_override_with_a_model_that_is_not_a_string(self) -> None:
-        self.slack_overrides({"C0000000001": {"model": 5}})
-
-        self.assertEqual(
-            self.check(),
-            (1, f"config platforms.slack.channel_overrides.C0000000001.model in {self.root}: is not a non-empty model alias (part 13)\n"),
-        )
+        self.assertEqual(self.check(), (
+            1, f"slack profile platforms.slack.channel_overrides in {self.root}: is set; the Slack profile's model.default replaces it (part 13)\n",
+        ))
 
     def test_upload_platform_that_is_not_enabled(self) -> None:
         self.config(self.root, {**ROOT_CONFIG, "platforms.factory_uploads.enabled": False})
@@ -1093,12 +1097,15 @@ class CheckInstallTest(unittest.TestCase):
     def test_proxy_provider_from_part_3_is_accepted(self) -> None:
         self.config(self.root, {**ROOT_CONFIG, "model.provider": "custom:proxy"})
         self.config(self.worker, {**WORKER_CONFIG, "model.provider": "custom:proxy"})
+        with models_server(["opus"]) as api:
+            self.config(self.slack, {"model.provider": "custom:proxy", "model.default": "opus", "providers.proxy.api": api})
 
-        self.assertEqual(self.check(), (0, ""))
+            self.assertEqual(self.check(), (0, ""))
 
     def test_provider_the_runbook_does_not_document(self) -> None:
         self.config(self.root, {**ROOT_CONFIG, "model.provider": "openrouter"})
         self.config(self.worker, {**WORKER_CONFIG, "model.provider": "openrouter"})
+        self.config(self.slack, {"model.provider": "openrouter", "model.default": "opus"})
 
         self.assertEqual(
             self.check(),
@@ -2576,6 +2583,8 @@ class CheckRootMcpServersTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.root = self.tmp / "root"
         self.root.mkdir()
+        self.home = self.root / "profiles" / "slack"
+        self.home.mkdir(parents=True)
         self.hermes = self.tmp / "hermes"
         self.hermes.write_text(with_interpreter(FAKE_ROOT_MCP_HERMES))
         self.hermes.chmod(0o755)
@@ -2593,16 +2602,19 @@ class CheckRootMcpServersTest(unittest.TestCase):
         )
 
     def check(self, servers, connects=("sentry",)) -> list:
-        (self.root / "config.yaml").write_text(json.dumps({"model": "x", "mcp_servers": servers}))
-        (self.root / "connects.json").write_text(json.dumps(list(connects)))
-        return classified(self, check_install.check_root_mcp_servers(self.root, str(self.hermes)))
+        (self.home / "config.yaml").write_text(json.dumps({"model": "x", "mcp_servers": servers}))
+        (self.home / "connects.json").write_text(json.dumps(list(connects)))
+        return self.run_check()
+
+    def run_check(self) -> list:
+        return classified(self, check_install.check_root_mcp_servers(self.root, self.home, str(self.hermes)))
 
     def test_a_connected_server_with_sampling_off_and_a_reference_is_silent(self) -> None:
         self.assertEqual(self.check({"sentry": ROOT_SERVER}), [])
 
     def test_a_server_that_does_not_connect_is_reported(self) -> None:
         self.assertEqual(self.check({"sentry": ROOT_SERVER}, connects=()), [
-            f"root mcp sentry in {self.root}: does not connect: run hermes mcp test sentry (part 10)",
+            f"root mcp sentry in {self.home}: does not connect: run hermes mcp test sentry (part 10)",
         ])
 
     def test_sampling_on_or_missing_is_reported(self) -> None:
@@ -2610,7 +2622,7 @@ class CheckRootMcpServersTest(unittest.TestCase):
             with self.subTest(sampling=sampling):
                 server = {k: v for k, v in {**ROOT_SERVER, "sampling": sampling}.items() if v is not None}
                 self.assertEqual(self.check({"sentry": server}), [
-                    f"root mcp sentry in {self.root}: does not set sampling.enabled to false (part 10)",
+                    f"root mcp sentry in {self.home}: does not set sampling.enabled to false (part 10)",
                 ])
 
     def test_a_literal_header_is_reported_without_its_value(self) -> None:
@@ -2619,7 +2631,7 @@ class CheckRootMcpServersTest(unittest.TestCase):
                 lines = self.check({"sentry": {**ROOT_SERVER, "headers": {"Authorization": value}}})
 
                 self.assertEqual(lines, [
-                    f"root mcp sentry in {self.root}: header Authorization holds a literal value, not a ${{VAR}} reference (part 10)",
+                    f"root mcp sentry in {self.home}: header Authorization holds a literal value, not a ${{VAR}} reference (part 10)",
                 ])
                 self.assertNotIn(SECRET, "".join(lines))
 
@@ -2630,31 +2642,31 @@ class CheckRootMcpServersTest(unittest.TestCase):
         self.assertEqual(self.check({"sentry": {**ROOT_SERVER, "sampling": {}, "enabled": False}}, connects=()), [])
 
     def test_no_servers_is_silent(self) -> None:
-        (self.root / "config.yaml").write_text('{"model": "x"}')
-        self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
+        (self.home / "config.yaml").write_text('{"model": "x"}')
+        self.assertEqual(self.run_check(), [])
 
     def test_a_missing_config_is_check_configs_to_report(self) -> None:
-        self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
+        self.assertEqual(self.run_check(), [])
 
     def test_a_reference_is_never_expanded_and_never_reported(self) -> None:
-        (self.root / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
-        (self.root / "connects.json").write_text('["sentry"]')
+        (self.home / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
+        (self.home / "connects.json").write_text('["sentry"]')
         with mock.patch.dict(os.environ, {"SENTRY_ACCESS_TOKEN": SECRET}):
-            self.assertEqual(check_install.check_root_mcp_servers(self.root, str(self.hermes)), [])
+            self.assertEqual(self.run_check(), [])
 
     def test_a_config_that_does_not_parse_is_one_drift_that_quotes_none_of_it(self) -> None:
-        (self.root / "config.yaml").write_text(f"mcp_servers: [unclosed Sentry-Bearer {SECRET}\n")
+        (self.home / "config.yaml").write_text(f"mcp_servers: [unclosed Sentry-Bearer {SECRET}\n")
 
-        lines = classified(self, check_install.check_root_mcp_servers(self.root, str(self.hermes)))
+        lines = self.run_check()
 
-        self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: ValueError (part 10)"])
+        self.assertEqual(lines, [f"root mcp {self.home}: cannot check: cannot read config.yaml: ValueError (part 10)"])
 
     def test_a_config_read_that_times_out_is_one_drift(self) -> None:
-        (self.root / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
+        (self.home / "config.yaml").write_text(json.dumps({"mcp_servers": {"sentry": ROOT_SERVER}}))
         with mock.patch.object(check_install.subprocess, "run", side_effect=subprocess.TimeoutExpired("python3", 60)):
-            lines = classified(self, check_install.check_root_mcp_servers(self.root, str(self.hermes)))
+            lines = self.run_check()
 
-        self.assertEqual(lines, [f"root mcp {self.root}: cannot check: cannot read config.yaml: timed out (part 10)"])
+        self.assertEqual(lines, [f"root mcp {self.home}: cannot check: cannot read config.yaml: timed out (part 10)"])
 
     def test_a_malformed_config_is_one_drift(self) -> None:
         for servers, problem in (
@@ -2665,7 +2677,331 @@ class CheckRootMcpServersTest(unittest.TestCase):
             ({"sentry": {**ROOT_SERVER, "sampling": True}}, "mcp_servers.sentry.sampling is not a mapping"),
         ):
             with self.subTest(servers=servers):
-                self.assertEqual(self.check(servers), [f"root mcp {self.root}: cannot check: {problem} (part 10)"])
+                self.assertEqual(self.check(servers), [f"root mcp {self.home}: cannot check: {problem} (part 10)"])
+
+
+FAKE_CONFIG_HERMES = """#!/usr/bin/env python3
+import json, os, sys
+config = os.path.join(os.environ["HERMES_HOME"], "installed-config.json")
+values = json.load(open(config)) if os.path.exists(config) else {}
+if sys.argv[1:3] != ["config", "get"] or sys.argv[3] not in values:
+    sys.exit("Config key not set: " + " ".join(sys.argv[1:]))
+print(json.dumps(values[sys.argv[3]]))
+"""
+
+SLACK_ROUTE = {"platform": "slack", "profile": "slack"}
+DIRECT = "claude-subscription-directsdk-experimental"
+PROXY = "custom:proxy"
+SLACK_MODEL = "example-opus"
+PROXY_API = "http://127.0.0.1:8317"
+PROXY_TOKEN = "proxy-token-0123456789abcdef"
+ROOT_SLACK_CONFIG = {"gateway.multiplex_profiles": True, "model.provider": DIRECT}
+SLACK_CONFIG = {"model.provider": DIRECT, "model.default": SLACK_MODEL}
+
+
+class SlackRouteTest(unittest.TestCase):
+    root = Path("/hermes")
+    worker = root / "profiles" / "claude-worker"
+
+    def route(self, routes):
+        return check_install.slack_route(routes, self.root, self.worker)
+
+    def test_one_slack_route_with_no_discriminator_names_the_profile_home(self) -> None:
+        routes = [{"platform": "telegram", "profile": "other", "chat_id": "1"}, SLACK_ROUTE]
+
+        self.assertEqual(self.route(routes), ("slack", self.root / "profiles" / "slack", ()))
+
+    def test_the_profile_name_is_read_the_way_hermes_normalizes_it(self) -> None:
+        self.assertEqual(self.route([{**SLACK_ROUTE, "profile": " Slack "}]).home, self.root / "profiles" / "slack")
+
+    def test_a_missing_or_second_slack_route_is_a_problem(self) -> None:
+        for routes, count in ((None, 0), ([], 0), ("slack", 0), ([SLACK_ROUTE, SLACK_ROUTE], 2)):
+            with self.subTest(routes=routes):
+                self.assertEqual(
+                    self.route(routes), (None, None, (f"has {count} routes for platform slack, not one",))
+                )
+
+    def test_each_discriminator_and_bot_profile_is_a_problem(self) -> None:
+        for key in ("guild_id", "chat_id", "thread_id", "user_id", "bot_profile"):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    self.route([{**SLACK_ROUTE, key: "x"}]).problems,
+                    (f"sets {key} on the Slack route, so it covers only part of Slack",),
+                )
+
+    def test_a_disabled_route_is_a_problem(self) -> None:
+        self.assertEqual(self.route([{**SLACK_ROUTE, "enabled": False}]).problems, ("disables the Slack route",))
+
+    def test_a_truthy_enabled_value_is_enabled_as_hermes_reads_it(self) -> None:
+        self.assertEqual(self.route([{**SLACK_ROUTE, "enabled": "true"}]).problems, ())
+
+    def test_a_route_to_no_valid_profile_has_no_home(self) -> None:
+        for profile in (None, "", "../root", 5):
+            with self.subTest(profile=profile):
+                self.assertEqual(
+                    self.route([{**SLACK_ROUTE, "profile": profile}]),
+                    (None, None, ("names no valid profile on the Slack route",)),
+                )
+
+    def test_a_route_to_the_default_or_worker_profile_has_no_home(self) -> None:
+        for profile in ("default", "claude-worker"):
+            with self.subTest(profile=profile):
+                self.assertEqual(
+                    self.route([{**SLACK_ROUTE, "profile": profile}]),
+                    (profile, None, (f"routes Slack to the {profile} profile, not to a Slack profile",)),
+                )
+
+
+class CheckSlackProfileTest(unittest.TestCase):
+    def setUp(self) -> None:
+        CheckRootMcpServersTest.setUp(self)
+        self.hermes.write_text(with_interpreter(FAKE_CONFIG_HERMES))
+        self.listed = [SLACK_MODEL]
+        self.asked = []
+        self.broker_token = PROXY_TOKEN
+        self.configs(ROOT_SLACK_CONFIG, SLACK_CONFIG)
+        self.yaml(self.home, {"model": {"default": SLACK_MODEL}})
+
+    def configs(self, root: dict, slack: dict) -> None:
+        (self.root / "installed-config.json").write_text(json.dumps(root))
+        (self.home / "installed-config.json").write_text(json.dumps(slack))
+
+    def yaml(self, home: Path, config: dict) -> None:
+        (home / "config.yaml").write_text(json.dumps(config))
+
+    def list_models(self, api: str, token):
+        self.asked.append((api, token))
+        if isinstance(self.listed, Exception):
+            raise self.listed
+        return self.listed
+
+    def proxy_token(self, root: Path) -> str:
+        self.assertEqual(root, self.root)
+        if isinstance(self.broker_token, Exception):
+            raise self.broker_token
+        return self.broker_token
+
+    def check(self, routes=(SLACK_ROUTE,)) -> list:
+        route = check_install.slack_route(list(routes), self.root, self.root / "profiles" / "claude-worker")
+        drifts = check_install.check_slack_profile(
+            self.root, str(self.hermes), route, list_models=self.list_models, proxy_token=self.proxy_token,
+        )
+        return classified(self, drifts)
+
+    def test_a_routed_profile_on_the_shared_transport_is_silent(self) -> None:
+        self.assertEqual(self.check(), [])
+
+    def test_a_missing_route_is_reported_without_reading_a_profile(self) -> None:
+        self.assertEqual(self.check(routes=()), [
+            f"slack profile gateway.profile_routes in {self.root}: has 0 routes for platform slack, not one (part 13)",
+        ])
+
+    def test_a_route_with_a_discriminator_is_reported_and_the_profile_still_checked(self) -> None:
+        (self.home / "gateway.parked").write_text("")
+
+        self.assertEqual(self.check(routes=({**SLACK_ROUTE, "chat_id": "C0000000001"},)), [
+            f"slack profile gateway.profile_routes in {self.root}: sets chat_id on the Slack route, so it covers only part of Slack (part 13)",
+            f"slack profile {self.home}: is parked, so the gateway drops every Slack message (part 13)",
+        ])
+
+    def test_multiplexing_that_is_not_true_is_reported(self) -> None:
+        for value in (False, "true", None):
+            with self.subTest(value=value):
+                self.configs({**ROOT_SLACK_CONFIG, "gateway.multiplex_profiles": value}, SLACK_CONFIG)
+
+                self.assertEqual(self.check(), [
+                    f"slack profile gateway.multiplex_profiles in {self.root}: is not true, so the gateway serves no profile but the default (part 13)",
+                ])
+
+    def test_any_channel_override_in_the_root_home_is_reported(self) -> None:
+        self.configs({**ROOT_SLACK_CONFIG, "platforms.slack.channel_overrides": {"C0000000001": {"model": "x"}}}, SLACK_CONFIG)
+
+        self.assertEqual(self.check(), [
+            f"slack profile platforms.slack.channel_overrides in {self.root}: is set; the Slack profile's model.default replaces it (part 13)",
+        ])
+
+    def test_a_native_mcp_server_in_the_root_home_is_reported(self) -> None:
+        self.yaml(self.root, {"mcp_servers": {"sentry": ROOT_SERVER, "posthog": ROOT_SERVER}})
+
+        self.assertEqual(self.check(), [
+            f"slack profile mcp_servers in {self.root}: holds posthog, sentry, which belong in the Slack profile (part 13)",
+        ])
+
+    def test_a_missing_profile_is_reported(self) -> None:
+        (self.home / "config.yaml").unlink()
+
+        self.assertEqual(self.check(), [
+            f"slack profile {self.home}: is missing, so the gateway drops every Slack message (part 13)",
+        ])
+
+    def test_a_parked_profile_is_reported(self) -> None:
+        (self.home / "gateway.parked").write_text("")
+
+        self.assertEqual(self.check(), [
+            f"slack profile {self.home}: is parked, so the gateway drops every Slack message (part 13)",
+        ])
+
+    def test_a_standalone_profile_is_reported(self) -> None:
+        for value in (True, "yes", " ON "):
+            with self.subTest(value=value):
+                self.yaml(self.home, {"gateway": {"standalone": value}})
+
+                self.assertEqual(self.check(), [
+                    f"slack profile {self.home}: sets gateway.standalone, so the host gateway does not serve it (part 13)",
+                ])
+
+    def test_a_profile_that_is_not_standalone_is_silent(self) -> None:
+        for value in (False, "no", None):
+            with self.subTest(value=value):
+                self.yaml(self.home, {"gateway": {"standalone": value}})
+
+                self.assertEqual(self.check(), [])
+
+    def test_a_slack_block_in_the_profile_is_reported(self) -> None:
+        for config in ({"platforms": {"slack": {"enabled": True}}}, {"slack": {"enabled": True}}):
+            with self.subTest(config=config):
+                self.yaml(self.home, config)
+
+                self.assertEqual(self.check(), [
+                    f"slack profile {self.home}: has a platforms.slack block; only the default profile runs the Slack bot (part 13)",
+                ])
+
+    def test_a_slack_token_in_the_profile_env_is_reported_without_its_value(self) -> None:
+        (self.home / ".env").write_text("SLACK_BOT_TOKEN=xoxb-0123456789-secret\nOTHER=1\n")
+
+        lines = self.check()
+
+        self.assertEqual(lines, [
+            f"slack profile SLACK_BOT_TOKEN in {self.home}/.env: is set; only the default profile holds a Slack token (part 13)",
+        ])
+        self.assertNotIn("xoxb", "".join(lines))
+
+    def test_a_secret_the_config_references_but_the_env_lacks_is_reported(self) -> None:
+        self.yaml(self.home, {
+            "mcp_servers": {"sentry": ROOT_SERVER},
+            "providers": {"proxy": {"api": PROXY_API, "key_env": "CLAUDE_PROXY_TOKEN"}},
+        })
+
+        self.assertEqual(self.check(), [
+            f"slack profile CLAUDE_PROXY_TOKEN in {self.home}/.env: is not set, but the profile's config.yaml uses it (part 13)",
+            f"slack profile SENTRY_ACCESS_TOKEN in {self.home}/.env: is not set, but the profile's config.yaml uses it (part 13)",
+        ])
+
+    def test_a_secret_the_env_holds_is_silent(self) -> None:
+        self.yaml(self.home, {"mcp_servers": {"sentry": ROOT_SERVER}})
+        (self.home / ".env").write_text(f"SENTRY_ACCESS_TOKEN={SECRET}\n")
+
+        self.assertEqual(self.check(), [])
+
+    def test_a_profile_with_a_secrets_command_is_not_judged_by_its_env(self) -> None:
+        self.yaml(self.home, {"mcp_servers": {"sentry": ROOT_SERVER}, "secrets": {"command": {"enabled": True}}})
+
+        self.assertEqual(self.check(), [])
+
+    def test_a_provider_that_differs_from_the_root_homes_is_reported(self) -> None:
+        self.configs(ROOT_SLACK_CONFIG, {**SLACK_CONFIG, "model.provider": "openrouter"})
+
+        self.assertEqual(self.check(), [
+            f"slack profile model.provider in {self.home}: differs from the root home's, so Slack turns leave the factory's transport (part 13)",
+        ])
+
+    def test_an_unset_model_is_reported(self) -> None:
+        for model in (None, "", " "):
+            with self.subTest(model=model):
+                self.configs(ROOT_SLACK_CONFIG, {**SLACK_CONFIG, "model.default": model})
+
+                self.assertEqual(self.check(), [
+                    f"slack profile model.default in {self.home}: is not set to the operator's Slack model (part 13)",
+                ])
+
+    def proxy_configs(self, **slack) -> None:
+        self.configs({**ROOT_SLACK_CONFIG, "model.provider": PROXY}, {
+            **SLACK_CONFIG, "model.provider": PROXY, "providers.proxy.api": PROXY_API,
+            "providers.proxy.key_env": "CLAUDE_PROXY_TOKEN", **slack,
+        })
+
+    def test_a_model_the_proxy_lists_is_silent_and_asked_with_the_brokers_token(self) -> None:
+        self.proxy_configs()
+
+        self.assertEqual(self.check(), [])
+        self.assertEqual(self.asked, [(PROXY_API, PROXY_TOKEN)])
+
+    def test_the_profiles_own_token_is_used_before_the_brokers(self) -> None:
+        self.proxy_configs()
+        self.broker_token = OSError("not asked")
+        (self.home / ".env").write_text("CLAUDE_PROXY_TOKEN=own-token\n")
+
+        self.assertEqual(self.check(), [])
+        self.assertEqual(self.asked, [(PROXY_API, "own-token")])
+
+    def test_a_model_the_proxy_does_not_list_is_reported(self) -> None:
+        self.proxy_configs()
+        self.listed = ["example-sonnet"]
+
+        self.assertEqual(self.check(), [
+            f"slack profile model.default in {self.home}: is {SLACK_MODEL}, which {PROXY_API}/v1/models does not list (part 13)",
+        ])
+
+    def test_a_proxy_that_cannot_be_asked_is_advisory_and_names_no_token(self) -> None:
+        self.proxy_configs()
+        self.listed = OSError("connection refused")
+
+        lines = self.check()
+
+        self.assertEqual(lines, [
+            f"slack profile model.default in {self.home}: cannot be checked: {PROXY_API} lists no models: connection refused (part 13)",
+        ])
+        self.assertNotIn(PROXY_TOKEN, "".join(lines))
+
+    def test_a_proxy_reply_cut_short_is_advisory(self) -> None:
+        self.proxy_configs()
+        self.listed = http.client.IncompleteRead(b"")
+
+        self.assertEqual(self.check(), [
+            f"slack profile model.default in {self.home}: cannot be checked: {PROXY_API} lists no models: "
+            "IncompleteRead(0 bytes read) (part 13)",
+        ])
+
+    def test_a_key_env_that_is_not_a_name_is_reported(self) -> None:
+        self.proxy_configs(**{"providers.proxy.key_env": ["CLAUDE_PROXY_TOKEN"]})
+
+        self.assertEqual(self.check(), [f"slack profile providers.proxy.key_env in {self.home}: is not a variable name (part 13)"])
+
+    def test_a_proxy_provider_without_an_api_is_reported(self) -> None:
+        self.proxy_configs(**{"providers.proxy.api": ""})
+
+        self.assertEqual(self.check(), [f"slack profile providers.proxy.api in {self.home}: is not set (part 13)"])
+
+    def test_a_config_it_cannot_read_is_one_advisory_drift(self) -> None:
+        (self.home / "config.yaml").write_text(f"model: [unclosed {SECRET}\n")
+
+        lines = self.check()
+
+        self.assertEqual(lines, [f"slack profile {self.home}: cannot check: cannot read config.yaml: ValueError (part 13)"])
+
+
+class BrokerProxyTokenTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.root)
+        client = self.root / check_install.BROKER_CLIENT
+        client.parent.mkdir(parents=True)
+        shutil.copy(REPO / check_install.BROKER_CLIENT, client)
+
+    def broker(self, reply: dict) -> None:
+        broker = FakeBroker(self.root / "factory-uploads.sock", proxy_token=[reply])
+        self.addCleanup(broker.close)
+
+    def test_the_brokers_token_is_returned(self) -> None:
+        self.broker({"ok": True, "token": PROXY_TOKEN})
+
+        self.assertEqual(check_install.broker_proxy_token(self.root), PROXY_TOKEN)
+
+    def test_a_reply_without_a_token_is_an_os_error(self) -> None:
+        self.broker({"ok": True})
+
+        with self.assertRaisesRegex(OSError, "^the gateway's broker gave no proxy token$"):
+            check_install.broker_proxy_token(self.root)
 
 
 FAKE_REGISTRY = """import json
@@ -2711,6 +3047,9 @@ def install_fake_hermes(root: Path) -> Path:
     site = root / "installs" / "key" / "environments" / "env" / "venv" / "lib" / "python9.9" / "site-packages"
     site.mkdir(parents=True)
     (site / "fake_dependency.py").write_text("")
+    (site / "ruamel" / "yaml").mkdir(parents=True)
+    (site / "ruamel" / "__init__.py").write_text("")
+    (site / "ruamel" / "yaml" / "__init__.py").write_text(FAKE_RUAMEL)
     (root / "installs" / "key" / "facts.json").write_text(
         json.dumps({"packages": {"venv": {"environment": str(site.parents[2])}}}))
     return tree
