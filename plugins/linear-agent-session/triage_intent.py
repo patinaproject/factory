@@ -46,8 +46,8 @@ ACTIONS = {
 }
 REPLY_AUTHOR_KINDS = {
     "person": "the reply's author is a person",
-    "app": "the reply's author is an app account; wake no card",
-    "unknown": "the factory could not tell whether the author is a person or an app; wake no card",
+    "app": "the reply's author is an app account; the reply changes nothing",
+    "unknown": "the factory could not read the author's account; the reply changes nothing",
 }
 GATE_ACTIONS = {
     "ready-for-human": "gate_ready_for_human",

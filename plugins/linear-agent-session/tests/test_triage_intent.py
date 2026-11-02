@@ -727,7 +727,9 @@ class FakeLinearClient(plugin.linear.LinearClient):
     def user_is_app(self, user_id):
         if self.lookup_error:
             raise self.lookup_error
-        return self.users.get(user_id, {}).get("app", False)
+        if user_id not in self.users:
+            raise plugin.linear.LinearError(f"Linear has no user {user_id} that the agent app can read")
+        return self.users[user_id]["app"]
 
     def session_thread(self, _agent_session_id):
         if self.thread_error:
@@ -893,7 +895,7 @@ class ComputeTest(unittest.TestCase):
     def test_the_computed_intent_carries_the_authors_kind_for_a_reply_only(self):
         client = FakeLinearClient(issue(), users={ASSIGNEE: person(ASSIGNEE, "Ann Assignee"), OTHER: person(OTHER, "Bot", app=True)})
         boards = {"triage": [], None: [card("t_work", status="review", branch=BRANCH)]}
-        for author, kind in ((ASSIGNEE, "person"), (OTHER, "app"), ("user-ghost", "person")):
+        for author, kind in ((ASSIGNEE, "person"), (OTHER, "app"), ("user-ghost", "unknown")):
             with self.subTest(author):
                 self.assertEqual(self.compute(session_event("prompted", body="go", author=author), client, boards).reply_author_kind, kind)
         for payload in (session_event("created"), session_event("prompted", signal="stop"), issue_event()):
