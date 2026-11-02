@@ -196,17 +196,41 @@ def operator_user_ids(value: Any) -> list[str]:
     return value
 
 
+class OperatorLookupFailed(RuntimeError):
+    """The operator list could not be read, as opposed to read and found wrong."""
+
+
 def configured_operator_user_ids() -> list[str]:
-    return operator_user_ids(
-        json.loads(_hermes("config", "get", "plugins.entries.linear-agent-session.settings.operator_user_ids", "--json"))
-    )
+    """A key that is not set is no operators, as `ctx.get_config(..., default=[])` has it. A lookup that fails raises OperatorLookupFailed."""
+    try:
+        raw = _hermes("config", "get", "plugins.entries.linear-agent-session.settings.operator_user_ids", "--json")
+    except HermesFailed as failure:
+        if KEY_NOT_SET in failure.output:
+            return []
+        raise OperatorLookupFailed(str(failure)) from failure
+    except (OSError, subprocess.TimeoutExpired) as failure:
+        raise OperatorLookupFailed(type(failure).__name__) from failure
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as failure:
+        raise OperatorLookupFailed("hermes config get printed no JSON") from failure
+    return operator_user_ids(value)
+
+
+KEY_NOT_SET = "Config key not set"
+
+
+class HermesFailed(RuntimeError):
+    def __init__(self, message: str, output: str) -> None:
+        super().__init__(message)
+        self.output = output
 
 
 def _hermes(*args: str) -> str:
     hermes = os.environ.get("HERMES_BIN") or shutil.which("hermes") or str(Path.home() / ".local" / "bin" / "hermes")
     proc = subprocess.run([hermes, *args], capture_output=True, text=True, timeout=HERMES_TIMEOUT_SECONDS)
     if proc.returncode != 0:
-        raise RuntimeError(f"hermes {' '.join(args[:3])} exited {proc.returncode}")
+        raise HermesFailed(f"hermes {' '.join(args[:3])} exited {proc.returncode}", proc.stderr + proc.stdout)
     return proc.stdout
 
 

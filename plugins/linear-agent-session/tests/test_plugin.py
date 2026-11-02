@@ -611,6 +611,62 @@ class CliTest(unittest.TestCase):
                     self.assertEqual((code, output), (0, expected))
                     self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-1"})
 
+    def pr_authority_with_failing_operator_lookup(self, failure, sender):
+        from tests.test_linear import IssueTest, delegated_by, history_page
+
+        ann = {"id": "user-ann", "name": "Ann", "gitHubUserId": "4242", "app": False}
+        dee = {"id": "user-dee", "name": "Dee", "gitHubUserId": "5151", "app": False}
+        issue = json.loads(json.dumps(IssueTest.RESPONSE))
+        issue["data"]["issue"]["assignee"] = ann
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes = Path(tmp) / "hermes"
+            show = {"task": {"id": "t_work", "body": "linear_issue_id: ABC-1\n"}}
+            hermes.write_text(
+                "#!/bin/sh\n"
+                f"[ \"$*\" = 'kanban show t_work --json' ] && printf '%s' '{json.dumps(show)}'\n"
+                "case \"$*\" in *settings.app_user_id*) printf '\"app-user-1\"';; "
+                f"*settings.operator_user_ids*) echo '{failure}' >&2; exit 1;; esac\n"
+            )
+            hermes.chmod(0o755)
+            with mock.patch.dict(os.environ, {"HERMES_BIN": str(hermes)}):
+                fake = FakeLinear([(200, issue), history_page(delegated_by(dee))])
+                return self.run_cli(["pr-authority", "--task", "t_work", "--sender-id", sender], fake)
+
+    def test_pr_authority_treats_an_unset_operator_key_as_no_operators(self):
+        approvers = [
+            {"id": "user-ann", "name": "Ann", "role": "assignee"},
+            {"id": "user-dee", "name": "Dee", "role": "delegator"},
+        ]
+        key = "plugins.entries.linear-agent-session.settings.operator_user_ids"
+        for sender, from_assignee, role in (("4242", True, "assignee"), ("5151", True, "delegator"), ("99", False, None)):
+            with self.subTest(sender):
+                code, output = self.pr_authority_with_failing_operator_lookup(f"Config key not set: {key}", sender)
+                expected = {
+                    "from_assignee": from_assignee,
+                    "assignee": "Ann",
+                    "reason": None,
+                    "authorized_as": role,
+                    "approvers": approvers,
+                }
+                self.assertEqual((code, output), (0, expected))
+
+    def test_pr_authority_authorizes_the_assignee_and_names_a_failed_operator_lookup(self):
+        approvers = [
+            {"id": "user-ann", "name": "Ann", "role": "assignee"},
+            {"id": "user-dee", "name": "Dee", "role": "delegator"},
+        ]
+        for sender, from_assignee, role in (("4242", True, "assignee"), ("5151", True, "delegator"), ("99", False, None)):
+            with self.subTest(sender):
+                code, output = self.pr_authority_with_failing_operator_lookup("hermes: database is locked", sender)
+                expected = {
+                    "from_assignee": from_assignee,
+                    "assignee": "Ann",
+                    "reason": "operator_lookup_failed",
+                    "authorized_as": role,
+                    "approvers": approvers,
+                }
+                self.assertEqual((code, output), (0, expected))
+
     def test_pr_authority_prints_an_error_naming_a_non_list_operator_setting(self):
         from tests.test_linear import IssueTest
 
