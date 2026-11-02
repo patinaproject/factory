@@ -44,6 +44,11 @@ ACTIONS = {
     "open_session": "the issue is delegated; open a session and handle it there",
     "error": "the intent could not be computed; report `error` and stop",
 }
+REPLY_AUTHOR_KINDS = {
+    "person": "the reply's author is a person",
+    "app": "the reply's author is an app account; wake no card",
+    "unknown": "the factory could not tell whether the author is a person or an app; wake no card",
+}
 GATE_ACTIONS = {
     "ready-for-human": "gate_ready_for_human",
     "needs-brief": "gate_needs_brief",
@@ -57,6 +62,7 @@ class Reply(NamedTuple):
     text: Optional[str]
     source: Optional[str]
     author_id: Optional[str] = None
+    author_kind: Optional[str] = None
 
 
 NO_REPLY = Reply(None, None)
@@ -85,6 +91,7 @@ class Intent:
     reply: Optional[str] = None
     reply_source: Optional[str] = None
     reply_author_id: Optional[str] = None
+    reply_author_kind: Optional[str] = None
     assignee: Optional[dict] = None
     from_assignee: Optional[bool] = None
     authorized_as: Optional[str] = None
@@ -229,17 +236,18 @@ def decide(
     elif (payload.get("agentActivity") or {}).get("signal") == "stop":
         action = _session_prompted(facts, stop=True)
     else:
-        facts = _with_authority(facts, approvers, reply.author_id)
+        facts = _with_authority(facts, approvers, reply.author_id, reply.author_kind)
         action = _session_prompted(facts, stop=False)
     return replace(facts, action=action, agent_session_id=session)
 
 
-def _with_authority(facts: Intent, approvers: list[dict], author_id: Optional[str]) -> Intent:
+def _with_authority(facts: Intent, approvers: list[dict], author_id: Optional[str], author_kind: Optional[str]) -> Intent:
     role, reason = linear.authority(approvers, author_id, "id")
     assignee = next((person for person in approvers if person["role"] == "assignee"), None)
     return replace(
         facts,
         reply_author_id=author_id,
+        reply_author_kind=author_kind,
         assignee={key: assignee[key] for key in ("id", "name", "gitHubUserId")} if assignee else None,
         from_assignee=role is not None,
         authorized_as=role,
@@ -256,14 +264,26 @@ def carries_no_reply(payload: Mapping[str, Any]) -> bool:
     )
 
 
+def _kind(is_app: Any) -> str:
+    if not isinstance(is_app, bool):
+        return "unknown"
+    return "app" if is_app else "person"
+
+
 def resolve_reply(payload: Mapping[str, Any], client: Any) -> Reply:
     if carries_no_reply(payload):
         return NO_REPLY
     activity = payload.get("agentActivity") or {}
     body = (activity.get("content") or {}).get("body")
     author = activity.get("userId")
+    kind = "unknown"
+    if author:
+        try:
+            kind = _kind(client.user_is_app(author))
+        except Exception:
+            pass
     if isinstance(body, str) and author:
-        return Reply(body, "payload", author)
+        return Reply(body, "payload", author, kind)
     try:
         found = client.read_prompt(
             agent_activity_id=activity.get("id"),
@@ -271,10 +291,11 @@ def resolve_reply(payload: Mapping[str, Any], client: Any) -> Reply:
         )
     except Exception:
         found = {"found": False}
-    author = author or found.get("authorId")
+    if not author:
+        author, kind = found.get("authorId"), _kind(found.get("authorApp"))
     if isinstance(body, str):
-        return Reply(body, "payload", author)
-    return Reply(found["body"], "linear", author) if found.get("found") else Reply(None, "missing", author)
+        return Reply(body, "payload", author, kind)
+    return Reply(found["body"], "linear", author, kind) if found.get("found") else Reply(None, "missing", author, kind)
 
 
 def resolve_thread(payload: Mapping[str, Any], client: Any) -> Thread:

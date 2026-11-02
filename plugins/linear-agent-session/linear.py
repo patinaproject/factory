@@ -59,7 +59,7 @@ ISSUE_SESSIONS_QUERY = """query AgentSessionSiblings($id: String!) {
 # An awaitingInput session never goes stale and may hold questions a person has yet to answer.
 OPEN_SESSION_STATUSES = ("pending", "active", "stale")
 
-ACTIVITY_FIELDS = "id createdAt signal promptAuthor { id } content { __typename ... on AgentActivityPromptContent { body } }"
+ACTIVITY_FIELDS = "id createdAt signal promptAuthor { id app } content { __typename ... on AgentActivityPromptContent { body } }"
 
 ACTIVITY_QUERY = f"""query AgentActivity($id: String!) {{
   agentActivity(id: $id) {{ {ACTIVITY_FIELDS} }}
@@ -169,6 +169,10 @@ ISSUE_HISTORY_QUERY = """query IssueHistory($id: String!, $after: String) {
 
 OPERATORS_QUERY = """query OperatorUsers($ids: [ID!]) {
   users(first: 50, filter: { id: { in: $ids } }) { nodes { id name gitHubUserId app } }
+}"""
+
+USER_APP_QUERY = """query UserApp($id: String!) {
+  user(id: $id) { app }
 }"""
 
 ISSUE_BLOCKERS_QUERY = """query IssueBlockers($id: String!) {
@@ -537,6 +541,7 @@ class LinearClient:
                     "signal": node["signal"],
                     "body": node["content"]["body"],
                     "authorId": node["promptAuthor"]["id"] if node["promptAuthor"] else None,
+                    "authorApp": node["promptAuthor"]["app"] if node["promptAuthor"] else None,
                 }
         return {"found": False}
 
@@ -642,6 +647,14 @@ class LinearClient:
                 return None
             after = page["pageInfo"]["endCursor"]
         return None
+
+    def user_is_app(self, user_id: str) -> bool:
+        user = self._graphql(USER_APP_QUERY, {"id": user_id})["user"]
+        if user is None:
+            raise LinearError(f"Linear has no user {user_id} that the agent app can read")
+        if not isinstance(user["app"], bool):
+            raise LinearError(f"Linear did not say whether user {user_id} is an app")
+        return user["app"]
 
     def operators(self, user_ids: list[str]) -> list[dict]:
         """The people the ids name, in order. An id that resolves to nobody or to an app is logged and left out."""
