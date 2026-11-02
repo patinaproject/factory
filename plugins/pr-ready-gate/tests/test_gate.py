@@ -45,7 +45,8 @@ class FakeCtx:
 
 
 class FakeShell:
-    def __init__(self, pr=None, gh_stdout=None, gh_returncode=0, gh_raises=None, head=HEAD, branch=BRANCH, rules=None, state=None, post_returncode=0, login="luke"):
+    def __init__(self, pr=None, gh_stdout=None, gh_returncode=0, gh_raises=None, head=HEAD, branch=BRANCH, rules=None, state=None, post_returncode=0, login="luke", queue=False):
+        self.queue = queue
         self.post_returncode = post_returncode
         self.login = login
         self.rules = DEFAULT_RULES if rules is None else rules
@@ -69,6 +70,9 @@ class FakeShell:
             return subprocess.CompletedProcess(cmd, self.post_returncode, "{}", stderr)
         if cmd[1] == "api" and cmd[2].startswith("user/"):
             return subprocess.CompletedProcess(cmd, 0, self.login + "\n", "")
+        if cmd[1] == "api" and cmd[2] == "graphql" and any("isInMergeQueue" in part for part in cmd):
+            body = {"data": {"repository": {"pullRequest": {"isInMergeQueue": self.queue}}}}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
         if cmd[1] == "api":
             body = self.state if cmd[2] == "graphql" else self.rules
             return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
@@ -213,11 +217,12 @@ def threads_state(*threads):
     return state_with(reviewThreads={"pageInfo": {"hasNextPage": False}, "nodes": list(threads)})
 
 
-def evaluate_handoff(pr, rules=None, state=None, tool_name="kanban_request_review"):
-    shell = FakeShell(rules=rules or rules_requiring("Required checks pass", "Validate pull request"), state=state)
+def evaluate_handoff(pr, rules=None, state=None, tool_name="kanban_request_review", setting=None, in_queue=False, shell=None):
+    shell = shell or FakeShell(rules=rules or rules_requiring("Required checks pass", "Validate pull request"), state=state, queue=in_queue)
+    extra = {} if setting is None else {"merge_queue": setting}
     with mock.patch.object(gate.subprocess, "run", shell):
         blockers = gate._blockers(pr, WORKSPACE, time.monotonic() + 25)
-        return gate.evaluate(pr, HEAD, tool_name, blockers)
+        return gate.evaluate(pr, HEAD, tool_name, blockers, **extra)
 
 
 class ReviewHandoffTest(unittest.TestCase):
@@ -323,6 +328,143 @@ class ReviewHandoffTest(unittest.TestCase):
         self.assertEqual(len(graphql), 1)
 
 
+QUEUE_SETTING = {"example-org/example-repo": {"labels": ["queued"], "checks": ["Queue"]}}
+APPROVED_BLOCKED = {**QUEUED, "mergeStateStatus": "BLOCKED", "statusCheckRollup": REQUIRED_PASSED}
+LABELLED = {**APPROVED_BLOCKED, "labels": [{"name": "queued"}]}
+QUEUE_RUN = {"__typename": "CheckRun", "name": "Queue", "status": "IN_PROGRESS", "conclusion": "", "startedAt": "2026-10-16T03:03:27Z"}
+BLOCKED_MESSAGE = "mergeStateStatus is 'BLOCKED'"
+
+
+def approvals_state(*reviews):
+    return state_with(latestOpinionatedReviews={"pageInfo": {"hasNextPage": False}, "nodes": list(reviews)})
+
+
+def approval(oid, login="tlmader", typename="User"):
+    return {"state": "APPROVED", "author": {"login": login, "__typename": typename}, "commit": {"oid": oid}}
+
+
+def with_last_push_approval(rules):
+    return [
+        {"type": "pull_request", "parameters": {"required_review_thread_resolution": True, "require_last_push_approval": True}}
+        if rule["type"] == "pull_request"
+        else rule
+        for rule in rules
+    ]
+
+
+def graphql_calls(shell, marker):
+    return [call for call in shell.calls if call[0][:3] == ["gh", "api", "graphql"] and any(marker in part for part in call[0])]
+
+
+class MergeQueueHandoffTest(unittest.TestCase):
+    def test_an_approved_blocked_pull_request_with_the_configured_label_passes(self):
+        for name in ("queued", "Queued", "QUEUED"):
+            with self.subTest(name):
+                pr = {**APPROVED_BLOCKED, "labels": [{"name": name}]}
+                self.assertEqual(evaluate_handoff(pr, setting=QUEUE_SETTING), [])
+
+    def test_a_label_signal_needs_no_merge_queue_query(self):
+        shell = FakeShell(rules=rules_requiring("Required checks pass", "Validate pull request"))
+        self.assertEqual(evaluate_handoff(LABELLED, setting=QUEUE_SETTING, shell=shell), [])
+        self.assertEqual(graphql_calls(shell, "isInMergeQueue"), [])
+
+    def test_a_pending_configured_check_passes(self):
+        pr = {**APPROVED_BLOCKED, "statusCheckRollup": [*REQUIRED_PASSED, QUEUE_RUN]}
+        self.assertEqual(evaluate_handoff(pr, setting=QUEUE_SETTING), [])
+
+    def test_a_completed_configured_check_of_any_conclusion_is_no_signal(self):
+        for conclusion in ("SUCCESS", "NEUTRAL", "SKIPPED", "FAILURE"):
+            with self.subTest(conclusion):
+                done = {**QUEUE_RUN, "status": "COMPLETED", "conclusion": conclusion}
+                pr = {**APPROVED_BLOCKED, "statusCheckRollup": [*REQUIRED_PASSED, done]}
+                failures = evaluate_handoff(pr, setting=QUEUE_SETTING)
+                self.assertTrue(any(BLOCKED_MESSAGE in failure for failure in failures), failures)
+
+    def test_only_the_newest_run_of_the_configured_check_counts(self):
+        older = {**QUEUE_RUN, "startedAt": "2026-10-16T03:00:00Z"}
+        done = {**QUEUE_RUN, "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-10-16T04:00:00Z"}
+        pr = {**APPROVED_BLOCKED, "statusCheckRollup": [*REQUIRED_PASSED, older, done]}
+        failures = evaluate_handoff(pr, setting=QUEUE_SETTING)
+        self.assertTrue(any(BLOCKED_MESSAGE in failure for failure in failures), failures)
+
+    def test_the_merge_queue_query_alone_passes_without_a_setting(self):
+        self.assertEqual(evaluate_handoff(APPROVED_BLOCKED, in_queue=True), [])
+
+    def test_the_merge_queue_query_passes_under_a_rule_set_with_only_required_checks(self):
+        rules = rules_requiring("Required checks pass", "Validate pull request")[-1:]
+        self.assertEqual(evaluate_handoff(APPROVED_BLOCKED, rules=rules, in_queue=True), [])
+
+    def test_no_signal_is_refused_with_the_blocked_message(self):
+        failures = evaluate_handoff(APPROVED_BLOCKED, setting=QUEUE_SETTING)
+        self.assertEqual(len(failures), 1)
+        self.assertIn(BLOCKED_MESSAGE, failures[0])
+        self.assertNotIn("Queue", failures[0])
+
+    def test_a_label_configured_for_another_repository_or_not_at_all_is_refused(self):
+        other = {"example-org/other-repo": {"labels": ["queued"], "checks": []}}
+        for name, setting in {"another repository": other, "no setting": None, "empty setting": {}}.items():
+            with self.subTest(name):
+                failures = evaluate_handoff(LABELLED, setting=setting)
+                self.assertEqual(len(failures), 1)
+                self.assertIn(BLOCKED_MESSAGE, failures[0])
+
+    def test_a_required_check_that_failed_or_is_pending_is_refused_naming_it(self):
+        for conclusion, status in (("FAILURE", "COMPLETED"), ("", "IN_PROGRESS")):
+            with self.subTest(status):
+                validate = {**REQUIRED_PASSED[1], "status": status, "conclusion": conclusion}
+                pr = {**LABELLED, "statusCheckRollup": [REQUIRED_PASSED[0], validate]}
+                failures = evaluate_handoff(pr, setting=QUEUE_SETTING)
+                self.assertTrue(any("'Validate pull request'" in failure for failure in failures), failures)
+
+    def test_an_empty_rollup_is_refused(self):
+        failures = evaluate_handoff({**LABELLED, "statusCheckRollup": []}, setting=QUEUE_SETTING)
+        self.assertTrue(any(BLOCKED_MESSAGE in failure for failure in failures), failures)
+
+    def test_other_unmet_conditions_still_refuse_an_approved_queued_pull_request(self):
+        unsigned = state_with(commits={"pageInfo": {"hasNextPage": False}, "nodes": [{"commit": {"oid": HEAD, "signature": None}}]})
+        cases = {
+            "unverifiable rule": (
+                rules_requiring("Required checks pass", "Validate pull request") + [{"type": "workflows"}],
+                None,
+                "branch rule 'workflows' is one this gate cannot verify",
+            ),
+            "unsigned commit": (None, unsigned, "1 commit(s) lack a verified signature"),
+            "bot thread": (None, threads_state(open_thread(THREAD_AUTHORS["bot"])), "1 review thread(s) are unresolved"),
+        }
+        for name, (rules, state, expected) in cases.items():
+            with self.subTest(name):
+                failures = evaluate_handoff(LABELLED, rules=rules, state=state, setting=QUEUE_SETTING)
+                self.assertTrue(any(expected in failure for failure in failures), failures)
+
+    def test_last_push_approval_needs_a_person_approval_on_the_current_head(self):
+        rules = with_last_push_approval(rules_requiring("Required checks pass", "Validate pull request"))
+        cases = (
+            ("older commit", approvals_state(approval(OTHER)), False),
+            ("bot approval", approvals_state(approval(HEAD, "a-bot", "Bot")), False),
+            ("current head", approvals_state(approval(HEAD)), True),
+        )
+        for name, state, passes in cases:
+            with self.subTest(name):
+                failures = evaluate_handoff(LABELLED, rules=rules, state=state, setting=QUEUE_SETTING)
+                if passes:
+                    self.assertEqual(failures, [])
+                else:
+                    self.assertTrue(any(BLOCKED_MESSAGE in failure for failure in failures), failures)
+
+    def test_an_approval_on_an_older_commit_is_fine_when_no_rule_requires_last_push_approval(self):
+        self.assertEqual(evaluate_handoff(LABELLED, state=approvals_state(approval(OTHER)), setting=QUEUE_SETTING), [])
+
+    def test_completion_of_an_approved_queued_blocked_pull_request_is_refused(self):
+        failures = evaluate_handoff(LABELLED, setting=QUEUE_SETTING, tool_name="kanban_complete", in_queue=True)
+        self.assertTrue(any(BLOCKED_MESSAGE in failure for failure in failures), failures)
+
+    def test_a_merge_queue_rule_is_one_the_gate_can_verify(self):
+        rules = [*rules_requiring("Required checks pass", "Validate pull request"), {"type": "merge_queue"}]
+        self.assertEqual(evaluate_handoff(LABELLED, rules=rules, setting=QUEUE_SETTING), [])
+        waiting = {**APPROVED_BLOCKED, "reviewDecision": "REVIEW_REQUIRED"}
+        self.assertEqual(evaluate_handoff(waiting, rules=rules), [])
+
+
 class HookScopeTest(unittest.TestCase):
     def test_other_tool_is_ignored(self):
         shell = FakeShell(pr={**CLEAN, "isDraft": True})
@@ -371,7 +513,7 @@ class HookDecisionTest(unittest.TestCase):
         gh_calls = [call for call in shell.calls if call[0][0] == "gh"]
         self.assertEqual(
             gh_calls,
-            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews"], WORKSPACE, 15)],
+            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews,labels"], WORKSPACE, 15)],
         )
 
     def test_published_pr_url_is_viewed_with_its_repo(self):
@@ -379,7 +521,7 @@ class HookDecisionTest(unittest.TestCase):
         self.assertIsNone(call_hook(shell, args={"metadata": {"published_pr": PR_URL}}))
         self.assertEqual(
             shell.gh_call()[0],
-            ["gh", "pr", "view", PR_URL, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews",
+            ["gh", "pr", "view", PR_URL, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews,labels",
              "--repo", "example-org/example-repo"],
         )
 
@@ -856,6 +998,30 @@ class ReviewHookTest(unittest.TestCase):
         state = threads_state(open_thread(THREAD_AUTHORS["person"]), open_thread(THREAD_AUTHORS["bot"]))
         result = json.loads(call_review_hook(FakeShell(pr=pr, state=state)))
         self.assertEqual(result, {**json.loads(LANDED_IN_REVIEW), "reviewer_owned_threads": 1})
+
+    def queue_ctx(self):
+        ctx = FakeCtx()
+        ctx.settings["merge_queue"] = QUEUE_SETTING
+        return ctx
+
+    def test_an_approved_queued_pull_request_is_named_as_waiting_for_the_merge_queue(self):
+        cases = (("label", FakeShell(pr=LABELLED)), ("query", FakeShell(pr=APPROVED_BLOCKED, queue=True)))
+        for name, shell in cases:
+            with self.subTest(name):
+                result = json.loads(call_review_hook(shell, ctx=self.queue_ctx()))
+                self.assertEqual(result, {**json.loads(LANDED_IN_REVIEW), "waiting_for_merge_queue": True})
+
+    def test_no_signal_leaves_the_waiting_field_out(self):
+        self.assertIsNone(call_review_hook(FakeShell(pr=APPROVED_BLOCKED), ctx=self.queue_ctx()))
+
+    def test_an_open_thread_that_a_person_started_leaves_the_waiting_field_out(self):
+        state = threads_state(open_thread(THREAD_AUTHORS["person"]))
+        result = json.loads(call_review_hook(FakeShell(pr=LABELLED, state=state, queue=True), ctx=self.queue_ctx()))
+        self.assertEqual(result, {**json.loads(LANDED_IN_REVIEW), "reviewer_owned_threads": 1})
+
+    def test_a_pull_request_that_still_needs_a_review_is_not_named_as_waiting_for_the_queue(self):
+        pr = {**LABELLED, "reviewDecision": "REVIEW_REQUIRED"}
+        self.assertIsNone(call_review_hook(FakeShell(pr=pr, queue=True), ctx=self.queue_ctx()))
 
     def test_a_pull_request_with_neither_leaves_the_result_alone(self):
         pr = {**QUEUED, "statusCheckRollup": REQUIRED_PASSED}

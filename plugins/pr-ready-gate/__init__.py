@@ -15,7 +15,7 @@ TRIAGE_BOARD = "triage"
 # Hermes runs its completion contract inside complete_task only, so a review handoff needs this gate too.
 GATED_TOOLS = ("kanban_complete", "kanban_request_review")
 PR_FIELDS = (
-    "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews"
+    "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews,labels"
 )
 PASSING_CONCLUSIONS = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
 # gh reports a run that has not started with Go's zero time, so it sorts as the newest run of its check.
@@ -42,13 +42,17 @@ REVIEW_HANDOFF_RULES = frozenset(
         "non_fast_forward",
         "creation",
         "update",
+        "merge_queue",
     }
 )
 THREAD_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){"
     "reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:1){nodes{author{__typename login}}}}} "
     "commits(first:100){pageInfo{hasNextPage} nodes{commit{oid signature{isValid}}}} "
-    "latestOpinionatedReviews(first:100){pageInfo{hasNextPage} nodes{state author{login} commit{oid}}}}}}"
+    "latestOpinionatedReviews(first:100){pageInfo{hasNextPage} nodes{state author{__typename login} commit{oid}}}}}}"
+)
+MERGE_QUEUE_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){isInMergeQueue}}}"
 )
 
 MERGE_STATE_REMEDIES = {
@@ -78,6 +82,8 @@ class Blockers(NamedTuple):
     problems: list[str]
     required_checks: frozenset[str]
     reviewer_threads: int
+    stale_approval: bool = False
+    in_merge_queue: Callable[[], bool] = lambda: False
 
 
 def evaluate(
@@ -85,12 +91,15 @@ def evaluate(
     local_head: str,
     tool_name: str,
     other_blockers: Optional[Callable[[], Blockers]] = None,
+    merge_queue: Optional[dict] = None,
 ) -> list[str]:
     """Lists what stops the pull request from being ready; an empty list lets the tool call through.
 
     kanban_request_review also passes an UNSTABLE pull request, and a BLOCKED one that waits for a reviewer: its review
     decision is REVIEW_REQUIRED or CHANGES_REQUESTED, or a person started a review thread that is still open.
+    A BLOCKED pull request that is approved and in the merge queue passes too: GitHub reports BLOCKED until the queue merges it.
     It does so only when other_blockers finds no unmet branch rule. A check that no rule requires does not stop it.
+    merge_queue maps "<owner>/<repo>" to the queue's "labels" and "checks".
     """
     failures = []
     state = pr.get("state")
@@ -113,6 +122,8 @@ def evaluate(
         required = blockers.required_checks
         if not hidden and _awaiting_review(pr, blockers.reviewer_threads):
             merge_state = "CLEAN"
+        elif not hidden and merge_state == "BLOCKED" and _approved_and_queued(pr, blockers, merge_queue):
+            merge_state = "CLEAN"
     if merge_state != "CLEAN":
         remedy = MERGE_STATE_REMEDIES.get(merge_state, "wait until GitHub reports CLEAN")
         failures.append(f"mergeStateStatus is {merge_state!r}, expected 'CLEAN': {remedy}")
@@ -129,6 +140,31 @@ def _awaiting_review(pr: dict, reviewer_threads: int) -> bool:
     reviewer_cause = pr.get("reviewDecision") in ("CHANGES_REQUESTED", "REVIEW_REQUIRED") or reviewer_threads > 0
     return bool(_latest_runs(pr.get("statusCheckRollup"))) and (
         merge_state == "UNSTABLE" or (merge_state == "BLOCKED" and reviewer_cause)
+    )
+
+
+def _approved_and_queued(pr: dict, blockers: Blockers, merge_queue: Optional[dict]) -> bool:
+    """True when only the merge queue holds an approved pull request at BLOCKED; the caller has found no unmet branch rule."""
+    return (
+        pr.get("reviewDecision") == "APPROVED"
+        and bool(_latest_runs(pr.get("statusCheckRollup")))
+        and not blockers.stale_approval
+        and (_queue_signal(pr, merge_queue) or blockers.in_merge_queue())
+    )
+
+
+def _queue_signal(pr: dict, merge_queue: Optional[dict]) -> bool:
+    """True when a configured label is on the pull request or the newest run of a configured check is still pending."""
+    match = PR_URL.match(str(pr.get("url")))
+    entry = (merge_queue or {}).get(match.group(1)) if match else None
+    config = entry if isinstance(entry, dict) else {}
+    labels = {str(label).lower() for label in config.get("labels") or []}
+    checks = set(config.get("checks") or [])
+    if any(isinstance(label, dict) and str(label.get("name")).lower() in labels for label in pr.get("labels") or []):
+        return True
+    return any(
+        isinstance(check, dict) and _rollup_name(check) in checks and not _check_passed(check) and not _check_failed(check)
+        for check in _latest_runs(pr.get("statusCheckRollup"))
     )
 
 
@@ -215,14 +251,12 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
             if not seen or not all(_check_passed(check) for check in seen):
                 problems.append(f"required check {context!r} has not passed: wait for it, or fix and push")
     changes_requested = pr.get("reviewDecision") == "CHANGES_REQUESTED"
-    wants_threads = any(
-        isinstance(rule, dict)
-        and rule.get("type") == "pull_request"
-        and (rule.get("parameters") or {}).get("required_review_thread_resolution")
-        for rule in rules
-    )
-    if pr_state is not None and (wants_threads or "required_signatures" in types or changes_requested):
+    wants_threads = _pull_request_wants(rules, "required_review_thread_resolution")
+    wants_head_approval = _pull_request_wants(rules, "require_last_push_approval") and pr.get("reviewDecision") == "APPROVED"
+    stale_approval = False
+    if pr_state is not None and (wants_threads or "required_signatures" in types or changes_requested or wants_head_approval):
         state = pr_state()
+        stale_approval = wants_head_approval and pr.get("headRefOid") not in state["approvals"]
         if changes_requested:
             if state["reviews_truncated"]:
                 problems.append("more than 100 reviews, so the gate cannot confirm none requests changes on the current head")
@@ -239,7 +273,14 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
                 problems.append("more than 100 commits, so the gate cannot confirm each is signed")
             elif state["unsigned_commits"]:
                 problems.append(f"{state['unsigned_commits']} commit(s) lack a verified signature: publish with push-signed")
-    return Blockers(problems, frozenset(required_checks), reviewer_threads)
+    return Blockers(problems, frozenset(required_checks), reviewer_threads, stale_approval)
+
+
+def _pull_request_wants(rules: list, parameter: str) -> bool:
+    return any(
+        isinstance(rule, dict) and rule.get("type") == "pull_request" and (rule.get("parameters") or {}).get(parameter)
+        for rule in rules
+    )
 
 
 def _check_passed(check) -> bool:
@@ -294,10 +335,10 @@ def _published_pr(args: Any) -> Optional[str]:
     return None
 
 
-def check(tool_name: str, args: Any, env: dict) -> tuple[str, list[str]]:
+def check(tool_name: str, args: Any, env: dict, merge_queue: Optional[dict] = None) -> tuple[str, list[str]]:
     deadline = time.monotonic() + HOOK_BUDGET_SECONDS
     workspace, local_head, pr = _load_pr(args, env, deadline)
-    return pr["url"], evaluate(pr, local_head, tool_name, _blockers(pr, workspace, deadline))
+    return pr["url"], evaluate(pr, local_head, tool_name, _blockers(pr, workspace, deadline), merge_queue)
 
 
 def re_request_reviews(pr: dict, workspace: str, deadline: float) -> tuple[list[str], list[str]]:
@@ -417,13 +458,25 @@ def _person_started(thread: dict) -> bool:
     return isinstance(author, dict) and author.get("__typename") == "User"
 
 
-def _pr_state(pr: dict, repo: str, workspace: str, deadline: float) -> dict:
+def _graphql(query: str, pr: dict, repo: str, workspace: str, deadline: float):
     owner, name = repo.split("/")
-    data = _gh_json(
-        ["api", "graphql", "-f", f"query={THREAD_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={_pr_number(pr)}"],
+    return _gh_json(
+        ["api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={_pr_number(pr)}"],
         workspace,
         deadline,
     )
+
+
+def _in_merge_queue(pr: dict, repo: str, workspace: str, deadline: float) -> bool:
+    data = _graphql(MERGE_QUEUE_QUERY, pr, repo, workspace, deadline)
+    try:
+        return bool(data["data"]["repository"]["pullRequest"]["isInMergeQueue"])
+    except (KeyError, TypeError):
+        raise GateError(f"whether {pr['url']} is in the merge queue could not be read")
+
+
+def _pr_state(pr: dict, repo: str, workspace: str, deadline: float) -> dict:
+    data = _graphql(THREAD_QUERY, pr, repo, workspace, deadline)
     try:
         node = data["data"]["repository"]["pullRequest"]
         threads, commits, reviews = node["reviewThreads"], node["commits"], node["latestOpinionatedReviews"]
@@ -434,6 +487,11 @@ def _pr_state(pr: dict, repo: str, workspace: str, deadline: float) -> dict:
             "commits_truncated": commits["pageInfo"]["hasNextPage"],
             "unsigned_commits": sum(1 for c in commits["nodes"] if not (c["commit"].get("signature") or {}).get("isValid")),
             "reviews_truncated": reviews["pageInfo"]["hasNextPage"],
+            "approvals": [
+                (r.get("commit") or {}).get("oid")
+                for r in reviews["nodes"]
+                if r["state"] == "APPROVED" and (r.get("author") or {}).get("__typename") == "User"
+            ],
             "change_requests": [
                 ((r.get("author") or {}).get("login"), (r.get("commit") or {}).get("oid"))
                 for r in reviews["nodes"]
@@ -455,7 +513,8 @@ def _blockers(pr: dict, workspace: str, deadline: float) -> Optional[Callable[[]
         rules = _gh_json(["api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100"], workspace, deadline)
         if not isinstance(rules, list):
             raise GateError(f"the branch rules of {repo}:{base} could not be read")
-        return _unmet_rules(pr, rules, lambda: _pr_state(pr, repo, workspace, deadline))
+        unmet = _unmet_rules(pr, rules, lambda: _pr_state(pr, repo, workspace, deadline))
+        return unmet._replace(in_merge_queue=lambda: _in_merge_queue(pr, repo, workspace, deadline))
 
     return blockers
 
@@ -472,7 +531,7 @@ def make_hook(ctx: Any):
         if tool_name not in GATED_TOOLS or not _gated(ctx):
             return None
         try:
-            pr, failures = check(tool_name, args, dict(os.environ))
+            pr, failures = check(tool_name, args, dict(os.environ), ctx.get_config("merge_queue", default={}))
         except GateError as exc:
             return {
                 "action": "block",
@@ -506,6 +565,7 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
 
     It also asks the Linear issue's owner to review. It names each failed or pending check that no branch rule requires,
     and counts the open review threads that a person started, which the gate let through.
+    It sets waiting_for_merge_queue when the pull request is approved and queued, with no such thread, so only the queue is left.
     Hermes keeps only the first transform_tool_result string, so one hook does all of it.
 
     transform_tool_result is the one hook that can change what the worker reads, and Hermes bounds it at 30s and fails open.
@@ -523,6 +583,7 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
         unrequired: list[str] = []
         pending: list[str] = []
         reviewer_threads = 0
+        waiting = False
         owner: dict = {}
         try:
             deadline = time.monotonic() + HOOK_BUDGET_SECONDS
@@ -534,12 +595,19 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
             if pr.get("state") == "OPEN" and match:
                 try:
                     reviewer_threads = _pr_state(pr, match.group(1), workspace, deadline)["reviewer_threads"]
+                    merge_queue = ctx.get_config("merge_queue", default={})
+                    waiting = (
+                        pr.get("reviewDecision") == "APPROVED"
+                        and pr.get("mergeStateStatus") == "BLOCKED"
+                        and not reviewer_threads
+                        and (_queue_signal(pr, merge_queue) or _in_merge_queue(pr, match.group(1), workspace, deadline))
+                    )
                 except GateError as exc:
                     failed.append(str(exc))
             owner = request_owner_review(pr, workspace, deadline, owner_lookup, asked)
         except GateError as exc:
             asked, failed = [], [str(exc)]
-        if not (asked or failed or unrequired or pending or reviewer_threads or owner):
+        if not (asked or failed or unrequired or pending or reviewer_threads or waiting or owner):
             return None
         landed.update(owner)
         if asked:
@@ -552,6 +620,8 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
             landed["pending_unrequired_checks"] = pending
         if reviewer_threads:
             landed["reviewer_owned_threads"] = reviewer_threads
+        if waiting:
+            landed["waiting_for_merge_queue"] = True
         return json.dumps(landed)
 
     return on_tool_result
