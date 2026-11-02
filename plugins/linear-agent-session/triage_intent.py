@@ -207,6 +207,7 @@ def decide(
     thread: Thread,
     document_titles: list[str],
     approvers: list[dict],
+    operators_configured: bool,
 ) -> Intent:
     found = triage_exit.find_card(work_cards, issue["id"], issue["identifier"], issue["gitBranchName"])
     triage_card = find_triage_card(triage_cards, issue["id"])
@@ -238,13 +239,15 @@ def decide(
     elif (payload.get("agentActivity") or {}).get("signal") == "stop":
         action = _session_prompted(facts, stop=True)
     else:
-        facts = _with_authority(facts, approvers, reply.author_id, reply.author_kind)
+        facts = _with_authority(facts, approvers, reply.author_id, reply.author_kind, operators_configured)
         action = _session_prompted(facts, stop=False)
     return replace(facts, action=action, agent_session_id=session)
 
 
-def _with_authority(facts: Intent, approvers: list[dict], author_id: Optional[str], author_kind: Optional[str]) -> Intent:
-    role, reason = linear.authority(approvers, author_id, "id")
+def _with_authority(
+    facts: Intent, approvers: list[dict], author_id: Optional[str], author_kind: Optional[str], operators_configured: bool
+) -> Intent:
+    role, reason = linear.authority(approvers, author_id, "id", operators_configured)
     assignee = next((person for person in approvers if person["role"] == "assignee"), None)
     return replace(
         facts,
@@ -342,7 +345,8 @@ def compute(
         issue = linear_client.get_issue(_issue_id(payload))
         documents = linear_client.issue_documents(issue["id"])["documents"]
         app = app_user_id()
-        people = [] if carries_no_reply(payload) else linear.lookup_approvers(linear_client, issue, app, operator_user_ids())
+        operators = operator_user_ids()
+        people = [] if carries_no_reply(payload) else linear.lookup_approvers(linear_client, issue, app, operators)
         return decide(
             payload,
             issue,
@@ -354,6 +358,7 @@ def compute(
             resolve_thread(payload, linear_client),
             [document["title"] for document in documents],
             people,
+            bool(operators),
         )
     except Exception as failure:
         return error_intent(redact(f"{type(failure).__name__}: {failure}"))

@@ -68,10 +68,10 @@ def issue_event(updated_from=None):
 BRIEF = ["PAT-1 Agent brief"]
 
 
-def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD, titles=BRIEF, approvers=None):
+def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD, titles=BRIEF, approvers=None, operators_configured=True):
     live = live or issue()
     people = plugin.linear.approvers(live["assignee"], None, []) if approvers is None else approvers
-    return intent_module.decide(payload, live, list(triage), list(work), APP, NOW, reply, thread, list(titles), people)
+    return intent_module.decide(payload, live, list(triage), list(work), APP, NOW, reply, thread, list(titles), people, operators_configured)
 
 
 def expected(action, **overrides):
@@ -561,7 +561,7 @@ class IssueUpdateTest(unittest.TestCase):
 
     def test_the_duplicate_is_judged_at_the_delivery_time(self):
         live = issue(agentSessions=[session("s-1", 60)])
-        replay = intent_module.decide(issue_event(), live, [], [], APP, NOW - dt.timedelta(minutes=57), intent_module.NO_REPLY, intent_module.NO_THREAD, BRIEF, [])
+        replay = intent_module.decide(issue_event(), live, [], [], APP, NOW - dt.timedelta(minutes=57), intent_module.NO_REPLY, intent_module.NO_THREAD, BRIEF, [], True)
         self.assertEqual(replay.action, "session_created_handles_it")
         self.assertEqual(self.update(live).action, "open_session")
 
@@ -847,6 +847,27 @@ class ApproverTest(unittest.TestCase):
                 with self.subTest(assignee=live["assignee"], author=author):
                     result = self.reply(author, [delegation(DELEGATOR)], [OPERATOR], live=live)
                     self.assertEqual((result.action, result.not_assignee_reason), (action, None))
+
+    def test_a_stranger_is_told_no_operators_are_configured_only_while_the_list_is_empty(self):
+        for operators, reason in (([], "no_operators_configured"), ([OPERATOR], None)):
+            with self.subTest(operators=operators):
+                result = self.reply(OTHER, operators=operators)
+                self.assertEqual((result.action, result.from_assignee, result.not_assignee_reason), ("card_reply_not_assignee", False, reason))
+
+    def test_the_assignee_and_the_delegator_are_approvers_whatever_the_operator_list(self):
+        for author, role in ((ASSIGNEE, "assignee"), (DELEGATOR, "delegator")):
+            with self.subTest(role):
+                result = self.reply(author, [delegation(DELEGATOR)], [])
+                self.assertEqual((result.action, result.authorized_as, result.not_assignee_reason), ("card_reply", role, None))
+
+    def test_the_earlier_reasons_win_over_an_empty_operator_list(self):
+        no_author = self.reply(None)
+        no_assignee = self.reply(OTHER, live=issue(assignee=None))
+        self.assertEqual((no_author.not_assignee_reason, no_assignee.not_assignee_reason), ("no_author", "no_assignee"))
+
+    def test_a_configured_list_whose_lookup_fails_never_says_no_operators_are_configured(self):
+        result = self.reply(OTHER, operators=[OPERATOR], lookup_error=RuntimeError("down"))
+        self.assertEqual((result.action, result.not_assignee_reason), ("card_reply_not_assignee", None))
 
     def test_a_delegation_nobody_can_name_authorizes_only_the_assignee_and_operators(self):
         app_actor = person("app-user-3", "Some agent", None, app=True)
