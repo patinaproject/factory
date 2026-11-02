@@ -468,15 +468,16 @@ def sweep_cause(prefix: str | None, over: Callable[[Card, dict], bool], cleared:
 
 def note_resumed(card: Card, cleared: str, post: Callable[[str, str], None]) -> None:
     """After a release, one thought on the card's agent session, and a card comment that records it."""
+    note = f"{RESUMED_NOTED} {cleared}."
     try:
         session_id = card_field(card.show()["task"]["body"], "linear_agent_session_id")
         post(session_id, f"{cleared[0].upper()}{cleared[1:]}, so this card runs again.")
-        card.comment(f"{RESUMED_NOTED} {cleared}.")
     except Failed as failure:
-        try:
-            card.comment(f"{RESUMED_NOTED} {cleared}, but the note on the agent session was not posted: {failure}")
-        except Failed:
-            pass
+        note = f"{RESUMED_NOTED} {cleared}, but the note on the agent session was not posted: {failure}"
+    try:
+        card.comment(note)
+    except Failed:
+        pass
 
 
 def sweep_worktree() -> dict:
