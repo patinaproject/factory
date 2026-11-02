@@ -249,10 +249,15 @@ ISSUE_EDIT_QUERY = """query IssueEdit($id: String!) {
 }"""
 
 TEAM_CREATE_QUERY = """query TeamForCreate($key: String!) {
+  viewer { id }
   teams(filter: { key: { eq: $key } }) {
-    nodes { id key labels(first: 250) { nodes { id name isGroup parent { id } } } }
+    nodes { id key states { nodes { id type } } labels(first: 250) { nodes { id name isGroup parent { id } } } }
   }
   issueLabels(first: 250, filter: { team: { null: true } }) { nodes { id name isGroup parent { id } } }
+}"""
+
+OPEN_TITLED_ISSUES_QUERY = """query OpenTitledIssues($filter: IssueFilter!) {
+  issues(filter: $filter, first: 10) { nodes { identifier title url } }
 }"""
 
 ISSUE_CREATE_MUTATION = """mutation IssueCreate($input: IssueCreateInput!) {
@@ -796,8 +801,17 @@ class LinearClient:
             "state": target["name"] if target else issue["state"]["name"],
         }
 
-    def create_issue(self, team_key: str, title: str, description: str = "", labels: list = ()) -> dict:
-        """Create an issue in the team with that key. It sends no status, so Linear applies the team's default."""
+    def create_issue(
+        self,
+        team_key: str,
+        title: str,
+        description: str = "",
+        labels: list = (),
+        *,
+        state_type: Optional[str] = None,
+        delegate_self: bool = False,
+    ) -> dict:
+        """Create an issue in the team with that key. Without `state_type` it sends no status, so Linear applies the team's default."""
         data = self._graphql(TEAM_CREATE_QUERY, {"key": team_key})
         if not data["teams"]["nodes"]:
             raise LinearError(f"Linear has no team with the key {team_key!r} that the agent app can read")
@@ -805,12 +819,30 @@ class LinearClient:
         known = team["labels"]["nodes"] + data["issueLabels"]["nodes"]
         label_ids = sorted({_label_named(known, name)["id"] for name in labels})
         issue_input: dict = {"teamId": team["id"], "title": title, "description": description}
+        if state_type is not None:
+            states = [s for s in team["states"]["nodes"] if s["type"] == state_type]
+            if not states:
+                raise LinearError(f"team {team_key!r} has no workflow state of type {state_type!r}")
+            issue_input["stateId"] = states[0]["id"]
         if label_ids:
             issue_input["labelIds"] = label_ids
+        if delegate_self:
+            issue_input["delegateId"] = data["viewer"]["id"]
         payload = self._graphql(ISSUE_CREATE_MUTATION, {"input": issue_input})["issueCreate"]
         if not payload["success"]:
             raise LinearError("issueCreate reported success: false")
         return {"identifier": payload["issue"]["identifier"], "url": payload["issue"]["url"]}
+
+    def open_issues_titled(self, team_key: str, title_prefix: str) -> list:
+        """The team's open issues that the agent app created and whose title starts with `title_prefix`."""
+        issue_filter = {
+            "team": {"key": {"eq": team_key}},
+            "creator": {"isMe": {"eq": True}},
+            "title": {"startsWith": title_prefix},
+            "state": {"type": {"nin": list(CLOSED_STATE_TYPES)}},
+        }
+        nodes = self._graphql(OPEN_TITLED_ISSUES_QUERY, {"filter": issue_filter})["issues"]["nodes"]
+        return [{"identifier": n["identifier"], "title": n["title"], "url": n["url"]} for n in nodes]
 
     def relate_issues(self, id_or_identifier: str, other: str, kind: str) -> dict:
         """Make `issue` a duplicate of `other` (kind `duplicate`), make `other` block it (kind `blocks`),

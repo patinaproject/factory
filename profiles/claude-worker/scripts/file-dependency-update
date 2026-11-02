@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""File the weekly dependency-update issue.
+
+Reads `dependency_updates` from the factory settings. Prints `open <identifier> <url>` when the agent app
+already has an open issue titled with `dependency_update.TITLE_PREFIX`, else files one and prints
+`filed <identifier> <url>`. Exits 1 when Linear or the broker fails, or 2 when the settings or HERMES_HOME are wrong.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from datetime import datetime, timezone
+
+import card_transition
+import dependency_update
+import factory_settings
+
+
+def main() -> int:
+    if not os.environ.get("HERMES_HOME"):
+        print("file-dependency-update: HERMES_HOME is not set; point it at the claude-worker profile home", file=sys.stderr)
+        return 2
+    try:
+        settings = dependency_update.parse_settings(factory_settings.read(raw=False))
+    except (factory_settings.SettingsError, dependency_update.SettingsError, ValueError) as exc:
+        print(f"file-dependency-update: {exc}", file=sys.stderr)
+        return 2
+    linear = card_transition.plugin_module("linear-agent-session", "linear")
+    try:
+        client = linear.client_from_env()
+        open_issues = client.open_issues_titled(settings.team_key, dependency_update.TITLE_PREFIX)
+        if open_issues:
+            print(f"open {open_issues[0]['identifier']} {open_issues[0]['url']}")
+            return 0
+        issue = client.create_issue(
+            settings.team_key,
+            dependency_update.title(datetime.now(timezone.utc).date()),
+            dependency_update.description(settings),
+            [settings.theme_label],
+            state_type="triage",
+            delegate_self=True,
+        )
+    except (*linear.CLIENT_ERRORS, OSError) as exc:
+        print(f"file-dependency-update: Linear failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"filed {issue['identifier']} {issue['url']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

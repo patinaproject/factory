@@ -78,6 +78,13 @@ config_schema:
     description: >-
       The Triage board. max_running caps how many triage cards run at once; dispatch-triage assigns
       triage cards only while fewer run.
+  dependency_updates:
+    type: dict
+    default: {}
+    description: >-
+      The weekly dependency-update issue. repository is the <owner>/<name> to update, team_key the Linear
+      team that gets the issue, theme_label its one label, and type_label the type its description names.
+      file-dependency-update refuses to run without all four.
   claude_session:
     type: dict
     default: {}

@@ -118,7 +118,12 @@ def artifact_tools(*tools: str) -> None:
 artifact_login()
 artifact_tools("Artifact", "Read")
 
-SETTINGS = {"app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}, "claude_artifact": ARTIFACT_SETTINGS}
+DEPENDENCY_UPDATES = {"repository": "example-org/example-repo", "team_key": "ABC", "theme_label": "Security", "type_label": "Tools"}
+SETTINGS = {
+    "app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}, "claude_artifact": ARTIFACT_SETTINGS,
+    "dependency_updates": DEPENDENCY_UPDATES,
+}
+DEPENDENCY_UPDATES_KEY = "plugins.entries.linear-agent-session.settings.dependency_updates"
 MAX_RUNNING_KEY = "plugins.entries.linear-agent-session.settings.triage.max_running"
 BOARDS = [{"slug": "default", "default_workdir": None}, {"slug": "triage", "default_workdir": None}]
 ROOT_CONFIG = {
@@ -129,6 +134,7 @@ ROOT_CONFIG = {
     "platforms.webhook.extra.port": 8644,
     "plugins.entries.linear-agent-session.settings": SETTINGS,
     MAX_RUNNING_KEY: 2,
+    DEPENDENCY_UPDATES_KEY: DEPENDENCY_UPDATES,
     "kanban.max_in_progress": 4,
     "kanban.max_spawn": 2,
     "kanban.review_dispatch": False,
@@ -142,6 +148,7 @@ ROOT_CONFIG = {
 WORKER_CONFIG = {
     **{key: ROOT_CONFIG[key] for key in (
         "model.provider", "model.default", "plugins.entries.linear-agent-session.settings", MAX_RUNNING_KEY,
+        DEPENDENCY_UPDATES_KEY,
     )},
     "terminal.timeout": 400,
 }
@@ -161,6 +168,7 @@ WORKER_JOBS = [
     cron_job("reopen-conflicts", 5),
     cron_job("finish-merged", 5),
     cron_job("dispatch-triage", 1),
+    cron_job("file-dependency-update", 10080),
 ]
 RETRY_SCRIPT = "retry-failed-webhooks"
 ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack"), cron_job("report-deploy", 5, "slack")]
@@ -1289,6 +1297,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("reopen-conflicts", 5),
             cron_job("finish-merged", 5),
             cron_job("dispatch-triage", 1),
+            cron_job("file-dependency-update", 10080),
         ])
         self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local"), ROOT_JOBS[1]])
 
