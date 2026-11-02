@@ -326,8 +326,12 @@ Then act on the result:
     threads that a person started are still open. The reviewer resolves
     them at review. Add `open reviewer threads:` and the count to the
     `body`. Do not resolve them yourself.
-  - End the `body` with what the operator is asked to do: `Review the pull
-    request on GitHub, then merge it or request changes.`
+  - When the tool result has `waiting_for_merge_queue`, the pull request is
+    approved and waits for the merge queue. Say so in the `body`, and end it
+    with that instead of asking the operator to review and merge. Never add
+    or remove a merge queue label yourself.
+  - Otherwise end the `body` with what the operator is asked to do: `Review
+    the pull request on GitHub, then merge it or request changes.`
 - **Completion accepted.** Post a `response` activity that summarizes the
   change, with the handoff `external_urls`. You are done.
 - **Refused by `pr-ready-gate`.** The refusal says why: draft, an unmet

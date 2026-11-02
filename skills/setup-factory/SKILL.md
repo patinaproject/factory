@@ -1042,6 +1042,23 @@ another worker profile name, set
 `plugins.entries.pr-ready-gate.settings.gated_profiles` in both homes and read
 it back the same way.
 
+For a repository that uses a merge queue, also set
+`plugins.entries.pr-ready-gate.settings.merge_queue` in both homes. It maps
+`<owner>/<repo>` to the queue's label and check names:
+
+```json
+{"<owner>/<repo>": {"labels": ["<queue-label>"], "checks": ["<queue-check>"]}}
+```
+
+An approved pull request that GitHub holds at `BLOCKED` passes
+`kanban_request_review` when it carries one of the labels, when the newest run
+of one of the checks is still pending, or when GitHub reports it in the merge
+queue. Name the label that the queue tool sets itself while it queues a pull
+request, not the label that a person adds to ask for queueing. The rule needs a
+repository whose branch rules live in a ruleset: the gate reads rules only from
+the rulesets endpoint and cannot see classic branch protection. The default is
+empty, which leaves only GitHub's own queue report.
+
 **GitHub login.** Return to [`references/github.md`](references/github.md)
 and run its "Sign the worker's `gh` in" section now. It needs only the
 settings above. The clones below use that login.

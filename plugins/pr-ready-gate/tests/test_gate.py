@@ -513,7 +513,7 @@ class HookDecisionTest(unittest.TestCase):
         gh_calls = [call for call in shell.calls if call[0][0] == "gh"]
         self.assertEqual(
             gh_calls,
-            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews"], WORKSPACE, 15)],
+            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews,labels"], WORKSPACE, 15)],
         )
 
     def test_published_pr_url_is_viewed_with_its_repo(self):
@@ -521,7 +521,7 @@ class HookDecisionTest(unittest.TestCase):
         self.assertIsNone(call_hook(shell, args={"metadata": {"published_pr": PR_URL}}))
         self.assertEqual(
             shell.gh_call()[0],
-            ["gh", "pr", "view", PR_URL, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews",
+            ["gh", "pr", "view", PR_URL, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews,labels",
              "--repo", "example-org/example-repo"],
         )
 
