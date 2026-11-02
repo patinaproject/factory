@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from unittest import mock
 
@@ -304,6 +305,22 @@ class TriageIntentContractTest(unittest.TestCase):
 
         self.assertEqual(missing, [])
         self.assertNotIn("<triage_intent>", render.build_routes(SETTINGS)["github"]["prompt"])
+
+    def test_the_linear_prompt_names_every_intent_field_and_author_kind(self):
+        plugin_dir = Path(__file__).resolve().parents[2] / "plugins" / "linear-agent-session"
+        spec = importlib.util.spec_from_file_location(
+            "linear_agent_session", plugin_dir / "__init__.py", submodule_search_locations=[str(plugin_dir)]
+        )
+        plugin = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = plugin
+        spec.loader.exec_module(plugin)
+        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        triage_intent = plugin.triage_intent
+
+        fields = asdict(triage_intent.Intent(action=""))
+        missing = [name for name in [*fields, *triage_intent.REPLY_AUTHOR_KINDS] if f"`{name}`" not in prompt]
+
+        self.assertEqual(missing, [])
 
 
 class IssueWriteToolContractTest(unittest.TestCase):

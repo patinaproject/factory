@@ -93,6 +93,7 @@ def replied(action, **overrides):
         reply="yes",
         reply_source="payload",
         reply_author_id=ASSIGNEE,
+        reply_author_kind="person",
         assignee=ASSIGNEE_FIELDS,
         from_assignee=True,
         authorized_as="assignee",
@@ -355,7 +356,7 @@ class SessionCreatedTest(unittest.TestCase):
 
 class SessionPromptedTest(unittest.TestCase):
     def prompted(self, live=None, triage=(), work=(), reply=None, **event):
-        reply = reply or Reply("yes", "payload", event.get("author", ASSIGNEE))
+        reply = reply or Reply("yes", "payload", event.get("author", ASSIGNEE), "person")
         return decide(session_event("prompted", **event), live, triage, work, reply)
 
     def test_a_reply_resumes_a_live_triage_card_before_any_other_card(self):
@@ -465,7 +466,7 @@ class SessionPromptedTest(unittest.TestCase):
                 )
 
     def test_a_reply_that_arrived_without_text_keeps_its_action(self):
-        result = self.prompted(work=[card("t_work", branch=BRANCH)], reply=Reply(None, "missing", ASSIGNEE))
+        result = self.prompted(work=[card("t_work", branch=BRANCH)], reply=Reply(None, "missing", ASSIGNEE, "person"))
         self.assertEqual((result.action, result.reply, result.reply_source), ("card_reply", None, "missing"))
 
     def test_a_stop_stops_the_triage_card_first_then_the_card(self):
@@ -567,8 +568,9 @@ class IssueUpdateTest(unittest.TestCase):
 
 class ReplyTest(unittest.TestCase):
     class Client:
-        def __init__(self, result=None, error=None):
+        def __init__(self, result=None, error=None, app=False, user_error=None):
             self.result, self.error, self.calls = result, error, []
+            self.app, self.user_error, self.asked = app, user_error, []
 
         def read_prompt(self, **kwargs):
             self.calls.append(kwargs)
@@ -576,17 +578,23 @@ class ReplyTest(unittest.TestCase):
                 raise self.error
             return self.result
 
+        def user_is_app(self, user_id):
+            self.asked.append(user_id)
+            if self.user_error:
+                raise self.user_error
+            return self.app
+
     def resolve(self, payload, client=None):
         return intent_module.resolve_reply(payload, client or self.Client())
 
     def test_the_payloads_text_is_the_reply_however_short(self):
         client = self.Client()
-        self.assertEqual(self.resolve(session_event("prompted", body="yes"), client), Reply("yes", "payload", ASSIGNEE))
+        self.assertEqual(self.resolve(session_event("prompted", body="yes"), client), Reply("yes", "payload", ASSIGNEE, "person"))
         self.assertEqual(client.calls, [])
 
     def test_a_payload_without_text_is_read_from_linear_by_activity(self):
         client = self.Client({"found": True, "body": "go ahead"})
-        self.assertEqual(self.resolve(session_event("prompted"), client), Reply("go ahead", "linear", ASSIGNEE))
+        self.assertEqual(self.resolve(session_event("prompted"), client), Reply("go ahead", "linear", ASSIGNEE, "person"))
         self.assertEqual(client.calls, [{"agent_activity_id": "activity-1", "agent_session_id": None}])
 
     def test_without_an_activity_id_the_session_is_read(self):
@@ -599,19 +607,61 @@ class ReplyTest(unittest.TestCase):
     def test_a_reply_linear_cannot_find_is_missing(self):
         for client in (self.Client({"found": False}), self.Client(error=RuntimeError("down"))):
             with self.subTest(client.result):
-                self.assertEqual(self.resolve(session_event("prompted"), client), Reply(None, "missing", ASSIGNEE))
+                self.assertEqual(self.resolve(session_event("prompted"), client), Reply(None, "missing", ASSIGNEE, "person"))
 
     def test_a_payload_without_its_author_reads_the_prompt_author_from_linear(self):
-        client = self.Client({"found": True, "body": "go ahead", "authorId": OTHER})
-        self.assertEqual(self.resolve(session_event("prompted", body="yes", author=None), client), Reply("yes", "payload", OTHER))
-        self.assertEqual(self.resolve(session_event("prompted", author=None), client), Reply("go ahead", "linear", OTHER))
+        client = self.Client({"found": True, "body": "go ahead", "authorId": OTHER, "authorApp": False})
+        self.assertEqual(self.resolve(session_event("prompted", body="yes", author=None), client), Reply("yes", "payload", OTHER, "person"))
+        self.assertEqual(self.resolve(session_event("prompted", author=None), client), Reply("go ahead", "linear", OTHER, "person"))
         self.assertEqual(client.calls, [{"agent_activity_id": "activity-1", "agent_session_id": None}] * 2)
 
     def test_an_author_linear_cannot_read_is_none(self):
         for client in (self.Client({"found": False}), self.Client(error=RuntimeError("down"))):
             with self.subTest(client.result):
                 payload = session_event("prompted", body="yes", author=None)
-                self.assertEqual(self.resolve(payload, client), Reply("yes", "payload", None))
+                self.assertEqual(self.resolve(payload, client), Reply("yes", "payload", None, "unknown"))
+
+    def test_a_person_is_a_person_whatever_the_reply_says(self):
+        for body in ("yes", "That completes the move."):
+            with self.subTest(body):
+                kind = self.resolve(session_event("prompted", body=body), self.Client(app=False)).author_kind
+                self.assertEqual(kind, "person")
+
+    def test_an_app_is_an_app_whatever_the_reply_says(self):
+        for body in ("yes", "yep do it"):
+            with self.subTest(body):
+                client = self.Client(app=True)
+                self.assertEqual(self.resolve(session_event("prompted", body=body), client).author_kind, "app")
+                self.assertEqual(client.asked, [ASSIGNEE])
+
+    def test_a_payload_without_an_author_has_an_unknown_kind(self):
+        client = self.Client({"found": False})
+        self.assertEqual(self.resolve(session_event("prompted", body="yes", author=None), client).author_kind, "unknown")
+
+    def test_a_failed_lookup_is_an_unknown_kind_and_keeps_the_rest_of_the_reply(self):
+        client = self.Client(user_error=RuntimeError("down"))
+        self.assertEqual(self.resolve(session_event("prompted", body="yes"), client), Reply("yes", "payload", ASSIGNEE, "unknown"))
+
+    def test_a_non_bool_app_is_an_unknown_kind(self):
+        for app in (None, "yes", 1):
+            with self.subTest(app):
+                self.assertEqual(self.resolve(session_event("prompted", body="yes"), self.Client(app=app)).author_kind, "unknown")
+
+    def test_the_users_lookup_decides_the_kind_when_the_payload_has_no_body(self):
+        client = self.Client({"found": True, "body": "go ahead", "authorId": ASSIGNEE, "authorApp": False}, app=True)
+        self.assertEqual(self.resolve(session_event("prompted"), client).author_kind, "app")
+
+    def test_the_prompt_authors_app_flag_decides_the_kind_when_the_payload_has_no_user(self):
+        for flag, kind in ((False, "person"), (True, "app"), (None, "unknown"), ("yes", "unknown")):
+            with self.subTest(flag):
+                client = self.Client({"found": True, "body": "go ahead", "authorId": OTHER, "authorApp": flag})
+                self.assertEqual(self.resolve(session_event("prompted", author=None), client).author_kind, kind)
+                self.assertEqual(client.asked, [])
+
+    def test_a_prompt_author_that_cannot_be_read_has_an_unknown_kind(self):
+        for client in (self.Client({"found": False}), self.Client(error=RuntimeError("down"))):
+            with self.subTest(client.result):
+                self.assertEqual(self.resolve(session_event("prompted", author=None), client).author_kind, "unknown")
 
     def test_events_without_a_reply_have_none(self):
         client = self.Client()
@@ -721,6 +771,13 @@ class FakeLinearClient(plugin.linear.LinearClient):
 
     def read_prompt(self, **_):
         return {"found": False}
+
+    def user_is_app(self, user_id):
+        if self.lookup_error:
+            raise self.lookup_error
+        if user_id not in self.users:
+            raise plugin.linear.LinearError(f"Linear has no user {user_id} that the agent app can read")
+        return self.users[user_id]["app"]
 
     def session_thread(self, _agent_session_id):
         if self.thread_error:
@@ -882,6 +939,24 @@ class ComputeTest(unittest.TestCase):
             with self.subTest(author):
                 result = self.compute(session_event("prompted", body="fix it", author=author), FakeLinearClient(issue()), boards)
                 self.assertEqual((result.action, result.reply_author_id), (action, author))
+
+    def test_the_computed_intent_carries_the_authors_kind_for_a_reply_only(self):
+        client = FakeLinearClient(issue(), users={ASSIGNEE: person(ASSIGNEE, "Ann Assignee"), OTHER: person(OTHER, "Bot", app=True)})
+        boards = {"triage": [], None: [card("t_work", status="review", branch=BRANCH)]}
+        for author, kind in ((ASSIGNEE, "person"), (OTHER, "app"), ("user-ghost", "unknown")):
+            with self.subTest(author):
+                self.assertEqual(self.compute(session_event("prompted", body="go", author=author), client, boards).reply_author_kind, kind)
+        for payload in (session_event("created"), session_event("prompted", signal="stop"), issue_event()):
+            with self.subTest(payload["type"] + str(payload.get("action"))):
+                self.assertIsNone(self.compute(payload, client, boards).reply_author_kind)
+
+    def test_a_failed_author_lookup_changes_only_the_kind(self):
+        boards = {"triage": [], None: [card("t_work", status="review", branch=BRANCH)]}
+        payload = session_event("prompted", body="go", author=ASSIGNEE)
+        found = self.compute(payload, FakeLinearClient(issue(), users={ASSIGNEE: person(ASSIGNEE, "Ann")}), boards)
+        failed = self.compute(payload, FakeLinearClient(issue(), lookup_error=RuntimeError("down")), boards)
+        self.assertEqual(replace(failed, reply_author_kind="person"), found)
+        self.assertEqual((failed.action, failed.reply_author_kind), ("card_reply", "unknown"))
 
     def test_a_non_list_operator_setting_is_the_error_intent_naming_it(self):
         def misconfigured():
