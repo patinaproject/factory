@@ -207,7 +207,7 @@ def _comment_skip(plugin, payload_file: str) -> int:
         cards=triage_exit.listed_cards,
         history=triage_exit.listed_history,
     )
-    print(json.dumps({"skip": intent.action == "skip_comment"}))
+    print(json.dumps({"skip": intent.action != "comment_resume"}))
     return 0
 
 

@@ -357,8 +357,26 @@ class HookTest(unittest.TestCase):
         path = os.path.join(self.store.name, hashlib.sha256(COMMENT_ID.encode()).hexdigest() + ".json")
         with open(path) as record:
             self.assertEqual(json.load(record)["state"], "reserved")
-        with self.assertLogs("linear_agent_session", "WARNING"):
-            self.assertEqual(self.deliver(comment_event())["action"], "skip")
+        self.assertEqual(
+            self.deliver(comment_event()),
+            {
+                "action": "skip",
+                "reason": f"the comment's id could not be recorded: a call with idempotency_key '{COMMENT_ID}' is still running or did not finish; nothing was sent again",
+            },
+        )
+
+    def test_a_comment_whose_intent_fails_is_skipped_without_a_turn(self):
+        hook = plugin.make_dispatch_hook(
+            lambda: self.client,
+            lambda: "linear",
+            lambda: CONFIG,
+            lambda _: None,
+            lambda delivery: run_compute(delivery, self.cards, error=RuntimeError("Linear down")),
+            lambda: self.store.name,
+        )
+        result = asyncio.run(hook(event=Event(comment_event()), gateway=object(), session_store=None))
+        self.assertEqual(result, {"action": "skip", "reason": "the comment's intent failed: RuntimeError: Linear down"})
+        self.assertEqual(self.client.activities, [])
 
     def test_a_comment_after_the_thread_reply_released_the_card_gets_a_skip(self):
         self.cards = boards(triage_card("ready"))
@@ -411,6 +429,9 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(json.loads(self.run_cli("comment-skip", comment_event(), waits)), {"skip": False})
         self.assertEqual(json.loads(self.run_cli("comment-skip", comment_event(), boards())), {"skip": True})
         self.assertEqual(json.loads(self.run_cli("comment-skip", comment_event(parent="p"), waits)), {"skip": True})
+
+    def test_comment_skip_skips_a_comment_whose_intent_fails(self):
+        self.assertEqual(json.loads(self.run_cli("comment-skip", {"type": "Comment"}, boards(triage_card()))), {"skip": True})
 
 
 class MachineParksTest(unittest.TestCase):

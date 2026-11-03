@@ -506,6 +506,17 @@ class RetryTest(unittest.TestCase):
         self.assertIn('"action": "card_reply"', queries[0])
         self.assertEqual([c["payload"] for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "triage-intent"], [comment])
 
+    def test_an_unadmitted_comment_is_not_replayed(self):
+        comment = {"type": "Comment", "action": "create", "data": {"id": "c1", "issueId": "issue-1"}}
+        self.install_triage_exit(handled=False, skip=False)
+        self.seed(entry("comment", state="pending", delivered=ago(minutes=30), payload=comment, admitted=False))
+
+        result = self.run_retry()
+
+        self.assertEqual(self.chats(), [])
+        self.assertIn("retried linear comment: skipped a comment that resumes no card\n", result.stdout)
+        self.assertEqual([c for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "comment-skip"], [])
+
     def test_a_failed_comment_check_replays_the_turn(self):
         comment = {"type": "Comment", "action": "create", "data": {"id": "c1", "issueId": "issue-1"}}
         self.install_triage_exit(handled=False, skip=True, exit=1)

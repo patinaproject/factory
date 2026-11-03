@@ -303,25 +303,31 @@ def make_dispatch_hook(
         intent = compute_intent(payload)
         return compute_intent(payload) if intent.action == "error" else intent
 
-    def first_delivery(comment_id: str) -> bool:
-        """A crash after the record is written leaves it reserved, and `idempotency.once` refuses a reserved record
-        forever, so that comment never resumes its card and the person answers again. Releasing it could resume twice."""
+    def first_delivery(comment_id: str) -> Optional[str]:
+        """None when this delivery is the comment's first, else why it is not.
+
+        The id is recorded as done before the turn runs. A crash before the turn finishes leaves it recorded, so no
+        later delivery of the comment resumes the card and the person answers again. Forgetting the id on failure
+        could resume the card twice."""
         ran = []
         try:
             idempotency.once(comment_store(), "comment_resume", comment_id, {}, lambda: ran.append(True) or {"recorded": True})
         except linear.LinearError as failure:
-            logger.warning("linear-agent-session: comment %s not resumed: %s", comment_id, failure)
-            return False
-        return bool(ran)
+            return f"the comment's id could not be recorded: {failure}"
+        return None if ran else "the comment already resumed its card"
 
-    async def resume_from_comment(event: Any) -> Optional[dict[str, str]]:
+    async def resume_from_comment(event: Any) -> dict[str, str]:
         intent = await compute_for(event)
-        if intent.action == "skip_comment":
-            logger.info("linear-agent-session: skipped a comment: %s", intent.skip_reason)
-            return {"action": "skip", "reason": intent.skip_reason}
-        if intent.action == "comment_resume" and not first_delivery(intent.comment_id):
-            return {"action": "skip", "reason": "the comment already resumed its card"}
-        return rewrite(intent, event)
+        if intent.action == "comment_resume":
+            reason = first_delivery(intent.comment_id)
+            if reason is None:
+                return rewrite(intent, event)
+        elif intent.action == "error":
+            reason = f"the comment's intent failed: {intent.error}"
+        else:
+            reason = intent.skip_reason
+        logger.info("linear-agent-session: skipped a comment: %s", reason)
+        return {"action": "skip", "reason": reason}
 
     async def prepend_intent(event: Any) -> dict[str, str]:
         return rewrite(await compute_for(event), event)

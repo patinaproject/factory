@@ -192,6 +192,10 @@ class Run:
         payload = entry.get("payload")
         if not isinstance(payload, dict) or payload.get("type") != "Comment":
             return False
+        # The hook decided an unadmitted comment already: it skipped it, or recorded its id. A replay later could
+        # release a card that parked after the comment was written.
+        if entry.get("reason") == "unadmitted":
+            return True
         answer = self.cli_answer(entry, "comment-skip", TRIAGE_INTENT_TIMEOUT_SECONDS)
         return answer is not None and answer.get("skip") is True
 
