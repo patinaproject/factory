@@ -416,7 +416,13 @@ def matches(rendered, installed) -> bool:
         return rendered.keys() == installed.keys() and all(matches(rendered[k], installed[k]) for k in rendered)
     if isinstance(rendered, list) and isinstance(installed, list):
         return len(rendered) == len(installed) and all(map(matches, rendered, installed))
-    return rendered == installed
+    return rendered == installed or (isinstance(rendered, str) and bool(rendered) and installed == masked(rendered))
+
+
+def masked(value: str) -> str:
+    # Without --raw, Hermes also masks a plain value under a credential-shaped name, such as a route's coalesce.key.
+    # This is agent.redact.mask_secret's display form.
+    return "***" if len(value) < 12 else f"{value[:4]}...{value[-4:]}"
 
 
 def render_at(commit: Commit, homes: Homes, *args: str) -> subprocess.CompletedProcess:
