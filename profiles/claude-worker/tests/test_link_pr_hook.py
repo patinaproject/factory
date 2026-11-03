@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import SCRIPTS, GitFixture
+from tests.support import SCRIPTS, FakeGithub, GitFixture
 
 sys.path.insert(0, str(SCRIPTS))
 import session_links  # noqa: E402
@@ -172,3 +172,147 @@ class LinkPrHookProcessTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual([u["url"] for u in self.updates()[0]["input"]["addedExternalUrls"]], [URL, REVIEW_URL])
+
+
+REPO = "example-org/example-repo"
+MUTATION_ARGV = [
+    "api", "graphql",
+    "-f", "query=mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) "
+          "{ pullRequest { number } } }",
+    "-f", "id=PR_node42",
+]
+CHECKS_RULE = [{"type": "pull_request"}, {"type": "required_status_checks"}]
+
+
+class ArmAutoMergeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name).resolve()
+        self.home = self.dir / "home"
+        self.home.mkdir()
+        GitFixture.install_linear_plugin(GitFixture, self.home, cached_token=None, accepted=("run-token",))
+        self.github = FakeGithub(self.dir, REPO)
+        self.github.add_pull(42, "abc-123-fix")
+        self.configure()
+
+    def configure(self, *, draft=False, allow=True, rules=None, base="main", **extra) -> None:
+        self.github.state["pulls"]["42"].update(draft=draft, base={"ref": base}, node_id="PR_node42")
+        self.github.state.update(
+            repository={"allow_auto_merge": allow}, rules={base: CHECKS_RULE if rules is None else rules}, **extra
+        )
+        self.github.save()
+
+    def run_hook(self, *flags: str, event: dict = CREATED, token: str | None = None):
+        env = {k: v for k, v in os.environ.items() if k not in ("LINEAR_API_KEY", "HERMES_HOME")}
+        env.update(self.github.env(), HERMES_HOME=str(self.home))
+        if token:
+            env["LINEAR_API_KEY"] = token
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / "link-pr-hook"), *flags],
+            input=json.dumps(event), capture_output=True, text=True, env=env, timeout=60,
+        )
+
+    def arm(self, **kwargs):
+        return self.run_hook("--auto-merge", "--repo", REPO, **kwargs)
+
+    def assert_nothing_merged(self) -> None:
+        for call in self.github.calls():
+            if call != MUTATION_ARGV:
+                self.assertEqual([arg for arg in call if "merge" in arg.lower()], [], call)
+
+    def test_a_ready_pull_request_in_a_repository_with_required_checks_is_armed_once_with_squash(self) -> None:
+        result = self.arm()
+
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertEqual(self.github.calls(), [
+            ["api", f"repos/{REPO}/pulls/42"],
+            ["api", f"repos/{REPO}/rules/branches/main"],
+            ["api", f"repos/{REPO}"],
+            MUTATION_ARGV,
+        ])
+        self.assert_nothing_merged()
+
+    def test_the_base_branch_is_quoted_in_the_rules_path(self) -> None:
+        self.configure(base="release/1")
+
+        self.arm()
+
+        self.assertIn(["api", f"repos/{REPO}/rules/branches/release%2F1"], self.github.calls())
+        self.assertIn(MUTATION_ARGV, self.github.calls())
+
+    def test_the_repository_is_matched_ignoring_case(self) -> None:
+        result = self.run_hook("--auto-merge", "--repo", REPO.upper())
+
+        self.assertEqual((result.stderr, MUTATION_ARGV in self.github.calls()), ("", True))
+
+    def test_each_failed_condition_is_logged_as_a_skip_and_arms_nothing(self) -> None:
+        cases = {
+            "draft": (dict(draft=True), "the pull request is a draft"),
+            "auto-merge not allowed": (dict(allow=False), "the repository does not allow auto-merge"),
+            "no rules": (dict(rules=[]), "main has no required status checks rule"),
+            "rules without checks": (dict(rules=[{"type": "pull_request"}]), "main has no required status checks rule"),
+            "clean status": (
+                dict(graphql_error="gh: Pull request is in clean status (enablePullRequestAutoMerge)"),
+                "the pull request is already mergeable (clean status)",
+            ),
+        }
+        for name, (settings, reason) in cases.items():
+            with self.subTest(name):
+                self.configure(**settings)
+                Path(str(self.github.state_path) + ".log").unlink(missing_ok=True)
+
+                result = self.arm()
+
+                self.assertEqual(
+                    (result.returncode, result.stdout, result.stderr),
+                    (0, "", f"link-pr-hook: auto-merge skipped: {reason}\n"),
+                )
+                self.assertEqual(MUTATION_ARGV in self.github.calls(), name == "clean status")
+                self.assert_nothing_merged()
+
+    def test_another_repository_is_skipped_without_reading_github(self) -> None:
+        result = self.run_hook("--auto-merge", "--repo", "example-org/other")
+
+        self.assertEqual(
+            (result.returncode, result.stderr, self.github.calls()),
+            (0, "link-pr-hook: auto-merge skipped: example-org/example-repo is not example-org/other\n", []),
+        )
+
+    def test_without_the_flag_nothing_is_read_or_armed(self) -> None:
+        result = self.run_hook()
+
+        self.assertEqual((result.returncode, result.stderr, self.github.calls()), (0, "", []))
+
+    def test_a_call_that_created_no_pull_request_arms_nothing(self) -> None:
+        result = self.arm(event=ALREADY_EXISTS)
+
+        self.assertEqual((result.returncode, result.stderr, self.github.calls()), (0, "", []))
+
+    def test_an_api_failure_is_logged_and_exits_zero(self) -> None:
+        self.configure(graphql_error="gh: Resource not accessible by integration (HTTP 403)")
+
+        result = self.arm()
+
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+        self.assertEqual(
+            result.stderr,
+            "link-pr-hook: auto-merge failed: GhFailed('gh api graphql failed: gh: Resource not accessible by integration (HTTP 403)')\n",
+        )
+        self.assertEqual(self.github.calls().count(MUTATION_ARGV), 1)
+
+    def test_a_missing_linear_key_does_not_stop_arming(self) -> None:
+        result = self.run_hook("--session-id", "live-session", "--auto-merge", "--repo", REPO)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("link-pr-hook: linking failed: KeyError('LINEAR_API_KEY')", result.stderr)
+        self.assertIn(MUTATION_ARGV, self.github.calls())
+
+    def test_a_failure_to_arm_does_not_stop_the_link(self) -> None:
+        self.configure(graphql_error="gh: boom")
+
+        result = self.run_hook("--session-id", "live-session", "--auto-merge", "--repo", REPO, token="run-token")
+
+        self.assertEqual(result.returncode, 0)
+        updates = [e["session_update"] for e in GitFixture.linear_requests(self.home) if "session_update" in e]
+        self.assertEqual([u["input"]["addedExternalUrls"][0] for u in updates], [{"label": "Pull request #42", "url": URL}])

@@ -1200,7 +1200,7 @@ def artifact_denials(settings: dict) -> list[str]:
 
 def claude_settings(
     transport: dict, api_key: str, path: Path, triage: bool = False, inbox: Path | None = None,
-    session_id: str | None = None, denials: tuple = (),
+    session_id: str | None = None, denials: tuple = (), auto_merge_repo: str | None = None,
 ) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
@@ -1232,8 +1232,13 @@ def claude_settings(
         for event, mode in (("PostToolUse", "post-tool-use"), ("Stop", "stop")):
             command = f"{shlex.quote(sys.executable)} {shlex.quote(str(REPLY_HOOK))} {mode} --inbox {shlex.quote(str(inbox))}"
             settings["hooks"][event] = [{"hooks": [{"type": "command", "command": command}]}]
-    if session_id and not triage:
-        link = {"type": "command", "command": f"{helper_command(LINK_PR_HOOK)} --session-id {shlex.quote(session_id)}"}
+    # One hook acts on the pull request Claude opens: it links the Linear session and arms auto-merge, each when asked.
+    pull_hook = [
+        *(["--session-id", shlex.quote(session_id)] if session_id else []),
+        *(["--auto-merge", "--repo", shlex.quote(auto_merge_repo)] if auto_merge_repo else []),
+    ]
+    if pull_hook and not triage:
+        link = {"type": "command", "command": " ".join([helper_command(LINK_PR_HOOK), *pull_hook])}
         settings["hooks"].setdefault("PostToolUse", []).append({"matcher": "Bash", "hooks": [link]})
     if transport.get("auth_token_env"):
         settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)
@@ -1662,6 +1667,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         try:
             write_private(settings_path, claude_settings(
                 transport, api_key, settings_path, triage, inbox, card_session_id, artifact_denials(settings),
+                args.repo if factory_settings.auto_merge(repo) else None,
             ))
             with reply_watch(inbox, client, args, comments, own):
                 try:
