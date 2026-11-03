@@ -354,9 +354,10 @@ def _older_sessions(agent_session_id: str, session: dict) -> list:
 
 def _misplaced(held: set, older: list) -> dict:
     """Per older session, the pull request URLs among `held` that it holds too. Other links stay."""
+    held = {form for url in held for form in pull_request_urls(url) or ()}
     found = {}
     for other in older:
-        urls = [u["url"] for u in session_links(other) if pull_request_urls(u["url"]) and u["url"] in held]
+        urls = [u["url"] for u in session_links(other) if u["url"] in held]
         if urls:
             found[other["id"]] = urls
     return found

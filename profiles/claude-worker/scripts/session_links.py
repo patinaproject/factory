@@ -45,7 +45,7 @@ def add(linear, client, session_id: str, links: list[dict]) -> dict:
 
 def combine(total: dict, step: dict) -> dict:
     """Two adds as one report: the URLs of both, failed when either failed."""
-    added = total["added"] + step["added"]
+    added = list(dict.fromkeys(total["added"] + step["added"]))
     removed = {}
     for each in (total, step):
         for session, urls in each.get("removed", {}).items():
@@ -71,7 +71,7 @@ def sync_session_pull_requests(
         links += branch_pull_links(repo, branch, gh)
     except (card_branch.GhFailed, ValueError, KeyError, TypeError) as failure:
         error = f"listing the pull requests on {branch} failed: {failure}"
-    report = add(linear, client, session_id, links)
+    report = add(linear, client, session_id, links) if links else {"added": [], "action": "unchanged"}
     if error and report["action"] != "failed":
         return {**report, "action": "failed", "error": error}
     return report

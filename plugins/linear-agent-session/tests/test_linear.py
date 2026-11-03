@@ -622,6 +622,13 @@ class MisplacedPullRequestsTest(unittest.TestCase):
         })
         self.assertEqual(len(fake.graphql_requests), 1)
 
+    def test_a_live_session_holding_one_form_of_a_pull_request_counts_as_holding_both(self):
+        fake = FakeLinear([sessions_ok(self.others(), [self.GITHUB])])
+
+        misplaced = make_client(fake).misplaced_pull_requests("live")
+
+        self.assertEqual(misplaced, {"old-complete": [self.GITHUB, self.REVIEW]})
+
     def test_removing_updates_each_older_session_and_never_the_live_one(self):
         fake = FakeLinear([sessions_ok(self.others(), self.HELD), session_update_ok(), session_update_ok()])
 

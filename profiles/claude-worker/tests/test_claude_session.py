@@ -963,7 +963,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(status, 0)
         self.assertEqual(held, {"live-session": [], "newer-session": [GITHUB_PULL_9, REVIEW_PULL_9]})
         self.assertEqual(report["session_links"], {
-            "added": [GITHUB_PULL_9, REVIEW_PULL_9, GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked",
+            "added": [GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked",
             "removed": {"live-session": [GITHUB_PULL_9, REVIEW_PULL_9]},
         })
 
