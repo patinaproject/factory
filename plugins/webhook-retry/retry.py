@@ -188,6 +188,14 @@ class Run:
         answer = self.cli_answer(entry, "teammate-reply", TEAMMATE_REPLY_TIMEOUT_SECONDS)
         return answer is not None and answer.get("addressed") is True
 
+    def comment_skipped(self, entry: dict[str, Any]) -> bool:
+        """Run linear-agent-session's comment-skip check. Anything but a clean `skip` answer replays the turn."""
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "Comment":
+            return False
+        answer = self.cli_answer(entry, "comment-skip", TRIAGE_INTENT_TIMEOUT_SECONDS)
+        return answer is not None and answer.get("skip") is True
+
     def intent_block(self, entry: dict[str, Any]) -> str:
         """The block the dispatch hook adds, recomputed for the stored delivery time because a replay skips the hook.
 
@@ -261,6 +269,11 @@ class Run:
                 retried += 1
                 self.update(key, "retry_succeeded")
                 self.say(f"retried {who}: skipped a reply addressed to a teammate")
+                continue
+            if self.comment_skipped(entry):
+                retried += 1
+                self.update(key, "retry_succeeded")
+                self.say(f"retried {who}: skipped a comment that resumes no card")
                 continue
             code, stderr, usage = self.replay(hermes, entry)
             retried += 1

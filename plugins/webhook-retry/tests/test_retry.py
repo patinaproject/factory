@@ -55,6 +55,9 @@ FAKE_TRIAGE_EXIT = textwrap.dedent(
     if args[0] == "teammate-reply":
         print(json.dumps({"addressed": behavior.get("addressed", False)}))
         sys.exit(behavior.get("exit", 0))
+    if args[0] == "comment-skip":
+        print(json.dumps({"skip": behavior.get("skip", False)}))
+        sys.exit(behavior.get("exit", 0))
     if args[0] == "triage-intent":
         if behavior.get("intent_exit"):
             sys.exit(behavior["intent_exit"])
@@ -473,6 +476,40 @@ class RetryTest(unittest.TestCase):
         reply = {"type": "AgentSessionEvent", "action": "prompted"}
         self.install_triage_exit(handled=False, addressed=True, exit=1)
         self.seed(entry("talk", payload=reply))
+
+        self.run_retry()
+
+        self.assertEqual(len(self.chats()), 1)
+
+    def test_a_comment_that_resumes_no_card_is_not_replayed(self):
+        comment = {"type": "Comment", "action": "create", "data": {"id": "c1", "issueId": "issue-1"}}
+        self.install_triage_exit(handled=False, skip=True)
+        self.seed(entry("comment", delivered=ago(minutes=30), reason="paused", payload=comment, admitted=False))
+
+        result = self.run_retry()
+
+        self.assertEqual(self.chats(), [])
+        self.assertEqual(
+            result.stdout, "retried linear comment: skipped a comment that resumes no card\nwebhook retry queue drained\n"
+        )
+        self.assertEqual(self.entries(), {})
+
+    def test_a_comment_that_resumes_a_card_is_replayed_with_its_intent_block(self):
+        comment = {"type": "Comment", "action": "create", "data": {"id": "c1", "issueId": "issue-1"}}
+        self.install_triage_exit(handled=False, skip=False)
+        self.seed(entry("comment", payload=comment))
+
+        self.run_retry()
+
+        queries = [c["query"] for c in self.chats()]
+        self.assertEqual(len(queries), 1)
+        self.assertIn('"action": "card_reply"', queries[0])
+        self.assertEqual([c["payload"] for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "triage-intent"], [comment])
+
+    def test_a_failed_comment_check_replays_the_turn(self):
+        comment = {"type": "Comment", "action": "create", "data": {"id": "c1", "issueId": "issue-1"}}
+        self.install_triage_exit(handled=False, skip=True, exit=1)
+        self.seed(entry("comment", payload=comment))
 
         self.run_retry()
 

@@ -227,6 +227,7 @@ def make_dispatch_hook(
     load_config: Callable[[], Mapping[str, Any]],
     handle_triage_exit: Callable[[Any], triage_exit.Verdict],
     compute_intent: Optional[Callable[[Any], triage_intent.Intent]] = None,
+    comment_store: Callable[[], Optional[str]] = lambda: idempotency.store_dir(os.environ),
 ) -> Callable[..., Any]:
     pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-exit")
     # A bulk move can hold every triage-exit worker for minutes, and an intent must not wait behind it.
@@ -249,6 +250,8 @@ def make_dispatch_hook(
         if route == webhook_route() and addressed_to_teammate(event.raw_message):
             logger.info("linear-agent-session: %s; no acknowledgement or triage turn", TEAMMATE_REPLY)
             return {"action": "skip", "reason": TEAMMATE_REPLY}
+        if route == webhook_route() and compute_intent is not None and _is_comment(event.raw_message):
+            return await resume_from_comment(event)
         await acknowledge_best_effort(event, route)
         skipped = await archive_triage_exit(event, route)
         if skipped is not None or route != webhook_route() or compute_intent is None:
@@ -300,7 +303,37 @@ def make_dispatch_hook(
         intent = compute_intent(payload)
         return compute_intent(payload) if intent.action == "error" else intent
 
+    def first_delivery(comment_id: str) -> bool:
+        """Record the comment id before the turn, and refuse one already recorded.
+
+        A crash between recording and the end of this hook leaves the record reserved, and `idempotency.once` refuses
+        a reserved record forever. So the comment never resumes its card, and the person answers again, which is a new
+        comment id. That costs one repeated answer, where releasing the record could resume a card twice.
+        """
+        ran = []
+        try:
+            idempotency.once(comment_store(), "comment_resume", comment_id, {}, lambda: ran.append(True) or {"recorded": True})
+        except linear.LinearError as failure:
+            logger.warning("linear-agent-session: comment %s not resumed: %s", comment_id, failure)
+            return False
+        return bool(ran)
+
+    async def resume_from_comment(event: Any) -> Optional[dict[str, str]]:
+        intent = await compute_for(event)
+        if intent.action == "skip_comment":
+            logger.info("linear-agent-session: skipped a comment: %s", intent.skip_reason)
+            return {"action": "skip", "reason": intent.skip_reason}
+        if intent.action == "comment_resume" and not first_delivery(intent.comment_id):
+            return {"action": "skip", "reason": "the comment already resumed its card"}
+        return rewrite(intent, event)
+
     async def prepend_intent(event: Any) -> dict[str, str]:
+        return rewrite(await compute_for(event), event)
+
+    def rewrite(intent: triage_intent.Intent, event: Any) -> dict[str, str]:
+        return {"action": "rewrite", "text": triage_intent.render(intent) + event.text}
+
+    async def compute_for(event: Any) -> triage_intent.Intent:
         try:
             loop = asyncio.get_running_loop()
             intent = await asyncio.wait_for(
@@ -314,9 +347,13 @@ def make_dispatch_hook(
             )
             logger.warning("linear-agent-session: no triage intent: %s", message)
             intent = triage_intent.error_intent(message)
-        return {"action": "rewrite", "text": triage_intent.render(intent) + event.text}
+        return intent
 
     return guard_then_acknowledge
+
+
+def _is_comment(payload: Any) -> bool:
+    return isinstance(payload, dict) and payload.get("type") == "Comment"
 
 
 def _delivery_route(event: Any) -> Optional[str]:

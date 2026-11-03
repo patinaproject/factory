@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 _spec = importlib.util.spec_from_file_location("render", Path(__file__).resolve().parent.parent / "render.py")
@@ -149,6 +150,19 @@ LINEAR_FILTERS = [
     {
         "any": [
             {"field": "event", "equals": "AgentSessionEvent"},
+            {
+                "all": [
+                    {"field": "event", "equals": "Comment"},
+                    {"field": "action", "equals": "create"},
+                    {"any": [{"field": "data.parentId", "missing": True}, {"field": "data.parentId", "equals": None}]},
+                    {
+                        "any": [
+                            {"field": "data.issueId", "in_file": "owned-refs.json"},
+                            {"field": "data.issueId", "in_file": "triage-refs.json"},
+                        ]
+                    },
+                ]
+            },
             {"field": "updatedFrom.delegateId", "exists": True},
             {
                 "all": [
@@ -203,7 +217,7 @@ class RouteStructureTest(unittest.TestCase):
         self.assertEqual(
             route,
             {
-                "events": ["AgentSessionEvent", "Issue"],
+                "events": ["AgentSessionEvent", "Comment", "Issue"],
                 "secret": "${LINEAR_WEBHOOK_SECRET}",
                 "filters": LINEAR_FILTERS,
                 "toolsets": TOOLSETS,
@@ -1124,9 +1138,60 @@ class LinearClosureReplayTest(HermesFiltersCase):
         self.assertIs(self.matches("AgentSessionEvent", session), True)
 
 
+def linear_comment(issue_id, action="create", **data):
+    body = {"id": "6c1f0a52-3a8e-4f43-9d0b-1f5c2a7d9e01", "body": "Use the blue one.", "issueId": issue_id, "userId": "u1"}
+    return {"type": "Comment", "action": action, "data": {**body, **data}}
+
+
 APP_USER = SETTINGS["app_user_id"]
 READY = [{"id": "l1", "name": "ready-for-agent", "color": "#0e8a16", "parentId": None}]
 BUG = [{"id": "l2", "name": "bug", "color": "#d73a4a", "parentId": None}]
+
+
+class LinearCommentFilterTest(HermesFiltersCase):
+    route_name = "linear"
+
+    def setUp(self):
+        super().setUp()
+        (self.home / "owned-refs.json").write_text(json.dumps([CARD_ISSUES[0]]))
+        (self.home / "triage-refs.json").write_text(json.dumps([CARD_ISSUES[1]]))
+
+    def test_a_created_top_level_comment_on_an_issue_with_a_card_is_kept(self):
+        for issue_id in CARD_ISSUES[:2]:
+            with self.subTest(issue_id):
+                self.assertIs(self.matches("Comment", linear_comment(issue_id)), True)
+
+    def test_a_null_parent_is_top_level(self):
+        self.assertIs(self.matches("Comment", linear_comment(CARD_ISSUES[0], parentId=None)), True)
+
+    def test_a_reply_in_a_thread_is_dropped(self):
+        self.assertIs(self.matches("Comment", linear_comment(CARD_ISSUES[0], parentId="c-parent")), False)
+
+    def test_an_edit_or_a_removal_is_dropped(self):
+        for action in ("update", "remove"):
+            with self.subTest(action):
+                self.assertIs(self.matches("Comment", linear_comment(CARD_ISSUES[0], action=action)), False)
+
+    def test_a_comment_on_an_issue_with_no_card_is_dropped(self):
+        self.assertIs(self.matches("Comment", linear_comment(CARDLESS_ISSUES[0])), False)
+
+    def test_a_comment_names_its_issue_in_data_issue_id_only(self):
+        without_issue = linear_comment(CARD_ISSUES[0])
+        del without_issue["data"]["issueId"]
+        self.assertIs(self.matches("Comment", without_issue), False)
+
+
+class LinearCommentAcknowledgementTest(unittest.TestCase):
+    def test_the_route_acknowledges_no_comment(self):
+        plugin_dir = Path(__file__).resolve().parents[2] / "plugins" / "linear-agent-session"
+        spec = importlib.util.spec_from_file_location(
+            "linear_agent_session", plugin_dir / "__init__.py", submodule_search_locations=[str(plugin_dir)]
+        )
+        plugin = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = plugin
+        spec.loader.exec_module(plugin)
+        event = linear_comment(CARD_ISSUES[0])
+        self.assertIsNone(plugin._ack_session_id(SimpleNamespace(raw_message=event), "linear", "linear"))
 
 
 class LinearTriageReplayTest(HermesFiltersCase):

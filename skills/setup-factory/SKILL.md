@@ -2069,6 +2069,16 @@ each check. Report each result.
     `review_reopened` with no `CHANGES REQUESTED` comment. After the worker's
     run the card is back in `review`, with no `blocked` event of kind
     `needs_input`.
+34. Let a triage card ask a question, so it is in Scheduled. As the issue's
+    assignee, the delegator, or a configured operator, answer it with a
+    top-level comment on the issue, not in the agent session. Within a
+    minute the card gets one comment that starts `Linear reply:`, it leaves
+    Scheduled, and its session gets one `thought` naming the comment's link.
+    Wait for the Linear retry window and confirm no second `Linear reply:`
+    appears. A top-level comment from anyone else, or one that mentions only
+    other people, changes nothing, and neither does the factory's own
+    top-level comment. If no comment arrives, check that the Linear app
+    subscribes to comment events (`references/linear-app.md`).
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate

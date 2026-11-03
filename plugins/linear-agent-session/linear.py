@@ -175,6 +175,10 @@ USER_APP_QUERY = """query UserApp($id: String!) {
   user(id: $id) { app }
 }"""
 
+USER_URL_QUERY = """query UserUrl($id: String!) {
+  user(id: $id) { url }
+}"""
+
 ISSUE_BLOCKERS_QUERY = """query IssueBlockers($id: String!) {
   viewer { id }
   issue(id: $id) { inverseRelations(first: 50) { nodes { type issue { id identifier branchName state { type } delegate { id } } } } }
@@ -663,6 +667,12 @@ class LinearClient:
         if not isinstance(user["app"], bool):
             raise LinearError(f"Linear did not say whether user {user_id} is an app")
         return user["app"]
+
+    def user_profile_url(self, user_id: str) -> str:
+        user = self._graphql(USER_URL_QUERY, {"id": user_id})["user"]
+        if user is None or not isinstance(user["url"], str):
+            raise LinearError(f"Linear gave no profile URL for user {user_id}")
+        return user["url"]
 
     def operators(self, user_ids: list[str]) -> list[dict]:
         """The people the ids name, in order. An id that resolves to nobody or to an app is logged and left out."""

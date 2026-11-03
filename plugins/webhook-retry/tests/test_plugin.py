@@ -193,9 +193,15 @@ class PluginTest(unittest.TestCase):
         self.dispatch(ev)
         self.assertEqual(self.entries()[ev.source.chat_id]["payload"], session)
 
+    def test_a_linear_comment_delivery_keeps_its_payload_for_the_replay_intent(self):
+        comment = {"type": "Comment", "action": "create", "data": {"id": "c1", "issueId": "issue-1"}}
+        ev = event(payload=comment)
+        self.dispatch(ev)
+        self.assertEqual(self.entries()[ev.source.chat_id]["payload"], comment)
+
     def test_other_deliveries_keep_no_payload(self):
         github = {"action": "closed", "pull_request": {"number": 1}, "repository": {"full_name": "o/r"}}
-        other = {"type": "Comment", "action": "create"}
+        other = {"type": "Project", "action": "create"}
         for name, payload in (("github", github), ("other linear type", other), ("not a dict", "raw")):
             with self.subTest(name):
                 ev = event(delivery=name, payload=payload)

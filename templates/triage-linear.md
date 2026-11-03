@@ -50,6 +50,12 @@ the gate, or read the reply yourself. Its fields:
   the author could not be read. `no_operators_configured` means the author is
   someone else and the `operator_user_ids` setting is empty. It is null when
   the author is simply someone else. All of them are null on an event that carries no reply, such as a stop.
+- `comment_id`, `comment_url`, and `skip_reason`: on a top-level issue comment,
+  the comment's id, its link ending in `#comment-` and the id, and why the
+  comment resumes no card. `reply` holds the comment's text, and
+  `reply_author_id`, `reply_author_kind`, and the approver fields describe its
+  author. Only `comment_resume` reaches this turn; the hook skips every
+  `skip_comment` without one. All of them are null on other events.
 - `thread` and `thread_source`: on a `prompted` event, the session's earlier
   activities, oldest first, without the reply itself. Each has `id`, `type`
   (`prompt`, `response`, `elicitation`, `thought`, `action`, or `error`),
@@ -354,6 +360,29 @@ keeps it as context.
      assignee and the delegator can ask for the change. Name the
      `operator_user_ids` setting of the `linear-agent-session` plugin, and say
      its value belongs in the factory's private configuration record.
+
+### `comment_resume`
+
+An approver answered in a top-level issue comment, not in the agent session,
+and the one card the intent names waits for a person. `triage_card` is set
+when the triage card waits, and `card` when the implementation card does. The
+comment is not a reply in the session, so skip "Requested issue change". Do not
+reopen a `review` card, and comment on no card the intent does not name.
+`agent_session_id` is the session the card already works in, or the issue's open
+session, or null.
+
+1. When `triage_card` is not null, pipe `reply`, exactly as it arrived, into
+   `<<card_transition>> --board triage triage-reply <task id>` with a quoted
+   heredoc, as `triage_card_reply` step 3 does, and add nothing to the
+   implementation card. When the command prints `error`, post that error as a
+   `thought` on `agent_session_id` if it is not null, and stop.
+2. Otherwise comment on `card` once with `reply`, attributed to Linear, as
+   `card_reply` step 2 does, starting `Linear reply:`. Then unblock the card as
+   "Rules" says when it is `blocked`, or resume it as "Rules" says when it is
+   `triage`.
+3. When `agent_session_id` is not null, post one `thought` on it that names the
+   card's task id, says the card resumed with the comment, and names the comment
+   by `comment_url`. When it is null, post nothing.
 
 ### `triage_card_reply`
 
