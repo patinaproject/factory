@@ -101,7 +101,7 @@ def evaluate(
     decision is REVIEW_REQUIRED or CHANGES_REQUESTED, or a person started a review thread that is still open.
     A BLOCKED pull request that is approved and in the merge queue passes too: GitHub reports BLOCKED until the queue merges it.
     So does an approved one that is not queued yet when the base branch has an update rule and merge_queue declares the repository's
-    queue: only the queue may write the branch, and a person adds the pull request to it.
+    queue.
     It does so only when other_blockers finds no unmet branch rule. A check that no rule requires does not stop it.
     merge_queue maps "<owner>/<repo>" to the queue's "labels" and "checks"; an entry, even {}, declares the queue.
     """
@@ -160,14 +160,12 @@ def _approved_and_queued(pr: dict, blockers: Blockers, merge_queue: Optional[dic
 
 
 def _queue_config(pr: dict, merge_queue: Optional[dict]) -> Optional[dict]:
-    """The repository's merge_queue entry, or None when the repository declares no queue; an empty entry declares one."""
     match = PR_URL.match(str(pr.get("url")))
     entry = (merge_queue or {}).get(match.group(1)) if match else None
     return entry if isinstance(entry, dict) else None
 
 
 def _queue_entry_candidate(pr: dict, merge_queue: Optional[dict]) -> bool:
-    """True when the pull request is approved, BLOCKED, and has checks, and its repository declares a queue."""
     return (
         pr.get("reviewDecision") == "APPROVED"
         and pr.get("mergeStateStatus") == "BLOCKED"
@@ -177,11 +175,7 @@ def _queue_entry_candidate(pr: dict, merge_queue: Optional[dict]) -> bool:
 
 
 def _awaiting_queue_entry(pr: dict, blockers: Blockers, merge_queue: Optional[dict]) -> bool:
-    """True when a person only has to add the approved pull request to the queue.
-
-    A ruleset update rule lets only its bypass actors write the branch, and the App cannot read them, so the declared queue
-    stands for the merge queue. The caller has checked that the pull request is not queued.
-    """
+    # The App cannot read an update rule's bypass actors, so the operator's declared queue stands for them.
     return (
         _queue_entry_candidate(pr, merge_queue)
         and blockers.update_rule
@@ -601,7 +595,6 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
     and counts the open review threads that a person started, which the gate let through.
     It sets waiting_for_merge_queue when the pull request is approved and queued, with no such thread, so only the queue is left.
     It sets waiting_for_queue_entry instead when the gate would pass the approved pull request for a person to queue.
-    That reads the base branch rules once, and reuses the pull request state it already read.
     Hermes keeps only the first transform_tool_result string, so one hook does all of it.
 
     transform_tool_result is the one hook that can change what the worker reads, and Hermes bounds it at 30s and fails open.
