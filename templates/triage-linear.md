@@ -79,8 +79,9 @@ It was computed when the webhook arrived, so it can be seconds old.
   mention without delegation gets a direct answer and nothing else. Triage
   cards are the exception: "Triage inbox" creates one for every issue in the
   Triage status, "Delegation gate" starts one for a delegated issue that is
-  not ready, and "Prompt" and "Stop" act on a triage card for any teammate,
-  delegated or not. "Requested issue change" is the other exception: it
+  not ready, `start_triage_with_reply` starts one with a person's answers to
+  open triage questions, and "Prompt" and "Stop" act on a triage card for any
+  teammate, delegated or not. "Requested issue change" is the other exception: it
   changes any issue a teammate asks for, files a follow-up issue, and posts an
   issue comment.
 - Never change a Linear issue's title, description, status, labels,
@@ -162,6 +163,11 @@ session's prompt context is:
 The full payload, truncated to 4000 characters:
 
 {__raw__}
+
+A note at the end of this prompt that says several webhook events arrived in
+quick succession and were coalesced only means earlier events were merged. This
+payload is the newest state, and its `updatedFrom` holds the keys of the whole
+burst. The note changes no decision.
 
 ## Sessions created on an issue
 
@@ -270,8 +276,9 @@ Actions `create_card`, `foreign_cards`, and `reuse_card`, and the `then` of
 
 ## Prompt
 
-Actions `card_reply`, `card_reply_not_assignee`, `triage_card_reply`, and
-`answer_reply`: a human replied in the agent session. A null `reply` means the
+Actions `card_reply`, `card_reply_not_assignee`, `triage_card_reply`,
+`start_triage_with_reply`, and `answer_reply`: a human replied in the agent
+session. A null `reply` means the
 reply arrived without its text, which the steps below handle.
 
 A reply can refer to an earlier message, as "All of them" refers to a list of
@@ -297,10 +304,32 @@ from the reply read in the context of `thread`, and the issue. When the thread
 makes the reply's target clear, act on it: "All of them" after a response that
 listed numbered options means every option. When the thread leaves it unclear,
 ask one question that names the options instead of saying you cannot tell which
-question the reply answers. When the reply answers triage questions but the
-issue has no live triage card, say in that `response` that the person should
-move the issue back to Triage and send the answer again. Create no card and
-stop.
+question the reply answers. Create no card and stop.
+
+### `start_triage_with_reply`
+
+A person answered the triage questions open in this session, and the issue
+is not delegated, has no implementation card, and has no live triage card.
+Start a new triage pass that carries the answers, so the person does not move
+the issue or send them again. Change no issue status, label, assignee, or
+delegate: the triage pass sets them by its outcome.
+
+1. When `reply` is null, post a `thought` on `agent_session_id` asking the
+   person to send the reply again, and stop.
+2. Read the issue with `linear_issue` and follow "Start triage" with the
+   intent's `agent_session_id`. It archives a `done` triage card and creates
+   one triage card.
+3. When the card cannot be created, post one `response` on `agent_session_id`
+   that names the one step the person should take, such as moving the issue
+   back to Triage, and stop.
+4. Pipe `reply`, exactly as it arrived, into
+   `<<card_transition>> --board triage triage-reply <new task id>` with a
+   quoted heredoc, as `triage_card_reply` step 3 does.
+5. Post one `response` on `agent_session_id` that says triage started with
+   the answers and names the triage card's task id. When the command printed
+   `error`, say instead that the card exists but the answers did not reach it,
+   name the error, and ask the person to send the answers again in this
+   session, which reaches the new card.
 
 ### `card_reply`
 
@@ -488,8 +517,8 @@ a person to send a fixed phrase.
 
    A reply can approve the follow-ups that an earlier activity listed, such
    as "do this yourself", "handle it", or "review A and B". When the `action`
-   is `triage_card_reply`, skip this section for that part: the resumed
-   triage run applies the follow-ups. Otherwise read the newest `Needs input:`
+   is `triage_card_reply` or `start_triage_with_reply`, skip this section for
+   that part: the triage run applies the follow-ups. Otherwise read the newest `Needs input:`
    or triage-outcome activity in `thread`, never an earlier round, and apply
    its recommendation for each item it lists. Take each item through steps 2
    to 7 in turn. A step that stops ends only that item, and one `response` at

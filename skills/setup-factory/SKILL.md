@@ -1009,6 +1009,15 @@ host cannot verify. Claude Code gets `JAVA_HOME`, `ANDROID_HOME`,
 ]
 ```
 
+A repository sets `auto_merge: true` on its entry to have `claude-session` arm
+squash auto-merge on each pull request a worker opens there. It is a boolean
+and defaults to false, and `check-install` reports any other value. The hook
+arms only a pull request that is not a draft, in a repository that allows
+auto-merge, whose base branch has a `required_status_checks` rule. GitHub then
+merges it once every required check passes. Turn it on only for a repository
+whose base branch rules require all of its checks, because the base branch
+rules and not the factory decide what must pass.
+
 `triage.max_running` caps how many triage cards run at once. It is a positive
 integer from the operator's input, and its value belongs in the private
 record. Hermes caps workers per host and per profile, but has no per-board
@@ -1318,7 +1327,14 @@ config keys, such as `platforms.webhook.extra.routes.linear` and
 python3 <repo>/templates/render.py > <scratch>/webhook-config.json
 ```
 
-**Install** each key that `--check` reports as not installed, as differing, or
+**Install** first the `linear` route's script, because Hermes drops every
+delivery of a route whose script is missing:
+
+```sh
+install -m 0644 <repo>/skills/setup-factory/scripts/linear-route <root>/scripts/linear-route
+```
+
+Then install each key that `--check` reports as not installed, as differing, or
 with the wrong secret:
 
 ```sh

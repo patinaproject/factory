@@ -180,6 +180,14 @@ def toolchain_checks(repo: dict) -> list[str]:
     return checks
 
 
+def auto_merge(repo: dict) -> bool:
+    """Whether claude-session arms squash auto-merge on each pull request a worker opens in this repository."""
+    value = repo.get("auto_merge", False)
+    if not isinstance(value, bool):
+        raise SettingsError(f"auto_merge {value!r} must be true or false")
+    return value
+
+
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 ARTIFACT_KEYS = frozenset({"auth_dir", "organization_uuid", "claude", "operation_model", "design_model"})
 
@@ -219,7 +227,7 @@ def artifact(settings) -> ArtifactSettings:
 GLOBAL_FIELDS = (
     fresh_after_tokens, max_turns, command_timeout_seconds, idle_limit_seconds, tier_models, mcp_servers, disabled_mcp_servers,
 )
-REPOSITORY_FIELDS = (worker_entry, toolchain_checks)
+REPOSITORY_FIELDS = (worker_entry, toolchain_checks, auto_merge)
 
 
 @dataclass(frozen=True)
