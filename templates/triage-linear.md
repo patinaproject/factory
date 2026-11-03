@@ -16,6 +16,8 @@ the gate, or read the reply yourself. Its fields:
 - `issue`: the issue's `id`, `identifier`, and `state_type`.
 - `delegated`: whether the issue is delegated to the agent app user
   `<<app_user_id>>`.
+- `delegate`: the issue's delegate as `id` and `name`, or null when the issue
+  has no delegate.
 - `gate`: `pass`, `ready-for-human`, `needs-brief`, or `not-ready`. The
   `action` already applies it.
 - `card`: the issue's implementation card with its `id` and `status`, or null.
@@ -164,7 +166,9 @@ the session.
   does for a triage card. Post no activity, create no card, and stop.
 - `answer_mention`: a person mentioned the agent. Answer the request in one
   `response` activity on `agent_session_id`, from the prompt context and the
-  issue. Create no card and stop.
+  issue. When the reply says whether the issue is delegated, `delegate` is the
+  answer: null means the issue has no delegate, otherwise name `delegate.name`.
+  Create no card and stop.
 
 ## Implementation card
 
@@ -275,7 +279,9 @@ action unless it stops.
 ### `answer_reply`
 
 The issue is not delegated and has no card, and a person still wrote to you,
-whoever opened the session. When `reply` is null, post a `thought` on
+whoever opened the session. When the reply says whether the issue is
+delegated, `delegate` is the answer: null means the issue has no delegate,
+otherwise name `delegate.name`. When `reply` is null, post a `thought` on
 `agent_session_id` asking the human to send the reply again, and stop.
 Otherwise answer the reply in one `response` activity on `agent_session_id`,
 from the reply read in the context of `thread`, and the issue. When the thread

@@ -35,6 +35,7 @@ def issue(**overrides):
         "gitBranchName": BRANCH,
         "stateType": "backlog",
         "delegate": APP,
+        "delegateName": "Factory App" if overrides.get("delegate", APP) else None,
         "assignee": {"id": ASSIGNEE, "name": "Ann Assignee", "gitHubUserId": "1001", "app": False},
         "labels": ["Ready for agent"],
         "agentSessions": [],
@@ -79,9 +80,12 @@ def expected(action, **overrides):
         action=action,
         issue={"id": ISSUE_ID, "identifier": "PAT-1", "state_type": "backlog"},
         delegated=True,
+        delegate={"id": APP, "name": "Factory App"},
         gate="pass",
         agent_session_id="session-1",
     )
+    if overrides.get("delegated") is False:
+        base = replace(base, delegate=None)
     return replace(base, **overrides)
 
 
@@ -308,7 +312,8 @@ class SessionCreatedTest(unittest.TestCase):
 
     def test_a_delegation_to_someone_else_is_a_mention(self):
         self.assertEqual(
-            decide(session_event("created"), issue(delegate="user-other")), expected("answer_mention", delegated=False)
+            decide(session_event("created"), issue(delegate="user-other", delegateName="Bo Bystander")),
+            expected("answer_mention", delegated=False, delegate={"id": "user-other", "name": "Bo Bystander"}),
         )
 
     def test_the_gate_stops_a_delegation_before_any_card_is_made_or_reused(self):
@@ -741,9 +746,10 @@ class RenderTest(unittest.TestCase):
 class FakeLinearClient(plugin.linear.LinearClient):
     """The real delegator and operator lookups over a fake GraphQL: `history` is newest first, `users` maps id to a user."""
 
-    def __init__(self, live, error=None, thread_error=None, titles=BRIEF, documents_error=None, history=(), users=None, lookup_error=None):
+    def __init__(self, live, error=None, reads=None, thread_error=None, titles=BRIEF, documents_error=None, history=(), users=None, lookup_error=None):
         super().__init__("client-id", "client-secret")
         self.live, self.error, self.thread_error, self.asked = live, error, thread_error, []
+        self.reads = list(reads or [])
         self.titles, self.documents_error = titles, documents_error
         self.history, self.users, self.lookup_error = list(history), users or {}, lookup_error
 
@@ -767,6 +773,11 @@ class FakeLinearClient(plugin.linear.LinearClient):
         self.asked.append(issue_id)
         if self.error:
             raise self.error
+        if self.reads:
+            read = self.reads.pop(0)
+            if isinstance(read, Exception):
+                raise read
+            return read
         return self.live
 
     def read_prompt(self, **_):
@@ -959,7 +970,7 @@ class ApproverTest(unittest.TestCase):
 
 
 class ComputeTest(unittest.TestCase):
-    def compute(self, payload, client, boards=None, now=NOW, redact=lambda text: re.sub(r"lin_api_\w+", "[redacted]", text), operators=()):
+    def compute(self, payload, client, boards=None, now=NOW, redact=lambda text: re.sub(r"lin_api_\w+", "[redacted]", text), operators=(), sleep=lambda _seconds: None):
         boards = boards or {"triage": [], None: []}
         return intent_module.compute(
             payload,
@@ -969,6 +980,7 @@ class ComputeTest(unittest.TestCase):
             cards=lambda board: boards[board],
             now=now,
             redact=redact,
+            sleep=sleep,
         )
 
     def test_a_session_event_reads_its_issue_and_both_boards(self):
@@ -1035,6 +1047,53 @@ class ComputeTest(unittest.TestCase):
         client = FakeLinearClient(issue())
         self.assertEqual(self.compute(issue_event(), client).action, "open_session")
         self.assertEqual(client.asked, [ISSUE_ID])
+
+    def test_a_person_created_session_rereads_until_the_delegate_appears(self):
+        sleeps = []
+        client = FakeLinearClient(None, reads=[issue(delegate=None, delegateName=None), issue()])
+        result = self.compute(session_event("created"), client, sleep=sleeps.append)
+        self.assertEqual((result.action, result.delegated, result.delegate), ("create_card", True, {"id": APP, "name": "Factory App"}))
+        self.assertEqual((sleeps, len(client.asked)), ([1], 2))
+
+    def test_a_person_created_session_that_never_sees_a_delegate_is_answered_as_undelegated(self):
+        sleeps = []
+        client = FakeLinearClient(issue(delegate=None, delegateName=None))
+        result = self.compute(session_event("created"), client, sleep=sleeps.append)
+        self.assertEqual((result.action, result.delegated, result.delegate), ("answer_mention", False, None))
+        self.assertEqual((sleeps, len(client.asked)), ([1, 1, 2, 2, 4], 6))
+
+    def test_a_person_created_session_on_a_delegated_issue_reads_once(self):
+        sleeps = []
+        client = FakeLinearClient(issue())
+        self.compute(session_event("created"), client, sleep=sleeps.append)
+        self.assertEqual((sleeps, len(client.asked)), ([], 1))
+
+    def test_a_person_created_session_on_an_issue_delegated_to_someone_else_reads_once(self):
+        sleeps = []
+        client = FakeLinearClient(issue(delegate=OTHER, delegateName="Bo Bystander"))
+        result = self.compute(session_event("created"), client, sleep=sleeps.append)
+        self.assertEqual((result.action, result.delegate), ("answer_mention", {"id": OTHER, "name": "Bo Bystander"}))
+        self.assertEqual((sleeps, len(client.asked)), ([], 1))
+
+    def test_a_factory_created_session_without_a_delegate_reads_once(self):
+        sleeps = []
+        client = FakeLinearClient(issue(delegate=None, delegateName=None))
+        result = self.compute(session_event("created", creator=None), client, sleep=sleeps.append)
+        self.assertEqual((result.action, sleeps, len(client.asked)), ("ignore_factory_session", [], 1))
+
+    def test_issue_and_prompted_events_never_wait_for_a_delegate(self):
+        sleeps = []
+        client = FakeLinearClient(issue(delegate=None, delegateName=None))
+        for payload in (issue_event(), session_event("prompted", body="hi")):
+            with self.subTest(payload["type"]):
+                self.compute(payload, client, sleep=sleeps.append)
+        self.assertEqual((sleeps, len(client.asked)), ([], 2))
+
+    def test_a_failed_reread_is_the_error_intent(self):
+        sleeps = []
+        client = FakeLinearClient(None, reads=[issue(delegate=None, delegateName=None), RuntimeError("read down")])
+        result = self.compute(session_event("created"), client, sleep=sleeps.append)
+        self.assertEqual(result, Intent(action="error", error="RuntimeError: read down"))
 
     def test_any_failure_is_the_error_intent_without_a_secret(self):
         client = FakeLinearClient(None, error=RuntimeError("Linear refused lin_api_a1b2c3"))
