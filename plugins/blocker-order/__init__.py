@@ -46,6 +46,13 @@ names one does not apply, and adds `issue_park` to the result. A URL that is not
 refuses to schedule such as a `goal_mode` card, gets the `needs_input` block above with the whole result as its
 reason. `card_transition.py` releases the card once the issue closes or a person replies.
 
+A finished run whose `result` starts with `Waiting for pull request:` and a GitHub pull request URL is a worker
+whose card must wait for another pull request to merge. On every board the hook parks the card in `scheduled` with
+the reason `result_line.PULL_REQUEST_PARK` and `owner/name#number`, never the URL, and adds `pull_request_park` to
+the result. A line without such a URL, or a card Hermes refuses to schedule, gets the `needs_input` block with the
+whole result as its reason. `card_transition.py` releases the card once the pull request merges or closes, or a
+person replies.
+
 After any successful park on the `triage` board whose reason starts with `Needs input:`, its own or one the
 worker made with `kanban_schedule`, the hook posts the round once per task and run through
 `linear-agent-session`'s `linear_triage_round` tool, which no model sees. It posts after the park, so nobody is
@@ -173,6 +180,24 @@ def park_for_issue(result: str, dispatch: Dispatch) -> dict:
     return {"issue_park": {"parked": True, "instruction": (
         f"This card waits in scheduled for {url} and goes back to the queue once that issue is closed or a person "
         "replies. Stop now: call no other tool, do not call kanban_block, and do not run claude-session again."
+    )}}
+
+
+def park_for_pull_request(result: str, dispatch: Dispatch) -> dict:
+    """The result keys for a finished run that waits for a GitHub pull request. A line without one, or a card
+    Hermes refuses to schedule (`goal_mode`), gets today's `needs_input` block with the whole result. The reason
+    names the pull request as `owner/name#number`, never by URL, for the one form every comment shares."""
+    pull = result_line.pull_request(result)
+    if pull is None:
+        return {"needs_input_block": block_for_input(result, dispatch)}
+    answer = _call(dispatch, SCHEDULE_TOOL, {"reason": f"{result_line.PULL_REQUEST_PARK} {pull}"})
+    if not answer.get("ok"):
+        return {"needs_input_block": block_for_input(result, dispatch)}
+    os.environ[STOP_NUDGE] = "off"
+    return {"pull_request_park": {"parked": True, "instruction": (
+        f"This card waits in scheduled for {pull} and goes back to the queue once that pull request merges or "
+        "closes, or a person replies. Stop now: call no other tool, do not call kanban_block, and do not run "
+        "claude-session again."
     )}}
 
 
@@ -317,6 +342,12 @@ def make_hook(ctx: Any):
             key = (task, run, issue_result)
             if key not in _handled:
                 _handled[key] = json.dumps({**payload, **park_for_issue(issue_result, ctx.dispatch_tool)})
+            return _handled[key]
+        pull_result = result_line.waiting_for_pull_request(report)
+        if pull_result is not None:
+            key = (task, run, pull_result)
+            if key not in _handled:
+                _handled[key] = json.dumps({**payload, **park_for_pull_request(pull_result, ctx.dispatch_tool)})
             return _handled[key]
         reason = result_line.needs_input(report)
         if reason is not None:
