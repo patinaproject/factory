@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Run one scheduled command from the factory settings, on a clean clone, and report only a failure.
+
+Install one copy per `scheduled_commands` entry into the root home's `scripts/` as `scheduled-<name>`.
+Hermes passes a cron script no argument, so the entry is the script's own file name without `scheduled-`.
+
+Each run fetches the entry's repository into the root home's own clone, resets it to origin/HEAD, and
+removes every untracked file. It then runs the entry's commands in order, each in its own process group,
+and stops at the first non-zero exit or when the entry's `timeout_minutes` runs out. It kills the whole
+process group, so no child outlives a run.
+
+The commands run with the real home, the repository's workstation Infisical client ID, and the Node that
+the clone's `.nvmrc` names. The environment holds no factory secret and no Infisical client secret or token.
+
+Prints nothing and exits 0 when every command succeeds. Otherwise prints one block and exits 1. The first
+line is `<name>: <command> exited <code>` or `<name>: <command> timeout after <n> minutes`, followed by the
+last 40 lines of that command's output. A missing prerequisite prints `<name>: <what is missing>`.
+
+Reads the settings with `hermes config get ... --json` and never `--raw`.
+"""
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import pwd
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+
+PREFIX = "scheduled-"
+SETTINGS_KEY = "plugins.entries.linear-agent-session.settings.scheduled_commands"
+SECRET_NAMES = Path("plugins/factory-secret-names/plugin.yaml")
+DECLARED_NAME = re.compile(r"^\s*-\s*name:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", re.MULTILINE)
+CLIENT_ID_NAME = "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID"
+CLIENT_ID_LINE = re.compile(rf"^\s*(?:export\s+)?{CLIENT_ID_NAME}=(.*)$", re.MULTILINE)
+# The client ID is the only Infisical value a command gets. Anything else Infisical-shaped is a credential.
+ALWAYS_REMOVED = (
+    "INFISICAL_CLIENT_ID", "INFISICAL_TOKEN", "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET",
+    "GH_TOKEN", "GITHUB_TOKEN",
+)
+NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+REPOSITORY = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
+CRON_FIELD = re.compile(r"[A-Za-z0-9*/,?-]+")
+NVMRC_MAJOR = re.compile(r"v?(\d+)")
+SECONDS_PER_MINUTE = 60  # tests shrink it to run a timeout in a moment
+TAIL_LINES = 40
+
+
+class SettingsError(Exception):
+    pass
+
+
+class Missing(Exception):
+    """A prerequisite the factory does not create."""
+
+
+@dataclass(frozen=True)
+class ScheduledCommand:
+    name: str
+    repository: str
+    schedule: str
+    commands: tuple[tuple[str, ...], ...]
+    timeout_minutes: int
+
+
+def parse_entry(raw: object) -> ScheduledCommand:
+    if not isinstance(raw, dict):
+        raise SettingsError(f"scheduled_commands entry {raw!r} must be an object")
+    name = raw.get("name")
+    if not isinstance(name, str) or not NAME.fullmatch(name):
+        raise SettingsError(f"scheduled_commands name {name!r} must be lowercase words joined by hyphens")
+    where = f"scheduled_commands {name}"
+    repository, schedule = raw.get("repository"), raw.get("schedule")
+    if not isinstance(repository, str) or not REPOSITORY.fullmatch(repository):
+        raise SettingsError(f"{where}: repository {repository!r} must be <owner>/<repo>")
+    fields = schedule.split() if isinstance(schedule, str) else []
+    if len(fields) != 5 or not all(CRON_FIELD.fullmatch(field) for field in fields):
+        raise SettingsError(f"{where}: schedule {schedule!r} must be a five-field cron expression in UTC")
+    commands = raw.get("commands")
+    if not isinstance(commands, list) or not commands or not all(
+        isinstance(argv, list) and argv and all(isinstance(arg, str) and arg for arg in argv) for argv in commands
+    ):
+        raise SettingsError(f"{where}: commands {commands!r} must be a non-empty list of non-empty argv lists")
+    timeout = raw.get("timeout_minutes")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise SettingsError(f"{where}: timeout_minutes {timeout!r} must be a positive integer")
+    return ScheduledCommand(name, repository, " ".join(fields), tuple(tuple(argv) for argv in commands), timeout)
+
+
+def parse_entries(value: object) -> tuple[ScheduledCommand, ...]:
+    """Every entry, or no entry when the key is unset."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise SettingsError(f"scheduled_commands {value!r} must be a list")
+    entries = tuple(parse_entry(raw) for raw in value)
+    names = [entry.name for entry in entries]
+    for name in sorted({name for name in names if names.count(name) > 1}):
+        raise SettingsError(f"scheduled_commands name {name} is used more than once")
+    return entries
+
+
+def real_home() -> Path:
+    return Path(os.environ.get("HERMES_REAL_HOME") or pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or real_home() / ".hermes")
+
+
+def read_entry(name: str, home: Path, root: Path) -> ScheduledCommand | None:
+    proc = subprocess.run(
+        [str(home / ".local" / "bin" / "hermes"), "config", "get", SETTINGS_KEY, "--json"],
+        env={**os.environ, "HERMES_HOME": str(root)}, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        if "Config key not set" in proc.stderr:
+            return None
+        raise SettingsError(f"hermes config get {SETTINGS_KEY} failed: {proc.stderr.strip()}")
+    raw = json.loads(proc.stdout)
+    if not isinstance(raw, list):
+        raise SettingsError(f"scheduled_commands {raw!r} must be a list")
+    # Only the named entry has to be valid for this run.
+    return next((parse_entry(item) for item in raw if isinstance(item, dict) and item.get("name") == name), None)
+
+
+def run_git(clone: Path, env: dict, *args: str) -> str:
+    proc = subprocess.run(["git", "-C", str(clone), *args], env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        lines = [line for line in proc.stderr.splitlines() if line.strip()]
+        raise Missing(f"git {args[0]} failed: {lines[-1] if lines else 'exit ' + str(proc.returncode)}")
+    return proc.stdout
+
+
+def refresh_clone(entry: ScheduledCommand, home: Path, root: Path) -> Path:
+    """Fetch into the root home's own clone and leave exactly origin/HEAD in it. The worker's checkouts are never touched."""
+    owner, repo = entry.repository.split("/")
+    clone = root / "scheduled" / owner / repo
+    clone.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "PATH": f"{home / '.local' / 'bin'}:{os.environ.get('PATH', '')}"}
+    helper = f"!{home / '.local' / 'bin' / 'gh'} auth git-credential"
+    git = ("-c", "credential.helper=", "-c", f"credential.helper={helper}")
+    url = f"https://github.com/{entry.repository}.git"
+    if not (clone / ".git").exists():
+        run_git(clone, env, "init", "--quiet")
+        run_git(clone, env, "remote", "add", "origin", url)
+    run_git(clone, env, "remote", "set-url", "origin", url)
+    run_git(clone, env, *git, "fetch", "--quiet", "--prune", "origin")
+    run_git(clone, env, *git, "remote", "set-head", "origin", "--auto")
+    run_git(clone, env, "reset", "--quiet", "--hard", "origin/HEAD")
+    run_git(clone, env, "clean", "--quiet", "-ffdx")
+    return clone
+
+
+def secret_names(root: Path) -> set:
+    # The installed plugin is the list Hermes itself strips from every process this home starts.
+    path = root / SECRET_NAMES
+    if not path.is_file():
+        raise Missing(f"{path} is missing, so the secret names to remove are unknown")
+    return set(DECLARED_NAME.findall(path.read_text()))
+
+
+def client_id(home: Path) -> str:
+    config = home / ".config" / "infisical" / "config"
+    if config.is_file():
+        found = CLIENT_ID_LINE.search(config.read_text())
+        if found and found[1].strip().strip("'\""):
+            return found[1].strip().strip("'\"")
+    plain = home / ".config" / "infisical" / "client-id"
+    if plain.is_file() and plain.read_text().strip():
+        return plain.read_text().strip()
+    raise Missing(f"no {CLIENT_ID_NAME} in {config} or {plain}")
+
+
+def node_bin(home: Path, clone: Path) -> Path:
+    nvmrc = clone / ".nvmrc"
+    if not nvmrc.is_file():
+        raise Missing(f"{nvmrc} is missing, so the Node version is unknown")
+    found = NVMRC_MAJOR.match(nvmrc.read_text().strip())
+    if not found:
+        raise Missing(f"{nvmrc} names no Node major version")
+    major = found[1]
+    versions = home / ".nvm" / "versions" / "node"
+
+    def version(path: Path) -> tuple:
+        return tuple(int(part) for part in re.findall(r"\d+", path.name))
+
+    installed = sorted(versions.glob(f"v{major}.*"), key=version) if versions.is_dir() else []
+    if not installed or not (installed[-1] / "bin").is_dir():
+        raise Missing(f"no Node v{major} under {versions}")
+    return installed[-1] / "bin"
+
+
+def child_env(home: Path, root: Path, clone: Path) -> dict:
+    removed = {*ALWAYS_REMOVED, *secret_names(root)}
+    env = {key: value for key, value in os.environ.items() if key not in removed}
+    env["HOME"] = str(home)
+    env[CLIENT_ID_NAME] = client_id(home)
+    node = node_bin(home, clone)
+    env["PATH"] = ":".join(p for p in (str(node), str(home / ".local" / "bin"), os.environ.get("PATH", "")) if p)
+    return env
+
+
+def kill_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def run_command(argv: tuple, clone: Path, env: dict, deadline: float) -> tuple[str, deque]:
+    """The outcome ("exited <code>" or "timeout"), and the last lines of the command's output."""
+    tail: deque = deque(maxlen=TAIL_LINES)
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=clone, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, errors="replace", start_new_session=True,
+        )
+    except OSError as error:
+        tail.append(str(error))
+        return "exited 127", tail
+    reader = threading.Thread(target=lambda: tail.extend(line.rstrip("\n") for line in proc.stdout), daemon=True)
+    reader.start()
+    try:
+        code = proc.wait(timeout=max(deadline - time.monotonic(), 0))
+        outcome = f"exited {code}"
+    except subprocess.TimeoutExpired:
+        outcome = "timeout"
+    kill_group(proc.pid)
+    proc.wait()
+    reader.join(timeout=5)
+    proc.stdout.close()
+    return outcome, tail
+
+
+def run_entry(entry: ScheduledCommand, home: Path, root: Path) -> str:
+    """The failure block, or "" when every command succeeded."""
+    lock = root / "scheduled" / f"{entry.repository.replace('/', '__')}.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        clone = refresh_clone(entry, home, root)
+        env = child_env(home, root, clone)
+        deadline = time.monotonic() + entry.timeout_minutes * SECONDS_PER_MINUTE
+        for argv in entry.commands:
+            outcome, tail = run_command(argv, clone, env, deadline)
+            if outcome == "timeout":
+                head = f"{entry.name}: {shlex.join(argv)} timeout after {entry.timeout_minutes} minutes"
+            elif outcome != "exited 0":
+                head = f"{entry.name}: {shlex.join(argv)} {outcome}"
+            else:
+                continue
+            return "\n".join([head, *tail])
+    return ""
+
+
+def main(script: str | None = None) -> int:
+    script_name = Path(script or sys.argv[0]).name
+    name = script_name.removeprefix(PREFIX)
+    if not script_name.startswith(PREFIX) or not name:
+        print(f"{script_name}: the file name must be {PREFIX}<name>")
+        return 1
+    home, root = real_home(), hermes_home()
+    try:
+        entry = read_entry(name, home, root)
+        if entry is None:
+            print(f"{name}: no scheduled_commands entry has this name")
+            return 1
+        block = run_entry(entry, home, root)
+    except (SettingsError, Missing, ValueError) as error:
+        print(f"{name}: {error}")
+        return 1
+    if block:
+        print(block)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
