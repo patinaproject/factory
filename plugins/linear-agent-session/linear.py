@@ -147,7 +147,7 @@ ISSUE_QUERY = """query Issue($id: String!) {
   issue(id: $id) {
     id identifier title description url branchName priority archivedAt
     state { name type }
-    delegate { id }
+    delegate { id name }
     assignee { id name gitHubUserId app }
     labels { nodes { name } }
     attachments { nodes { url sourceType } }
@@ -620,6 +620,7 @@ class LinearClient:
             "description": issue["description"] or "",
             "githubIssues": [a["url"] for a in issue["attachments"]["nodes"] if GITHUB_ISSUE_URL.fullmatch(a["url"])],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
+            "delegateName": issue["delegate"]["name"] if issue["delegate"] else None,
             "assignee": issue["assignee"],
             "labels": _label_names(issue),
             "blockedBy": _blocking_issues(issue["inverseRelations"]),

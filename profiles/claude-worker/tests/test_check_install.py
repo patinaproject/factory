@@ -24,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, SCRIPTS, FakeBroker, git, with_interpreter
+from tests.support import REPO, SCRIPTS, FakeBroker, FakeXcode, git, with_interpreter
 
 ROUTE_KEY = "platforms.webhook.extra.routes.linear"
 RATE_LIMIT_KEY = "platforms.webhook.extra.rate_limit"
@@ -268,6 +268,9 @@ REMEDY_CLASSES = (
     ("hermes tool", "cannot read", "advisory"),
     ("hermes tool", "", "manual"),
     ("github app", "", "manual"),
+    ("app auto-update", "", "manual"),
+    ("macos auto-update", "", "manual"),
+    ("xcode first launch", "", "manual"),
 )
 
 
@@ -379,6 +382,7 @@ class CheckInstallTest(unittest.TestCase):
         self.cron(self.worker, WORKER_JOBS)
         self.cron(self.root, ROOT_JOBS)
         self.launchd = Launchd(self.tmp)
+        self.host = HostUpdates(self.tmp)
         self.uploads = self.broker()
 
     def install(self, home: Path, path: str, text: str) -> None:
@@ -415,7 +419,9 @@ class CheckInstallTest(unittest.TestCase):
             path.write_text(expires_at if isinstance(expires_at, str) else json.dumps({"expires_at": expires_at}))
 
     def run_check(self, *args: str) -> subprocess.CompletedProcess:
-        env = {**os.environ, **self.launchd.env, "HERMES_HOME": str(self.worker), "HERMES_BIN": str(self.hermes)}
+        env = {
+            **os.environ, **self.launchd.env, **self.host.env, "HERMES_HOME": str(self.worker), "HERMES_BIN": str(self.hermes),
+        }
         return subprocess.run([sys.executable, str(SCRIPTS / "check-install"), *args], env=env, capture_output=True, text=True)
 
     def check(self, *args: str) -> tuple:
@@ -660,6 +666,34 @@ class CheckInstallTest(unittest.TestCase):
             "skills/setup-factory/scripts/watch-gateway (part 12)\n"
             f"script {self.root}/scripts/restart-gateway: differs from both at {sha} (part 12)\n"
         )))
+
+    def test_host_updates_are_checked_on_macos(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("the update settings are macOS preferences")
+        self.host.set("Preferences", COMMERCE, AutoUpdate=True)
+        self.host.set("Preferences", SOFTWARE_UPDATE, **{MACOS_KEY: True})
+        self.host.xcode.answer(status=1)
+
+        self.assertEqual(self.check(), (1, APP_STORE_LINE + MACOS_LINE + first_launch_line(self.host.xcode.developer)))
+
+    def test_no_host_update_check_runs_off_macos(self) -> None:
+        self.host.set("Preferences", COMMERCE, AutoUpdate=True)
+        self.host.xcode.answer(status=1)
+        env = {
+            **os.environ, **self.launchd.env, **self.host.env, "HERMES_HOME": str(self.worker), "HERMES_BIN": str(self.hermes),
+        }
+        code = (
+            "import runpy, sys\n"
+            f"sys.path.insert(0, {str(SCRIPTS)!r})\n"
+            "sys.platform = 'linux'\n"
+            f"sys.argv = ['check-install', '--no-fetch']\n"
+            f"runpy.run_path({str(SCRIPT)!r}, run_name='__main__')\n"
+        )
+
+        proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+
+        self.assertNotRegex(proc.stdout, "auto-update|first launch")
+        self.assertEqual(self.host.xcode.called(), [])
 
     def test_auto_deploy_is_checked_on_macos(self) -> None:
         if sys.platform != "darwin":
@@ -1907,7 +1941,9 @@ class CheckInstallTest(unittest.TestCase):
         self.launchd.plist(f"{agents}/ai.patinaproject.factory.gh-login.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS)
         self.launchd.plist(f"{agents}/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL, **AUTO_DEPLOY_FIELDS)
         self.launchd.plist(f"{agents}/{ARTIFACT_LABEL}.plist", ARTIFACT_LABEL, **ARTIFACT_FIELDS)
-        env = {"PATH": "/usr/bin:/bin", **self.launchd.env, "HOME": str(home), "HERMES_HOME": str(self.worker)}
+        env = {
+            "PATH": "/usr/bin:/bin", **self.launchd.env, **self.host.env, "HOME": str(home), "HERMES_HOME": str(self.worker),
+        }
         proc = subprocess.run(
             ["/usr/bin/env", "python3", str(SCRIPTS / "check-install")], env=env, capture_output=True, text=True
         )
@@ -2417,6 +2453,114 @@ class CheckAutoDeployTest(unittest.TestCase):
         self.assertEqual((printed["StartInterval"], service.interval), (300, 300))
         self.assertEqual(hook.LABEL, deploy.LABEL)
         self.assertIn("factory-deploy", check_install.ROOT_ONLY_PLUGINS)
+
+
+COMMERCE = "com.apple.commerce"
+SOFTWARE_UPDATE = "com.apple.SoftwareUpdate"
+MACOS_KEY = "AutomaticallyInstallMacOSUpdates"
+DISABLE_SCRIPT = "skills/setup-factory/scripts/disable-auto-updates"
+APP_STORE_LINE = f"app auto-update {COMMERCE}: AutoUpdate is on or unset; run sudo python3 {DISABLE_SCRIPT}\n"
+MACOS_LINE = f"macos auto-update {SOFTWARE_UPDATE}: {MACOS_KEY} is on or unset; run sudo python3 {DISABLE_SCRIPT}\n"
+
+
+def first_launch_line(developer: Path) -> str:
+    return (
+        f"xcode first launch {developer}: xcodebuild -checkFirstLaunchStatus reports a first launch pending; "
+        "run sudo xcodebuild -runFirstLaunch\n"
+    )
+
+
+class HostUpdates:
+    """A preferences root with both automatic updates off, and an Xcode with no first launch pending."""
+
+    def __init__(self, tmp: Path) -> None:
+        self.preferences = tmp / "library"
+        self.xcode = FakeXcode(tmp)
+        self.set("Preferences", COMMERCE, AutoUpdate=False)
+        self.set("Preferences", SOFTWARE_UPDATE, **{MACOS_KEY: False})
+
+    def set(self, folder: str, domain: str, **values) -> None:
+        path = self.preferences / folder / f"{domain}.plist"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(plistlib.dumps(values))
+
+    @property
+    def env(self) -> dict:
+        return {
+            "PREFERENCES_ROOT": str(self.preferences), "XCODEBUILD_BIN": str(self.xcode.xcodebuild),
+            "DEVELOPER_DIR": str(self.xcode.developer),
+        }
+
+
+class CheckHostUpdatesTest(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.host = HostUpdates(self.tmp)
+
+    def lines(self, developer: Path | None = None) -> str:
+        env = {"DEVELOPER_DIR": str(developer or self.host.xcode.developer)}
+        drifts = check_install.check_host_updates(self.host.preferences, str(self.host.xcode.xcodebuild), env)
+        records = [drift.to_json() for drift in drifts]
+        self.assertEqual({record["remedy"]["type"] for record in records} - {"manual"}, set())
+        self.assertEqual({record["remedy"]["gates_runs"] for record in records} - {False}, set())
+        return "".join(f"{line}\n" for line in classified(self, records))
+
+    def test_everything_off_and_no_first_launch_pending_is_clean(self) -> None:
+        self.assertEqual(self.lines(), "")
+
+    def test_app_store_auto_update_on_or_unset_is_reported(self) -> None:
+        self.host.set("Preferences", COMMERCE, AutoUpdate=True)
+        on = self.lines()
+        self.host.set("Preferences", COMMERCE)
+        unset = self.lines()
+        (self.host.preferences / "Preferences" / f"{COMMERCE}.plist").unlink()
+        absent = self.lines()
+
+        self.assertEqual((on, unset, absent), (APP_STORE_LINE,) * 3)
+
+    def test_automatic_macos_install_on_or_unset_is_reported(self) -> None:
+        self.host.set("Preferences", SOFTWARE_UPDATE, **{MACOS_KEY: True})
+        on = self.lines()
+        self.host.set("Preferences", SOFTWARE_UPDATE)
+        unset = self.lines()
+
+        self.assertEqual((on, unset), (MACOS_LINE,) * 2)
+
+    def test_a_managed_value_overrides_the_local_one(self) -> None:
+        self.host.set("Managed Preferences", COMMERCE, AutoUpdate=True)
+        self.host.set("Managed Preferences", SOFTWARE_UPDATE, **{MACOS_KEY: True})
+        managed_on = self.lines()
+        self.host.set("Preferences", COMMERCE, AutoUpdate=True)
+        self.host.set("Managed Preferences", COMMERCE, AutoUpdate=False)
+        managed_off = self.lines()
+
+        self.assertEqual((managed_on, managed_off), (APP_STORE_LINE + MACOS_LINE, MACOS_LINE))
+
+    def test_a_pending_first_launch_is_reported(self) -> None:
+        self.host.xcode.answer(status=1)
+
+        self.assertEqual(self.lines(), first_launch_line(self.host.xcode.developer))
+        self.assertEqual(self.host.xcode.called(), ["-checkFirstLaunchStatus"])
+
+    def test_a_first_launch_check_that_hangs_counts_as_pending(self) -> None:
+        self.host.xcode.answer(hang=True)
+
+        with mock.patch.object(check_install.xcode, "FIRST_LAUNCH_SECONDS", 0.5):
+            lines = self.lines()
+
+        self.assertEqual(lines, first_launch_line(self.host.xcode.developer))
+
+    def test_the_first_launch_check_waits_ten_seconds(self) -> None:
+        self.assertEqual(check_install.xcode.FIRST_LAUNCH_SECONDS, 10)
+
+    def test_command_line_tools_alone_skip_the_first_launch_check(self) -> None:
+        self.host.xcode.answer(status=1)
+
+        self.assertEqual(self.lines(self.host.xcode.command_line_tools), "")
+        self.assertEqual(self.lines(self.host.xcode.dir / "missing"), "")
+        self.assertEqual(self.host.xcode.called(), [])
 
 
 class Launchd:

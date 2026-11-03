@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import time
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Mapping, NamedTuple, Optional
 
@@ -81,6 +82,7 @@ class Intent:
     action: str
     issue: Optional[dict] = None
     delegated: bool = False
+    delegate: Optional[dict] = None
     gate: Optional[str] = None
     card: Optional[dict] = None
     triage_card: Optional[dict] = None
@@ -216,8 +218,18 @@ def decide(
         action="",
         issue={"id": issue["id"], "identifier": issue["identifier"], "state_type": issue["stateType"]},
         delegated=delegated,
+        delegate={"id": issue["delegate"], "name": issue["delegateName"]} if issue["delegate"] else None,
         gate=gate_verdict(issue["labels"], issue["identifier"], document_titles),
-        card={"id": found[0].id, "status": found[0].status, "matched_by": found[1]} if found else None,
+        card=(
+            {
+                "id": found[0].id,
+                "status": found[0].status,
+                "matched_by": found[1],
+                "session_id": blocks.session_id(found[0].body),
+            }
+            if found
+            else None
+        ),
         triage_card={"id": triage_card.id, "status": triage_card.status} if triage_card else None,
         foreign_cards=[] if found else foreign_card_ids(work_cards, issue),
         session_duplicate=_recent_person_session(issue, app_user_id, now),
@@ -259,6 +271,45 @@ def _with_authority(
         approvers=linear.approver_summary(approvers),
         not_assignee_reason=reason,
     )
+
+
+def _triage_inbox_is_noop(intent: Intent, payload: Mapping[str, Any]) -> bool:
+    moved = "stateId" in (payload.get("updatedFrom") or {})
+    if intent.issue["state_type"] != "triage":
+        return intent.triage_card is None or not moved
+    return payload.get("action") != "create" and not moved
+
+
+def _undelegated_needs_no_turn(intent: Intent, payload: Mapping[str, Any]) -> bool:
+    card_gone = intent.card is None or intent.card["status"] == "done"
+    return card_gone and intent.triage_card is None and _triage_inbox_is_noop(intent, payload)
+
+
+def _reuse_card_needs_no_turn(intent: Intent, payload: Mapping[str, Any]) -> bool:
+    card = intent.card
+    return (
+        card is not None
+        and card["session_id"] is not None
+        and card["session_id"] == intent.agent_session_id
+        and card["status"] not in ("blocked", "triage", "done")
+        and intent.issue["state_type"] != "triage"
+    )
+
+
+# The actions the route prompt answers by doing nothing, each with the condition that makes it so.
+NO_TURN_RULES: dict[str, Callable[[Intent, Mapping[str, Any]], bool]] = {
+    "ignore_factory_session": lambda intent, payload: True,
+    "session_created_handles_it": _triage_inbox_is_noop,
+    "issue_closed": lambda intent, payload: intent.card is None and intent.triage_card is None,
+    "undelegated": _undelegated_needs_no_turn,
+    "reuse_card": _reuse_card_needs_no_turn,
+}
+
+
+def needs_no_turn(intent: Intent, payload: Mapping[str, Any]) -> bool:
+    """True when the prompt would do nothing for this intent, so the hook can skip the turn."""
+    rule = NO_TURN_RULES.get(intent.action)
+    return rule is not None and rule(intent, payload)
 
 
 def carries_no_reply(payload: Mapping[str, Any]) -> bool:
@@ -327,6 +378,19 @@ def _issue_id(payload: Mapping[str, Any]) -> str:
     return payload["agentSession"]["issue"]["id"]
 
 
+# Linear can serve a delegate-less issue for a few seconds after the delegation that opened the session.
+DELEGATE_REREAD_DELAYS = (1, 1, 2, 2, 4)
+
+
+def _delegation_may_be_pending(payload: Mapping[str, Any], issue: Mapping[str, Any]) -> bool:
+    return (
+        payload["type"] == "AgentSessionEvent"
+        and payload["action"] == "created"
+        and payload["agentSession"].get("creatorId") is not None
+        and issue["delegate"] is None
+    )
+
+
 def compute(
     payload: Any,
     *,
@@ -336,6 +400,7 @@ def compute(
     cards: Callable[[Optional[str]], list[Card]],
     now: Optional[dt.datetime] = None,
     redact: Callable[[str], str] = blocks.hermes_redact,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Intent:
     """Read the issue and both boards, then decide. Any failure becomes the `error` intent, never an exception."""
     try:
@@ -343,6 +408,12 @@ def compute(
             raise ValueError("the payload is not a Linear Issue or AgentSessionEvent")
         linear_client = client()
         issue = linear_client.get_issue(_issue_id(payload))
+        if _delegation_may_be_pending(payload, issue):
+            for delay in DELEGATE_REREAD_DELAYS:
+                sleep(delay)
+                issue = linear_client.get_issue(_issue_id(payload))
+                if issue["delegate"] is not None:
+                    break
         documents = linear_client.issue_documents(issue["id"])["documents"]
         app = app_user_id()
         no_reply = carries_no_reply(payload)
