@@ -26,6 +26,7 @@ from tests import (
 plugin = load_plugin()
 linear = plugin.linear
 tools = plugin.tools
+opened_sessions = plugin.opened_sessions
 
 
 class Clock:
@@ -92,9 +93,15 @@ class ActivityTest(unittest.TestCase):
 
     def test_external_urls_add_to_session_urls(self):
         urls = [{"label": "Pull request", "url": "https://github.com/example-org/example-repo/pull/1"}]
-        sent = [{"label": "Pull request", "url": "https://linear.review/example-org/example-repo/pull/1"}]
+        sent = [
+            {"label": "Pull request", "url": "https://github.com/example-org/example-repo/pull/1"},
+            {"label": "Pull request", "url": "https://linear.review/example-org/example-repo/pull/1"},
+        ]
         fake, output = self.post_urls(["https://example.test/t_1"], urls)
-        self.assertEqual(output["external_urls"], ["https://linear.review/example-org/example-repo/pull/1"])
+        self.assertEqual(
+            output["external_urls"],
+            ["https://github.com/example-org/example-repo/pull/1", "https://linear.review/example-org/example-repo/pull/1"],
+        )
         self.assertIn("agentSession(id: $id)", fake.graphql_requests[1]["query"])
         self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "session-1"})
         update = fake.graphql_requests[2]
@@ -178,7 +185,7 @@ class ActivityTest(unittest.TestCase):
         make_client(fake).close_older_sessions("live")
         return [r["variables"]["input"] for r in fake.graphql_requests[2:]]
 
-    def test_a_closed_sessions_pull_requests_are_copied_in_review_page_form_and_cards_are_not(self):
+    def test_a_closed_sessions_pull_requests_are_copied_in_both_forms_and_cards_are_not(self):
         old = "2026-10-27T09:00:00.000Z"
         links = [
             ("Pull request #7", "https://github.com/o/r/pull/7"),
@@ -189,7 +196,9 @@ class ActivityTest(unittest.TestCase):
         self.assertEqual(
             self.carried([("old", "active", old, "app-1", links)]),
             [{"addedExternalUrls": [
+                {"label": "Pull request #7", "url": "https://github.com/o/r/pull/7"},
                 {"label": "Pull request #7", "url": "https://linear.review/o/r/pull/7"},
+                {"label": "Pull request #8", "url": "https://github.com/o/r/pull/8"},
                 {"label": "Pull request #8", "url": "https://linear.review/o/r/pull/8"},
             ]}],
         )
@@ -200,17 +209,28 @@ class ActivityTest(unittest.TestCase):
         others = [("old-active", "active", old, "app-1"), ("old-awaiting", "awaitingInput", old, "app-1", link)]
         self.assertEqual(
             self.carried(others),
-            [{"addedExternalUrls": [{"label": "Pull request #7", "url": "https://linear.review/o/r/pull/7"}]}],
+            [{"addedExternalUrls": [
+                {"label": "Pull request #7", "url": "https://github.com/o/r/pull/7"},
+                {"label": "Pull request #7", "url": "https://linear.review/o/r/pull/7"},
+            ]}],
         )
 
     def test_no_pull_request_is_copied_when_no_sibling_closes(self):
         link = [("Pull request #7", "https://github.com/o/r/pull/7")]
         self.assertEqual(self.carried([("old", "awaitingInput", "2026-10-27T09:00:00.000Z", "app-1", link)], responses=[]), [])
 
+    def test_only_the_form_the_live_session_lacks_is_copied(self):
+        link = [("Pull request #7", "https://linear.review/o/r/pull/7")]
+        others = [("old", "active", "2026-10-27T09:00:00.000Z", "app-1", link)]
+        self.assertEqual(
+            self.carried(others, live_urls=["https://linear.review/o/r/pull/7"]),
+            [{"addedExternalUrls": [{"label": "Pull request #7", "url": "https://github.com/o/r/pull/7"}]}],
+        )
+
     def test_a_pull_request_the_live_session_holds_is_not_copied_again(self):
         link = [("Pull request #7", "https://github.com/o/r/pull/7")]
         others = [("old", "active", "2026-10-27T09:00:00.000Z", "app-1", link)]
-        self.assertEqual(self.carried(others, live_urls=["https://github.com/o/r/pull/7"], responses=[]), [])
+        self.assertEqual(self.carried(others, live_urls=["https://github.com/o/r/pull/7", "https://linear.review/o/r/pull/7"], responses=[]), [])
 
     def test_a_failed_copy_never_stops_the_close(self):
         link = [("Pull request #7", "https://github.com/o/r/pull/7")]
@@ -593,6 +613,35 @@ class SessionCreateTest(unittest.TestCase):
         self.assertEqual(
             update["variables"], {"id": "session-77", "input": {"summary": "Triage ABC-123: Fix checkout"}}
         )
+
+    def test_the_session_id_is_recorded_before_titling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeLinear([self.CREATED, self.issue(), session_update_ok()])
+            tools.run_session_create(
+                lambda: make_client(fake), {"issue": "ABC-123", "purpose": "work"}, opened_dir=directory
+            )
+            self.assertTrue(opened_sessions.recorded(directory, "session-77"))
+            self.assertFalse(opened_sessions.recorded(directory, "session-78"))
+
+    def test_a_failed_create_records_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeLinear([(200, {"data": {"agentSessionCreateOnIssue": {"success": False, "agentSession": None}}})])
+            tools.run_session_create(
+                lambda: make_client(fake), {"issue": "ABC-123", "purpose": "work"}, opened_dir=directory
+            )
+            self.assertEqual(os.listdir(directory), [])
+
+    def test_an_unwritable_store_does_not_fail_the_tool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocker = os.path.join(directory, "file")
+            open(blocker, "w").close()
+            fake = FakeLinear([self.CREATED, self.issue(), session_update_ok()])
+            output = json.loads(
+                tools.run_session_create(
+                    lambda: make_client(fake), {"issue": "ABC-123", "purpose": "work"}, opened_dir=os.path.join(blocker, "x")
+                )
+            )
+        self.assertEqual(output["agent_session_id"], "session-77")
 
     def test_a_work_session_is_titled_work_on_the_issue(self):
         fake = FakeLinear([self.CREATED, self.issue(), session_update_ok()])
@@ -1806,23 +1855,56 @@ class CardTitleTest(unittest.TestCase):
 
 
 class ReviewLinksTest(unittest.TestCase):
-    def test_a_pull_request_url_is_sent_as_its_review_page(self):
-        urls = [{"label": "Pull request", "url": "https://github.com/o/r/pull/1"}]
-        fake = FakeLinear([session_urls_ok(), session_update_ok()])
-        added = make_client(fake).add_external_urls("session-1", urls)
-        self.assertEqual(added, ["https://linear.review/o/r/pull/1"])
-        self.assertEqual(
-            fake.graphql_requests[1]["variables"]["input"],
-            {"addedExternalUrls": [{"label": "Pull request", "url": "https://linear.review/o/r/pull/1"}]},
-        )
-        self.assertEqual(urls, [{"label": "Pull request", "url": "https://github.com/o/r/pull/1"}])
+    GH = "https://github.com/o/r/pull/1"
+    LR = "https://linear.review/o/r/pull/1"
 
-    def test_a_session_holding_the_review_page_gets_no_update(self):
-        fake = FakeLinear([session_urls_ok("https://linear.review/o/r/pull/1")])
-        added = make_client(fake).add_external_urls(
-            "session-1", [{"label": "Pull request", "url": "https://github.com/o/r/pull/1"}]
+    def add(self, held, urls):
+        fake = FakeLinear([session_urls_ok(*held), session_update_ok()])
+        added = make_client(fake).add_external_urls("session-1", urls)
+        sent = fake.graphql_requests[1]["variables"]["input"] if len(fake.graphql_requests) > 1 else None
+        return added, sent
+
+    def test_a_pull_request_url_is_sent_with_its_review_page(self):
+        urls = [{"label": "Pull request", "url": self.GH}]
+        added, sent = self.add([], urls)
+        self.assertEqual(added, [self.GH, self.LR])
+        self.assertEqual(
+            sent, {"addedExternalUrls": [{"label": "Pull request", "url": self.GH}, {"label": "Pull request", "url": self.LR}]}
         )
+        self.assertEqual(urls, [{"label": "Pull request", "url": self.GH}])
+
+    def test_a_session_holding_only_the_review_page_gets_the_github_url(self):
+        added, sent = self.add([self.LR], [{"label": "Pull request", "url": self.GH}])
+        self.assertEqual(added, [self.GH])
+        self.assertEqual(sent, {"addedExternalUrls": [{"label": "Pull request", "url": self.GH}]})
+
+    def test_a_session_holding_only_the_github_url_gets_the_review_page(self):
+        added, sent = self.add([self.GH], [{"label": "Pull request", "url": self.GH}])
+        self.assertEqual(added, [self.LR])
+        self.assertEqual(sent, {"addedExternalUrls": [{"label": "Pull request", "url": self.LR}]})
+
+    def test_a_session_holding_both_gets_no_update(self):
+        fake = FakeLinear([session_urls_ok(self.GH, self.LR)])
+        added = make_client(fake).add_external_urls("session-1", [{"label": "Pull request", "url": self.GH}])
         self.assertEqual((added, len(fake.graphql_requests)), ([], 1))
+
+    def test_a_review_page_input_adds_the_github_url_too(self):
+        added, _ = self.add([], [{"label": "Pull request", "url": self.LR}])
+        self.assertEqual(added, [self.GH, self.LR])
+
+    def test_a_suffixed_pull_request_url_maps_to_the_bare_pair(self):
+        added, _ = self.add([], [{"label": "Pull request", "url": "https://github.com/o/r/pull/1/files"}])
+        self.assertEqual(added, [self.GH, self.LR])
+
+    def test_both_forms_of_one_pull_request_in_one_call_are_added_once(self):
+        added, _ = self.add([], [{"label": "A", "url": self.GH}, {"label": "B", "url": self.LR}])
+        self.assertEqual(added, [self.GH, self.LR])
+
+    def test_a_url_that_is_not_a_pull_request_is_added_once_unchanged(self):
+        url = "https://github.com/o/r/issues/1"
+        added, sent = self.add([], [{"label": "Issue", "url": url}, {"label": "Issue again", "url": url}])
+        self.assertEqual(added, [url])
+        self.assertEqual(sent, {"addedExternalUrls": [{"label": "Issue", "url": url}]})
 
     def test_an_activity_body_is_sent_with_the_review_page(self):
         fake = FakeLinear([activity_ok("activity-1")])

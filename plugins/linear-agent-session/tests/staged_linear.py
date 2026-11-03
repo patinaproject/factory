@@ -18,7 +18,7 @@ its creator is `creator`, an app when `creator_app` is set; each is no one when 
 fails the read, and `people_timeout` times it out.
 A posted activity is logged as `activity`, with the session's issue holding no other session.
 Its blockers come from its `blocked_by` list of {id, identifier, gitBranchName, stateType, delegate}, none
-when unset, and `blockers_error` fails the read.
+when unset, and `blockers_error` fails the read. `activity_error` fails a posted activity.
 Its title comes from `issue_title`, "Fix checkout" when unset, and its priority from `priority`, 0 when unset. An AgentSessionUpdate is logged as
 `session_update` with its variables, and `session_update_error` makes it fail. The session's
 links are its `session_urls` list, which an update's `addedExternalUrls` extends, and `session_urls_error` fails the read.
@@ -163,6 +163,8 @@ def _fake_urlopen(request, timeout=None):
                 for b in state.get("blocked_by", [])
             ]
             response = _Response(200, {"data": {"viewer": {"id": "app-user"}, "issue": {"inverseRelations": {"nodes": nodes}}}})
+        elif "AgentActivityCreate" in query and state.get("activity_error"):
+            response = _Response(200, {"errors": [{"message": state["activity_error"]}]})
         elif "AgentActivityCreate" in query:
             entry["activity"] = body["variables"]["input"]
             response = _Response(200, {"data": {"agentActivityCreate": {"success": True, "agentActivity": {"id": "activity-1"}}}})

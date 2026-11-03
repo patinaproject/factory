@@ -133,11 +133,14 @@ class LinkPrHookProcessTest(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         self.assertEqual(
             self.updates(),
-            [{"id": "live-session", "input": {"addedExternalUrls": [{"label": "Pull request #42", "url": REVIEW_URL}]}}],
+            [{"id": "live-session", "input": {"addedExternalUrls": [
+                {"label": "Pull request #42", "url": URL},
+                {"label": "Pull request #42", "url": REVIEW_URL},
+            ]}}],
         )
 
     def test_a_session_that_holds_the_pull_request_gets_no_update(self) -> None:
-        self.set_state(session_urls=[REVIEW_URL])
+        self.set_state(session_urls=[URL, REVIEW_URL])
 
         result = self.run_hook(json.dumps(CREATED))
 
@@ -168,4 +171,4 @@ class LinkPrHookProcessTest(unittest.TestCase):
         result = self.run_hook(json.dumps(CREATED))
 
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(self.updates()[0]["input"]["addedExternalUrls"][0]["url"], REVIEW_URL)
+        self.assertEqual([u["url"] for u in self.updates()[0]["input"]["addedExternalUrls"]], [URL, REVIEW_URL])

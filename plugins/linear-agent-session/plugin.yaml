@@ -92,6 +92,14 @@ config_schema:
       The issues file-recurring-issues files on a cadence. Each entry is an object with repository
       (<owner>/<name>), team_key, title_prefix (the job appends the slot's start date), cadence (daily,
       weekly, or monthly), labels (a list of label names), and description. The job skips a malformed entry.
+  scheduled_commands:
+    type: list
+    default: []
+    description: >-
+      Repository commands that run on a Hermes cron schedule. Each entry has name (lowercase words joined by
+      hyphens, unique), repository (<owner>/<name>), schedule (a five-field cron expression in the root profile's timezone), commands
+      (a list of argv lists, run in order in a clean clone), and timeout_minutes (the budget for all of the commands together).
+      The scheduled-command script reads it. Leave it empty to schedule nothing.
   claude_session:
     type: dict
     default: {}

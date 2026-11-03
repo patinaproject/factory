@@ -181,9 +181,21 @@ message, because the `blocker-order` hook sees tool results and not that message
   exactly as `gh_login_park` above: stop, post no activity, never call
   `kanban_block`, and treat a result without it as the `"transient": true`
   case below.
+- A line that holds `"precondition": "worktree_held"` means another
+  claude-session holds this card's worktree. A line that holds
+  `"precondition": "server_error"` means GitHub or the gateway's broker
+  answered with a server error. The `blocker-order` hook parks the card the
+  same way and adds `worktree_held_park` or `server_error_park` to the result,
+  and a sweep returns the card to the queue once the lock is free, or five
+  minutes after the park. Follow the park key exactly as `gh_login_park`
+  above: stop, post no activity, never call `kanban_block`, and treat a
+  result without it as the `"transient": true` case below. A line with
+  `"transient": true` and no precondition is a cause that keeps coming back,
+  and its error names the count.
 - On failure the line holds `error`. A refusal that another process holds the
-  worktree means a second worker is running this card: post an `error`
-  activity saying so, call `kanban_block` with kind `transient`, and stop.
+  worktree and has no precondition means a second worker is running this card:
+  post an `error` activity saying so, call `kanban_block` with kind
+  `transient`, and stop.
   When the line also holds `"transient": true`, GitHub kept answering with a
   server error, or the gateway's broker stayed busy or unreachable: post an
   `error` activity with the message, call
@@ -307,6 +319,8 @@ Then act on the result:
     variant that matches wins.
     - When the tool result has `re_requested_reviewers`: `Changes are in,
       re-review: <published_pr>` (outcome `re_review`).
+    - When the tool result has `waiting_for_queue_entry`: `Approved, add it
+      to the merge queue: <published_pr>` (outcome `queue_entry`).
     - When the tool result has `waiting_for_merge_queue`: `Approved, waiting
       for the merge queue: <published_pr>` (outcome `merge_queue`).
     - Otherwise: `Ready for your review: <published_pr>` (outcome
@@ -344,6 +358,10 @@ Then act on the result:
     approved and waits for the merge queue. End the `body` with that instead
     of asking the operator to review and merge. Never add or remove a merge
     queue label yourself.
+  - When the tool result has `waiting_for_queue_entry`, the pull request is
+    approved and waits for a person to add it to the merge queue. End the
+    `body` with that, and name the person from `owner_review_requested` when
+    it is present. Never add a merge label or queue the pull request yourself.
   - Otherwise end the `body` with what the operator is asked to do: `Review
     the pull request on GitHub, then merge it or request changes.`
 - **Completion accepted.** Post a `response` activity (outcome `merged`) that
@@ -352,9 +370,9 @@ Then act on the result:
   branch rule, a head commit that is not the worktree's `HEAD`, or a
   `MERGED` pull request sent to review. It names each check whose latest
   run is failing, or is pending and required by a branch rule. A pull
-  request that waits only for a reviewer or for the merge queue passes
-  `kanban_request_review`, so never wait for `CLEAN` before you hand it to
-  review. A pending check that no rule requires does not stop the handoff.
+  request that waits only for a reviewer, for the merge queue, or for a person
+  to add it to the merge queue passes `kanban_request_review`, so never wait
+  for `CLEAN` before you hand it to review. A pending check that no rule requires does not stop the handoff.
   An open review thread that a person started does not stop it either.
   Before the handoff, answer in the thread each such thread that asks you
   something.

@@ -55,6 +55,11 @@ behind, on the default branch, and clean. --ref turns the line off, because
 the target is then not origin/HEAD. --print-source prints the checkout path
 and exits.
 
+It checks each `scheduled_commands` entry in the factory settings: a root-profile script-only job named
+scheduled-<name> with the entry's cron expression that delivers to a chat platform, and the root home's copy of
+the runner, scripts/scheduled-<name>. It reports a scheduled-* job that has no entry, and cron.catch_up_missed
+set to false.
+
 It also checks that watch-gateway, the launchd job that restarts a gateway whose secrets did not
 resolve, runs: its script and restart-gateway match the repository, its job is loaded, its
 state file is fresh and does not say the restart budget is spent, and the heartbeat URL file exists with
@@ -113,6 +118,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import urllib.request
 from collections import Counter
 from datetime import datetime, timedelta
@@ -153,6 +159,8 @@ RUN_ERROR_LIMIT = 200
 SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE)
 TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
 ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway", "auto-deploy", "report-deploy")
+SCHEDULED_RUNNER = "skills/setup-factory/scripts/scheduled-command"
+SCHEDULED_PREFIX = "scheduled-"
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
 DEFAULT_OIDC_SCOPES = "openid profile email"
 PLACEHOLDER = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -223,7 +231,7 @@ class ConfigKey(NamedTuple):
 class CronJob(NamedTuple):
     part: int
     name: str
-    minutes: int
+    every: int | str  # minutes between runs, or a cron expression
     deliver: Want
     home: str = WORKER
     script: str = ""
@@ -273,6 +281,12 @@ CONFIG = (
         10, f"{SETTINGS_KEY}.dependency_updates", BOTH, declared("set to the weekly dependency update's repository, team, and labels"),
         same_in_homes=True,
     ),
+    ConfigKey(
+        10, f"{SETTINGS_KEY}.scheduled_commands", BOTH,
+        Want(lambda live: live is None or isinstance(live, list), "unset or a list of scheduled commands"),
+        same_in_homes=True,
+    ),
+    ConfigKey(12, "cron.catch_up_missed", (ROOT,), Want(lambda live: live is not False, "true", True)),
     ConfigKey(10, "kanban.max_in_progress", (ROOT,), positive_int("a positive card limit")),
     ConfigKey(10, "kanban.max_spawn", (ROOT,), positive_int("a positive limit on worker spawns per board")),
     ConfigKey(10, "kanban.review_dispatch", (ROOT,), equal(False)),
@@ -311,7 +325,7 @@ CRON = (
 )
 # Jobs that moved from Hermes' cron to launchd, because `hermes pause` stops Hermes' cron.
 LAUNCHD_JOBS = ("refresh-gh-app-login",)
-OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
+OWNED_REFS_MAX_AGE = 5 * 60 * next(job.every for job in CRON if job.name == "refresh-owned-refs")
 
 AUTO_DEPLOY_INTERVAL_SECONDS = 300  # equals auto-deploy's INTERVAL_SECONDS
 # macOS only. `plist` is a glob; the runbook lets the operator name the cloudflared plist.
@@ -663,10 +677,14 @@ def cron_differences(job: CronJob, live: dict) -> list:
     if not live["enabled"]:
         details.append(("is disabled", ("resume", job_id)))
     schedule = live["schedule"]
-    if schedule.get("kind") != "interval" or schedule.get("minutes") != job.minutes:
+    if isinstance(job.every, str):
+        on_schedule, wanted = schedule.get("kind") == "cron" and schedule.get("expr") == job.every, job.every
+    else:
+        on_schedule, wanted = schedule.get("kind") == "interval" and schedule.get("minutes") == job.every, f"every {job.every}m"
+    if not on_schedule:
         details.append((
-            f"runs {live['schedule_display']}, not every {job.minutes}m",
-            ("edit", job_id, "--schedule", install_plan.schedule(job.minutes)),
+            f"runs {live['schedule_display']}, not {wanted}",
+            ("edit", job_id, "--schedule", install_plan.schedule(job.every)),
         ))
     if live["script"] != job.runs or not live["no_agent"]:
         details.append((f"is not a script-only job that runs {job.runs}", ("edit", job_id, "--no-agent", "--script", job.runs)))
@@ -753,16 +771,37 @@ def unresolved_deliveries(home: Path, live: dict, hermes: str) -> list:
     return details
 
 
-def check_root_wrappers(commit: Commit, homes: Homes) -> list:
+def load_runner(commit: Commit):
+    files = commit.files(SCHEDULED_RUNNER)
+    if SCHEDULED_RUNNER not in files:
+        return None
+    module = types.ModuleType("scheduled_command")
+    sys.modules[module.__name__] = module  # dataclasses look their module up here
+    exec(compile(commit.blob(files[SCHEDULED_RUNNER]), SCHEDULED_RUNNER, "exec"), module.__dict__)
+    return module
+
+
+def scheduled_entries(runner, settings) -> tuple:
+    section = settings.get("scheduled_commands") if isinstance(settings, dict) else None
+    return runner.parse_entries(section) if runner else ()
+
+
+def scheduled_jobs(entries: tuple) -> tuple:
+    chat = declared("the operator's chat platform", besides=("local",))
+    return tuple(CronJob(12, SCHEDULED_PREFIX + entry.name, entry.schedule, chat, home=ROOT) for entry in entries)
+
+
+def check_root_wrappers(commit: Commit, homes: Homes, entries: tuple = ()) -> list:
     root = homes.root
     drifts = []
-    for name in ROOT_WRAPPERS:
-        source = f"skills/setup-factory/scripts/{name}"
+    wrappers = [(name, name) for name in ROOT_WRAPPERS] + [(SCHEDULED_PREFIX + entry.name, "scheduled-command") for entry in entries]
+    for name, source_name in wrappers:
+        source = f"skills/setup-factory/scripts/{source_name}"
         if source not in commit.files(source):
             continue
         installed = root / "scripts" / name
         where = str(installed)
-        fix = install_plan.wrapper_install(homes, name)
+        fix = install_plan.wrapper_install(homes, name, source_name)
         if not installed.is_file():
             drifts.append(Drift("script", where, f"is missing; install it from {source} (part 12)", fix))
         elif installed.read_bytes() != commit.blob(commit.files(source)[source]):
@@ -770,13 +809,24 @@ def check_root_wrappers(commit: Commit, homes: Homes) -> list:
     return drifts
 
 
-def check_cron(commit: Commit, homes: Homes) -> list:
+def check_cron(commit: Commit, homes: Homes, settings=None) -> list:
     hermes = homes.hermes
     paths = {ROOT: homes.root, WORKER: homes.worker}
     live_jobs = {name: cron_jobs(home) for name, home in paths.items()}
-    drifts = check_root_wrappers(commit, homes)
+    runner = load_runner(commit)
+    drifts = []
+    try:
+        entries = scheduled_entries(runner, settings)
+    except runner.SettingsError as error:
+        entries = ()
+        drifts.append(Drift(
+            "config", f"scheduled_commands in {homes.worker}", f"is invalid: {error} (part 12)",
+            Manual("correct scheduled_commands as part 12 describes"),
+        ))
+    expected = (*CRON, *scheduled_jobs(entries))
+    drifts.extend(check_root_wrappers(commit, homes, entries))
     secrets = known_secrets(paths.values())
-    for job in CRON:
+    for job in expected:
         home = paths[job.home]
         where = f"{job.name} in {home}"
         operator_platform = Manual(f"set {job.name}'s delivery to the operator's chat platform as part {job.part} describes")
@@ -788,7 +838,7 @@ def check_cron(commit: Commit, homes: Homes) -> list:
         if not found:
             target = job.deliver.target
             drifts.append(drift("is missing", operator_platform if target is MANUAL else install_plan.cron_command(
-                homes, home, "create", install_plan.schedule(job.minutes), "--name", job.name, "--no-agent",
+                homes, home, "create", install_plan.schedule(job.every), "--name", job.name, "--no-agent",
                 "--script", job.runs, "--deliver", target,
             )))
         elif len(found) > 1:
@@ -805,7 +855,7 @@ def check_cron(commit: Commit, homes: Homes) -> list:
                 for d in unresolved_deliveries(home, live, hermes)
             )
             drifts.extend(drift(d, ADVISORY) for d in last_run_failure(job, live, secrets))
-    owners = {job.name: job for job in CRON}
+    owners = {job.name: job for job in expected}
     for name, jobs in live_jobs.items():
         for live in jobs:
             where = f"{live['name']} in {paths[name]}"
@@ -815,6 +865,11 @@ def check_cron(commit: Commit, homes: Homes) -> list:
                 drifts.append(Drift(
                     "cron job", where, "is replaced by a launchd job; remove it with hermes cron remove (part 10)",
                     Manual(f"once the part 10 launchd job has run, run {remove}"),
+                ))
+            elif owner is None and live["name"].startswith(SCHEDULED_PREFIX):
+                drifts.append(Drift(
+                    "cron job", where, "has no scheduled_commands entry of that name (part 12)",
+                    Manual("remove it with hermes cron remove <job id> or add the entry"),
                 ))
             elif owner is None:
                 drifts.append(Drift(
@@ -2328,7 +2383,7 @@ def main() -> int:
             *check_config(homes_, CONFIG if broker is None else BROKER_USER_CONFIG),
             *check_worker_secrets(commit, worker, hermes, settings),
             *check_upload_broker(root, *factory_settings.token_variables(settings)),
-            *check_cron(commit, homes_),
+            *check_cron(commit, homes_, settings),
             *check_routes(commit, homes_),
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
