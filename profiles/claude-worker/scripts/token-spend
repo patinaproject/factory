@@ -1,0 +1,550 @@
+#!/usr/bin/env python3
+"""Report where a factory's model tokens and estimated cost went, in five buckets and by card."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import sys
+from dataclasses import astuple, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import NamedTuple
+
+import kanban_board
+
+BUCKETS = {
+    "webhook": "Webhook triggers",
+    "dispatch": "Worker dispatch",
+    "startup": "Startup context",
+    "conversation": "Main-thread conversation",
+    "subagent": "Subagent fan-out",
+}
+WEBHOOK_SOURCES = ("webhook", "webhook-retry", "webhook-replay")
+ISSUE = re.compile(r"^\s*([A-Z][A-Z0-9]*-\d+)")
+SESSION_SQL = (
+    "SELECT id, source, display_name, title, model, started_at, COALESCE(input_tokens, 0) AS input_tokens, "
+    "COALESCE(output_tokens, 0) AS output_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, "
+    "COALESCE(cache_write_tokens, 0) AS cache_write_tokens FROM sessions WHERE source IN ({})"
+)
+TASK_SQL = "SELECT id, title, workspace_path FROM tasks"
+RUN_SQL = "SELECT id, task_id, started_at, ended_at, outcome, metadata FROM task_runs ORDER BY started_at, id"
+OUTSIDE_RUNS = "outside runs"
+
+
+@dataclass(frozen=True)
+class Tokens:
+    input: int = 0
+    cache_read: int = 0
+    cache_write_5m: int = 0
+    cache_write_1h: int = 0
+    output: int = 0
+
+    def __add__(self, other: Tokens) -> Tokens:
+        return Tokens(*(a + b for a, b in zip(astuple(self), astuple(other))))
+
+    def __sub__(self, other: Tokens) -> Tokens:
+        return Tokens(*(a - b for a, b in zip(astuple(self), astuple(other))))
+
+    @property
+    def cache_write(self) -> int:
+        return self.cache_write_5m + self.cache_write_1h
+
+    @property
+    def total(self) -> int:
+        return sum(astuple(self))
+
+    def as_dict(self) -> dict:
+        return {
+            "input": self.input, "cache_read": self.cache_read, "cache_write": self.cache_write,
+            "output": self.output, "total": self.total,
+        }
+
+
+class Card(NamedTuple):
+    task_id: str | None
+    issue: str | None
+
+    @property
+    def key(self) -> str:
+        return self.issue or self.task_id or "unknown"
+
+
+class RunKey(NamedTuple):
+    board: str
+    id: int
+
+
+class Spend(NamedTuple):
+    bucket: str
+    card: Card | None
+    run: RunKey | None
+    label: str
+    model: str
+    started_at: float
+    tokens: Tokens
+
+
+class Message(NamedTuple):
+    at: float
+    model: str
+    tokens: Tokens
+    sidechain: bool
+
+
+@dataclass(frozen=True)
+class Run:
+    key: RunKey
+    card: Card
+    started_at: float
+    ended_at: float | None
+    outcome: str | None
+
+
+@dataclass
+class Worktree:
+    cards: list[Card]
+    runs: list[Run]
+
+
+@dataclass
+class Ledger:
+    spends: list[Spend]
+    runs: dict[RunKey, dict]
+    sessions: dict[str, dict]
+
+
+class Window(NamedTuple):
+    since: float | None
+    until: float | None
+
+    def has(self, at: float) -> bool:
+        return (self.since is None or at >= self.since) and (self.until is None or at < self.until)
+
+
+def parse_time(text: str) -> float:
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    when = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def issue_of(title: str | None) -> str | None:
+    match = ISSUE.match(title or "")
+    return match.group(1) if match else None
+
+
+def board_databases(root: Path) -> list[Path]:
+    return sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")])
+
+
+def read_optional(path: Path, sql: str, params: tuple = ()) -> list[dict]:
+    if not path.is_file():
+        return []
+    try:
+        return kanban_board.read(str(path), sql, params)
+    except sqlite3.OperationalError as error:
+        if "no such table" in str(error):
+            return []
+        raise
+
+
+def usage_tokens(usage: dict) -> Tokens:
+    one_hour = (usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0
+    written = usage.get("cache_creation_input_tokens") or 0
+    return Tokens(
+        input=usage.get("input_tokens") or 0, cache_read=usage.get("cache_read_input_tokens") or 0,
+        cache_write_5m=written - one_hour, cache_write_1h=one_hour, output=usage.get("output_tokens") or 0,
+    )
+
+
+def transcript_cwd(transcript: Path) -> str | None:
+    with open(transcript, encoding="utf-8") as lines:
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict) and entry.get("cwd"):
+                return entry["cwd"]
+    return None
+
+
+def read_messages(path: Path, sidechain_file: bool) -> list[Message]:
+    """One message per API message id: Claude Code writes one entry per content block, all sharing the id.
+
+    The first entry says when the message began and the last carries the final usage."""
+    merged: dict = {}
+    with open(path, "rb") as lines:
+        for line in lines:
+            try:
+                entry = json.loads(line.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            message = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
+            if not isinstance(message, dict) or message.get("model") == "<synthetic>":
+                continue
+            if not isinstance(message.get("usage"), dict) or not entry.get("timestamp"):
+                continue
+            at = parse_time(entry["timestamp"])
+            key = message.get("id") or ("anonymous", len(merged))
+            if key in merged:
+                at = merged[key].at
+            merged[key] = Message(
+                at, message.get("model") or "unknown", usage_tokens(message["usage"]),
+                sidechain_file or bool(entry.get("isSidechain")),
+            )
+    return list(merged.values())
+
+
+def index_transcripts(config_dir: Path) -> dict[str, list[Path]]:
+    index: dict[str, list[Path]] = {}
+    for main in sorted((config_dir / "projects").glob("*/*.jsonl")):
+        cwd = transcript_cwd(main)
+        if cwd:
+            index.setdefault(cwd, []).append(main)
+    return index
+
+
+def worktree_messages(mains: list[Path], since: float | None) -> list[Message]:
+    """A file last written before `since` holds no message at or after it, so it is not read."""
+    def written_in_window(path: Path) -> bool:
+        return since is None or path.stat().st_mtime >= since
+
+    messages: list[Message] = []
+    for main in mains:
+        if written_in_window(main):
+            messages += read_messages(main, False)
+        for sub in sorted((main.with_suffix("") / "subagents").glob("agent-*.jsonl")):
+            if written_in_window(sub):
+                messages += read_messages(sub, True)
+    return messages
+
+
+def by_model(messages: list[Message]) -> dict[str, Tokens]:
+    totals: dict[str, Tokens] = {}
+    for message in messages:
+        totals[message.model] = totals.get(message.model, Tokens()) + message.tokens
+    return totals
+
+
+def split_by_run(runs: list[Run], messages: list[Message]) -> tuple[dict[RunKey, list[Message]], list[Message]]:
+    """A run covers its start up to its end, or up to the next run's start while it has no end."""
+    ordered = sorted(runs, key=lambda r: (r.started_at, r.key.id))
+    spans = []
+    for i, run in enumerate(ordered):
+        following = ordered[i + 1].started_at if i + 1 < len(ordered) else float("inf")
+        spans.append((run, run.started_at, following if run.ended_at is None else run.ended_at))
+    inside: dict[RunKey, list[Message]] = {r.key: [] for r in ordered}
+    outside = []
+    for message in messages:
+        owner = next((r for r, start, end in reversed(spans) if start <= message.at < end), None)
+        (inside[owner.key] if owner else outside).append(message)
+    return inside, outside
+
+
+def run_spends(run: Run, messages: list[Message]) -> list[Spend]:
+    label = f"run {run.key.id}"
+    ordered = sorted(messages, key=lambda m: m.at)
+    main = [m for m in ordered if not m.sidechain]
+    spends = [
+        Spend("subagent", run.card, run.key, label, model, run.started_at, tokens)
+        for model, tokens in by_model([m for m in ordered if m.sidechain]).items()
+    ]
+    conversation = by_model(main)
+    if main:
+        first = main[0].tokens
+        startup = Tokens(first.input, first.cache_read, first.cache_write_5m, first.cache_write_1h)
+        conversation[main[0].model] = conversation[main[0].model] - startup
+        spends.append(Spend("startup", run.card, run.key, label, main[0].model, run.started_at, startup))
+    spends += [Spend("conversation", run.card, run.key, label, model, run.started_at, t) for model, t in conversation.items()]
+    return [s for s in spends if s.tokens.total]
+
+
+def outside_spends(card: Card, messages: list[Message], window: Window) -> list[Spend]:
+    return [
+        Spend("subagent" if m.sidechain else "conversation", card, None, OUTSIDE_RUNS, m.model, m.at, m.tokens)
+        for m in messages if window.has(m.at) and m.tokens.total
+    ]
+
+
+def is_outside_runs(spend: Spend) -> bool:
+    return spend.card is not None and spend.run is None and spend.bucket in ("conversation", "subagent")
+
+
+def session_tokens(row: dict) -> Tokens:
+    return Tokens(row["input_tokens"], row["cache_read_tokens"], row["cache_write_tokens"], 0, row["output_tokens"])
+
+
+def collect(gateway: Path, worker: Path, config_dir: Path, window: Window) -> Ledger:
+    ledger = Ledger([], {}, {})
+    marks = ", ".join("?" for _ in WEBHOOK_SOURCES)
+    for row in kanban_board.read(str(gateway / "state.db"), SESSION_SQL.format(marks), WEBHOOK_SOURCES):
+        if window.has(row["started_at"]):
+            route = row["display_name"] or row["source"]
+            ledger.spends.append(
+                Spend("webhook", None, None, route, row["model"] or "unknown", row["started_at"], session_tokens(row))
+            )
+
+    cards_by_worker_session: dict[str, Card] = {}
+    worktrees: dict[str, Worktree] = {}
+    for board in board_databases(gateway):
+        name = board.parent.name if board.parent != gateway else "main"
+        tasks = {t["id"]: t for t in read_optional(board, TASK_SQL)}
+        for task in tasks.values():
+            if task["workspace_path"]:
+                worktrees.setdefault(task["workspace_path"], Worktree([], [])).cards.append(
+                    Card(task["id"], issue_of(task["title"]))
+                )
+        for row in read_optional(board, RUN_SQL):
+            task = tasks.get(row["task_id"]) or {}
+            card = Card(row["task_id"], issue_of(task.get("title")))
+            metadata = json.loads(row["metadata"] or "{}")
+            if metadata.get("worker_session_id"):
+                cards_by_worker_session[metadata["worker_session_id"]] = card
+            run = Run(RunKey(name, row["id"]), card, row["started_at"], row["ended_at"], row["outcome"])
+            if task.get("workspace_path"):
+                worktrees[task["workspace_path"]].runs.append(run)
+            if window.has(run.started_at):
+                ledger.runs[run.key] = {
+                    "id": run.key.id, "card": card, "started_at": run.started_at, "outcome": run.outcome,
+                }
+
+    transcripts = index_transcripts(config_dir)
+    for path, worktree in sorted(worktrees.items()):
+        if path not in transcripts:
+            continue
+        inside, outside = split_by_run(worktree.runs, worktree_messages(transcripts[path], window.since))
+        for run in worktree.runs:
+            if window.has(run.started_at):
+                ledger.spends += run_spends(run, inside[run.key])
+        first = min(worktree.runs, key=lambda r: (r.started_at, r.key.id)).card if worktree.runs else worktree.cards[0]
+        ledger.spends += outside_spends(first, outside, window)
+
+    for row in kanban_board.read(str(worker / "state.db"), SESSION_SQL.format("?"), ("kanban",)):
+        if not window.has(row["started_at"]):
+            continue
+        card = cards_by_worker_session.get(row["id"]) or Card(None, issue_of(row["title"]))
+        ledger.sessions[row["id"]] = {"id": row["id"], "card": card, "title": row["title"], "started_at": row["started_at"]}
+        ledger.spends.append(
+            Spend("dispatch", card, None, row["id"], row["model"] or "unknown", row["started_at"], session_tokens(row))
+        )
+    return ledger
+
+
+def only_card(ledger: Ledger, wanted: str) -> Ledger:
+    known = [
+        *(s.card for s in ledger.spends if s.card), *(r["card"] for r in ledger.runs.values()),
+        *(s["card"] for s in ledger.sessions.values()),
+    ]
+    issues = {c.issue for c in known if c.task_id == wanted and c.issue} | {wanted}
+
+    def matches(card: Card | None) -> bool:
+        return card is not None and (card.task_id == wanted or card.issue in issues)
+
+    return Ledger(
+        [s for s in ledger.spends if matches(s.card)],
+        {k: v for k, v in ledger.runs.items() if matches(v["card"])},
+        {k: v for k, v in ledger.sessions.items() if matches(v["card"])},
+    )
+
+
+def cost_of(tokens: Tokens, rate: dict) -> float:
+    return (
+        tokens.input * rate["input"] + tokens.output * rate["output"] + tokens.cache_read * rate["cache_read"]
+        + tokens.cache_write_5m * rate["cache_write_5m"] + tokens.cache_write_1h * rate["cache_write_1h"]
+    ) / 1e6
+
+
+def summarize(spends: list[Spend], prices: dict) -> dict:
+    models: dict[str, Tokens] = {}
+    for spend in spends:
+        models[spend.model] = models.get(spend.model, Tokens()) + spend.tokens
+    rows, total, cost, unpriced = [], Tokens(), 0.0, []
+    for model, tokens in sorted(models.items(), key=lambda item: (-item[1].total, item[0])):
+        rate = prices.get(model)
+        priced = None if rate is None else cost_of(tokens, rate)
+        if priced is None:
+            unpriced.append(model)
+        else:
+            cost += priced
+        total += tokens
+        rows.append({"model": model, "tokens": tokens.as_dict(), "cost_usd": None if priced is None else round(priced, 6)})
+    return {"tokens": total.as_dict(), "cost_usd": round(cost, 6), "unpriced_models": unpriced, "models": rows}
+
+
+def share(part: float, whole: float) -> float:
+    return round(part / whole, 4) if whole else 0.0
+
+
+def build_report(ledger: Ledger, prices: dict, window: Window, top: int, card: str | None) -> dict:
+    total = summarize(ledger.spends, prices)
+    buckets = []
+    for key, name in BUCKETS.items():
+        summary = summarize([s for s in ledger.spends if s.bucket == key], prices)
+        summary["tokens_share"] = share(summary["tokens"]["total"], total["tokens"]["total"])
+        summary["cost_share"] = share(summary["cost_usd"], total["cost_usd"])
+        buckets.append({"bucket": key, "name": name, **summary})
+    routes = sorted({s.label for s in ledger.spends if s.bucket == "webhook"})
+    ranked = []
+    for key in sorted({s.card.key for s in ledger.spends if s.card}):
+        mine = [s for s in ledger.spends if s.card and s.card.key == key]
+        summary = summarize(mine, prices)
+        del summary["models"]
+        ranked.append({"card": key, "task_ids": sorted({s.card.task_id for s in mine if s.card.task_id}), **summary})
+    ranked.sort(key=lambda c: (-c["cost_usd"], -c["tokens"]["total"], c["card"]))
+    report = {
+        "window": {"since": window.since, "until": window.until},
+        "total": total,
+        "buckets": buckets,
+        "webhook_routes": [
+            {"route": r, **summarize([s for s in ledger.spends if s.bucket == "webhook" and s.label == r], prices)}
+            for r in routes
+        ],
+        "top_cards": ranked[:top],
+        "card": None,
+    }
+    if card:
+        runs = []
+        for key, run in sorted(ledger.runs.items(), key=lambda item: (item[1]["id"], item[0].board)):
+            mine = [s for s in ledger.spends if s.run == key]
+            runs.append({
+                "run_id": run["id"], "task_id": run["card"].task_id, "issue": run["card"].issue,
+                "started_at": run["started_at"], "outcome": run["outcome"],
+                **{b: summarize([s for s in mine if s.bucket == b], prices) for b in ("startup", "conversation", "subagent")},
+                "total": summarize(mine, prices),
+            })
+        sessions = [
+            {"session_id": s["id"], "title": s["title"], "started_at": s["started_at"],
+             **summarize([e for e in ledger.spends if e.label == s["id"] and e.bucket == "dispatch"], prices)}
+            for s in sorted(ledger.sessions.values(), key=lambda s: (s["started_at"], s["id"]))
+        ]
+        outside = summarize([s for s in ledger.spends if is_outside_runs(s)], prices)
+        report["card"] = {"id": card, "runs": runs, "outside_runs": outside, "sessions": sessions, "total": total}
+    return report
+
+
+def money(value: float | None) -> str:
+    return "unpriced" if value is None else f"${value:,.2f}"
+
+
+def moment(value: float | None) -> str:
+    return "-" if value is None else datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def table(header: list[str], rows: list[list[str]]) -> list[str]:
+    widths = [max(len(r[i]) for r in [header, *rows]) for i in range(len(header))]
+    return [
+        "  ".join(c.ljust(w) if i == 0 else c.rjust(w) for i, (c, w) in enumerate(zip(r, widths)))
+        for r in [header, *rows]
+    ]
+
+
+def figures(summary: dict) -> list[str]:
+    return [f"{summary['tokens'][k]:,}" for k in ("input", "cache_read", "cache_write", "output", "total")]
+
+
+def render(report: dict) -> str:
+    window = report["window"]
+    out = [f"Token spend, since {moment(window['since'])}, until {moment(window['until'])}"]
+    head = ["bucket", "input", "cache read", "cache write", "output", "total", "cost USD", "% tokens", "% cost"]
+    rows = [
+        [b["name"], *figures(b), money(b["cost_usd"]), f"{b['tokens_share']:.1%}", f"{b['cost_share']:.1%}"]
+        for b in report["buckets"]
+    ] + [["All buckets", *figures(report["total"]), money(report["total"]["cost_usd"]), "", ""]]
+    out += ["", *table(head, rows)]
+    if report["total"]["unpriced_models"]:
+        out.append("unpriced: " + ", ".join(report["total"]["unpriced_models"]))
+
+    out += ["", "By model"]
+    model_head = ["model", "input", "cache read", "cache write", "output", "total", "cost USD"]
+    for b in report["buckets"]:
+        if b["models"]:
+            out.append(f"{b['name']}:")
+            out += ["  " + line for line in table(model_head, [[m["model"], *figures(m), money(m["cost_usd"])] for m in b["models"]])]
+            if b["unpriced_models"]:
+                out.append("  unpriced: " + ", ".join(b["unpriced_models"]))
+    if report["webhook_routes"]:
+        out += ["", "Webhook triggers by route"]
+        out += table(
+            ["route", *model_head[1:]], [[r["route"], *figures(r), money(r["cost_usd"])] for r in report["webhook_routes"]]
+        )
+    if report["top_cards"]:
+        out += ["", f"Top {len(report['top_cards'])} cards by cost"]
+        out += table(
+            ["card", "total tokens", "cost USD"],
+            [
+                [c["card"], f"{c['tokens']['total']:,}", money(c["cost_usd"]) + (" + unpriced" if c["unpriced_models"] else "")]
+                for c in report["top_cards"]
+            ],
+        )
+    card = report["card"]
+    if card:
+        out += ["", f"Card {card['id']}: worker runs"]
+        out += table(
+            ["run", "task", "started", "outcome", "startup", "conversation", "subagent", "cost USD"],
+            [
+                [
+                    str(r["run_id"]), r["task_id"] or "", moment(r["started_at"]), r["outcome"] or "",
+                    f"{r['startup']['tokens']['total']:,}", f"{r['conversation']['tokens']['total']:,}",
+                    f"{r['subagent']['tokens']['total']:,}", money(r["total"]["cost_usd"]),
+                ]
+                for r in card["runs"]
+            ],
+        )
+        outside = card["outside_runs"]
+        out.append(
+            f"outside runs (no run covers the message): {outside['tokens']['total']:,} tokens, {money(outside['cost_usd'])}"
+        )
+        out += ["", f"Card {card['id']}: kanban sessions"]
+        out += table(
+            ["session", "title", "total tokens", "cost USD"],
+            [[s["session_id"], s["title"] or "", f"{s['tokens']['total']:,}", money(s["cost_usd"])] for s in card["sessions"]],
+        )
+    return "\n".join(out)
+
+
+def resolve_homes(args: argparse.Namespace) -> tuple[Path, Path]:
+    worker = args.worker_home or os.environ.get("HERMES_HOME")
+    if not worker:
+        sys.exit("token-spend: pass --worker-home or set HERMES_HOME")
+    worker = Path(worker)
+    gateway = args.gateway_home
+    if not gateway:
+        if worker.parent.name != "profiles":
+            sys.exit(f"token-spend: {worker} is not under a profiles directory, so pass --gateway-home")
+        gateway = worker.parent.parent
+    return Path(gateway), worker
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Report where a factory's model tokens and cost went.")
+    parser.add_argument("--worker-home")
+    parser.add_argument("--gateway-home")
+    parser.add_argument("--claude-config-dir")
+    parser.add_argument("--since", type=parse_time)
+    parser.add_argument("--until", type=parse_time)
+    parser.add_argument("--card")
+    parser.add_argument("--prices", default=str(Path(__file__).resolve().parent / "token_prices.json"))
+    parser.add_argument("--top", type=int, default=10)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    gateway, worker = resolve_homes(args)
+    config_dir = Path(args.claude_config_dir or os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    prices = json.loads(Path(args.prices).read_text(encoding="utf-8"))
+    window = Window(args.since, args.until)
+    ledger = collect(gateway, worker, config_dir, window)
+    if args.card:
+        ledger = only_card(ledger, args.card)
+    report = build_report(ledger, prices, window, args.top, args.card)
+    print(json.dumps(report, indent=2) if args.json else render(report))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

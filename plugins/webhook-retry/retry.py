@@ -106,14 +106,24 @@ class Run:
 
         store.mutate(self.directory, change)
 
+    def prune_skip_markers(self, moment: dt.datetime) -> None:
+        for marker in (self.directory / store.SKIPPED_DIRECTORY).glob("*"):
+            if moment - dt.datetime.fromtimestamp(marker.stat().st_mtime, dt.timezone.utc) > store.PENDING_AGE:
+                marker.unlink()
+
     def apply_caps(self) -> None:
         moment = store.now()
+        self.prune_skip_markers(moment)
         for key, entry in self.entries().items():
             if entry["state"] == "running" and self.update(key, "interrupted", last_error="a retry was interrupted"):
                 self.say(f"interrupted {entry['route']} {entry['delivery']}: not retried again, it may have run")
                 continue
             age = moment - store.parse_stamp(entry["delivered_at"])
             state = entry["state"]
+            marker = store.skip_marker(self.directory, key)
+            if state == "pending" and entry.get("admitted") is False and marker.exists() and self.update(key, "skipped"):
+                marker.unlink()
+                continue
             # An entry recorded before admission was tracked has no `admitted`, and its turn may have run.
             if state == "pending" and entry.get("admitted") is False and age >= store.UNSTARTED_AGE:
                 if self.update(key, "unadmitted", reason="unadmitted", next_try_at=entry["delivered_at"]):

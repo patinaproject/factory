@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from . import blocks, idempotency, kanban_guard, linear, missing_secret, replies, tools, triage_exit, triage_intent, triage_round
@@ -227,6 +229,7 @@ def make_dispatch_hook(
     load_config: Callable[[], Mapping[str, Any]],
     handle_triage_exit: Callable[[Any], triage_exit.Verdict],
     compute_intent: Optional[Callable[[Any], triage_intent.Intent]] = None,
+    skip_home: Callable[[], Path] = triage_exit.gateway_home,
     comment_store: Callable[[], Optional[str]] = lambda: idempotency.store_dir(os.environ),
 ) -> Callable[..., Any]:
     pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-exit")
@@ -330,7 +333,17 @@ def make_dispatch_hook(
         return {"action": "skip", "reason": reason}
 
     async def prepend_intent(event: Any) -> dict[str, str]:
-        return rewrite(await compute_for(event), event)
+        intent = await compute_for(event)
+        if triage_intent.needs_no_turn(intent, event.raw_message):
+            reason = f"{intent.action}: the computed intent needs no action"
+            try:
+                write_skip_record(skip_home(), event.source.chat_id)
+            except Exception as failure:
+                logger.warning("linear-agent-session: no skip record, so the turn runs: %s: %s", type(failure).__name__, failure)
+            else:
+                logger.info("linear-agent-session: %s; no triage turn", reason)
+                return {"action": "skip", "reason": reason}
+        return rewrite(intent, event)
 
     def rewrite(intent: triage_intent.Intent, event: Any) -> dict[str, str]:
         return {"action": "rewrite", "text": triage_intent.render(intent) + event.text}
@@ -352,6 +365,14 @@ def make_dispatch_hook(
         return intent
 
     return guard_then_acknowledge
+
+
+def write_skip_record(home: Path, chat_id: str) -> None:
+    """The path is a contract with `webhook-retry`'s `queue_store.skip_marker`, which reads it to drop the pending entry."""
+    directory = home / "webhook-retry" / "skipped"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(directory / hashlib.sha256(chat_id.encode()).hexdigest(), os.O_CREAT | os.O_WRONLY, 0o600)
+    os.close(fd)
 
 
 def _is_comment(payload: Any) -> bool:

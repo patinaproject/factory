@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Turn off the App Store's and macOS's automatic installs. The operator runs it with sudo.
+
+    sudo python3 skills/setup-factory/scripts/disable-auto-updates
+
+It sets com.apple.commerce AutoUpdate and com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates to
+false in /Library/Preferences, leaves every other key alone, and prints one line per setting it changed,
+or `no change`. A second run changes nothing. PREFERENCES_ROOT replaces /Library, for tests, and then
+root is not required.
+"""
+from __future__ import annotations
+
+import os
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
+
+SETTINGS = (
+    ("com.apple.commerce", "AutoUpdate"),
+    ("com.apple.SoftwareUpdate", "AutomaticallyInstallMacOSUpdates"),
+)
+COMMAND = "sudo python3 skills/setup-factory/scripts/disable-auto-updates"
+
+
+def current(path: Path, key: str) -> object:
+    try:
+        return plistlib.loads(path.read_bytes()).get(key)
+    except FileNotFoundError:
+        return None
+
+
+def main() -> int:
+    override = os.environ.get("PREFERENCES_ROOT")
+    if override is None and os.geteuid() != 0:
+        print(f"disable-auto-updates: it writes /Library/Preferences; run {COMMAND}", file=sys.stderr)
+        return 2
+    preferences = Path(override or "/Library") / "Preferences"
+    changed = False
+    for domain, key in SETTINGS:
+        path = preferences / f"{domain}.plist"
+        value = current(path, key)
+        if value is False:
+            continue
+        subprocess.run(["defaults", "write", str(path), key, "-bool", "false"], check=True)
+        print(f"{domain} {key}: was {'unset' if value is None else 'on'}, now off")
+        changed = True
+    if not changed:
+        print("no change")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

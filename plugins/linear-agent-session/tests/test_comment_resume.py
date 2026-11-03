@@ -314,7 +314,7 @@ class HookTest(unittest.TestCase):
             lambda: CONFIG,
             triage_exit,
             lambda delivery: run_compute(delivery, self.cards),
-            lambda: self.store.name,
+            comment_store=lambda: self.store.name,
         )
         return asyncio.run(hook(event=Event(payload), gateway=object(), session_store=None))
 
@@ -372,7 +372,7 @@ class HookTest(unittest.TestCase):
             lambda: CONFIG,
             lambda _: None,
             lambda delivery: run_compute(delivery, self.cards, error=RuntimeError("Linear down")),
-            lambda: self.store.name,
+            comment_store=lambda: self.store.name,
         )
         result = asyncio.run(hook(event=Event(comment_event()), gateway=object(), session_store=None))
         self.assertEqual(result, {"action": "skip", "reason": "the comment's intent failed: RuntimeError: Linear down"})
