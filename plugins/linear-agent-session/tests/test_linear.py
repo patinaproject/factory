@@ -816,7 +816,7 @@ class IssueTest(unittest.TestCase):
                 "priority": 2.0,
                 "archivedAt": None,
                 "state": {"name": "Todo", "type": "unstarted"},
-                "delegate": {"id": "app-user-1"},
+                "delegate": {"id": "app-user-1", "name": "Factory App"},
                 "assignee": {"id": "user-1", "name": "Ted Example", "gitHubUserId": "1001", "app": False},
                 "labels": {"nodes": [{"name": "ready-for-agent"}, {"name": "bug"}]},
                 "attachments": {
@@ -866,6 +866,7 @@ class IssueTest(unittest.TestCase):
                 "description": "Checkout fails.",
                 "githubIssues": ["https://github.com/example-org/example-repo/issues/9"],
                 "delegate": "app-user-1",
+                "delegateName": "Factory App",
                 "assignee": {"id": "user-1", "name": "Ted Example", "gitHubUserId": "1001", "app": False},
                 "labels": ["bug", "ready-for-agent"],
                 "role_labels": {"ready-for-agent": "Ready for agent"},
@@ -915,7 +916,12 @@ class IssueTest(unittest.TestCase):
         response = json.loads(json.dumps(self.RESPONSE))
         response["data"]["issue"]["delegate"] = None
         fake = FakeLinear([(200, response)])
-        self.assertIsNone(make_client(fake).get_issue("ABC-123")["delegate"])
+        issue = make_client(fake).get_issue("ABC-123")
+        self.assertEqual((issue["delegate"], issue["delegateName"]), (None, None))
+
+    def test_issue_returns_the_delegates_id_and_name(self):
+        issue = make_client(FakeLinear([(200, self.RESPONSE)])).get_issue("ABC-123")
+        self.assertEqual((issue["delegate"], issue["delegateName"]), ("app-user-1", "Factory App"))
 
 
 class BlockersTest(unittest.TestCase):

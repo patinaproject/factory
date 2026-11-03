@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import importlib.util
 import json
 import os
 import re
@@ -486,6 +487,121 @@ class ParkWaitingTest(CardTransitionTest):
 
         self.assertEqual(self.park_waiting(), (0, {"parked": []}))
         self.assertEqual(self.state_changes(), [])
+
+
+class ImplementationReplyTest(CardTransitionTest):
+    WAIT = "WAITING_ON=the design review"
+    RELEASED = f"Released from scheduled for a Linear reply. The card waited for: {WAIT}"
+
+    def parked(self, reason: str = WAIT, **changes) -> None:
+        self.state["task"]["body"] = f"{BODY}\nrepo: example-org/app"
+        event = {"kind": "scheduled", "payload": {"reason": reason}, "created_at": 500, "run_id": 1}
+        self.given("scheduled", events=[event], **changes)
+
+    def reply(self, text: str = REPLY) -> tuple[int, dict]:
+        return self.transition("implementation-reply", "t_1", reply=text)
+
+    def test_a_reply_releases_a_scheduled_card_with_its_wait_reason_and_keeps_its_worker(self):
+        self.parked(branch_has_pr=False)
+        code, out = self.reply()
+        self.assertEqual((code, out), (0, {"action": "unblocked", "post": None, "pull_request": False}))
+        self.assertEqual(self.state_changes(), [
+            ["comment", "t_1", REPLY_COMMENT], ["comment", "t_1", self.RELEASED], ["unblock", "t_1"],
+        ])
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("ready", "claude-worker"))
+        self.assertEqual(self.state["gh_calls"], [["pr", "view", "pat-1-work", "-R", "example-org/app", "--json", "state"]])
+        self.assertEqual(set(self.state["boards"]), {None})
+
+    def test_a_card_with_a_pull_request_is_sent_to_review_and_reopened(self):
+        self.parked()
+        code, out = self.reply()
+        self.assertEqual((code, out), (0, {"action": "unblocked", "post": None, "pull_request": True}))
+        self.assertEqual(self.state_changes(), [
+            ["comment", "t_1", REPLY_COMMENT], ["comment", "t_1", self.RELEASED], ["unblock", "t_1"],
+            ["request-review", "t_1"], ["reopen-review", "t_1"],
+        ])
+        self.assertEqual(self.state["task"]["status"], "ready")
+
+    def test_the_comments_seen_marker_is_left_out_of_the_wait_reason(self):
+        self.parked(f"{self.WAIT}\n\ncomments_seen: 0", branch_has_pr=False)
+        self.reply()
+        self.assertEqual(self.state["comments"], [REPLY_COMMENT, self.RELEASED])
+
+    def test_the_same_reply_again_writes_nothing_and_releases_nothing(self):
+        self.parked(branch_has_pr=False)
+        self.reply()
+        changes = len(self.state_changes())
+
+        code, out = self.reply()
+        self.assertEqual((code, out), (0, {"action": "none", "post": None, "status": "ready"}))
+
+        self.given("scheduled")
+        self.state["events"].append({"kind": "scheduled", "payload": {"reason": "WAITING_ON=more"}, "created_at": 5000, "run_id": 2})
+        code, out = self.reply()
+        self.assertEqual((code, out), (0, {"action": "none", "post": None, "status": "scheduled"}))
+        self.assertEqual(len(self.state_changes()), changes)
+
+    def test_a_rerun_after_a_crash_before_the_unblock_comments_the_release_once(self):
+        self.parked(branch_has_pr=False)
+        self.state["fail"]["unblock"] = 1
+        self.assertEqual(self.reply()[0], 1)
+        self.assertEqual(self.state["task"]["status"], "scheduled")
+
+        code, out = self.reply()
+        self.assertEqual((code, out["action"]), (0, "unblocked"))
+        self.assertEqual(self.state["comments"], [REPLY_COMMENT, self.RELEASED])
+
+    def test_a_reply_that_predates_a_newer_park_writes_nothing_and_releases_nothing(self):
+        self.parked(comments=[REPLY_COMMENT], comment_at=[100])
+        self.state["events"][0]["created_at"] = 2000
+        code, out = self.reply()
+        self.assertEqual((code, out), (0, {"action": "none", "post": None, "status": "scheduled"}))
+        self.assertEqual(self.state_changes(), [])
+
+    def test_a_machine_wait_gets_the_reply_comment_and_stays_parked(self):
+        spec = importlib.util.spec_from_file_location("result_line", REPO / "plugins" / "blocker-order" / "result_line.py")
+        result_line = importlib.util.module_from_spec(spec)
+        sys.modules["result_line"] = result_line
+        self.addCleanup(sys.modules.pop, "result_line", None)
+        spec.loader.exec_module(result_line)
+        for prefix in result_line.MACHINE_PARKS:
+            with self.subTest(prefix):
+                reason = f"{prefix} the thing\n\ncomments_seen: 0"
+                self.parked(reason, comments=[], calls=[])
+                code, out = self.reply()
+                self.assertEqual((code, out), (0, {"action": "none", "post": None, "waits_for": f"{prefix} the thing"}))
+                self.assertEqual(self.state_changes(), [["comment", "t_1", REPLY_COMMENT]])
+                self.assertEqual(self.state["task"]["status"], "scheduled")
+
+    def test_a_card_a_person_stopped_is_assigned_to_the_worker_before_it_is_unblocked(self):
+        self.parked(branch_has_pr=False, comments=["stopped"])
+        self.state["task"]["assignee"] = None
+        code, out = self.reply()
+        self.assertEqual((code, out), (0, {"action": "unblocked", "post": None, "pull_request": False}))
+        self.assertEqual(self.state_changes(), [
+            ["comment", "t_1", REPLY_COMMENT], ["comment", "t_1", self.RELEASED],
+            ["assign", "t_1", "claude-worker"], ["unblock", "t_1"],
+        ])
+
+    def test_a_failed_pull_request_lookup_leaves_the_card_scheduled_with_only_the_reply_written(self):
+        self.parked(gh_fail=1)
+        code, out = self.reply()
+        self.assertEqual((code, out), (1, {"error": "gh pr view failed: gh: HTTP 502"}))
+        self.assertEqual(self.state_changes(), [["comment", "t_1", REPLY_COMMENT]])
+        self.assertEqual(self.state["task"]["status"], "scheduled")
+
+    def test_a_card_in_another_status_gets_only_the_reply_comment(self):
+        self.parked()
+        self.given("running")
+        code, out = self.reply()
+        self.assertEqual((code, out), (0, {"action": "none", "post": None, "status": "running"}))
+        self.assertEqual(self.state_changes(), [["comment", "t_1", REPLY_COMMENT]])
+
+    def test_an_empty_reply_changes_nothing(self):
+        self.parked()
+        code, out = self.reply("  \n")
+        self.assertEqual((code, out), (1, {"error": "implementation-reply needs the reply's text on standard input"}))
+        self.assertEqual(self.calls(), [])
 
 
 class UnblockTest(CardTransitionTest):
