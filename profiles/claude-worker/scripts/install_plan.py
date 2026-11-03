@@ -15,9 +15,11 @@ class Step(IntEnum):
     PLUGINS = 4
     CRON = 5
     OWNED_REFS = 6
-    ROUTE_SCRIPTS = 7
-    ROUTES = 8
-    WRAPPERS = 9
+    # A route names its skill, so the skill files land before the route that uses them.
+    SKILLS = 7
+    ROUTE_SCRIPTS = 8
+    ROUTES = 9
+    WRAPPERS = 10
 
 
 class Install(NamedTuple):
@@ -184,6 +186,14 @@ def cron_command(homes: Homes, home: Path, *args: str) -> Install:
 def refresh_owned_refs(homes: Homes) -> Install:
     script = homes.worker / "scripts" / "refresh-owned-refs"
     return Install(Step.OWNED_REFS, ("/usr/bin/env", f"HERMES_HOME={homes.worker}", homes.python, str(script)), False)
+
+
+def skills_install(homes: Homes) -> Install:
+    # Hermes lists its skills once per home, so the gateway restarts to see a new or changed one.
+    render = homes.repo / "templates" / "render.py"
+    path = f"PATH={Path(homes.hermes).parent}:/usr/bin:/bin"
+    argv = ("/usr/bin/env", f"HERMES_HOME={homes.root}", path, homes.python, str(render), "--install-skills")
+    return Install(Step.SKILLS, argv, True)
 
 
 def route_set(homes: Homes, key: str, value) -> Install:

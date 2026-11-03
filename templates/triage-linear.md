@@ -5,8 +5,8 @@ the `hermes kanban` CLI through the terminal tool, and report to Linear with the
 
 ## Computed intent
 
-Code computed the `<triage_intent>` block at the top of this turn from Linear
-and the Kanban boards. Branch on its `action`, which names the section below
+Code computed the `<triage_intent>` block at the end of this turn, after the
+event section, from Linear and the Kanban boards. Branch on its `action`, which names the section below
 that handles it. Do not look up the card, compare times, read the labels for
 the gate, or read the reply yourself. Its fields:
 
@@ -142,27 +142,7 @@ It was computed when the webhook arrived, so it can be seconds old.
 
 <<repositories>>
 
-## This event
-
-- Type: {type}
-- Action: {action}
-- Agent session: {agentSession.id}
-- Agent session issue: {agentSession.issue.id} ({agentSession.issue.identifier})
-- Data change issue: {data.id} ({data.identifier})
-- Activity signal: {agentActivity.signal}
-- Activity id: {agentActivity.id}
-- Issue event action: {action}
-- Previous status: {updatedFrom.stateId}
-- Previous labels: {updatedFrom.labelIds}
-
-A field still shown as a dotted name in braces is absent from this payload. The
-session's prompt context is:
-
-{promptContext}
-
-The full payload, truncated to 4000 characters:
-
-{__raw__}
+<<event>>
 
 A note at the end of this prompt that says several webhook events arrived in
 quick succession and were coalesced only means earlier events were merged. This

@@ -23,7 +23,7 @@ FAKE_HERMES = textwrap.dedent(
         if "routes.unknown." in args[2]:
             sys.stderr.write("Config key not set")
             sys.exit(1)
-        print(json.dumps(["terminal", "linear_agent_session"]))
+        print(json.dumps(["factory-linear-triage"] if args[2].endswith(".skills") else ["terminal", "linear_agent_session"]))
         sys.exit(0)
     query = open(args[args.index("--query-file") + 1]).read()
     with open(os.environ["FAKE_LOG"], "a") as log:
@@ -159,9 +159,12 @@ class RetryTest(unittest.TestCase):
         result = self.run_retry()
 
         chats = self.chats()
-        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in chats], ["older", "newer"])
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1].split("\n")[0] for c in chats], ["older", "newer"])
         self.assertEqual(chats[0]["argv"][:5], ["chat", "-Q", "--oneshot", "--query-file", chats[0]["argv"][4]])
-        self.assertEqual(chats[0]["argv"][5:], ["-t", "terminal,linear_agent_session", "--source", "webhook-retry"])
+        self.assertEqual(
+            chats[0]["argv"][5:],
+            ["-t", "terminal,linear_agent_session", "--source", "webhook-retry", "-s", "factory-linear-triage"],
+        )
         self.assertEqual(chats[0]["home"], str(self.home))
         self.assertIn(older, chats[0]["query"].split("prompt for")[0])
         self.assertEqual(
@@ -222,8 +225,10 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(self.triage_checks(), [], "an agent session event has no Triage exit")
         query = self.chats()[0]["query"]
         self.assertTrue(query.startswith("This is a replay of a webhook delivery"))
-        self.assertLess(query.index("## Computed triage intent"), query.index("</triage_intent>"))
-        self.assertLess(query.index("</triage_intent>"), query.index("prompt for reply"))
+        intent = json.dumps({"action": "card_reply", "now": delivered})
+        self.assertTrue(
+            query.endswith(f"prompt for reply\n\n## Computed triage intent\n\n<triage_intent>\n{intent}\n</triage_intent>\n\n")
+        )
         self.assertIn(json.dumps({"action": "card_reply", "now": delivered}), query)
 
     def test_a_replay_whose_intent_cannot_be_computed_starts_with_the_error_intent(self):
@@ -235,7 +240,7 @@ class RetryTest(unittest.TestCase):
         query = self.chats()[0]["query"]
         block = query[query.index("<triage_intent>\n") + len("<triage_intent>\n") : query.index("\n</triage_intent>")]
         self.assertEqual(json.loads(block)["action"], "error")
-        self.assertLess(query.index("</triage_intent>"), query.index("prompt for broken"))
+        self.assertLess(query.index("prompt for broken"), query.index("<triage_intent>"))
 
     def test_a_replay_without_the_cli_still_starts_with_the_error_intent(self):
         self.seed(entry("nocli", payload=TRIAGE_EXIT_PAYLOAD))
@@ -355,7 +360,7 @@ class RetryTest(unittest.TestCase):
         result = self.run_retry()
 
         self.assertEqual((held.stdout, held.returncode), ("Hermes is paused: the queued deliveries wait for hermes resume\n", 0))
-        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["first", "second"])
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1].split("\n")[0] for c in self.chats()], ["first", "second"])
         self.assertEqual(
             result.stdout,
             "retried linear first: succeeded\nretried linear second: succeeded\nwebhook retry queue drained\n",
@@ -378,7 +383,7 @@ class RetryTest(unittest.TestCase):
 
         stored = self.entries()
         self.assertEqual(
-            [c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["first"],
+            [c["query"].rsplit("prompt for ", 1)[1].split("\n")[0] for c in self.chats()], ["first"],
         )
         self.assertEqual(len(self.triage_checks()), 1)
         self.assertEqual((stored[chat_key("second")]["state"], stored[chat_key("second")]["attempts"]), ("queued", 0))
@@ -418,7 +423,7 @@ class RetryTest(unittest.TestCase):
 
         result = self.run_retry()
 
-        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["dropped"])
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1].split("\n")[0] for c in self.chats()], ["dropped"])
         self.assertIn("because a restart, drain, or concurrency cap dropped it", self.chats()[0]["query"])
         self.assertEqual(result.stdout, "retried linear dropped: succeeded\nwebhook retry queue drained\n")
         self.assertEqual([e["delivery"] for e in self.entries().values()], ["recent"])
@@ -486,7 +491,7 @@ class RetryTest(unittest.TestCase):
 
         self.run_retry()
 
-        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["stale"])
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1].split("\n")[0] for c in self.chats()], ["stale"])
 
     def test_a_reply_addressed_to_a_teammate_is_not_replayed(self):
         reply = {"type": "AgentSessionEvent", "action": "prompted"}
@@ -575,7 +580,7 @@ class RetryTest(unittest.TestCase):
 
         self.run_retry()
 
-        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["older", "newer"])
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1].split("\n")[0] for c in self.chats()], ["older", "newer"])
 
     def test_a_delivery_that_is_not_due_holds_back_only_its_own_subject(self):
         later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -593,7 +598,7 @@ class RetryTest(unittest.TestCase):
 
         result = self.run_retry()
 
-        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1] for c in self.chats()], ["b-due"])
+        self.assertEqual([c["query"].rsplit("prompt for ", 1)[1].split("\n")[0] for c in self.chats()], ["b-due"])
         self.assertEqual(result.stdout, "retried linear b-due: succeeded\n")
 
     def test_each_reason_is_named_in_the_replay_the_announcement_and_the_list(self):

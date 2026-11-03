@@ -937,6 +937,7 @@ key file but does not contain the key.
   "recurring_issues": [
     {"repository": "<owner>/<name>", "team_key": "<Linear team key>", "title_prefix": "<title>, week of ", "cadence": "weekly", "labels": ["<label name>"], "description": "<what the issue asks the agent to do>"}
   ],
+  "sentry_sync": {},
   "scheduled_commands": [],
   "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0, "command_timeout_seconds": 600, "idle_limit_seconds": 2700}
 }
@@ -1043,6 +1044,38 @@ words like "week of", because the job appends the slot's start date. Two entries
 team cannot have prefixes that are equal or that start with each other. Real
 values belong in the private record. The job skips a malformed entry and names
 it as `recurring_issues[<index>]`, and `check-install` reports it the same way.
+
+`sentry_sync` configures the optional `sentry-linear-sync` job from part 12,
+default `{}`. Leave it empty for a factory that does not sync Sentry into
+Linear. To turn the sync on, set all eight keys, and record the real values in
+the private record:
+
+```json
+"sentry_sync": {
+  "organization": "<Sentry organization slug>",
+  "team_key": "<Linear team key>",
+  "repository": "<owner>/<name>",
+  "checkout_path": "/abs/path/to/worker-owned/checkout",
+  "rules_path": "<path of the grouping rules file in that repository>",
+  "sentry_label": "<label name>",
+  "theme_label": "<label name>",
+  "mcp_server": "<claude_session.mcp_servers name>"
+}
+```
+
+`organization` is the Sentry organization to read. `team_key` is the Linear
+team that gets the issues. `checkout_path` is a checkout of `repository` that
+the worker owns. The job runs `git fetch` there and reads the rules file at
+`rules_path` from the fetched default branch, never from the working tree.
+The owning repository maintains that rules file: the Sentry projects it maps
+to packages, the exclude and merge rules, and the thresholds. `sentry_label`
+and `theme_label` are the two labels every synced issue carries. `mcp_server`
+names the `claude_session.mcp_servers` entry whose token the broker hands the
+job. That token must be able to read the organization's issues, events,
+releases, and projects. `check-install` reports each malformed key, and a
+`mcp_server` that names no `claude_session.mcp_servers` entry, but it does not
+read the rules file. The job never enters the worker's own settings checks, so
+a mistake here stops only the sync.
 
 `scheduled_commands` lists repository commands that run on a cron schedule, default `[]`. Part 12 installs
 a runner and a job for each entry. An entry has five keys:
@@ -1296,8 +1329,11 @@ that is not a positive integer or differs between the homes.
 
 ## 11. Webhook routes
 
-`templates/render.py` builds the `linear` and `github` routes and the webhook
-rate limit from the settings in part 10. [`templates/README.md`](../../templates/README.md) describes the
+`templates/render.py` builds the `linear` and `github` routes, their two skills,
+and the webhook rate limit from the settings in part 10. Each route's `prompt` is
+only its event section. The static triage rules are the route's skill
+(`factory-linear-triage`, `factory-github-triage`), which Hermes keeps in the
+prompt cache. [`templates/README.md`](../../templates/README.md) describes the
 output.
 
 **Check.** Compare each rendered route and the rate limit with the installed ones:
@@ -1308,8 +1344,9 @@ python3 <repo>/templates/render.py --check
 
 It prints one line per route, such as
 `route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference`, then
-`rate_limit: matches 1200`. It exits `0` only when every route and the rate
-limit match and every secret is its reference. A
+`rate_limit: matches 1200`, then one `skill <name>: matches` line per skill. It
+exits `0` only when every route, skill, and the rate limit match and every
+secret is its reference. A skill line says `not installed` or `differs`. A
 `differs in <keys>` line names the keys that differ. A secret line other than
 `is the ... reference` means the route holds a literal secret, or Hermes has no
 value for the reference.
@@ -1327,7 +1364,18 @@ config keys, such as `platforms.webhook.extra.routes.linear` and
 python3 <repo>/templates/render.py > <scratch>/webhook-config.json
 ```
 
-**Install** first the `linear` route's script, because Hermes drops every
+**Install the skills first.** A route names its skill, and Hermes finds a skill
+only as `<home>/skills/<name>/SKILL.md`. Never commit the rendered files, which
+hold the factory's real values. This is idempotent:
+
+```sh
+python3 <repo>/templates/render.py --install-skills
+```
+
+Hermes lists its skills once, so a new or changed skill takes effect after the
+gateway restarts.
+
+**Install** the `linear` route's script next, because Hermes drops every
 delivery of a route whose script is missing:
 
 ```sh
@@ -1366,8 +1414,9 @@ belongs to the worker profile.
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
 jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`,
-`finish-merged`, `dispatch-triage`, `file-dependency-update`, and
-`file-recurring-issues`. A copy there runs without the worker's scripts and settings, so remove it the
+`finish-merged`, `dispatch-triage`, `file-dependency-update`,
+`file-recurring-issues`, and
+`sentry-linear-sync` when `sentry_sync` is set. A copy there runs without the worker's scripts and settings, so remove it the
 same way. The default home holds two jobs, `retry-failed-webhooks` and
 `report-deploy`, described below. A second setup session runs this check before it
 creates anything.
@@ -1471,6 +1520,33 @@ access and needs no new credential. Create the job when `cron list` has no
 hermes -p claude-worker cron create "every 1h" --name file-recurring-issues --no-agent --script file-recurring-issues </dev/null
 ```
 
+**Sentry sync job.** `sentry-linear-sync` runs every 30 minutes, and only when
+the factory settings have a non-empty `sentry_sync` section (part 10). It
+reads every unresolved production error issue from Sentry with the broker's
+token for `sentry_sync.mcp_server`, groups the issues into error groups with
+the rules file, and keeps one Linear issue for each error group. It reads all
+of Linear and all of Sentry before it writes, so a failed read writes nothing.
+It creates each issue in the team's Triage status with both labels, a priority
+from the rules, no assignee, and no delegate, and attaches a Sentry search
+link that identifies the error group. Later runs add new Sentry issues as
+comments, update the priority only while the issue is in Triage and no person
+has changed it, cancel an unstarted issue whose error group was quiet for the
+rules' `staleDays`, and verify or reopen as a related issue after a fix. On
+its first runs it takes over the open issues that Sentry's Linear integration
+created and marks the extra ones Duplicate, except an issue that is started or
+assigned. It changes no other issue and never writes to Sentry. Run it with
+`--dry-run` to print the plan without writing. It exits 1 when Sentry, Linear,
+git, or the broker fails, and 2 when the settings or the rules are invalid.
+Create the job when `sentry_sync` is set and `cron list` has no
+`sentry-linear-sync` job:
+
+```sh
+hermes -p claude-worker cron create "every 30m" --name sentry-linear-sync --no-agent --script sentry-linear-sync </dev/null
+```
+
+When `sentry_sync` is empty, remove any `sentry-linear-sync` job.
+`check-install` reports such a job as drift.
+
 **Conflict job.** GitHub sends no webhook when a pull request starts to
 conflict because its base branch moved, or when a required check fails after
 the worker handed the card off. `reopen-conflicts` lists the App's open pull
@@ -1522,17 +1598,23 @@ its `local-only` contract, so its next completion skips Hermes' acceptance.
 This is an accepted limit. Archived cards stay archived and are never swept.
 
 **Session link backfill.** The worker links each pull request on a card's
-branch to the card's Linear agent session, and a new session keeps the links
-of the older one it replaces. Sessions from before that change lack them. Once
-after the install, run the backfill as the worker profile, outside any card:
+branch to the card's current Linear agent session, and a new session takes the
+links of the older ones it replaces. Sessions from before that change lack
+them, and a pull request opened after a newer session took over the card can
+still sit on the older one. Once after the install, run the backfill as the
+worker profile, outside any card:
 
 ```sh
 HERMES_HOME=<worker home> python3 <worker home>/scripts/sync-session-links
 ```
 
-It adds each missing pull request link and removes none. To see which sessions
-lack a link without changing anything, run it with `--check`. It exits 1 and
-prints one line per session that lacks a link.
+It adds each missing pull request link to the card's current session and
+removes that link from the card's older sessions of the same app. It removes
+only pull request links, and never from the current session. To see what it
+would change without changing anything, run it with `--check`. It exits 1 and
+prints one `lacks` line per session that lacks a link and one `misplaced` line
+per session whose pull request an older session still holds. A second run
+prints nothing.
 
 **Install drift check.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with
@@ -2591,6 +2673,9 @@ Hermes process starts. The new helper also writes
    - A `work skills` line: the work skills directory is missing, empty, or
      lacks a skill that `allow` names. Fix the directory or the part 5
      setting.
+   - A `route skill <path>` line: run the part 11 `render.py --install-skills`
+     before the route install. The new or changed skill takes effect only after
+     the gateway restarts, which only the operator or `restart-gateway` does.
    - A `webhook config <key>` line: run the part 11 install for that key.
    - A `webhook route <name>: <n> rejected with HTTP 429` line: the gateway
      dropped deliveries in the last hour. Check that
@@ -2654,6 +2739,12 @@ Hermes process starts. The new helper also writes
      the job with the part 12 `cron create` command.
    - A `cron job file-recurring-issues` line: after the profile update, create
      the job with the part 12 `cron create` command.
+   - A `cron job sentry-linear-sync` line that says the job is missing: after
+     the profile update, create the job with the part 12 `cron create`
+     command. A line that says the job runs without a `sentry_sync` section:
+     remove the job, or add the section as in part 10.
+   - A `config sentry_sync` line: correct that key of the `sentry_sync`
+     section in both homes as in part 10.
    - A `config plugins.entries.linear-agent-session.settings.dependency_updates`
      line: add the `dependency_updates` section to the factory settings and set
      them in both homes as in part 10, before the profile update.

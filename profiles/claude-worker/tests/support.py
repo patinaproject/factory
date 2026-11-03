@@ -87,6 +87,11 @@ for step in options.get("steps", []):
         card["comments"].append(step["comment"])
         json.dump(card, open(step["card"] + ".tmp", "w"))
         os.rename(step["card"] + ".tmp", step["card"])
+    elif "body" in step:
+        card = json.load(open(step["card"]))
+        card["task"]["body"] = step["body"]
+        json.dump(card, open(step["card"] + ".tmp", "w"))
+        os.rename(step["card"] + ".tmp", step["card"])
     elif "hook" in step:
         # Like Claude Code, run each command of the event with the event as JSON on stdin; until_output polls for the watcher.
         deadline = time.time() + 20

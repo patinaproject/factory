@@ -301,6 +301,46 @@ ISSUE_SEARCH_QUERY = """query IssueSearch($term: String!, $first: Int!) {
 
 GITHUB_ISSUE_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+")
 
+LABELED_ISSUES_QUERY = """query LabeledIssues($filter: IssueFilter!, $after: String) {
+  viewer { id }
+  issues(filter: $filter, first: 50, after: $after) {
+    nodes {
+      id identifier createdAt completedAt canceledAt description priority
+      state { name type }
+      assignee { id }
+      creator { id }
+      attachments { nodes { url sourceType } }
+      relations(first: 50) { nodes { type relatedIssue { identifier } } }
+      comments(first: 50) { nodes { body } pageInfo { hasNextPage } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
+
+ISSUE_COMMENTS_QUERY = """query IssueComments($id: String!, $after: String) {
+  issue(id: $id) {
+    comments(first: 50, after: $after) { nodes { body } pageInfo { hasNextPage endCursor } }
+  }
+}"""
+
+PRIORITY_HISTORY_QUERY = """query PriorityHistory($id: String!, $after: String) {
+  viewer { id }
+  issue(id: $id) {
+    history(first: 50, after: $after, orderBy: createdAt) {
+      nodes { fromPriority toPriority actor { id } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
+
+ISSUE_IDENTITY_QUERY = """query IssueIdentity($id: String!) {
+  issue(id: $id) { id }
+}"""
+
+ATTACHMENT_CREATE_MUTATION = """mutation AttachmentCreate($input: AttachmentCreateInput!) {
+  attachmentCreate(input: $input) { success }
+}"""
+
 ISSUE_UPDATE_MUTATION = """mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
 }"""
@@ -338,6 +378,29 @@ def pull_request_urls(url: str) -> tuple[str, str] | None:
 def session_links(session: dict) -> list:
     """Linear types `externalUrls` as a JSON scalar and returns it as a JSON-encoded string."""
     return json.loads(session["externalUrls"])
+
+
+def _older_sessions(agent_session_id: str, session: dict) -> list:
+    """The issue's sessions of the same app user created before this one, open or not."""
+    return [
+        other
+        for other in session["issue"]["agentSessions"]["nodes"]
+        if other["id"] != agent_session_id
+        and other["appUser"] is not None
+        and other["appUser"]["id"] == session["appUser"]["id"]
+        and other["createdAt"] < session["createdAt"]
+    ]
+
+
+def _misplaced(held: set, older: list) -> dict:
+    """Per older session, the pull request URLs among `held` that it holds too. Other links stay."""
+    held = {form for url in held for form in pull_request_urls(url) or ()}
+    found = {}
+    for other in older:
+        urls = [u["url"] for u in session_links(other) if u["url"] in held]
+        if urls:
+            found[other["id"]] = urls
+    return found
 
 
 class LinearError(Exception):
@@ -432,7 +495,9 @@ class LinearClient:
         urlopen: Optional[UrlOpen] = None,
         clock: Callable[[], float] = time.time,
         timeout: float = 10.0,
+        api_url: str = API_URL,
     ) -> None:
+        self._api_url = api_url
         self._client_id = client_id
         self._client_secret = client_secret
         self._token_cache_path = token_cache_path
@@ -457,14 +522,7 @@ class LinearClient:
         session = self._graphql(ISSUE_SESSIONS_QUERY, {"id": agent_session_id})["agentSession"]
         if session is None or session["issue"] is None:
             return []
-        older = [
-            other
-            for other in session["issue"]["agentSessions"]["nodes"]
-            if other["id"] != agent_session_id
-            and other["appUser"] is not None
-            and other["appUser"]["id"] == session["appUser"]["id"]
-            and other["createdAt"] < session["createdAt"]
-        ]
+        older = _older_sessions(agent_session_id, session)
         closed = []
         for other in older:
             if other["status"] in OPEN_SESSION_STATUSES:
@@ -483,12 +541,27 @@ class LinearClient:
                 for url in pull_request_urls(u["url"]) or ():
                     if url not in held:
                         missing.setdefault(url, {"label": u["label"], "url": url})
-        if not missing:
-            return
         try:
-            self._update_session(agent_session_id, {"addedExternalUrls": list(missing.values())})
+            if missing:
+                self._update_session(agent_session_id, {"addedExternalUrls": list(missing.values())})
+            for other_id, urls in _misplaced(held | set(missing), older).items():
+                self._update_session(other_id, {"removedExternalUrls": urls})
         except (*CLIENT_ERRORS, OSError) as error:
-            logger.warning("linear-agent-session: copying pull request links failed: %s", type(error).__name__)
+            logger.warning("linear-agent-session: moving pull request links failed: %s", type(error).__name__)
+
+    def misplaced_pull_requests(self, agent_session_id: str) -> dict:
+        """The pull request URLs that this session holds and that its older sessions of the same app still hold, by older session id."""
+        session = self._graphql(ISSUE_SESSIONS_QUERY, {"id": agent_session_id})["agentSession"]
+        if session is None or session["issue"] is None:
+            return {}
+        return _misplaced({u["url"] for u in session_links(session)}, _older_sessions(agent_session_id, session))
+
+    def remove_misplaced_pull_requests(self, agent_session_id: str) -> dict:
+        """Remove what `misplaced_pull_requests` reports from the older sessions and return it. Never touches this session."""
+        misplaced = self.misplaced_pull_requests(agent_session_id)
+        for other_id, urls in misplaced.items():
+            self._update_session(other_id, {"removedExternalUrls": urls})
+        return misplaced
 
     def external_urls(self, agent_session_id: str) -> set:
         session = self._graphql(SESSION_URLS_QUERY, {"id": agent_session_id})["agentSession"]
@@ -842,6 +915,7 @@ class LinearClient:
         *,
         state_type: Optional[str] = None,
         delegate_self: bool = False,
+        priority: Optional[int] = None,
     ) -> dict:
         """Create an issue in the team with that key. Without `state_type` it sends no status, so Linear applies the team's default."""
         data = self._graphql(TEAM_CREATE_QUERY, {"key": team_key})
@@ -860,10 +934,116 @@ class LinearClient:
             issue_input["labelIds"] = label_ids
         if delegate_self:
             issue_input["delegateId"] = data["viewer"]["id"]
+        if priority is not None:
+            issue_input["priority"] = priority
         payload = self._graphql(ISSUE_CREATE_MUTATION, {"input": issue_input})["issueCreate"]
         if not payload["success"]:
             raise LinearError("issueCreate reported success: false")
         return {"identifier": payload["issue"]["identifier"], "url": payload["issue"]["url"]}
+
+    def list_issues_by_label(self, team_key: str, label: str) -> list:
+        """Every issue of the team that carries the label, in any state, with who created it, its attachments, comments, and duplicate-of target.
+
+        `createdByMe` is true for an issue the agent app created. `creator` is None for an issue an integration created.
+        Raises rather than return a partial list.
+        """
+        issue_filter = {"team": {"key": {"eq": team_key}}, "labels": {"name": {"eq": label}}}
+        issues: list = []
+        after: Optional[str] = None
+        while True:
+            data = self._graphql(LABELED_ISSUES_QUERY, {"filter": issue_filter, "after": after})
+            page = data["issues"]
+            for n in page["nodes"]:
+                issues.append({
+                    "id": n["id"],
+                    "identifier": n["identifier"],
+                    "createdAt": n["createdAt"],
+                    "completedAt": n["completedAt"],
+                    "canceledAt": n["canceledAt"],
+                    "description": n["description"] or "",
+                    "priority": int(n["priority"]),
+                    "state": n["state"]["name"],
+                    "stateType": n["state"]["type"],
+                    "assigned": n["assignee"] is not None,
+                    "creator": n["creator"]["id"] if n["creator"] else None,
+                    "createdByMe": n["creator"] is not None and n["creator"]["id"] == data["viewer"]["id"],
+                    "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in n["attachments"]["nodes"]],
+                    "duplicateOf": next((r["relatedIssue"]["identifier"] for r in n["relations"]["nodes"] if r["type"] == "duplicate"), None),
+                    "comments": (
+                        self.issue_comment_bodies(n["id"]) if n["comments"]["pageInfo"]["hasNextPage"]
+                        else [c["body"] for c in n["comments"]["nodes"]]
+                    ),
+                })
+            if not page["pageInfo"]["hasNextPage"]:
+                return issues
+            after = page["pageInfo"]["endCursor"]
+
+    def issue_comment_bodies(self, id_or_identifier: str) -> list:
+        """The bodies of every comment on the issue. Raises rather than return a partial list."""
+        bodies: list = []
+        after: Optional[str] = None
+        while True:
+            issue = self._graphql(ISSUE_COMMENTS_QUERY, {"id": id_or_identifier, "after": after})["issue"]
+            if issue is None:
+                raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+            bodies.extend(n["body"] for n in issue["comments"]["nodes"])
+            if not issue["comments"]["pageInfo"]["hasNextPage"]:
+                return bodies
+            after = issue["comments"]["pageInfo"]["endCursor"]
+
+    def priority_changes(self, id_or_identifier: str) -> list:
+        """Every priority change in the issue's history, oldest first, as {from, to, byMe}. Raises rather than return a partial list."""
+        changes: list = []
+        after: Optional[str] = None
+        while True:
+            data = self._graphql(PRIORITY_HISTORY_QUERY, {"id": id_or_identifier, "after": after})
+            if data["issue"] is None:
+                raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+            page = data["issue"]["history"]
+            for entry in page["nodes"]:
+                if entry["toPriority"] is not None and entry["fromPriority"] != entry["toPriority"]:
+                    actor = entry["actor"]
+                    changes.append({
+                        "from": entry["fromPriority"], "to": entry["toPriority"],
+                        "byMe": actor is not None and actor["id"] == data["viewer"]["id"],
+                    })
+            if not page["pageInfo"]["hasNextPage"]:
+                return changes
+            after = page["pageInfo"]["endCursor"]
+
+    def attach_url(self, id_or_identifier: str, url: str, title: str) -> None:
+        """Attach the URL to the issue. Linear keeps one attachment for each issue and URL, so a repeat changes nothing."""
+        issue_id = self._issue_id(id_or_identifier)
+        payload = self._graphql(ATTACHMENT_CREATE_MUTATION, {"input": {"issueId": issue_id, "url": url, "title": title}})
+        if not payload["attachmentCreate"]["success"]:
+            raise LinearError("attachmentCreate reported success: false")
+
+    def set_priority(self, id_or_identifier: str, priority: int) -> None:
+        payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": self._issue_id(id_or_identifier), "input": {"priority": priority}})
+        if not payload["issueUpdate"]["success"]:
+            raise LinearError("issueUpdate reported success: false")
+
+    def move_to_canceled(self, id_or_identifier: str) -> str:
+        """Move the issue to its team's only status of type canceled. Raises, and changes nothing, when the team has none or several."""
+        issue = self._graphql(ISSUE_STATES_QUERY, {"id": id_or_identifier})["issue"]
+        if issue is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        if issue["state"]["type"] == "canceled":
+            return issue["state"]["name"]
+        states = [s for s in issue["team"]["states"]["nodes"] if s["type"] == "canceled"]
+        if len(states) != 1:
+            problem = "no status of type canceled" if not states else "more than one status of type canceled: " + ", ".join(sorted(s["name"] for s in states))
+            raise LinearError(f"{issue['identifier']}'s team has {problem}, so its status did not change")
+        payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": {"stateId": states[0]["id"]}})
+        if not payload["issueUpdate"]["success"]:
+            raise LinearError("issueUpdate reported success: false")
+        return states[0]["name"]
+
+    def _issue_id(self, id_or_identifier: str) -> str:
+        issue = self._graphql(ISSUE_IDENTITY_QUERY, {"id": id_or_identifier})["issue"]
+        if issue is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        return issue["id"]
 
     def open_issues_titled(self, team_key: str, title_prefix: str) -> list:
         """The team's open issues that the agent app created and whose title starts with `title_prefix`."""
@@ -889,7 +1069,7 @@ class LinearClient:
 
     def relate_issues(self, id_or_identifier: str, other: str, kind: str) -> dict:
         """Make `issue` a duplicate of `other` (kind `duplicate`), make `other` block it (kind `blocks`),
-        or make `other` a child of `issue` (kind `parent`).
+        relate the two (kind `related`), or make `other` a child of `issue` (kind `parent`).
 
         A duplicate also loses the `related` relation between the two and moves to the team's duplicate status.
         A parent link changes only the child's parent. No other relation is touched.
@@ -1064,7 +1244,7 @@ class LinearClient:
 
     def _post_graphql(self, query: str, variables: dict) -> dict:
         request = urllib.request.Request(
-            API_URL,
+            self._api_url,
             data=json.dumps({"query": query, "variables": variables}).encode(),
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {self._access_token()}"},
             method="POST",
@@ -1226,6 +1406,10 @@ RELATION_RULES = {
     "blocks": (
         ("blocks", "b", "a", "existing", None),
         ("blocks", "a", "b", "conflict", "{b} is already blocked on {a}"),
+    ),
+    "related": (
+        ("related", "a", "b", "existing", None),
+        ("related", "b", "a", "existing", None),
     ),
 }
 

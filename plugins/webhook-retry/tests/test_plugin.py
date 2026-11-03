@@ -5,13 +5,14 @@ import enum
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests import chat_key, load_plugin
+from tests import chat_key, load_plugin, skill_commands_module, skill_turn
 
 
 class Platform(enum.Enum):
@@ -59,6 +60,9 @@ class PluginTest(unittest.TestCase):
 
     def start(self):
         self.plugin = load_plugin()
+        modules = mock.patch.dict(sys.modules, skill_commands_module())
+        modules.start()
+        self.addCleanup(modules.stop)
         for name, value in (
             ("hermes_home", lambda: self.home),
             ("load_config", lambda: self.config),
@@ -88,6 +92,14 @@ class PluginTest(unittest.TestCase):
         self.assertEqual((entry["state"], entry["reason"]), ("queued", "paused"))
         self.assertEqual((entry["delivered_at"], entry["next_try_at"]), ("2026-10-15T08:30:00Z", "2026-10-15T08:30:00Z"))
         self.assertEqual((entry["attempts"], entry["prompt"]), (0, "triage this"))
+
+    def test_a_skill_turn_is_stored_as_its_per_event_instruction_alone(self):
+        ev = event(text=skill_turn("## This event\n\n- Event: issues, action closed"))
+
+        self.dispatch(ev)
+
+        self.assertGreater(len(ev.text), 8000)
+        self.assertEqual(self.entries()[ev.source.chat_id]["prompt"], "## This event\n\n- Event: issues, action closed")
 
     def test_a_delivery_that_is_not_recorded_is_not_skipped_while_paused(self):
         self.paused = True

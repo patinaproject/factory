@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Keep one Linear issue for each Sentry error group.
+
+Usage: sentry-linear-sync [--dry-run]
+
+Reads unresolved production error issues from Sentry, groups them into error groups with the rules file that the
+`sentry_sync` settings name, and keeps one Linear issue for each error group. Reads all of Linear and all of Sentry
+before it writes anything. Prints one line per action, then a summary. Writes nothing with --dry-run, or when any
+read fails. Exits 0 on success and when another run holds the lock, 1 when Sentry, Linear, git, or the broker
+fails, and 2 when the settings or the rules are invalid.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import card_transition
+import factory_settings
+import sentry_source
+import sentry_sync
+from sentry_sync import (
+    AddMembers, CloseInactive, Create, Hold, LinkKey, LinkRefused, MarkDuplicate, OpenRegression, Repair, SetPriority,
+    TakeOver, Verify,
+)
+
+NAME = "sentry-linear-sync"
+LOCK_NAME = f"{NAME}.lock"
+
+
+class ReadFailed(Exception):
+    pass
+
+
+def load_rules(settings: sentry_sync.Settings) -> tuple:
+    """The rules file and the repository's paths, both at the checkout's fetched default branch."""
+    checkout = settings.checkout_path
+
+    def git(*args: str) -> str:
+        proc = subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise ReadFailed(f"git {' '.join(args)} failed in {checkout}: {proc.stderr.strip()}")
+        return proc.stdout
+
+    git("fetch", "--quiet", "origin")
+    ref = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip()
+    paths = git("ls-tree", "-r", "--name-only", ref).splitlines()
+    if settings.rules_path not in paths:
+        raise sentry_sync.SettingsError(f"{sentry_sync.SETTINGS_SECTION}.rules_path {settings.rules_path!r} does not exist at {ref}")
+    try:
+        document = json.loads(git("show", f"{ref}:{settings.rules_path}"))
+    except ValueError as error:
+        raise sentry_sync.SettingsError(f"{settings.rules_path} at {ref} is not JSON: {error}") from None
+    return sentry_sync.parse_rules(document), sentry_sync.repo_path_index(paths)
+
+
+def read_linear(client, settings: sentry_sync.Settings) -> sentry_sync.TrackedRead:
+    issues = client.list_issues_by_label(settings.team_key, settings.sentry_label)
+    owned = frozenset(
+        issue["id"] for issue in issues
+        if issue["createdByMe"] and issue["stateType"] == "triage" and sentry_sync.ORIGIN_LINE.search(issue["description"])
+        and all(change["byMe"] for change in client.priority_changes(issue["id"]))
+    )
+    return sentry_sync.read_tracked(issues, settings.organization, owned)
+
+
+def describe(action, identifier: str = "new") -> str:
+    """The output line for one action. `identifier` names the issue a create made."""
+    name = sentry_sync.PRIORITY_NAMES
+    match action:
+        case Repair():
+            return f"repaired    {action.issue.identifier} {action.key}"
+        case Create():
+            delegated = ", delegated" if action.delegate else ""
+            related = f", related to {action.previous}" if action.previous else ""
+            return f"created     {identifier} {action.group.key}  ({name[action.group.priority]}{delegated}{related})"
+        case TakeOver():
+            return f"taken over  {action.legacy.identifier} {action.key}"
+        case MarkDuplicate():
+            return f"duplicate   {action.legacy.identifier} -> {action.canonical}"
+        case AddMembers():
+            return f"added       {action.issue.identifier} " + " ".join(f"+{m.short_id}" for m in action.added)
+        case SetPriority():
+            return f"priority    {action.issue.identifier} {name[action.issue.priority]} -> {name[action.to]}"
+        case LinkKey():
+            return f"linked      {action.canonical.identifier} +{action.key} (from {action.duplicate})"
+        case LinkRefused():
+            return f"not linked  {action.duplicate} {action.key}: {action.canonical} is not an issue this job created or took over"
+        case CloseInactive():
+            return f"canceled    {action.issue.identifier} no events for {action.quiet_days} days"
+        case Verify():
+            return f"verified    {action.issue.identifier} 0 events in {action.fix_release} and later for {action.days} days"
+        case OpenRegression():
+            return f"regressed   {action.previous.identifier} -> created {identifier} (related)"
+        case Hold():
+            return f"held        {action.group.key}  (cap {action.cap} reached, rank {action.rank})"
+    raise TypeError(f"no line for {action!r}")
+
+
+def summary(report: sentry_sync.Report) -> list:
+    excluded = sum(report.excluded.values())
+    rules = ", ".join(f"{rule} {count}" for rule, count in report.excluded.items())
+    return [
+        f"excluded    {excluded} issues" + (f"  ({rules})" if rules else ""),
+        f"no key      {report.no_key} issues  (no in-repo frame, no message template)",
+        f"below       {report.below_impact} error groups under the impact threshold",
+        f"suppressed  {report.suppressed} error groups canceled within suppressDays",
+        f"legacy      {report.legacy_untouched} untouched (excluded or no key), {report.legacy_kept} kept (started or assigned)",
+    ]
+
+
+def apply(action, client, settings: sentry_sync.Settings, rules: sentry_sync.Rules) -> str:
+    def attach(issue: str, key, url: str) -> None:
+        client.attach_url(issue, url, f"Sentry error group {key}")
+
+    def comment(issue: str, text: str, kind: str, value: str = "") -> None:
+        client.comment_on_issue(issue, f"{text}\n\n{sentry_sync.marker(kind, value)}")
+
+    def create(group, delegate: bool, previous) -> str:
+        issue = client.create_issue(
+            settings.team_key, group.title, sentry_sync.description(group, rules, settings.organization),
+            [settings.sentry_label, settings.theme_label], state_type="triage", delegate_self=delegate,
+            priority=group.priority,
+        )
+        attach(issue["identifier"], group.key, group.url)
+        if previous:
+            client.relate_issues(issue["identifier"], previous, "related")
+        return issue["identifier"]
+
+    match action:
+        case Repair():
+            attach(action.issue.issue_id, action.key, action.url)
+        case Create():
+            return describe(action, create(action.group, action.delegate, action.previous))
+        case TakeOver():
+            attach(action.legacy.issue_id, action.key, action.url)
+        case MarkDuplicate():
+            client.relate_issues(action.legacy.identifier, action.canonical, "duplicate")
+        case AddMembers():
+            for member in action.added:
+                link = sentry_sync.member_link(member, settings.organization)
+                comment(action.issue.issue_id, f"Sentry issue {link} joined this error group.", "member", member.short_id)
+        case SetPriority():
+            client.set_priority(action.issue.issue_id, action.to)
+        case LinkKey():
+            attach(action.canonical.issue_id, action.key, action.url)
+        case CloseInactive():
+            client.move_to_canceled(action.issue.issue_id)
+            if "cancel" not in action.issue.markers:
+                comment(action.issue.issue_id, f"No member Sentry issue had an event for {action.quiet_days} days, so this job canceled the issue.", "cancel")
+        case Verify():
+            comment(
+                action.issue.issue_id,
+                f"Verified: 0 events in `{action.fix_release}` and later releases for {action.days} days after this issue completed.",
+                "verify", action.fix_release,
+            )
+        case OpenRegression():
+            return describe(action, create(action.group, False, action.previous.identifier))
+    return describe(action)
+
+
+def run(argv: list, *, linear_api_url: str | None = None, sentry_base_url: str = sentry_source.API_BASE, now: datetime | None = None) -> int:
+    parser = argparse.ArgumentParser(prog=NAME, description=__doc__.splitlines()[0])
+    parser.add_argument("--dry-run", action="store_true", help="print the plan and write nothing")
+    args = parser.parse_args(argv)
+    home = os.environ.get("HERMES_HOME")
+    if not home:
+        print(f"{NAME}: HERMES_HOME is not set; point it at the claude-worker profile home", file=sys.stderr)
+        return 2
+    try:
+        settings = sentry_sync.parse_settings(factory_settings.read(raw=False))
+    except (factory_settings.SettingsError, sentry_sync.SettingsError, ValueError) as error:
+        print(f"{NAME}: {error}", file=sys.stderr)
+        return 2
+    with open(Path(home) / LOCK_NAME, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("locked")
+            return 0
+        return _sync(settings, args.dry_run, linear_api_url, sentry_base_url, now or datetime.now(timezone.utc))
+
+
+def _sync(settings, dry_run: bool, linear_api_url, sentry_base_url: str, now: datetime) -> int:
+    linear = card_transition.plugin_module("linear-agent-session", "linear")
+    broker_client = card_transition.plugin_module("linear-agent-session", "broker_client")
+    try:
+        rules, index = load_rules(settings)
+        client = linear.client_from_env(**({"api_url": linear_api_url} if linear_api_url else {}))
+        read = read_linear(client, settings)
+        token = broker_client.request(broker_client.socket_path(os.environ), "mcp_token", server=settings.mcp_server)["token"]
+        reader = sentry_source.SentryReader(settings.organization, token, base_url=sentry_base_url)
+        observed = sentry_source.observe(reader, rules, read, index, now)
+    except sentry_sync.SettingsError as error:
+        print(f"{NAME}: {error}", file=sys.stderr)
+        return 2
+    except (ReadFailed, sentry_source.SentryError, *linear.CLIENT_ERRORS, OSError) as error:
+        print(f"{NAME}: read failed, so nothing was written: {error}", file=sys.stderr)
+        return 1
+    plan = sentry_sync.plan_sync(observed, read, rules, settings.organization, now)
+    for action in plan.actions:
+        if dry_run:
+            print(describe(action))
+            continue
+        try:
+            print(apply(action, client, settings, rules), flush=True)
+        except (*linear.CLIENT_ERRORS, OSError) as error:
+            print(f"{NAME}: Linear failed on `{describe(action)}`: {error}", file=sys.stderr)
+            return 1
+    for line in summary(plan.report):
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run(sys.argv[1:]))

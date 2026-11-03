@@ -92,6 +92,14 @@ config_schema:
       The issues file-recurring-issues files on a cadence. Each entry is an object with repository
       (<owner>/<name>), team_key, title_prefix (the job appends the slot's start date), cadence (daily,
       weekly, or monthly), labels (a list of label names), and description. The job skips a malformed entry.
+  sentry_sync:
+    type: dict
+    default: {}
+    description: >-
+      The Sentry-to-Linear sync. organization is the Sentry organization, team_key the Linear team, repository the
+      <owner>/<name> whose checkout_path checkout holds the rules file at rules_path, sentry_label and theme_label
+      the labels each issue gets, and mcp_server the claude_session.mcp_servers entry whose token reads Sentry.
+      Empty means no sync: check-install then expects no sentry-linear-sync cron job.
   scheduled_commands:
     type: list
     default: []
