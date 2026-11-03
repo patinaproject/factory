@@ -84,7 +84,18 @@ EVENT_FILTER = {
                 {"field": "event", "equals": "issue_comment"},
                 {"field": "action", "in": ["created"]},
                 {"not": {"field": "comment.body", "regex": r"\A<!-- linear-linkback -->"}},
-                {"not": {"field": "comment.user.login", "in": ["cloudflare-workers-and-pages[bot]", "vercel[bot]", "github-actions[bot]"]}},
+                {
+                    "not": {
+                        "field": "comment.user.login",
+                        "in": [
+                            "cloudflare-workers-and-pages[bot]",
+                            "vercel[bot]",
+                            "github-actions[bot]",
+                            "blacksmith-sh[bot]",
+                            "mergify[bot]",
+                        ],
+                    }
+                },
                 {
                     "any": [
                         {
@@ -887,6 +898,23 @@ FILTER_CASES = [
             issue=issue(APP),
             comment=comment("cloudflare-workers-and-pages[bot]", "## Deploying with Cloudflare Workers"),
         ),
+        False,
+    ),
+    (
+        "Blacksmith test failure notice on an App PR",
+        "issue_comment",
+        payload(
+            "created",
+            sender="blacksmith-sh[bot]",
+            issue=issue(APP),
+            comment=comment("blacksmith-sh[bot]", "Found 1 test failure on Blacksmith runners"),
+        ),
+        False,
+    ),
+    (
+        "Mergify merge-queue notice on an App PR",
+        "issue_comment",
+        payload("created", sender="mergify[bot]", issue=issue(APP), comment=comment("mergify[bot]", "Merged into `main`")),
         False,
     ),
     (
