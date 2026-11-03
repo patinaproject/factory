@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -417,6 +419,43 @@ class RetryTest(unittest.TestCase):
         self.assertIn("because a restart, drain, or concurrency cap dropped it", self.chats()[0]["query"])
         self.assertEqual(result.stdout, "retried linear dropped: succeeded\nwebhook retry queue drained\n")
         self.assertEqual([e["delivery"] for e in self.entries().values()], ["recent"])
+
+    def skip_marker(self, delivery):
+        marker = self.queue / "skipped" / hashlib.sha256(chat_key(delivery).encode()).hexdigest()
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text("")
+        return marker
+
+    def test_a_skipped_delivery_is_never_replayed_whichever_hook_ran_first(self):
+        for order in ("marker before the entry", "marker after the entry"):
+            with self.subTest(order):
+                self.setUp()
+                self.install_triage_exit(handled=False)
+                if order == "marker before the entry":
+                    marker = self.skip_marker("skipped")
+                self.seed(entry("skipped", state="pending", delivered=ago(minutes=11), next_try_at=None, admitted=False))
+                if order == "marker after the entry":
+                    marker = self.skip_marker("skipped")
+
+                result = self.run_retry()
+
+                self.assertEqual(self.chats(), [])
+                self.assertEqual(self.intent_checks(), [])
+                self.assertEqual(
+                    result.stdout,
+                    "skipped linear skipped: the live hook found no action needed\n",
+                )
+                self.assertEqual((self.entries(), marker.exists()), ({}, False))
+
+    def test_an_orphan_skip_marker_is_pruned_after_a_day(self):
+        self.seed()
+        old, recent = self.skip_marker("old"), self.skip_marker("recent")
+        aged = time.time() - 25 * 3600
+        os.utime(old, (aged, aged))
+
+        self.run_retry()
+
+        self.assertEqual((old.exists(), recent.exists()), (False, True))
 
     def test_an_admitted_pending_entry_stays_pending(self):
         self.seed(entry("running", state="pending", delivered=ago(minutes=30), admitted=True))
