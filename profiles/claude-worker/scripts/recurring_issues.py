@@ -23,7 +23,6 @@ def _next_month(day: date) -> date:
     return (first + timedelta(days=31)).replace(day=1)
 
 
-# A slot is one period of a cadence. An entry files at most one issue per slot, titled with the slot's start date.
 CADENCES = {
     "daily": Cadence(lambda day: day, lambda day: day + timedelta(days=1)),
     "weekly": Cadence(lambda day: day - timedelta(days=day.weekday()), lambda day: day - timedelta(days=day.weekday()) + timedelta(days=7)),
@@ -37,7 +36,6 @@ class Entry:
     index: int
     repository: str
     team_key: str
-    # The job appends the slot's start date (YYYY-MM-DD), so a prefix should end in something like "week of ".
     title_prefix: str
     cadence: str
     labels: tuple[str, ...]
@@ -54,7 +52,6 @@ class Entry:
 
 
 def _parse_entry(index: int, raw: object) -> Entry:
-    """The entry, or ValueError naming what is wrong with it."""
     if not isinstance(raw, dict):
         raise ValueError(f"must be an object, not {raw!r}")
     values: dict = {}
@@ -62,7 +59,6 @@ def _parse_entry(index: int, raw: object) -> Entry:
         value = raw.get(key)
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{key} {value!r} must be a non-empty string")
-        # The prefix keeps its trailing space, which separates it from the date.
         values[key] = value if key in ("title_prefix", "description") else value.strip()
     if not REPOSITORY.fullmatch(values["repository"]):
         raise ValueError(f"repository {values['repository']!r} must be <owner>/<repo>")
