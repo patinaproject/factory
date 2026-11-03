@@ -969,15 +969,16 @@ def install_skew() -> Skew | None:
     against = f"the deployed commit {deployed[:12]}" if deployed else "the factory checkout"
     root = home.parent.parent
     retry = f"HERMES_HOME={root} python3 {root}/scripts/auto-deploy --retry"
-    if state.get("failed"):
+    stopped = (
+        (state["failed"], "failed") if state.get("failed")
+        else (state["blocked"], "was blocked by a run-gating manual line") if state.get("blocked")
+        else None
+    )
+    if stopped:
+        commit, outcome = stopped
         cause = (
-            f"the automatic deploy of {state['failed'][:12]} failed. A person must finish that deploy, then run "
-            f"{retry}. {FINISH_DEPLOY}"
-        )
-    elif state.get("blocked"):
-        cause = (
-            f"the automatic deploy of {state['blocked'][:12]} was blocked by a run-gating manual line. A person must "
-            f"finish that deploy, then run {retry}. {FINISH_DEPLOY}"
+            f"the automatic deploy of {commit[:12]} {outcome}. A person must finish that deploy, then run {retry}. "
+            f"{FINISH_DEPLOY}"
         )
     else:
         cause = f"a factory deploy is in progress or was left unfinished. {FINISH_DEPLOY}"
