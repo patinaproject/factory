@@ -48,7 +48,9 @@ lands `ready` and still assigned.
 
 The deploy release rule is the same for a card whose newest park reason starts with
 `result_line.INSTALL_SKEW_PARK`, which waits for a factory deploy: `sweep_deploy` releases it once the install
-matches the commit auto-deploy recorded as deployed, compared the way `claude-session` compares it.
+matches the commit auto-deploy recorded as deployed, compared the way `claude-session` compares it. A `failed` or
+`blocked` commit in `auto-deploy.json` does not release it. The card waits until a person finishes the deploy and runs
+`auto-deploy --retry`, which records the commit as deployed.
 
 The resume release rule: a card whose newest park reason starts with `result_line.STOPPED_PARK` was parked by a
 `claude-session` that a signal stopped during a Hermes pause. `sweep_resume` releases it once no `ESTOP` sentinel
@@ -420,12 +422,11 @@ def sweep_login() -> dict:
 
 
 def install_matches() -> bool:
-    """claude-session's comparison: whether its skew check would no longer park a run. Once auto-deploy records a
-    failed or blocked commit no deploy is coming, so a released card's run is blocked and a person is told."""
+    """claude-session's comparison: whether its skew check would no longer park a run. A failed or blocked commit
+    in auto-deploy.json changes nothing here: the install still differs from the deployed commit until a deploy
+    records it, so the card stays parked."""
     home = Path(os.environ["HERMES_HOME"])
     state = install_drift.deploy_state(home)
-    if state.get("failed") or state.get("blocked"):
-        return True
     try:
         repo = factory_source.checkout(home)
         return not install_drift.skew(home, repo, install_drift.deployed(state))

@@ -92,6 +92,8 @@ class ManualLine(NamedTuple):
 class Plan(NamedTuple):
     installs: Tuple[Install, ...]
     manual: Tuple[ManualLine, ...]
+    # Every drift that an install fixes, in install order, so a failed deploy can name what remains.
+    install_drifts: Tuple[Drift, ...]
 
     @property
     def restarts_gateway(self) -> bool:
@@ -104,7 +106,8 @@ def plan(drifts) -> Plan:
         if isinstance(drift.remedy, Install) and drift.remedy not in installs:
             installs.append(drift.remedy)
     manual = tuple(ManualLine(str(d), d.remedy.action, d.remedy.gates_runs) for d in drifts if isinstance(d.remedy, Manual))
-    return Plan(tuple(sorted(installs, key=lambda install: install.step)), manual)
+    install_drifts = sorted((d for d in drifts if isinstance(d.remedy, Install)), key=lambda d: d.remedy.step)
+    return Plan(tuple(sorted(installs, key=lambda install: install.step)), manual, tuple(install_drifts))
 
 
 class Homes(NamedTuple):
