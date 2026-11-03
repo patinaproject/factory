@@ -378,6 +378,7 @@ class Stopped(BaseException):
     def __init__(self, signum: int) -> None:
         super().__init__(signum)
         self.signum = signum
+        self.session_id: str | None = None
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -1671,6 +1672,9 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                     )
                 except CardEnded as ended:
                     output, exit_code, detail, idle, card_ended = None, None, "", None, ended
+                except Stopped as stopped:
+                    stopped.session_id = session_id
+                    raise
         finally:
             capability.revoke()
             settings_path.unlink(missing_ok=True)
@@ -1845,7 +1849,24 @@ def capped(result_line, args: argparse.Namespace, refusal: Refusal) -> Refusal:
     )
 
 
+def print_stopped(result_line, stopped: Stopped, started: float) -> None:
+    """The run's last line when a signal ends it. The reader may be gone, and the signal still ends the process."""
+    if not hasattr(result_line, "Stopped"):
+        return
+    report = result_line.Stopped(
+        signal.Signals(stopped.signum).name,
+        int(time.monotonic() - started),
+        result_line.paused(Path(os.environ["HERMES_HOME"])),
+        stopped.session_id,
+    )
+    try:
+        print(result_line.line(report), flush=True)
+    except OSError:
+        pass
+
+
 def main() -> int:
+    started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id", help="the Kanban card id; Hermes does not pass it in the environment")
     parser.add_argument("--issue-id")
@@ -1881,6 +1902,8 @@ def main() -> int:
     try:
         status, report = mcp_status(args) if args.mcp_status else run(args)
     except Stopped as stopped:
+        if not args.mcp_status:
+            print_stopped(result_line, stopped, started)
         signal.signal(stopped.signum, signal.SIG_DFL)
         os.kill(os.getpid(), stopped.signum)
         raise
@@ -1894,6 +1917,8 @@ def main() -> int:
         status, report = 2, result_line.Refused(str(error))
     except Exception as error:
         status, report = 1, result_line.Refused(f"{type(error).__name__}: {error}")
+    for each in STOP_SIGNALS:
+        signal.signal(each, signal.SIG_DFL)
     print(json.dumps(report) if isinstance(report, dict) else result_line.line(report))
     return status
 
