@@ -134,7 +134,9 @@ TRIAGE_ENTRY = (
 )
 TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
 TAKEOVER_REVIEW = "https://linear.review/Example-Org/example-repo/pull/7"
+GITHUB_PULL_9 = f"https://github.com/{REPO}/pull/9"
 REVIEW_PULL_9 = f"https://linear.review/{REPO}/pull/9"
+GITHUB_PULL_42 = f"https://github.com/{REPO}/pull/42"
 REVIEW_PULL_42 = f"https://linear.review/{REPO}/pull/42"
 LINEAR_URL = "https://linear.app/example/issue/ABC-123"
 CARD_BODY = f"```text\nlinear_issue_identifier: ABC-123\n```\ngithub_issue_url: https://github.com/{REPO}/issues/12"
@@ -828,9 +830,8 @@ class ClaudeSessionTest(GitFixture):
     def link_updates(self) -> list:
         return [u["input"] for u in self.session_updates() if "summary" not in u["input"]]
 
-    def linked(self, label_and_url: tuple[str, str]) -> dict:
-        label, url = label_and_url
-        return {"addedExternalUrls": [{"label": label, "url": url}]}
+    def linked(self, *labelled_urls: tuple[str, str]) -> dict:
+        return {"addedExternalUrls": [{"label": label, "url": url} for label, url in labelled_urls]}
 
     def factory_pull(self) -> str:
         self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body="Adds the thing.")
@@ -843,15 +844,15 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session()
 
-        self.assertEqual((status, report["session_links"]), (0, {"added": [REVIEW_PULL_9], "action": "linked"}))
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+        self.assertEqual((status, report["session_links"]), (0, {"added": [GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked"}))
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", GITHUB_PULL_9), ("Pull request #9", REVIEW_PULL_9))])
         urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
-        self.assertEqual(urls, ["https://kanban.test/t_1", REVIEW_PULL_9])
+        self.assertEqual(urls, ["https://kanban.test/t_1", GITHUB_PULL_9, REVIEW_PULL_9])
 
     def test_a_pull_request_the_session_already_holds_is_not_added_again(self) -> None:
         self.set_comments(body=SESSION_BODY)
         pull = self.factory_pull()
-        self.set_linear_state(session_urls=[REVIEW_PULL_9])
+        self.set_linear_state(session_urls=[GITHUB_PULL_9, REVIEW_PULL_9])
 
         status, report = self.run_session()
 
@@ -871,10 +872,10 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
-        self.assertEqual((status, report["session_links"]), (0, {"added": [TAKEOVER_REVIEW], "action": "linked"}))
+        self.assertEqual((status, report["session_links"]), (0, {"added": [TAKEOVER_PR, TAKEOVER_REVIEW], "action": "linked"}))
         started = [json.loads(line) for line in self.claude_call()["linear_log"].splitlines()]
         before = [e["session_update"]["input"] for e in started if "session_update" in e]
-        self.assertIn(self.linked(("Taken-over pull request #7", TAKEOVER_REVIEW)), before)
+        self.assertIn(self.linked(("Taken-over pull request #7", TAKEOVER_PR), ("Taken-over pull request #7", TAKEOVER_REVIEW)), before)
 
     def test_a_takeover_and_the_replacement_pull_request_both_stay_on_the_session(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -884,13 +885,16 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
         self.assertEqual(
-            (status, report["session_links"]), (0, {"added": [TAKEOVER_REVIEW, REVIEW_PULL_9], "action": "linked"})
+            (status, report["session_links"]), (0, {"added": [TAKEOVER_PR, TAKEOVER_REVIEW, GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked"})
         )
         self.assertEqual(self.link_updates(), [{"addedExternalUrls": [
-            {"label": "Taken-over pull request #7", "url": TAKEOVER_REVIEW}, {"label": "Pull request #9", "url": REVIEW_PULL_9},
+            {"label": "Taken-over pull request #7", "url": TAKEOVER_PR},
+            {"label": "Taken-over pull request #7", "url": TAKEOVER_REVIEW},
+            {"label": "Pull request #9", "url": GITHUB_PULL_9},
+            {"label": "Pull request #9", "url": REVIEW_PULL_9},
         ]}])
         urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
-        self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_REVIEW, REVIEW_PULL_9])
+        self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_PR, TAKEOVER_REVIEW, GITHUB_PULL_9, REVIEW_PULL_9])
 
     def test_a_run_that_prints_no_json_still_links_the_branchs_pull_request(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -900,8 +904,8 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session()
 
         self.assertEqual(status, 1)
-        self.assertEqual(report["session_links"], {"added": [REVIEW_PULL_9], "action": "linked"})
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+        self.assertEqual(report["session_links"], {"added": [GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked"})
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", GITHUB_PULL_9), ("Pull request #9", REVIEW_PULL_9))])
 
     def test_a_refused_adoption_still_links_the_branchs_existing_pull_request(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -912,7 +916,7 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(status, 2)
         self.assertFalse(self.log.exists())
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", GITHUB_PULL_9), ("Pull request #9", REVIEW_PULL_9))])
 
     def test_a_merged_pull_request_on_the_branch_is_added_unless_the_session_holds_it(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -921,10 +925,10 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session()
 
-        self.assertEqual((status, report["session_links"]), (0, {"added": [REVIEW_PULL_9], "action": "linked"}))
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+        self.assertEqual((status, report["session_links"]), (0, {"added": [GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked"}))
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", GITHUB_PULL_9), ("Pull request #9", REVIEW_PULL_9))])
 
-        self.set_linear_state(session_urls=[REVIEW_PULL_9])
+        self.set_linear_state(session_urls=[GITHUB_PULL_9, REVIEW_PULL_9])
         self.run_session()
 
         self.assertEqual(len(self.link_updates()), 1)
@@ -988,7 +992,7 @@ class ClaudeSessionTest(GitFixture):
         self.reply_run({"hook": "PostToolUse", "event": event})
 
         self.assertEqual(self.hook_log()[0]["codes"], [0, 0])
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #42", REVIEW_PULL_42))])
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #42", GITHUB_PULL_42), ("Pull request #42", REVIEW_PULL_42))])
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(
