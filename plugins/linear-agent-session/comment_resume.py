@@ -14,6 +14,7 @@ MACHINE_PARKS = (
     "Waiting for the worktree:",
     "Waiting after a server error:",
     "Waiting for an issue:",
+    "Waiting for hermes resume:",
     "Waiting for a pull request:",
 )
 WAITING_STATUSES = ("blocked", "triage")

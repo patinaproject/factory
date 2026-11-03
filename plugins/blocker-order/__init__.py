@@ -49,6 +49,11 @@ names one does not apply, and adds `issue_park` to the result. A URL that is not
 refuses to schedule such as a `goal_mode` card, gets the `needs_input` block above with the whole result as its
 reason. `card_transition.py` releases the card once the issue closes or a person replies.
 
+A report with `signal`, `elapsed`, and `paused` is a run that `claude-session` ended on SIGTERM, SIGINT, or SIGHUP.
+When `paused` is true the hook parks the card in `scheduled` with a reason that starts with
+`result_line.STOPPED_PARK`, and `card_transition.py` releases it once the pause ends. Otherwise, and when Hermes
+refuses to schedule the card, the hook blocks it with kind `transient` and a reason that names the signal.
+
 A finished run whose `result` starts with `Waiting for pull request:` and a GitHub pull request URL is a worker
 whose card must wait for another pull request to merge. On every board the hook parks the card in `scheduled` with
 the reason `result_line.PULL_REQUEST_PARK` and `owner/name#number`, never the URL, and adds `pull_request_park` to
@@ -177,6 +182,39 @@ def park_for_precondition(precondition: str, error: str, dispatch: Dispatch) -> 
         f"{PRECONDITION_PARKED[precondition][1]} Stop now: call no other tool, do not call kanban_block, do not "
         "post an activity, and do not run claude-session again."
     )}
+
+
+def stop_text(report: result_line.Stopped) -> str:
+    where = "during a Hermes pause" if report.paused else "outside a Hermes pause"
+    return f"claude-session was stopped by {report.signal} after {report.elapsed} s, {where}. It was stopped, not crashed."
+
+
+def block_for_stop(report: result_line.Stopped, dispatch: Dispatch) -> dict:
+    reason = stop_text(report)
+    answer = _call(dispatch, "kanban_block", {"reason": reason, "kind": "transient"})
+    if not answer.get("ok"):
+        return {"blocked": False, "instruction": (
+            f"The blocker-order hook could not block this card: {answer.get('error')}. Call kanban_block with "
+            f"kind transient and exactly this reason, then stop: {json.dumps(reason)}. Do not run claude-session again."
+        )}
+    os.environ[STOP_NUDGE] = "off"
+    return {"blocked": True, "instruction": (
+        f"{reason} The blocker-order hook blocked this card with kind transient. Post an error activity with "
+        "that text, then stop: do not block again and do not run claude-session again."
+    )}
+
+
+def park_for_stop(report: result_line.Stopped, dispatch: Dispatch) -> dict:
+    """A card Hermes refuses to schedule (`goal_mode`) gets the transient block of an unpaused stop."""
+    answer = _call(dispatch, SCHEDULE_TOOL, {"reason": f"{result_line.STOPPED_PARK} {stop_text(report)}"})
+    if not answer.get("ok"):
+        return {"stopped_block": block_for_stop(report, dispatch)}
+    os.environ[STOP_NUDGE] = "off"
+    return {"stopped_park": {"parked": True, "instruction": (
+        f"claude-session was stopped by {report.signal} during a Hermes pause, so this card waits in scheduled "
+        "and goes back to the queue once the pause ends. Stop now: call no other tool, do not call kanban_block, "
+        "do not post an activity, and do not run claude-session again."
+    )}}
 
 
 def park_for_issue(result: str, dispatch: Dispatch) -> dict:
@@ -370,6 +408,15 @@ def make_hook(ctx: Any):
                 _handled[key] = json.dumps({**payload, "triage_round": park_round(task, run, marked, ctx.dispatch_tool)})
             elif key not in _handled:
                 _handled[key] = json.dumps({**payload, "needs_input_block": block_for_input(reason, ctx.dispatch_tool)})
+            return _handled[key]
+        stop = result_line.stopped(report)
+        if stop is not None:
+            key = (task, run, stop)
+            if key not in _handled:
+                _handled[key] = json.dumps({**payload, **(
+                    park_for_stop(stop, ctx.dispatch_tool) if stop.paused
+                    else {"stopped_block": block_for_stop(stop, ctx.dispatch_tool)}
+                )})
             return _handled[key]
         refusal = result_line.precondition_refusal(report)
         if refusal is not None:

@@ -1243,6 +1243,7 @@ class IssueWaitTest(BriefHarness):
         self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "released t_default\n", ""))
 
 
+RESUME_PARK = "Waiting for hermes resume: claude-session was stopped by SIGTERM after 12 s, during a Hermes pause."
 WORKTREE_PARK = "Waiting for the worktree: another claude-session holds /w for card t_old (running)"
 SERVER_PARK = "Waiting after a server error: gh api repos/o/r failed: gh: Server Error (HTTP 500)"
 PARK_AT = 200
@@ -1411,6 +1412,25 @@ class CauseWaitTest(BriefHarness):
         self.assertEqual(swept, [{"released": [], "failed": {}}] * 2)
         self.assertEqual({status for status, _ in self.statuses().values()}, {"scheduled"})
         self.assertEqual((self.thoughts(), self.comments()), ([], []))
+
+    def test_a_card_parked_for_a_pause_is_released_with_no_reply_once_the_sentinel_is_gone(self) -> None:
+        self.wait("default", "t_1", RESUME_PARK)
+        sentinel = self.home / "ESTOP"
+        sentinel.touch()
+
+        during = self.call("card_transition.sweep_resume()")
+        sentinel.unlink()
+        after = self.call("card_transition.sweep_resume()")
+
+        self.assertEqual(during, {"released": [], "failed": {}})
+        self.assertEqual(after, {"released": ["t_1"], "failed": {}})
+        self.assertEqual(self.statuses()["t_1"], ("ready", "claude-worker"))
+
+    def test_a_stop_comment_after_a_pause_park_keeps_the_card_parked(self) -> None:
+        self.wait("default", "t_1", RESUME_PARK, comments=("stopped",))
+
+        self.assertEqual(self.call("card_transition.sweep_resume()"), {"released": [], "failed": {}})
+        self.assertEqual(self.statuses()["t_1"], ("scheduled", "claude-worker"))
 
     def test_a_card_parked_with_another_prefix_is_released_by_neither_sweep(self) -> None:
         path, _ = self.worktree("w")

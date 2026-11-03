@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import MISSING, asdict, dataclass, field, fields
+from pathlib import Path
 from typing import Any, NamedTuple, Optional, Union
 
 NEEDS_INPUT = "Needs input:"
@@ -42,6 +43,8 @@ ISSUE_PARK = "Waiting for an issue:"
 # the card already parked on that issue.
 ISSUE_NOTED = "Parked on issue"
 _ISSUE_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/issues/[0-9]+")
+# A run stopped by SIGTERM, SIGINT, or SIGHUP during a Hermes pause parks the card until the pause ends.
+STOPPED_PARK = "Waiting for hermes resume:"
 # A finished implementation run that waits for another pull request to merge ends with this first line, then the
 # pull request's URL. Every reason, comment, and thought names the pull request as `owner/name#number`, never by
 # URL, because Hermes holds a `ready` card for a day after a card comment that holds a pull request URL.
@@ -61,7 +64,7 @@ PRECONDITION_PARKS = {
     WORKTREE_HELD: WORKTREE_HELD_PARK,
     SERVER_ERROR: SERVER_ERROR_PARK,
 }
-MACHINE_PARKS = (*PRECONDITION_PARKS.values(), ISSUE_PARK, PULL_REQUEST_PARK)
+MACHINE_PARKS = (*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK, PULL_REQUEST_PARK)
 _COMMENTS_SEEN_LINE = re.compile(r"\s*^" + COMMENTS_SEEN + r"[ \t]*(\d+)[ \t]*\Z", re.MULTILINE)
 
 
@@ -156,8 +159,19 @@ class Crashed:
     session_id: str
 
 
-Report = Union[Waiting, Done, Failed, Refused, Crashed]
-VARIANTS = (Waiting, Done, Failed, Refused, Crashed)
+@dataclass(frozen=True)
+class Stopped:
+    """A person or process stopped `claude-session` with `signal` (such as `SIGTERM`) after `elapsed` whole
+    seconds. `paused` is true when a Hermes pause was in place. `session_id` is set once Claude had started."""
+
+    signal: str
+    elapsed: int
+    paused: bool
+    session_id: Optional[str] = None
+
+
+Report = Union[Waiting, Done, Failed, Refused, Crashed, Stopped]
+VARIANTS = (Waiting, Done, Failed, Refused, Crashed, Stopped)
 
 
 def precondition_refusal(report: Optional[Report]) -> Optional[Refused]:
@@ -165,6 +179,23 @@ def precondition_refusal(report: Optional[Report]) -> Optional[Refused]:
     if isinstance(report, Refused) and report.precondition in PRECONDITION_PARKS:
         return report
     return None
+
+
+def stopped(report: Optional[Report]) -> Optional[Stopped]:
+    """The report when `claude-session` was stopped by a signal."""
+    return report if isinstance(report, Stopped) else None
+
+
+def paused(home: Path) -> bool:
+    """Hermes' `agent.estop.is_engaged` for a profile home: an `ESTOP` sentinel in the home or the fleet root,
+    and a stat error counts as engaged. `webhook-retry`'s `queue_store.paused` is the same check, but that plugin
+    is installed only in the root home, and the worker home's scripts read this one."""
+    home = Path(home)
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    try:
+        return any(sentinel.exists() for sentinel in {home / "ESTOP", root / "ESTOP"})
+    except OSError:
+        return True
 
 
 def waiting_on(report: Optional[Report]) -> Optional[list[str]]:

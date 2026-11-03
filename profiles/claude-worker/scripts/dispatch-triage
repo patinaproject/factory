@@ -14,7 +14,8 @@ It then releases, on every board, each card parked for the worker's gh login onc
 `card_transition.sweep_login`), with the same line. On `triage` that card is unassigned
 and the next step assigns it; on any other board it lands `ready` and assigned.
 It releases each card parked for a factory deploy the same way once the install
-matches the commit auto-deploy recorded as deployed (`card_transition.sweep_deploy`).
+matches the commit auto-deploy recorded as deployed (`card_transition.sweep_deploy`), and each card parked for a
+Hermes pause once the pause ends (`card_transition.sweep_resume`).
 It releases each card parked for its worktree once no claude-session holds the card's lock
 (`card_transition.sweep_worktree`), and each card parked after a server error five minutes after its park
 (`card_transition.sweep_server_error`), and posts one thought on the card's agent session for each.
@@ -117,6 +118,7 @@ def main() -> int:
         released = release_waiting()
         released = release_parked(card_transition.sweep_login, "the gh login") and released
         released = release_parked(card_transition.sweep_deploy, "a factory deploy") and released
+        released = release_parked(card_transition.sweep_resume, "a Hermes resume") and released
         released = release_parked(card_transition.sweep_worktree, "a free worktree") and released
         released = release_parked(card_transition.sweep_server_error, "a server-error wait") and released
         released = release_parked(card_transition.sweep_brief, "an Agent brief") and released
