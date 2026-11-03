@@ -103,8 +103,9 @@ def parse_entries(value: object) -> tuple[ScheduledCommand, ...]:
         raise SettingsError(f"scheduled_commands {value!r} must be a list")
     entries = tuple(parse_entry(raw) for raw in value)
     names = [entry.name for entry in entries]
-    for name in sorted({name for name in names if names.count(name) > 1}):
-        raise SettingsError(f"scheduled_commands name {name} is used more than once")
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise SettingsError(f"scheduled_commands name {repeated[0]} is used more than once")
     return entries
 
 
