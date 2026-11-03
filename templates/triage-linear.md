@@ -20,7 +20,8 @@ the gate, or read the reply yourself. Its fields:
   has no delegate.
 - `gate`: `pass`, `ready-for-human`, `needs-brief`, or `not-ready`. The
   `action` already applies it.
-- `card`: the issue's implementation card with its `id` and `status`, or null.
+- `card`: the issue's implementation card with its `id`, `status`, and `session_id`
+  (the agent session the card is on, or null), or null.
 - `triage_card`: the issue's live triage card with its `id` and `status`, or
   null.
 - `foreign_cards`: the task IDs of cards the factory did not create that work

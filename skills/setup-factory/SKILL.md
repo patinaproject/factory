@@ -1481,7 +1481,11 @@ Linear `Issue` update, it runs the `triage-exit` command of the
 that command archived the triage card or left a running one to its worker, the
 delivery is done without a turn. Before it reruns an agent session reply, it
 runs the `teammate-reply` command, and a reply addressed to a teammate is
-dropped without a turn. It prints a line only when something happened,
+dropped without a turn. When the dispatch hook skipped a delivery because
+its computed intent needs no action, it left a skip marker under
+`<root>/webhook-retry/skipped/`, and the job drops the pending delivery
+without a turn and without an `unadmitted` replay. It prunes markers older
+than a day. It prints a line only when something happened,
 so Hermes delivers nothing on a quiet run. It belongs to the root profile,
 unlike the other jobs in this part, because only that profile runs the chat
 platform from part 13 and has its home channel. Hermes drops the output of a
