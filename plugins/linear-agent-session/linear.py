@@ -1053,6 +1053,17 @@ class LinearClient:
             "title": {"startsWith": title_prefix},
             "state": {"type": {"nin": list(CLOSED_STATE_TYPES)}},
         }
+        return self._titled_issues(issue_filter)
+
+    def issues_titled(self, team_key: str, title: str) -> list:
+        """The team's issues in any state that the agent app created with exactly `title`."""
+        return self._titled_issues({
+            "team": {"key": {"eq": team_key}},
+            "creator": {"isMe": {"eq": True}},
+            "title": {"eq": title},
+        })
+
+    def _titled_issues(self, issue_filter: dict) -> list:
         nodes = self._graphql(OPEN_TITLED_ISSUES_QUERY, {"filter": issue_filter})["issues"]["nodes"]
         return [{"identifier": n["identifier"], "title": n["title"], "url": n["url"]} for n in nodes]
 

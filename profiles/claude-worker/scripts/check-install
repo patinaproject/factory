@@ -132,6 +132,7 @@ import factory_source
 import gh_login
 import install_plan
 import kanban_board
+import recurring_issues
 import sentry_sync
 import stale_failure
 import xcode
@@ -325,6 +326,7 @@ CRON = (
     CronJob(12, "finish-merged", 5, equal("local")),
     CronJob(12, "dispatch-triage", 1, equal("local")),
     CronJob(12, "file-dependency-update", 10080, equal("local")),
+    CronJob(12, "file-recurring-issues", 60, equal("local")),
     CronJob(12, "sentry-linear-sync", 30, equal("local"), section=sentry_sync.SETTINGS_SECTION),
     CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
     CronJob(12, "report-deploy", 5, declared("the operator's chat platform", besides=("local",)), home=ROOT),
@@ -1801,6 +1803,16 @@ def check_settings(settings, worker: Path) -> list:
     ]
 
 
+def check_recurring_issues(settings, worker: Path) -> list:
+    if not isinstance(settings, dict):
+        return []
+    try:
+        _, errors = recurring_issues.parse_entries(settings)
+    except recurring_issues.SettingsError as error:
+        errors = [f"{error}, so file-recurring-issues files nothing"]
+    return [Drift("config", f"{recurring_issues.SETTINGS_SECTION} in {worker}", error, SETTINGS_FIX) for error in errors]
+
+
 def check_operators(settings, worker: Path) -> list:
     if not isinstance(settings, dict) or settings.get("operator_user_ids"):
         return []
@@ -2446,6 +2458,7 @@ def main() -> int:
             ),
             *check_settings(settings, worker),
             *check_operators(settings, worker),
+            *check_recurring_issues(settings, worker),
             *check_artifact(settings),
             *check_app_events(settings),
             *check_model_tiers(settings, worker),

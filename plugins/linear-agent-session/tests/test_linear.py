@@ -1540,6 +1540,17 @@ class OpenIssuesTitledTest(unittest.TestCase):
                         "state": {"type": {"nin": ["completed", "canceled", "duplicate"]}}}},
         )
 
+    def test_issues_titled_filters_by_team_creator_and_exact_title_in_any_state(self):
+        node = {"identifier": "ABC-5", "title": "Weekly (week of 2026-11-02)", "url": "https://linear.app/x/issue/ABC-5"}
+        fake = FakeLinear([(200, {"data": {"issues": {"nodes": [node]}}})])
+        found = make_client(fake).issues_titled("ABC", "Weekly (week of 2026-11-02)")
+        self.assertEqual(found, [node])
+        self.assertEqual(
+            fake.graphql_requests[0]["variables"],
+            {"filter": {"team": {"key": {"eq": "ABC"}}, "creator": {"isMe": {"eq": True}},
+                        "title": {"eq": "Weekly (week of 2026-11-02)"}}},
+        )
+
 
 class SearchTest(unittest.TestCase):
     def search(self, responses, args):

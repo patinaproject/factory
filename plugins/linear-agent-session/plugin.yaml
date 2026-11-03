@@ -85,6 +85,13 @@ config_schema:
       The weekly dependency-update issue. repository is the <owner>/<name> to update, team_key the Linear
       team that gets the issue, theme_label its one label, and type_label the type its description names.
       file-dependency-update refuses to run without all four.
+  recurring_issues:
+    type: list
+    default: []
+    description: >-
+      The issues file-recurring-issues files on a cadence. Each entry is an object with repository
+      (<owner>/<name>), team_key, title_prefix (the job appends the slot's start date), cadence (daily,
+      weekly, or monthly), labels (a list of label names), and description. The job skips a malformed entry.
   sentry_sync:
     type: dict
     default: {}
