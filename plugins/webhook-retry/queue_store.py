@@ -4,6 +4,7 @@ import base64
 import contextlib
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 QUEUE_DIRECTORY = "webhook-retry"
+SKIPPED_DIRECTORY = "skipped"
 USAGE_LIMIT_REASONS = frozenset({"rate_limit", "upstream_rate_limit"})
 # Hermes waits up to 600 s between its own attempts, so a turn that reported a usage limit may still be running.
 MIN_DELAY_SECONDS = 30 * 60
@@ -41,6 +43,7 @@ TRANSITIONS: dict[tuple[Optional[str], str], str] = {
     ("pending", "turn_ended"): REMOVED,
     ("queued", "turn_ended"): REMOVED,
     ("pending", "expire"): REMOVED,
+    ("pending", "skipped"): REMOVED,
     ("queued", "retry_started"): "running",
     ("running", "retry_succeeded"): REMOVED,
     ("running", "retry_usage_limit"): "queued",
@@ -95,6 +98,11 @@ def paused(home: Path) -> bool:
 
 def queue_dir(home: Path) -> Path:
     return Path(home) / QUEUE_DIRECTORY
+
+
+def skip_marker(directory: Path, key: str) -> Path:
+    """The path is a contract with `linear-agent-session`'s `write_skip_record`, which writes it when the live hook skips a turn."""
+    return Path(directory) / SKIPPED_DIRECTORY / hashlib.sha256(key.encode()).hexdigest()
 
 
 def decode_key(key: str) -> Optional[tuple[str, str, str]]:

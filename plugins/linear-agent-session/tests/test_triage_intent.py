@@ -35,6 +35,7 @@ def issue(**overrides):
         "gitBranchName": BRANCH,
         "stateType": "backlog",
         "delegate": APP,
+        "delegateName": "Factory App" if overrides.get("delegate", APP) else None,
         "assignee": {"id": ASSIGNEE, "name": "Ann Assignee", "gitHubUserId": "1001", "app": False},
         "labels": ["Ready for agent"],
         "agentSessions": [],
@@ -79,9 +80,12 @@ def expected(action, **overrides):
         action=action,
         issue={"id": ISSUE_ID, "identifier": "PAT-1", "state_type": "backlog"},
         delegated=True,
+        delegate={"id": APP, "name": "Factory App"},
         gate="pass",
         agent_session_id="session-1",
     )
+    if overrides.get("delegated") is False:
+        base = replace(base, delegate=None)
     return replace(base, **overrides)
 
 
@@ -115,7 +119,7 @@ class CardLookupTest(unittest.TestCase):
         }
         for key, found in cases.items():
             with self.subTest(key):
-                self.assertEqual(self.found([found]), {"id": found.id, "status": "todo", "matched_by": key})
+                self.assertEqual(self.found([found]), {"id": found.id, "status": "todo", "matched_by": key, "session_id": None})
 
     def test_the_keys_win_in_order_whatever_the_card_order(self):
         cards = [
@@ -129,6 +133,12 @@ class CardLookupTest(unittest.TestCase):
                 self.assertEqual(self.found(cards)["id"], expected_id)
                 self.assertEqual(self.found(cards)["matched_by"], key)
                 cards = [c for c in cards if c.id != expected_id]
+
+    def test_the_card_carries_the_session_it_names(self):
+        found = card("t_work", branch=BRANCH, body="linear_agent_session_id: s-card\n")
+        self.assertEqual(
+            self.found([found]), {"id": "t_work", "status": "todo", "matched_by": "branch", "session_id": "s-card"}
+        )
 
     def test_an_archived_card_is_never_found(self):
         self.assertIsNone(self.found([card("t_old", status="archived", branch=BRANCH)]))
@@ -308,7 +318,8 @@ class SessionCreatedTest(unittest.TestCase):
 
     def test_a_delegation_to_someone_else_is_a_mention(self):
         self.assertEqual(
-            decide(session_event("created"), issue(delegate="user-other")), expected("answer_mention", delegated=False)
+            decide(session_event("created"), issue(delegate="user-other", delegateName="Bo Bystander")),
+            expected("answer_mention", delegated=False, delegate={"id": "user-other", "name": "Bo Bystander"}),
         )
 
     def test_the_gate_stops_a_delegation_before_any_card_is_made_or_reused(self):
@@ -321,7 +332,7 @@ class SessionCreatedTest(unittest.TestCase):
                 self.assertEqual(
                     decide(session_event("created"), issue(labels=labels), work=[existing]),
                     expected(
-                        action, gate=gate, card={"id": "t_work", "status": "todo", "matched_by": "branch"}
+                        action, gate=gate, card={"id": "t_work", "status": "todo", "matched_by": "branch", "session_id": None}
                     ),
                 )
 
@@ -346,7 +357,7 @@ class SessionCreatedTest(unittest.TestCase):
         work = [card("t_work", status="blocked", body=id_line()), card("t_foreign", title="PAT-1 by hand")]
         self.assertEqual(
             decide(session_event("created"), work=work),
-            expected("reuse_card", card={"id": "t_work", "status": "blocked", "matched_by": "linear_issue_id"}),
+            expected("reuse_card", card={"id": "t_work", "status": "blocked", "matched_by": "linear_issue_id", "session_id": None}),
         )
 
     def test_the_triage_card_is_reported_beside_the_action(self):
@@ -367,14 +378,14 @@ class SessionPromptedTest(unittest.TestCase):
             replied(
                 "triage_card_reply",
                 triage_card={"id": "t_triage", "status": "blocked"},
-                card={"id": "t_work", "status": "todo", "matched_by": "branch"},
+                card={"id": "t_work", "status": "todo", "matched_by": "branch", "session_id": None},
             ),
         )
 
     def test_a_reply_resumes_a_scheduled_triage_card_whether_or_not_the_issue_is_delegated_or_has_a_card(self):
         triage = [card("t_triage", status="scheduled", body=id_line())]
         for delegate in (APP, None):
-            for work, work_card in (([], None), ([card("t_work", branch=BRANCH)], {"id": "t_work", "status": "todo", "matched_by": "branch"})):
+            for work, work_card in (([], None), ([card("t_work", branch=BRANCH)], {"id": "t_work", "status": "todo", "matched_by": "branch", "session_id": None})):
                 with self.subTest(delegate=delegate, card=bool(work)):
                     self.assertEqual(
                         self.prompted(live=issue(delegate=delegate, stateType="unstarted"), triage=triage, work=work),
@@ -396,7 +407,7 @@ class SessionPromptedTest(unittest.TestCase):
     def test_a_reply_on_an_issue_with_a_card_is_a_card_reply(self):
         self.assertEqual(
             self.prompted(work=[card("t_work", status="blocked", title="PAT-1: Fix it")]),
-            replied("card_reply", card={"id": "t_work", "status": "blocked", "matched_by": "title"}),
+            replied("card_reply", card={"id": "t_work", "status": "blocked", "matched_by": "title", "session_id": None}),
         )
 
     def test_a_reply_on_a_complete_session_of_an_issue_with_a_card_is_a_card_reply_on_that_session(self):
@@ -415,7 +426,7 @@ class SessionPromptedTest(unittest.TestCase):
             self.prompted(work=work, author=OTHER),
             replied(
                 "card_reply_not_assignee",
-                card={"id": "t_work", "status": "review", "matched_by": "branch"},
+                card={"id": "t_work", "status": "review", "matched_by": "branch", "session_id": None},
                 reply_author_id=OTHER,
                 from_assignee=False,
                 authorized_as=None,
@@ -741,9 +752,10 @@ class RenderTest(unittest.TestCase):
 class FakeLinearClient(plugin.linear.LinearClient):
     """The real delegator and operator lookups over a fake GraphQL: `history` is newest first, `users` maps id to a user."""
 
-    def __init__(self, live, error=None, thread_error=None, titles=BRIEF, documents_error=None, history=(), users=None, lookup_error=None):
+    def __init__(self, live, error=None, reads=None, thread_error=None, titles=BRIEF, documents_error=None, history=(), users=None, lookup_error=None):
         super().__init__("client-id", "client-secret")
         self.live, self.error, self.thread_error, self.asked = live, error, thread_error, []
+        self.reads = list(reads or [])
         self.titles, self.documents_error = titles, documents_error
         self.history, self.users, self.lookup_error = list(history), users or {}, lookup_error
 
@@ -767,6 +779,11 @@ class FakeLinearClient(plugin.linear.LinearClient):
         self.asked.append(issue_id)
         if self.error:
             raise self.error
+        if self.reads:
+            read = self.reads.pop(0)
+            if isinstance(read, Exception):
+                raise read
+            return read
         return self.live
 
     def read_prompt(self, **_):
@@ -959,7 +976,7 @@ class ApproverTest(unittest.TestCase):
 
 
 class ComputeTest(unittest.TestCase):
-    def compute(self, payload, client, boards=None, now=NOW, redact=lambda text: re.sub(r"lin_api_\w+", "[redacted]", text), operators=()):
+    def compute(self, payload, client, boards=None, now=NOW, redact=lambda text: re.sub(r"lin_api_\w+", "[redacted]", text), operators=(), sleep=lambda _seconds: None):
         boards = boards or {"triage": [], None: []}
         return intent_module.compute(
             payload,
@@ -969,6 +986,7 @@ class ComputeTest(unittest.TestCase):
             cards=lambda board: boards[board],
             now=now,
             redact=redact,
+            sleep=sleep,
         )
 
     def test_a_session_event_reads_its_issue_and_both_boards(self):
@@ -1036,6 +1054,53 @@ class ComputeTest(unittest.TestCase):
         self.assertEqual(self.compute(issue_event(), client).action, "open_session")
         self.assertEqual(client.asked, [ISSUE_ID])
 
+    def test_a_person_created_session_rereads_until_the_delegate_appears(self):
+        sleeps = []
+        client = FakeLinearClient(None, reads=[issue(delegate=None, delegateName=None), issue()])
+        result = self.compute(session_event("created"), client, sleep=sleeps.append)
+        self.assertEqual((result.action, result.delegated, result.delegate), ("create_card", True, {"id": APP, "name": "Factory App"}))
+        self.assertEqual((sleeps, len(client.asked)), ([1], 2))
+
+    def test_a_person_created_session_that_never_sees_a_delegate_is_answered_as_undelegated(self):
+        sleeps = []
+        client = FakeLinearClient(issue(delegate=None, delegateName=None))
+        result = self.compute(session_event("created"), client, sleep=sleeps.append)
+        self.assertEqual((result.action, result.delegated, result.delegate), ("answer_mention", False, None))
+        self.assertEqual((sleeps, len(client.asked)), ([1, 1, 2, 2, 4], 6))
+
+    def test_a_person_created_session_on_a_delegated_issue_reads_once(self):
+        sleeps = []
+        client = FakeLinearClient(issue())
+        self.compute(session_event("created"), client, sleep=sleeps.append)
+        self.assertEqual((sleeps, len(client.asked)), ([], 1))
+
+    def test_a_person_created_session_on_an_issue_delegated_to_someone_else_reads_once(self):
+        sleeps = []
+        client = FakeLinearClient(issue(delegate=OTHER, delegateName="Bo Bystander"))
+        result = self.compute(session_event("created"), client, sleep=sleeps.append)
+        self.assertEqual((result.action, result.delegate), ("answer_mention", {"id": OTHER, "name": "Bo Bystander"}))
+        self.assertEqual((sleeps, len(client.asked)), ([], 1))
+
+    def test_a_factory_created_session_without_a_delegate_reads_once(self):
+        sleeps = []
+        client = FakeLinearClient(issue(delegate=None, delegateName=None))
+        result = self.compute(session_event("created", creator=None), client, sleep=sleeps.append)
+        self.assertEqual((result.action, sleeps, len(client.asked)), ("ignore_factory_session", [], 1))
+
+    def test_issue_and_prompted_events_never_wait_for_a_delegate(self):
+        sleeps = []
+        client = FakeLinearClient(issue(delegate=None, delegateName=None))
+        for payload in (issue_event(), session_event("prompted", body="hi")):
+            with self.subTest(payload["type"]):
+                self.compute(payload, client, sleep=sleeps.append)
+        self.assertEqual((sleeps, len(client.asked)), ([], 2))
+
+    def test_a_failed_reread_is_the_error_intent(self):
+        sleeps = []
+        client = FakeLinearClient(None, reads=[issue(delegate=None, delegateName=None), RuntimeError("read down")])
+        result = self.compute(session_event("created"), client, sleep=sleeps.append)
+        self.assertEqual(result, Intent(action="error", error="RuntimeError: read down"))
+
     def test_any_failure_is_the_error_intent_without_a_secret(self):
         client = FakeLinearClient(None, error=RuntimeError("Linear refused lin_api_a1b2c3"))
         result = self.compute(issue_event(), client)
@@ -1087,3 +1152,98 @@ class ComputeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def needs_no_turn(action, payload=None, card=None, triage_card=None, state_type="backlog", agent_session_id=None):
+    intent = Intent(
+        action=action,
+        issue={"id": ISSUE_ID, "identifier": "PAT-1", "state_type": state_type},
+        card=card,
+        triage_card=triage_card,
+        agent_session_id=agent_session_id,
+    )
+    return intent_module.needs_no_turn(intent, payload or issue_event())
+
+
+def work_card(status="todo", session_id=None):
+    return {"id": "t_work", "status": status, "matched_by": "branch", "session_id": session_id}
+
+
+TRIAGE_CARD = {"id": "t_triage", "status": "todo"}
+NO_MOVE = {"type": "Issue", "action": "update", "updatedFrom": {"labelIds": []}, "data": {"id": ISSUE_ID}}
+CREATE = {"type": "Issue", "action": "create", "data": {"id": ISSUE_ID}}
+NO_UPDATED_FROM = {"type": "Issue", "action": "update", "data": {"id": ISSUE_ID}}
+
+
+class NeedsNoTurnTest(unittest.TestCase):
+    def test_ignore_factory_session_always(self):
+        self.assertTrue(needs_no_turn("ignore_factory_session", session_event("created", creator=None)))
+
+    def test_session_created_handles_it_when_triage_inbox_is_a_noop(self):
+        cases = {
+            "no stateId, not triage": needs_no_turn("session_created_handles_it", NO_MOVE),
+            "no updatedFrom": needs_no_turn("session_created_handles_it", NO_UPDATED_FROM),
+            "stateId, not triage, no triage card": needs_no_turn("session_created_handles_it", issue_event()),
+            "triage, update, no stateId": needs_no_turn("session_created_handles_it", NO_MOVE, state_type="triage"),
+        }
+        self.assertEqual(cases, {name: True for name in cases})
+
+    def test_session_created_handles_it_runs_when_triage_inbox_acts(self):
+        cases = {
+            "stateId, triage": needs_no_turn("session_created_handles_it", issue_event(), state_type="triage"),
+            "create, triage": needs_no_turn("session_created_handles_it", CREATE, state_type="triage"),
+            "stateId, not triage, triage card": needs_no_turn(
+                "session_created_handles_it", issue_event(), triage_card=TRIAGE_CARD
+            ),
+        }
+        self.assertEqual(cases, {name: False for name in cases})
+
+    def test_issue_closed_only_without_any_card(self):
+        self.assertTrue(needs_no_turn("issue_closed"))
+        for status in ("todo", "running", "blocked", "done"):
+            with self.subTest(status):
+                self.assertFalse(needs_no_turn("issue_closed", card=work_card(status)))
+        self.assertFalse(needs_no_turn("issue_closed", triage_card=TRIAGE_CARD))
+
+    def test_undelegated_with_no_live_card_and_a_noop_inbox(self):
+        self.assertTrue(needs_no_turn("undelegated", NO_MOVE))
+        self.assertTrue(needs_no_turn("undelegated", NO_UPDATED_FROM))
+        self.assertTrue(needs_no_turn("undelegated", NO_MOVE, card=work_card("done")))
+        self.assertTrue(needs_no_turn("undelegated", issue_event()))
+
+    def test_undelegated_near_misses(self):
+        cases = {
+            "running card": needs_no_turn("undelegated", NO_MOVE, card=work_card("running")),
+            "triage card": needs_no_turn("undelegated", NO_MOVE, triage_card=TRIAGE_CARD),
+            "create in triage": needs_no_turn("undelegated", CREATE, state_type="triage"),
+            "stateId change in triage": needs_no_turn("undelegated", issue_event(), state_type="triage"),
+        }
+        self.assertEqual(cases, {name: False for name in cases})
+
+    def test_reuse_card_already_on_this_session(self):
+        for status in ("running", "ready"):
+            with self.subTest(status):
+                self.assertTrue(
+                    needs_no_turn("reuse_card", card=work_card(status, "s-1"), agent_session_id="s-1")
+                )
+
+    def test_reuse_card_near_misses(self):
+        cases = {
+            "another session": needs_no_turn("reuse_card", card=work_card("running", "s-2"), agent_session_id="s-1"),
+            "no card session": needs_no_turn("reuse_card", card=work_card("running"), agent_session_id="s-1"),
+            "no intent session": needs_no_turn("reuse_card", card=work_card("running", "s-1")),
+            "blocked": needs_no_turn("reuse_card", card=work_card("blocked", "s-1"), agent_session_id="s-1"),
+            "triage": needs_no_turn("reuse_card", card=work_card("triage", "s-1"), agent_session_id="s-1"),
+            "done": needs_no_turn("reuse_card", card=work_card("done", "s-1"), agent_session_id="s-1"),
+            "triage state": needs_no_turn(
+                "reuse_card", card=work_card("running", "s-1"), agent_session_id="s-1", state_type="triage"
+            ),
+        }
+        self.assertEqual(cases, {name: False for name in cases})
+
+    def test_every_other_action_needs_a_turn(self):
+        others = [a for a in intent_module.ACTIONS if a not in intent_module.NO_TURN_RULES]
+        self.assertIn("error", others)
+        for action in others:
+            with self.subTest(action):
+                self.assertFalse(needs_no_turn(action, NO_MOVE))

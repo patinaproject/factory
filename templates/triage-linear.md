@@ -16,9 +16,12 @@ the gate, or read the reply yourself. Its fields:
 - `issue`: the issue's `id`, `identifier`, and `state_type`.
 - `delegated`: whether the issue is delegated to the agent app user
   `<<app_user_id>>`.
+- `delegate`: the issue's delegate as `id` and `name`, or null when the issue
+  has no delegate.
 - `gate`: `pass`, `ready-for-human`, `needs-brief`, or `not-ready`. The
   `action` already applies it.
-- `card`: the issue's implementation card with its `id` and `status`, or null.
+- `card`: the issue's implementation card with its `id`, `status`, and `session_id`
+  (the agent session the card is on, or null), or null.
 - `triage_card`: the issue's live triage card with its `id` and `status`, or
   null.
 - `foreign_cards`: the task IDs of cards the factory did not create that work
@@ -164,7 +167,9 @@ the session.
   does for a triage card. Post no activity, create no card, and stop.
 - `answer_mention`: a person mentioned the agent. Answer the request in one
   `response` activity on `agent_session_id`, from the prompt context and the
-  issue. Create no card and stop.
+  issue. When the reply says whether the issue is delegated, `delegate` is the
+  answer: null means the issue has no delegate, otherwise name `delegate.name`.
+  Create no card and stop.
 
 ## Implementation card
 
@@ -275,7 +280,9 @@ action unless it stops.
 ### `answer_reply`
 
 The issue is not delegated and has no card, and a person still wrote to you,
-whoever opened the session. When `reply` is null, post a `thought` on
+whoever opened the session. When the reply says whether the issue is
+delegated, `delegate` is the answer: null means the issue has no delegate,
+otherwise name `delegate.name`. When `reply` is null, post a `thought` on
 `agent_session_id` asking the human to send the reply again, and stop.
 Otherwise answer the reply in one `response` activity on `agent_session_id`,
 from the reply read in the context of `thread`, and the issue. When the thread
@@ -293,8 +300,9 @@ stop.
    without text, post a `thought` on `agent_session_id` asking the human to
    send the reply again, and stop. Do not unblock the card, because the worker
    would block again on the same question.
-2. Comment on the card once with the reply, attributed to Linear, and never
-   correct it afterward. Start the comment with `Linear reply:`, because the
+2. When the card is `scheduled`, skip this step: step 4's command writes the
+   comment. Otherwise comment on the card once with the reply, attributed to
+   Linear, and never correct it afterward. Start the comment with `Linear reply:`, because the
    card's running Claude session recognizes a person's reply by that prefix.
    Replace each
    `https://github.com/<owner>/<name>/pull/<number>` URL in it with
@@ -305,7 +313,18 @@ stop.
    is `review`, run
    `<<card_transition>> reopen <task id> --comment 'Resumed for a Linear reply; see the card comments'`
    so its worker reads the reply. If the card is `triage`, resume it as
-   "Rules" says.
+   "Rules" says. If the card is `scheduled`, pipe `reply`, exactly as it
+   arrived, into `<<card_transition>> implementation-reply <task id>` with a
+   quoted heredoc, so the shell expands nothing in it:
+
+   ```sh
+   <<card_transition>> implementation-reply <task id> <<'LINEAR_REPLY'
+   <reply>
+   LINEAR_REPLY
+   ```
+
+   It writes the reply on the card itself, once, and releases the card unless
+   it waits for a machine. Never put the reply on the command line.
 5. Post one `thought` on `agent_session_id`, so the human sees that the reply
    arrived. Name the card's task id, then add what happens next:
    - You unblocked the card, reopened its review, or resumed it from `triage`:
@@ -316,6 +335,14 @@ stop.
      from the Kanban dashboard.
    - The card is `running`: the running Claude session reads the reply at its
      next step and answers in this session.
+   - The card is `scheduled` and the command printed `unblocked`: the worker
+     resumes with the reply as its newest instruction.
+   - The card is `scheduled` and the command printed `none` with `waits_for`:
+     name that wait reason and say the card continues by itself when the wait
+     ends. A card that waits for an issue also continues when the issue sweep
+     sees the reply.
+   - The card is `scheduled` and the command printed `error`: post the error
+     as the `thought`.
    - Any other status: the reply is on the card for its worker.
 
    In every case, never quote or summarize an earlier run's result, heartbeat,
