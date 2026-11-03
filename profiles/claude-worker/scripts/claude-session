@@ -1919,7 +1919,7 @@ def main() -> int:
         status, report = 1, result_line.Refused(f"{type(error).__name__}: {error}")
     for each in STOP_SIGNALS:
         signal.signal(each, signal.SIG_DFL)
-    print(json.dumps(report) if isinstance(report, dict) else result_line.line(report))
+    print(json.dumps(report) if isinstance(report, dict) else result_line.line(report), flush=True)
     return status
 
 
