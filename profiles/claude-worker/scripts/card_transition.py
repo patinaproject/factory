@@ -845,7 +845,7 @@ def sweep_pull_request() -> dict:
     if prefix is None or not gh_login.is_fresh(Path(os.environ["HERMES_HOME"]) / "gh", time.time()):
         return {"released": released, "failed": failed}
     reads: dict = {}
-    linear = []
+    post = linear_poster()
 
     def closed(pull) -> str | None:
         if pull not in reads:
@@ -856,16 +856,6 @@ def sweep_pull_request() -> dict:
         if isinstance(reads[pull], Failed):
             raise reads[pull]
         return reads[pull]
-
-    def post(session_id: str, text: str) -> None:
-        if not linear:
-            module = plugin_module("linear-agent-session", "linear")
-            linear.extend([module, module.client_from_env()])
-        module, client = linear
-        try:
-            client.create_activity(session_id, module.activity_content("thought", text))
-        except (*module.CLIENT_ERRORS, OSError) as error:
-            raise Failed(f"posting the note on Linear failed: {error}") from None
 
     for each in boards():
         slug, path = each["slug"], each["db_path"]
