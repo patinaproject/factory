@@ -386,8 +386,6 @@ class ReplyPrefixContractTest(unittest.TestCase):
         self.assertIn(f"`{reply_inbox.REPLY_PREFIX}`", prompt)
 
     def test_both_prompts_mark_an_event_not_from_the_assignee_with_the_workers_marker(self):
-        routes = render.build_routes(SETTINGS)
-
         for name in ("linear", "github"):
             with self.subTest(name):
                 self.assertIn(f"`{reply_inbox.NOT_ASSIGNEE_MARKER}`", full_prompt(name))
@@ -428,7 +426,6 @@ class PromptSubstitutionTest(unittest.TestCase):
                 )
 
     def test_queued_activity_links_the_kanban_board_when_configured(self):
-        routes = render.build_routes(settings(kanban_url="https://factory.example.com/kanban"))
         self.assertIn(
             "labeled `Kanban card <task id>` whose URL is `https://factory.example.com/kanban`.",
             full_prompt("linear", settings(kanban_url="https://factory.example.com/kanban")),
@@ -534,7 +531,6 @@ class PromptSubstitutionTest(unittest.TestCase):
 
 class MergedCardTest(unittest.TestCase):
     def setUp(self):
-        routes = render.build_routes(SETTINGS)
         self.section = render.triage_merged_section()
         self.github = full_prompt("github")
         self.linear = full_prompt("linear")
@@ -556,7 +552,6 @@ class ReviewHandbackTest(unittest.TestCase):
     """A Linear reply reopens a card with a plain comment, so the worker never reads it as CHANGES REQUESTED."""
 
     def setUp(self):
-        routes = render.build_routes(SETTINGS)
         self.github = full_prompt("github")
         self.linear = full_prompt("linear")
 
@@ -576,7 +571,6 @@ class ReviewHandbackTest(unittest.TestCase):
 
 class ImplementationReplyCommandTest(unittest.TestCase):
     def setUp(self):
-        routes = render.build_routes(SETTINGS)
         self.github = full_prompt("github")
         self.linear = full_prompt("linear")
 
@@ -866,7 +860,9 @@ class RouteSkillTest(unittest.TestCase):
     SKILLS = {"linear": "factory-linear-triage", "github": "factory-github-triage"}
 
     def setUp(self):
-        self.enterContext(mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}))
+        home = mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"})
+        home.start()
+        self.addCleanup(home.stop)
         self.routes = render.build_routes(SETTINGS)
         self.skills = render.build_skills(SETTINGS)
 

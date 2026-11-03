@@ -71,13 +71,8 @@ def route_setting(hermes: str, home: Path, route: str, key: str) -> Any:
         return None
 
 
-def route_toolsets(hermes: str, home: Path, route: str) -> str:
-    value = route_setting(hermes, home, route, "toolsets")
-    return ",".join(value) if isinstance(value, list) else (value or "")
-
-
-def route_skills(hermes: str, home: Path, route: str) -> str:
-    value = route_setting(hermes, home, route, "skills")
+def route_list(hermes: str, home: Path, route: str, key: str) -> str:
+    value = route_setting(hermes, home, route, key)
     return ",".join(value) if isinstance(value, list) else (value or "")
 
 
@@ -244,10 +239,10 @@ class Run:
         return "\n\n" + (proc.stdout if proc.returncode == 0 and "<triage_intent>" in proc.stdout else ERROR_BLOCK)
 
     def replay(self, hermes: str, entry: dict[str, Any]) -> tuple[int, str, Optional[dict]]:
-        toolsets = route_toolsets(hermes, self.home, entry["route"])
+        toolsets = route_list(hermes, self.home, entry["route"], "toolsets")
         if not toolsets:
             return 1, f"route {entry['route']} has no toolsets in the config", None
-        skills = route_skills(hermes, self.home, entry["route"])
+        skills = route_list(hermes, self.home, entry["route"], "skills")
         with tempfile.TemporaryDirectory(prefix="webhook-retry-") as scratch:
             query = Path(scratch) / "query.txt"
             report = Path(scratch) / "report.json"
