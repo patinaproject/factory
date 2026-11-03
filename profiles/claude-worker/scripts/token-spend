@@ -211,12 +211,18 @@ def index_transcripts(config_dir: Path) -> dict[str, list[Path]]:
     return index
 
 
-def worktree_messages(mains: list[Path]) -> list[Message]:
+def worktree_messages(mains: list[Path], since: float | None) -> list[Message]:
+    """A file last written before `since` holds no message at or after it, so it is not read."""
+    def written_in_window(path: Path) -> bool:
+        return since is None or path.stat().st_mtime >= since
+
     messages: list[Message] = []
     for main in mains:
-        messages += read_messages(main, False)
+        if written_in_window(main):
+            messages += read_messages(main, False)
         for sub in sorted((main.with_suffix("") / "subagents").glob("agent-*.jsonl")):
-            messages += read_messages(sub, True)
+            if written_in_window(sub):
+                messages += read_messages(sub, True)
     return messages
 
 
@@ -313,7 +319,7 @@ def collect(gateway: Path, worker: Path, config_dir: Path, window: Window) -> Le
     for path, worktree in sorted(worktrees.items()):
         if path not in transcripts:
             continue
-        inside, outside = split_by_run(worktree.runs, worktree_messages(transcripts[path]))
+        inside, outside = split_by_run(worktree.runs, worktree_messages(transcripts[path], window.since))
         for run in worktree.runs:
             if window.has(run.started_at):
                 ledger.spends += run_spends(run, inside[run.key])

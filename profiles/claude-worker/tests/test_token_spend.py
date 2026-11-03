@@ -327,6 +327,14 @@ class JoinTests(Harness):
         report = self.run_script("--since", "5400")
         self.assertEqual(report["total"]["tokens"]["total"], 111 + 21)
 
+    def test_files_last_written_before_the_window_are_not_read(self):
+        projects = self.claude / "projects" / "-wt-three"
+        for stale in (projects / "any-name.jsonl", projects / "any-name" / "subagents" / "agent-1.jsonl"):
+            os.utime(stale, (5000, 5000))
+        self.assertEqual(self.run_script("--since", "5400")["total"]["tokens"]["total"], 21)
+        os.utime(projects / "any-name.jsonl", (9000, 9000))
+        self.assertEqual(self.run_script("--since", "5400")["total"]["tokens"]["total"], 122)
+
     def test_transcript_with_no_matching_task_is_ignored(self):
         self.assertNotIn("777777", json.dumps(self.run_script()))
 
