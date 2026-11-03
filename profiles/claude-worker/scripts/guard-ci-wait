@@ -10,6 +10,12 @@ below the cache lifetime.
 It also refuses an `until` or `while` loop that runs `sleep` with no limit, and a background call whose
 timeout is above the factory's command limit, which claude-session passes as the first argument.
 
+A foreground call has a second set of limits, because a wait the model writes itself can outlast the cache
+without a long `sleep`: sleeps in one command are summed, a `$SECONDS` deadline in a sleep loop or a
+`timeout N` around a sleeping command must be at most MAX_WAIT_SECONDS, and a tool `timeout` above
+MAX_WAIT_SECONDS is refused when the command runs `sleep` or names a file whose text does. A background call
+keeps only the first set.
+
 Exit 0 allows the call (printing an input rewrite when it sets a timeout), exit 2 refuses it and
 Claude Code shows stderr to the model.
 """
@@ -18,7 +24,9 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import sys
+from pathlib import Path
 
 MAX_WAIT_SECONDS = 270
 TOOL_TIMEOUT_MS = MAX_WAIT_SECONDS * 1000
@@ -34,6 +42,12 @@ BOUNDING_CONDITION = re.compile(r"-(?:lt|le|gt|ge)\b|\(\(|\bSECONDS\b")
 READ_CONDITION = re.compile(r"(?:\w+=\S*\s+)*read\b")
 COUNTER_TEST = re.compile(r"-(?:lt|le|gt|ge|eq|ne)\b|\bSECONDS\b|\(\([^)]*(?:<|>|==|!=)")
 BREAK = re.compile(r"\bbreak\b")
+LOOP_KEYWORD = re.compile(r"\b(?:while|until)\b")
+SECONDS_DEADLINE = re.compile(r"\bSECONDS\}?\s*(?:\+\s*|-(?:lt|le|gt|ge)\s+|[<>]=?\s*)(\d+)")
+TIMEOUT_COMMAND = re.compile(
+    r"(?<![\w-])timeout\s+(?:(?:-[ks]\s+\S+|--?[\w-]+(?:=\S+)?)\s+)*(\d+(?:\.\d+)?)([smhd]?)\b"
+)
+SCRIPT_READ_BYTES = 65536
 # A command starts after a separator, a command substitution, or a brace group's opening or closing brace.
 COMMAND_SPLIT = re.compile(r"[;&|\n`]+|\$\((?!\()|(?<![\w$])[{}](?=[\s;]|$)")
 # Words that can precede a loop keyword in the same command.
@@ -41,13 +55,15 @@ PREFIX_WORDS = frozenset({"then", "else", "elif", "do", "time", "!"})
 REFUSAL = (
     "A foreground wait over {limit} seconds outlasts the 5-minute prompt cache, so the next call "
     "rewrites the whole context. To wait for CI, run `python3 <scripts>/{helper} <number> --repo <owner/repo>`. "
-    "It returns within 4 minutes: exit 3 means checks are still running, so run it again."
+    "It returns within 4 minutes: exit 3 means checks are still running, so run it again. To wait for "
+    "anything else, keep a loop's bound, a `timeout N`, and the tool `timeout` at or under {limit} seconds."
 )
 LOOP_REFUSAL = (
     "Refused: an `until` or `while` loop that runs `sleep` with no limit never ends when its condition "
     "never holds. To wait for CI, run `python3 <scripts>/{helper} <number> --repo <owner/repo>`. To wait "
     "for anything else, use a bounded loop: run it under `timeout <seconds>`, compare a counter or "
-    "`$SECONDS` in its condition, or test a counter in its body and `break`."
+    "`$SECONDS` in its condition, or test a counter in its body and `break`. Keep every bound at or under "
+    "{limit} seconds."
 )
 
 
@@ -133,14 +149,55 @@ def waits_without_limit(command: str) -> bool:
     return False
 
 
-def refusal(command: str) -> str | None:
+def refusal(command: str, foreground: bool) -> str | None:
     if WATCH.search(command):
         return "Refused: gh watches until checks finish"
     longest = max((float(n) * UNIT_SECONDS[unit] for n, unit in SLEEP.findall(command)), default=0)
+    if foreground:
+        longest = max(longest, sum(float(n) * UNIT_SECONDS[unit] for n, unit in SLEEP.findall(shell_code(command))))
     if longest > MAX_WAIT_SECONDS:
         return f"Refused: sleep {longest:g} seconds"
     if "pr checks" in command and SLEEP.search(command) and CHECKS_LOOP.search(command):
         return "Refused: a polling loop over gh pr checks"
+    return None
+
+
+def script_sleeps(command: str, cwd: str | None) -> bool:
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        arguments = command.split()
+    for argument in arguments:
+        path = Path(argument)
+        if cwd and not path.is_absolute():
+            path = Path(cwd) / path
+        try:
+            if not path.is_file():
+                continue
+            with path.open("rb") as handle:
+                text = handle.read(SCRIPT_READ_BYTES).decode(errors="ignore")
+        except (OSError, ValueError):
+            continue
+        if SLEEPS.search(text):
+            return True
+    return False
+
+
+def foreground_wait_refusal(command: str, tool_input: dict, cwd: str | None) -> str | None:
+    runs_sleep = bool(SLEEPS.search(command))
+    if runs_sleep and LOOP_KEYWORD.search(shell_code(command)):
+        deadline = max((int(n) for n in SECONDS_DEADLINE.findall(command)), default=0)
+        if deadline > MAX_WAIT_SECONDS:
+            return f"Refused: a sleep loop with a $SECONDS deadline of {deadline} seconds"
+    if runs_sleep:
+        for n, unit in TIMEOUT_COMMAND.findall(command):
+            if float(n) * UNIT_SECONDS[unit] > MAX_WAIT_SECONDS:
+                return f"Refused: `timeout {n}{unit}` around a command that sleeps"
+    timeout = tool_input.get("timeout")
+    if HELPER in command or not isinstance(timeout, (int, float)) or timeout <= TOOL_TIMEOUT_MS:
+        return None
+    if runs_sleep or script_sleeps(command, cwd):
+        return f"Refused: a tool timeout of {timeout:g} ms on a command that sleeps"
     return None
 
 
@@ -150,13 +207,14 @@ def decide(event: dict, command_limit_seconds: int = DEFAULT_COMMAND_LIMIT_SECON
         return 0, ""
     tool_input = event.get("tool_input") or {}
     command = tool_input.get("command") or ""
-    reason = refusal(command)
+    foreground = tool_input.get("run_in_background") is not True
+    reason = refusal(command, foreground) or (foreground and foreground_wait_refusal(command, tool_input, event.get("cwd")))
     if reason:
         return 2, f"{reason}. " + REFUSAL.format(limit=MAX_WAIT_SECONDS, helper=HELPER)
     if waits_without_limit(command):
-        return 2, LOOP_REFUSAL.format(helper=HELPER)
+        return 2, LOOP_REFUSAL.format(helper=HELPER, limit=MAX_WAIT_SECONDS)
     timeout = tool_input.get("timeout")
-    if tool_input.get("run_in_background") is True and isinstance(timeout, (int, float)) and timeout > command_limit_seconds * 1000:
+    if not foreground and isinstance(timeout, (int, float)) and timeout > command_limit_seconds * 1000:
         return 2, (
             f"Refused: a background command with a timeout of {timeout:g} ms is above the factory's command limit "
             f"of {command_limit_seconds} seconds. Set `timeout` to {command_limit_seconds * 1000} or less, or leave it out."

@@ -149,7 +149,7 @@ class GuardTests(unittest.TestCase):
     def test_a_bounded_loop_and_text_that_only_mentions_a_loop_pass(self) -> None:
         for command in [
             "for i in $(seq 20); do grep -q x f && break; sleep 10; done",
-            "timeout 600 sh -c 'until grep -q x f; do sleep 5; done'",
+            "timeout 240 sh -c 'until grep -q x f; do sleep 5; done'",
             "while [ $i -lt 20 ]; do i=$((i+1)); sleep 5; done",
             "until [ $SECONDS -gt 200 ]; do sleep 5; done",
             "while ((i < 20)); do i=$((i+1)); sleep 5; done",
@@ -204,6 +204,84 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(update["timeout"], guard.TOOL_TIMEOUT_MS)
         self.assertGreater(update["timeout"] / 1000, helper.BUDGET_SECONDS)
         self.assertEqual(update["description"], "wait")
+
+    def test_a_sleep_loop_with_a_deadline_over_the_ceiling_is_refused(self) -> None:
+        for command in [
+            "end=$((SECONDS+585)); until grep -q x f || [ $SECONDS -ge $end ]; do sleep 30; done",
+            "until [ $SECONDS -gt 585 ]; do sleep 5; done",
+            "while ((SECONDS < 400)); do sleep 5; done",
+        ]:
+            code, text = self.decide(command)
+            self.assertEqual(code, 2, command)
+            self.assertIn("wait-for-checks", text)
+            self.assertIn("270 seconds", text)
+
+    def test_timeout_around_a_sleeping_command_over_the_ceiling_is_refused(self) -> None:
+        for command in [
+            "timeout 585 sh -c 'until grep -q x f; do sleep 5; done'",
+            "timeout 600 sh -c 'until grep -q x f; do sleep 5; done'",
+            "timeout 10m sh -c 'while true; do sleep 5; done'",
+            "timeout -k 5 300 sh -c 'until grep -q x f; do sleep 5; done'",
+            "timeout --signal=KILL 1h sh -c 'while true; do sleep 5; done'",
+        ]:
+            code, text = self.decide(command)
+            self.assertEqual(code, 2, command)
+            self.assertIn("wait-for-checks", text)
+            self.assertIn("270 seconds", text)
+
+    def test_sleeps_in_one_command_are_summed(self) -> None:
+        code, text = self.decide("sleep 270; sleep 270")
+        self.assertEqual(code, 2)
+        self.assertIn("270 seconds", text)
+        self.assertEqual(self.decide("sleep 100; sleep 100"), (0, ""))
+
+    def test_a_raised_tool_timeout_on_a_sleeping_command_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "wait.sh").write_text("sleep 30\n")
+            Path(directory, "poll.py").write_text("import time\ntime.sleep(30)\n")
+            for command in [f"bash {directory}/wait.sh 575", f"python3 {directory}/poll.py", "sleep 30"]:
+                code, text = self.decide(command, timeout=600000)
+                self.assertEqual(code, 2, command)
+                self.assertIn("wait-for-checks", text)
+                self.assertIn("270 seconds", text)
+            code, _ = guard.decide(
+                {"tool_name": "Bash", "cwd": directory, "tool_input": {"command": "python3 poll.py", "timeout": 600000}}
+            )
+            self.assertEqual(code, 2)
+            wait = f"bash {directory}/wait.sh 575"
+            self.assertEqual(self.decide(wait), (0, ""))
+            self.assertEqual(self.decide(wait, timeout=270000), (0, ""))
+        self.assertEqual(self.decide("pnpm test", timeout=600000), (0, ""))
+
+    def test_sleeps_in_quoted_text_are_not_summed(self) -> None:
+        for command in ["echo 'sleep 200; sleep 100'", "cat > w.sh <<'EOF'\nsleep 200\nsleep 200\nEOF"]:
+            self.assertEqual(self.decide(command), (0, ""), command)
+
+    def test_a_long_wait_around_the_helper_is_refused(self) -> None:
+        for command in [
+            "timeout 600 sh -c 'until python3 /w/scripts/wait-for-checks 5 --repo o/r; do sleep 5; done'",
+            "end=$((SECONDS+585)); until python3 /w/scripts/wait-for-checks 5 --repo o/r || [ $SECONDS -ge $end ]; do sleep 5; done",
+        ]:
+            code, text = self.decide(command)
+            self.assertEqual(code, 2, command)
+            self.assertIn("270 seconds", text)
+
+    def test_the_helper_keeps_its_rewrite_when_the_agent_raises_the_timeout(self) -> None:
+        code, text = self.decide("python3 /w/scripts/wait-for-checks 7 --repo o/r", timeout=600000)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(text)["hookSpecificOutput"]["updatedInput"]["timeout"], guard.TOOL_TIMEOUT_MS)
+
+    def test_the_foreground_wait_limits_do_not_apply_in_the_background(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "wait.sh").write_text("sleep 30\n")
+            for command in [
+                "end=$((SECONDS+585)); until grep -q x f || [ $SECONDS -ge $end ]; do sleep 30; done",
+                "until [ $SECONDS -gt 585 ]; do sleep 5; done",
+                "timeout 585 sh -c 'until grep -q x f; do sleep 5; done'",
+                "sleep 200; sleep 200",
+                f"bash {directory}/wait.sh 575",
+            ]:
+                self.assertEqual(self.decide(command, run_in_background=True, timeout=600000), (0, ""), command)
 
     def test_the_helper_cannot_smuggle_a_long_wait(self) -> None:
         self.assertEqual(self.decide("python3 wait-for-checks 7 --repo o/r; sleep 900")[0], 2)
