@@ -154,15 +154,17 @@ The full payload, truncated to 4000 characters:
 
 {__raw__}
 
-## Undelegated sessions
+## Sessions created on an issue
 
-Actions `ignore_factory_session` and `answer_mention`: the issue is not
-delegated to the agent app, and an `AgentSessionEvent` of type `created` opened
-the session.
+Actions `ignore_factory_session` and `answer_mention`: an `AgentSessionEvent` of
+type `created` opened the session.
 
-- `ignore_factory_session`: the factory opened this session, as "Triage inbox"
-  does for a triage card. Post no activity, create no card, and stop.
-- `answer_mention`: a person mentioned the agent. Answer the request in one
+- `ignore_factory_session`: the factory opened this session on any issue,
+  delegated or not, as "Triage inbox" and the `use_session` and `open_session`
+  turns do. That turn already handles it. Post no activity, create no card, and
+  stop.
+- `answer_mention`: the issue is not delegated to the agent app and a person
+  mentioned the agent. Answer the request in one
   `response` activity on `agent_session_id`, from the prompt context and the
   issue. Create no card and stop.
 

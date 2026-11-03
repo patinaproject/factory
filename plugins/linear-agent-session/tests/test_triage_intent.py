@@ -583,7 +583,7 @@ class IssueUpdateTest(unittest.TestCase):
 
     def test_the_duplicate_is_judged_at_the_delivery_time(self):
         live = issue(agentSessions=[session("s-1", 60)])
-        replay = intent_module.decide(issue_event(), live, [], [], APP, NOW - dt.timedelta(minutes=57), intent_module.NO_REPLY, intent_module.NO_THREAD, BRIEF, [], True)
+        replay = intent_module.decide(issue_event(), live, [], [], APP, NOW - dt.timedelta(minutes=57), intent_module.NO_REPLY, intent_module.NO_THREAD, BRIEF, [], True, False)
         self.assertEqual(replay.action, "session_created_handles_it")
         self.assertEqual(self.update(live).action, "open_session")
 

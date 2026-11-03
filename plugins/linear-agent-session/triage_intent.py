@@ -21,7 +21,7 @@ CLOCK_SKEW = dt.timedelta(minutes=1)
 
 # Every action the prompt handles. A machine contract: `templates/tests/test_render.py` fails when the prompt omits one.
 ACTIONS = {
-    "ignore_factory_session": "the factory opened a session on an undelegated issue; post nothing",
+    "ignore_factory_session": "the factory opened this session itself (delegated or not); post nothing",
     "answer_mention": "a person mentioned the agent on an undelegated issue; answer once",
     "gate_ready_for_human": "triage marked the issue for a person; create no card",
     "gate_needs_brief": "the issue carries the ready label but has no Agent brief; start a triage pass and create no card",
@@ -165,7 +165,9 @@ def _delegated(facts: Intent, delegation: bool) -> str:
     return "foreign_cards" if facts.foreign_cards else "create_card"
 
 
-def _session_created(facts: Intent, creator_id: Optional[str]) -> str:
+def _session_created(facts: Intent, creator_id: Optional[str], factory_session: bool) -> str:
+    if factory_session:
+        return "ignore_factory_session"
     if facts.delegated:
         return _delegated(facts, delegation=True)
     return "answer_mention" if creator_id else "ignore_factory_session"
@@ -208,6 +210,7 @@ def decide(
     document_titles: list[str],
     approvers: list[dict],
     operators_configured: bool,
+    factory_session: bool,
 ) -> Intent:
     found = triage_exit.find_card(work_cards, issue["id"], issue["identifier"], issue["gitBranchName"])
     triage_card = find_triage_card(triage_cards, issue["id"])
@@ -235,7 +238,7 @@ def decide(
         return replace(facts, action=action, agent_session_id=session, then=then)
     session = payload["agentSession"]["id"]
     if payload["action"] == "created":
-        action = _session_created(facts, payload["agentSession"].get("creatorId"))
+        action = _session_created(facts, payload["agentSession"].get("creatorId"), factory_session)
     elif (payload.get("agentActivity") or {}).get("signal") == "stop":
         action = _session_prompted(facts, stop=True)
     else:
@@ -327,6 +330,15 @@ def _issue_id(payload: Mapping[str, Any]) -> str:
     return payload["agentSession"]["issue"]["id"]
 
 
+def _factory_session(payload: Mapping[str, Any], opened_by_factory: Callable[[str], bool]) -> bool:
+    if payload["type"] != "AgentSessionEvent" or payload["action"] != "created":
+        return False
+    try:
+        return opened_by_factory(payload["agentSession"]["id"])
+    except Exception:
+        return False
+
+
 def compute(
     payload: Any,
     *,
@@ -336,6 +348,7 @@ def compute(
     cards: Callable[[Optional[str]], list[Card]],
     now: Optional[dt.datetime] = None,
     redact: Callable[[str], str] = blocks.hermes_redact,
+    opened_by_factory: Callable[[str], bool] = lambda _id: False,
 ) -> Intent:
     """Read the issue and both boards, then decide. Any failure becomes the `error` intent, never an exception."""
     try:
@@ -360,6 +373,7 @@ def compute(
             [document["title"] for document in documents],
             people,
             bool(operators),
+            _factory_session(payload, opened_by_factory),
         )
     except Exception as failure:
         return error_intent(redact(f"{type(failure).__name__}: {failure}"))

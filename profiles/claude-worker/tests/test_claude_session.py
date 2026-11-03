@@ -533,6 +533,8 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual((status, report["activity"]), (0, "thought"))
         self.assertEqual(self.session_creates(), [{"input": {"issueId": ISSUE_ID}}])
+        store = self.hermes_home / "plugin-data" / "linear-agent-session" / "opened-sessions"
+        self.assertFalse(store.exists())
 
     def test_a_triage_run_opens_no_session_when_it_moved_the_issue(self) -> None:
         for moved in (["triage", "unstarted"], ["backlog", "unstarted"]):

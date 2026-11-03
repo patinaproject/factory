@@ -26,6 +26,7 @@ from tests import (
 plugin = load_plugin()
 linear = plugin.linear
 tools = plugin.tools
+opened_sessions = plugin.opened_sessions
 
 
 class Clock:
@@ -593,6 +594,35 @@ class SessionCreateTest(unittest.TestCase):
         self.assertEqual(
             update["variables"], {"id": "session-77", "input": {"summary": "Triage ABC-123: Fix checkout"}}
         )
+
+    def test_the_session_id_is_recorded_before_titling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeLinear([self.CREATED, self.issue(), session_update_ok()])
+            tools.run_session_create(
+                lambda: make_client(fake), {"issue": "ABC-123", "purpose": "work"}, opened_dir=directory
+            )
+            self.assertTrue(opened_sessions.recorded(directory, "session-77"))
+            self.assertFalse(opened_sessions.recorded(directory, "session-78"))
+
+    def test_a_failed_create_records_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeLinear([(200, {"data": {"agentSessionCreateOnIssue": {"success": False, "agentSession": None}}})])
+            tools.run_session_create(
+                lambda: make_client(fake), {"issue": "ABC-123", "purpose": "work"}, opened_dir=directory
+            )
+            self.assertEqual(os.listdir(directory), [])
+
+    def test_an_unwritable_store_does_not_fail_the_tool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocker = os.path.join(directory, "file")
+            open(blocker, "w").close()
+            fake = FakeLinear([self.CREATED, self.issue(), session_update_ok()])
+            output = json.loads(
+                tools.run_session_create(
+                    lambda: make_client(fake), {"issue": "ABC-123", "purpose": "work"}, opened_dir=os.path.join(blocker, "x")
+                )
+            )
+        self.assertEqual(output["agent_session_id"], "session-77")
 
     def test_a_work_session_is_titled_work_on_the_issue(self):
         fake = FakeLinear([self.CREATED, self.issue(), session_update_ok()])
