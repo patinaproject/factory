@@ -512,3 +512,38 @@ class BriefDispatchTest(BriefHarness):
         self.assertIn("releasing t_impl for an Agent brief failed: reading Linear issue ABC-123 failed: Entity not found",
                       proc.stderr)
         self.assertEqual(self.statuses()["t_impl"], ("scheduled", "claude-worker"))
+
+
+class PullRequestSweepDispatchTest(ParkedHarness):
+    """`dispatch-triage` runs `card_transition.sweep_pull_request`, here replaced by a fake that reports `swept`."""
+
+    DRIVER = (
+        "import importlib.machinery, importlib.util, sys, card_transition\n"
+        "card_transition.sweep_pull_request = lambda: {swept!r}\n"
+        "loader = importlib.machinery.SourceFileLoader('dispatch_triage', 'dispatch-triage')\n"
+        "module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))\n"
+        "loader.exec_module(module)\n"
+        "sys.exit(module.main())\n"
+    )
+
+    def dispatch(self, swept: dict) -> subprocess.CompletedProcess:
+        self.state_path.write_text(json.dumps({
+            "default_tasks": [], "tasks": [], "settings": {"triage": {"max_running": 2}},
+            "db_path": str(self.board), "default_db": str(self.default_board),
+        }))
+        env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path),
+               "HERMES_HOME": str(self.home)}
+        return subprocess.run([sys.executable, "-c", self.DRIVER.format(swept=swept)], cwd=SCRIPTS, env=env,
+                              capture_output=True, text=True)
+
+    def test_a_failed_pull_request_read_exits_1_and_names_the_card(self) -> None:
+        proc = self.dispatch({"released": [], "failed": {"t_waiting": "gh pr view o/r#7 failed: gh: HTTP 502"}})
+
+        self.assertEqual((proc.returncode, proc.stdout), (1, ""))
+        self.assertIn("releasing t_waiting for a GitHub pull request failed: gh pr view o/r#7 failed: gh: HTTP 502",
+                      proc.stderr)
+
+    def test_a_released_card_is_reported(self) -> None:
+        proc = self.dispatch({"released": ["t_waiting"], "failed": {}})
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "released t_waiting\n", ""))

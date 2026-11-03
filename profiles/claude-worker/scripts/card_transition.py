@@ -631,6 +631,113 @@ def sweep_issue() -> dict:
     return {"released": released, "failed": failed}
 
 
+PULL_READ_SECONDS = 30
+PULL_STATES = {"MERGED": "it merged", "CLOSED": "it closed without merging", "OPEN": None}
+
+
+def read_pull_state(pull) -> str | None:
+    """Why the pull request releases a card waiting for it, or None while it is open. Every `gh` error is a
+    `Failed`, including `Could not resolve to`, which GitHub also returns for a repository the App cannot see."""
+    env = {**os.environ, "GH_CONFIG_DIR": str(Path(os.environ["HERMES_HOME"]) / "gh")}
+    command = ["gh", "pr", "view", str(pull.number), "--repo", pull.repo, "--json", "state"]
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True, env=env, timeout=PULL_READ_SECONDS)
+    except OSError as failure:
+        raise Failed(f"gh could not run: {failure.strerror or failure}") from failure
+    except subprocess.TimeoutExpired:
+        raise Failed(f"gh pr view {pull} timed out after {PULL_READ_SECONDS} seconds") from None
+    if proc.returncode != 0:
+        raise Failed(f"gh pr view {pull} failed: {last_line(proc.stderr)}")
+    try:
+        state = json.loads(proc.stdout)["state"]
+        return PULL_STATES[state]
+    except (ValueError, KeyError, TypeError):
+        raise Failed(f"gh pr view {pull} printed no pull request state") from None
+
+
+def wait_for_pull_request(card: Card, board: str, show: dict, pull, closed: Callable[[object], str | None],
+                          post: Callable[[str, str], None]) -> str:
+    """The pull request release rule for one parked card: `released` or `waiting`. `closed` gives the reason the
+    pull request releases the card, and `post` puts a thought on the card's agent session. Every text it writes
+    names the pull request as `owner/name#number`, because Hermes holds a `ready` card for a day after a card
+    comment that holds a pull request URL."""
+    task = card.show()["task"]
+    if task["assignee"] != WORKER:
+        return "waiting"
+    park = [event for event in show["events"] if event["kind"] == "scheduled"][-1]
+    after = [comment["body"] for comment in show["comments"] if comment["created_at"] >= park["created_at"]]
+    why = "a person replied" if any(reply_inbox.is_reply(body) for body in after) else closed(pull)
+    noted = f"{plugin_module('blocker-order', 'result_line').PULL_REQUEST_NOTED} {pull}"
+    if why is not None:
+        note = f"{noted}, and {why}."
+        if note not in after:
+            card.comment(note)
+        return "released" if release_parked(card, board) else "waiting"
+    if not any(body.startswith((f"{noted}.", f"{noted},")) for body in after):
+        card.comment(f"{noted}. This card continues once the pull request merges or closes, or a person replies.")
+        post(card_field(task["body"], "linear_agent_session_id"),
+             f"This card waits for {pull} to merge and continues when it merges or closes.")
+    return "waiting"
+
+
+def sweep_pull_request() -> dict:
+    """Apply the pull request release rule to every card parked for a GitHub pull request, on every board.
+    `dispatch-triage` runs it each minute. GitHub is read only while such a card waits, once per pull request,
+    and only with a fresh gh login; Linear only for a card's first pass."""
+    prefix = getattr(plugin_module("blocker-order", "result_line"), "PULL_REQUEST_PARK", None)
+    released, failed = [], {}
+    if prefix is None or not gh_login.is_fresh(Path(os.environ["HERMES_HOME"]) / "gh", time.time()):
+        return {"released": released, "failed": failed}
+    reads: dict = {}
+    linear = []
+
+    def closed(pull) -> str | None:
+        if pull not in reads:
+            try:
+                reads[pull] = read_pull_state(pull)
+            except Failed as failure:
+                reads[pull] = failure
+        if isinstance(reads[pull], Failed):
+            raise reads[pull]
+        return reads[pull]
+
+    def post(session_id: str, text: str) -> None:
+        if not linear:
+            module = plugin_module("linear-agent-session", "linear")
+            linear.extend([module, module.client_from_env()])
+        module, client = linear
+        try:
+            client.create_activity(session_id, module.activity_content("thought", text))
+        except (*module.CLIENT_ERRORS, OSError) as error:
+            raise Failed(f"posting the note on Linear failed: {error}") from None
+
+    for each in boards():
+        slug, path = each["slug"], each["db_path"]
+        if not os.path.exists(path):
+            continue
+        try:
+            waiting = kanban_board.scheduled(path)
+        except sqlite3.Error as failure:
+            failed[slug] = f"cannot read the board: {failure}"
+            continue
+        for task_id, show in sorted(waiting.items()):
+            if not wait_over(show, prefix):
+                continue
+            reason = [event for event in show["events"] if event["kind"] == "scheduled"][-1]["payload"]["reason"]
+            pull = plugin_module("blocker-order", "result_line").park_pull_request(reason)
+            if pull is None:
+                failed[task_id] = f"the park reason names no pull request: {reason}"
+                continue
+            try:
+                action = wait_for_pull_request(Card(slug, task_id), slug, show, pull, closed, post)
+            except Failed as failure:
+                failed[task_id] = str(failure)
+                continue
+            if action == "released":
+                released.append(task_id)
+    return {"released": released, "failed": failed}
+
+
 def park_waiting(board: str | None) -> dict:
     result_line = plugin_module("blocker-order", "result_line")
     parked = []

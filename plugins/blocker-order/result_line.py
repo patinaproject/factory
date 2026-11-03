@@ -205,7 +205,9 @@ def pull_request(result: str) -> Optional[PullRequest]:
 
 def park_pull_request(reason: str) -> Optional[PullRequest]:
     """The pull request that a `PULL_REQUEST_PARK` reason names in the short form, or None."""
-    match = _PULL_REQUEST_REF.fullmatch(reason[len(PULL_REQUEST_PARK):].strip()) if reason.startswith(PULL_REQUEST_PARK) else None
+    if not reason.startswith(PULL_REQUEST_PARK):
+        return None
+    match = _PULL_REQUEST_REF.fullmatch(reason[len(PULL_REQUEST_PARK):].strip())
     return PullRequest(match.group(1), int(match.group(2))) if match else None
 
 

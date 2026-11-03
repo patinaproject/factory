@@ -20,6 +20,8 @@ it releases the card with the same line, or queues the issue's triage card and p
 `queued <triage task id> for <task id>`, so the next step can assign that triage card.
 For each card parked for a GitHub issue it applies `card_transition.sweep_issue`: it releases the card with the
 same line once the issue closes or a person replies, and otherwise leaves it parked.
+For each card parked for a GitHub pull request it applies `card_transition.sweep_pull_request`: it releases
+the card with the same line once the pull request merges or closes or a person replies.
 Then it counts the board's cards that are `running`, or `ready` with an
 assignee, and assigns `claude-worker` to waiting `ready` cards, highest priority
 and then oldest first, until that count reaches `triage.max_running` in the
@@ -114,6 +116,7 @@ def main() -> int:
         released = release_parked(card_transition.sweep_deploy, "a factory deploy") and released
         released = release_parked(card_transition.sweep_brief, "an Agent brief") and released
         released = release_parked(card_transition.sweep_issue, "a GitHub issue") and released
+        released = release_parked(card_transition.sweep_pull_request, "a GitHub pull request") and released
         tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
         for task_id in to_assign(tasks, cap):
             hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)
