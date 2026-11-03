@@ -1232,8 +1232,11 @@ that is not a positive integer or differs between the homes.
 
 ## 11. Webhook routes
 
-`templates/render.py` builds the `linear` and `github` routes and the webhook
-rate limit from the settings in part 10. [`templates/README.md`](../../templates/README.md) describes the
+`templates/render.py` builds the `linear` and `github` routes, their two skills,
+and the webhook rate limit from the settings in part 10. Each route's `prompt` is
+only its event section. The static triage rules are the route's skill
+(`factory-linear-triage`, `factory-github-triage`), which Hermes keeps in the
+prompt cache. [`templates/README.md`](../../templates/README.md) describes the
 output.
 
 **Check.** Compare each rendered route and the rate limit with the installed ones:
@@ -1244,8 +1247,9 @@ python3 <repo>/templates/render.py --check
 
 It prints one line per route, such as
 `route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference`, then
-`rate_limit: matches 1200`. It exits `0` only when every route and the rate
-limit match and every secret is its reference. A
+`rate_limit: matches 1200`, then one `skill <name>: matches` line per skill. It
+exits `0` only when every route, skill, and the rate limit match and every
+secret is its reference. A skill line says `not installed` or `differs`. A
 `differs in <keys>` line names the keys that differ. A secret line other than
 `is the ... reference` means the route holds a literal secret, or Hermes has no
 value for the reference.
@@ -1262,6 +1266,17 @@ config keys, such as `platforms.webhook.extra.routes.linear` and
 ```sh
 python3 <repo>/templates/render.py > <scratch>/webhook-config.json
 ```
+
+**Install the skills first.** A route names its skill, and Hermes finds a skill
+only as `<home>/skills/<name>/SKILL.md`. Never commit the rendered files, which
+hold the factory's real values. This is idempotent:
+
+```sh
+python3 <repo>/templates/render.py --install-skills
+```
+
+Hermes lists its skills once, so a new or changed skill takes effect after the
+gateway restarts.
 
 **Install** each key that `--check` reports as not installed, as differing, or
 with the wrong secret:
@@ -2436,6 +2451,9 @@ Hermes process starts. The new helper also writes
    - A `work skills` line: the work skills directory is missing, empty, or
      lacks a skill that `allow` names. Fix the directory or the part 5
      setting.
+   - A `route skill <path>` line: run the part 11 `render.py --install-skills`
+     before the route install. The new or changed skill takes effect only after
+     the gateway restarts, which only the operator or `restart-gateway` does.
    - A `webhook config <key>` line: run the part 11 install for that key.
    - A `webhook route <name>: <n> rejected with HTTP 429` line: the gateway
      dropped deliveries in the last hour. Check that
