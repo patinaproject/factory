@@ -12,6 +12,7 @@ MACHINE_PARKS = (
     "Waiting for a factory deploy:",
     "Waiting for triage:",
     "Waiting for an issue:",
+    "Waiting for a pull request:",
 )
 WAITING_STATUSES = ("blocked", "triage")
 
