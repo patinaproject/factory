@@ -158,6 +158,14 @@ message, because the `blocker-order` hook sees tool results and not that message
   activity that says Claude ran and `claude-session` failed after it, with the
   message, and never that Claude did not start. Call `kanban_block` with kind
   `capability` and stop.
+- A line of `signal`, `elapsed`, and `paused`, with `session_id` once Claude
+  started, means a person or process stopped `claude-session` with that signal.
+  It is not a crash. The `blocker-order` hook adds `stopped_park` when `paused`
+  is true, and the sweep returns the card once the Hermes pause ends: stop, post
+  no activity, and never call `kanban_block`. Otherwise it adds `stopped_block`,
+  having blocked the card with kind `transient`: post an `error` activity with
+  the instruction's text, then stop and do not block again. When `parked` or
+  `blocked` is false, follow the instruction's fallback call, then stop.
 - A line that holds `"precondition": "gh_login"` means the worker's gh login is
   missing or stale. The `blocker-order` hook parks the card in `scheduled` and
   adds `gh_login_park` to the result, and a sweep returns the card to the queue
