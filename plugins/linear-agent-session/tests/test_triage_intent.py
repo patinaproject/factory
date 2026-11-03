@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+import tempfile
 import unittest
 from dataclasses import replace
 
@@ -68,10 +69,10 @@ def issue_event(updated_from=None):
 BRIEF = ["PAT-1 Agent brief"]
 
 
-def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD, titles=BRIEF, approvers=None, operators_configured=True):
+def decide(payload, live=None, triage=(), work=(), reply=intent_module.NO_REPLY, thread=intent_module.NO_THREAD, titles=BRIEF, approvers=None, operators_configured=True, factory_session=False):
     live = live or issue()
     people = plugin.linear.approvers(live["assignee"], None, []) if approvers is None else approvers
-    return intent_module.decide(payload, live, list(triage), list(work), APP, NOW, reply, thread, list(titles), people, operators_configured)
+    return intent_module.decide(payload, live, list(triage), list(work), APP, NOW, reply, thread, list(titles), people, operators_configured, factory_session)
 
 
 def expected(action, **overrides):
@@ -298,6 +299,27 @@ class SessionCreatedTest(unittest.TestCase):
     def test_a_factory_session_on_an_undelegated_issue_is_ignored(self):
         self.assertEqual(
             decide(session_event("created", creator=None), issue(delegate=None)),
+            expected("ignore_factory_session", delegated=False),
+        )
+
+    def test_a_session_the_factory_opened_is_ignored_on_a_delegated_issue_too(self):
+        existing = card("t_work", status="blocked", body=id_line())
+        for work in ([], [existing]):
+            with self.subTest(cards=len(work)):
+                self.assertEqual(
+                    decide(session_event("created"), work=work, factory_session=True),
+                    expected(
+                        "ignore_factory_session",
+                        card={"id": "t_work", "status": "blocked", "matched_by": "linear_issue_id"} if work else None,
+                    ),
+                )
+
+    def test_a_session_the_factory_did_not_open_still_creates_or_reuses_the_card(self):
+        self.assertEqual(decide(session_event("created"), factory_session=False), expected("create_card"))
+
+    def test_a_session_the_factory_opened_is_ignored_on_an_undelegated_issue_whoever_the_creator_is(self):
+        self.assertEqual(
+            decide(session_event("created"), issue(delegate=None), factory_session=True),
             expected("ignore_factory_session", delegated=False),
         )
 
@@ -959,7 +981,7 @@ class ApproverTest(unittest.TestCase):
 
 
 class ComputeTest(unittest.TestCase):
-    def compute(self, payload, client, boards=None, now=NOW, redact=lambda text: re.sub(r"lin_api_\w+", "[redacted]", text), operators=()):
+    def compute(self, payload, client, boards=None, now=NOW, redact=lambda text: re.sub(r"lin_api_\w+", "[redacted]", text), operators=(), opened_by_factory=lambda _id: False):
         boards = boards or {"triage": [], None: []}
         return intent_module.compute(
             payload,
@@ -969,7 +991,42 @@ class ComputeTest(unittest.TestCase):
             cards=lambda board: boards[board],
             now=now,
             redact=redact,
+            opened_by_factory=opened_by_factory,
         )
+
+    def test_a_created_event_for_a_session_the_factory_opened_does_nothing(self):
+        asked = []
+
+        def opened(session_id):
+            asked.append(session_id)
+            return session_id == "session-1"
+
+        result = self.compute(session_event("created"), FakeLinearClient(issue()), opened_by_factory=opened)
+        self.assertEqual((result.action, asked), ("ignore_factory_session", ["session-1"]))
+
+    def test_only_a_created_session_event_asks_whether_the_factory_opened_it(self):
+        asked = []
+        client = FakeLinearClient(issue())
+        for payload in (session_event("prompted", body="go"), session_event("prompted", signal="stop"), issue_event()):
+            self.compute(payload, client, opened_by_factory=lambda sid: asked.append(sid) or True)
+        self.assertEqual(asked, [])
+
+    def test_a_failed_lookup_of_the_factory_sessions_routes_as_a_person_session(self):
+        def broken(_id):
+            raise OSError("disk gone")
+
+        result = self.compute(session_event("created"), FakeLinearClient(issue()), opened_by_factory=broken)
+        self.assertEqual(result.action, "create_card")
+
+    def test_a_session_recorded_in_the_store_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plugin.opened_sessions.record(directory, "session-1", NOW)
+            result = self.compute(
+                session_event("created"),
+                FakeLinearClient(issue()),
+                opened_by_factory=lambda sid: plugin.opened_sessions.recorded(directory, sid),
+            )
+        self.assertEqual(result.action, "ignore_factory_session")
 
     def test_a_session_event_reads_its_issue_and_both_boards(self):
         client = FakeLinearClient(issue())
