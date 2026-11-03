@@ -352,7 +352,7 @@ def make_dispatch_hook(
         return rewrite(intent, event)
 
     def rewrite(intent: triage_intent.Intent, event: Any) -> dict[str, str]:
-        return {"action": "rewrite", "text": triage_intent.render(intent) + event.text}
+        return {"action": "rewrite", "text": event.text + "\n\n" + triage_intent.render(intent)}
 
     async def compute_for(event: Any) -> triage_intent.Intent:
         try:

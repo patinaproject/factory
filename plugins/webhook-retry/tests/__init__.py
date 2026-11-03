@@ -22,3 +22,26 @@ def load_plugin():
 def chat_key(delivery: str, route: str = "linear", profile: str = "default") -> str:
     body = base64.urlsafe_b64encode(json.dumps([profile, route, delivery]).encode()).decode().rstrip("=")
     return f"webhook:v2:{body}"
+
+
+SKILL_PREFIX = '[IMPORTANT: The user has invoked the "factory-linear-triage" skill, indicating they want you to follow its instructions. '
+SKILL_MARKER = "The user has provided the following instruction alongside the skill invocation: "
+
+
+def skill_turn(instruction: str, body: str = "static triage rules\n" * 400) -> str:
+    """A turn the way Hermes builds it from a route skill: the cached scaffold, then the per-event instruction."""
+    return f"{SKILL_PREFIX}The full skill content is loaded below.]\n\n{body}\n[Skill directory: /x]\n{SKILL_MARKER}{instruction}"
+
+
+def skill_commands_module():
+    """Stands in for Hermes' `agent.skill_commands`, whose extractor cuts after the last instruction marker."""
+    import types
+
+    def extract(content):
+        if not isinstance(content, str) or not content.startswith("[IMPORTANT: The user has invoked the "):
+            return content
+        return content.rsplit(SKILL_MARKER, 1)[1].split("\n\n[Runtime note:", 1)[0]
+
+    module = types.ModuleType("agent.skill_commands")
+    module.extract_user_instruction_from_skill_message = extract
+    return {"agent": types.ModuleType("agent"), "agent.skill_commands": module}

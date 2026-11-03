@@ -244,7 +244,7 @@ class IntentHookTest(unittest.TestCase):
         )
         return asyncio.run(hook(event=evt, gateway=object(), session_store=None))
 
-    def test_a_linear_delivery_gets_the_block_in_front_of_its_prompt(self):
+    def test_a_linear_delivery_gets_the_block_after_its_prompt(self):
         seen = []
 
         def compute(payload):
@@ -255,8 +255,8 @@ class IntentHookTest(unittest.TestCase):
         result = self.run_intent_hook(evt, compute)
         self.assertEqual(seen, [evt.raw_message])
         self.assertEqual(result["action"], "rewrite")
-        self.assertTrue(result["text"].startswith("## Computed triage intent\n\n<triage_intent>\n{"))
-        self.assertTrue(result["text"].endswith("</triage_intent>\n\nrendered prompt"))
+        self.assertTrue(result["text"].startswith("rendered prompt\n\n## Computed triage intent\n\n<triage_intent>\n{"))
+        self.assertTrue(result["text"].endswith("</triage_intent>\n\n"))
         self.assertIn('"action": "create_card"', result["text"])
 
     def test_a_skip_stays_a_skip_and_computes_nothing(self):
@@ -360,7 +360,7 @@ class IntentHookTest(unittest.TestCase):
             result = self.run_intent_hook(event(session_event("created")), compute)
         self.assertEqual(result["action"], "rewrite")
         self.assertIn('"action": "error"', result["text"])
-        self.assertTrue(result["text"].endswith("rendered prompt"))
+        self.assertTrue(result["text"].startswith("rendered prompt\n\n"))
 
     def test_a_failing_intent_becomes_the_error_block_without_a_secret(self):
         def compute(_):

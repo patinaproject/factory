@@ -417,8 +417,8 @@ def matches(rendered, installed) -> bool:
     return rendered == installed
 
 
-def check_routes(commit: Commit, homes: Homes) -> list:
-    root, hermes = homes.root, homes.hermes
+def render_at(commit: Commit, homes: Homes, *args: str) -> subprocess.CompletedProcess:
+    """Run the commit's render.py on a copy of its templates, with the root home's settings."""
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         rendered_from = {**commit.files("templates"), **commit.files("profiles/claude-worker/scripts/reply_inbox.py")}
@@ -429,11 +429,36 @@ def check_routes(commit: Commit, homes: Homes) -> list:
         # render.py runs `hermes` by name, so put the chosen executable first on PATH under that name.
         shim = work / "bin"
         shim.mkdir()
-        (shim / "hermes").symlink_to(hermes)
-        env = {**os.environ, "HERMES_HOME": str(root), "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}"}
-        render = subprocess.run(
-            [sys.executable, str(work / "templates" / "render.py")], env=env, capture_output=True, text=True
+        (shim / "hermes").symlink_to(homes.hermes)
+        env = {**os.environ, "HERMES_HOME": str(homes.root), "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}"}
+        return subprocess.run(
+            [sys.executable, str(work / "templates" / "render.py"), *args], env=env, capture_output=True, text=True
         )
+
+
+def check_skills(commit: Commit, homes: Homes) -> list:
+    """Each route names a skill that Hermes finds only as a file under the home, so a missing or stale one is drift.
+
+    A render failure is check_routes' to report. An installed route names the skills this commit renders whenever
+    it matches the rendered route, so a route that names a skill nobody installed is a skill that is missing here.
+    """
+    render = render_at(commit, homes, "--skills-json")
+    if render.returncode != 0:
+        return []
+    fix = install_plan.skills_install(homes)
+    drifts = []
+    for name, text in json.loads(render.stdout).items():
+        path = homes.root / "skills" / name / "SKILL.md"
+        if not path.is_file():
+            drifts.append(Drift("route skill", str(path), f"is missing; a route at {commit.short} names it", fix))
+        elif path.read_bytes() != text.encode("utf-8"):
+            drifts.append(Drift("route skill", str(path), f"differs from the skill rendered at {commit.short}", fix))
+    return drifts
+
+
+def check_routes(commit: Commit, homes: Homes) -> list:
+    root, hermes = homes.root, homes.hermes
+    render = render_at(commit, homes)
     if render.returncode != 0:
         return [Drift(
             "webhook config", str(root), f"render.py failed at {commit.short}: {render.stderr.strip()}",
@@ -2397,6 +2422,7 @@ def main() -> int:
             *check_worker_secrets(commit, worker, hermes, settings),
             *check_upload_broker(root, *factory_settings.token_variables(settings)),
             *check_cron(commit, homes_, settings),
+            *check_skills(commit, homes_),
             *check_routes(commit, homes_),
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
