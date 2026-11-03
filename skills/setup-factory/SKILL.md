@@ -1071,6 +1071,11 @@ repository whose branch rules live in a ruleset: the gate reads rules only from
 the rulesets endpoint and cannot see classic branch protection. The default is
 empty, which leaves only GitHub's own queue report.
 
+An entry also declares the repository's queue, even an empty one (`{}`). With
+an entry, an approved, unqueued pull request on a base branch with an `update`
+rule hands off to review for a person to add it to the queue. Without an entry,
+that pull request stays refused.
+
 **GitHub login.** Return to [`references/github.md`](references/github.md)
 and run its "Sign the worker's `gh` in" section now. It needs only the
 settings above. The clones below use that login.
