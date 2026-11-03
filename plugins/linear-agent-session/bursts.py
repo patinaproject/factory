@@ -10,11 +10,26 @@ import fcntl
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
 STORE = "linear-route"
 STAMP = "factoryRoute"
+# Well under Hermes' 30 s script timeout, which would drop the event.
+LOCK_SECONDS = 5.0
+
+
+def take_lock(handle) -> None:
+    deadline = time.monotonic() + LOCK_SECONDS
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"the store lock was held for {LOCK_SECONDS:.0f} s")
+            time.sleep(0.05)
 
 
 def stamp(payload: Any) -> Optional[Tuple[str, int]]:
@@ -34,7 +49,7 @@ def clear(home: Path, payload: Any) -> None:
     store = Path(home) / STORE
     store.mkdir(parents=True, exist_ok=True)
     with open(store / "lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        take_lock(lock)
         path = store / "bursts.json"
         try:
             bursts = json.loads(path.read_text())

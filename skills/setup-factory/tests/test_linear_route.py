@@ -178,6 +178,13 @@ class BurstTest(RouteCase):
         self.assertEqual(recent["updatedFrom"], {"delegateId": "old", "labelIds": []})
         self.assertEqual(later["updatedFrom"], {"labelIds": [], "stateId": "s"})
 
+    def test_a_stale_burst_on_another_issue_is_dropped_from_the_store(self):
+        start = 1_000_000.0
+        linear_route.route(json.dumps(issue_update(issue="issue-2", created="a", updated_from={"stateId": "s"})), self.home, start)
+        linear_route.route(json.dumps(issue_update(created="b", updated_from={"labelIds": []})), self.home, start + 16 * 60)
+        stored = json.loads((self.home / "linear-route" / "bursts.json").read_text())
+        self.assertEqual(list(stored["issues"]), ["issue-1"])
+
     def test_session_events_and_comments_are_unchanged_and_unstamped(self):
         for payload in (session_created(), session_prompted(), comment()):
             with self.subTest(payload["type"], action=payload["action"]):
@@ -298,6 +305,18 @@ class CoalescedBurstTest(RouteCase):
             sorted((turn["data"]["id"], turn["createdAt"], tuple(sorted(turn["updatedFrom"]))) for turn in turns),
             [("issue-1", "c", ("delegateId", "labelIds")), ("issue-2", "d", ("delegateId", "stateId"))],
         )
+
+
+
+class HeldLockTest(RouteCase):
+    def test_a_lock_held_past_the_limit_passes_the_payload_through(self):
+        import fcntl
+        payload = issue_update(updated_from={"labelIds": []})
+        (self.home / "linear-route").mkdir()
+        with open(self.home / "linear-route" / "lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            out = self.run_script(json.dumps(payload))
+        self.assertEqual(json.loads(out), payload)
 
 
 if __name__ == "__main__":

@@ -238,20 +238,11 @@ def make_dispatch_hook(
     intent_pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-intent")
 
     async def guard_then_acknowledge(event: Any, **_: Any) -> Optional[dict[str, str]]:
+        # Cleared on entry, before any exit or slow step, so an update that lands mid-turn is not swept into this burst.
         try:
-            return await dispatch(event)
-        finally:
-            clear_burst(event.raw_message)
-
-    def clear_burst(payload: Any) -> None:
-        if bursts.stamp(payload) is None:
-            return
-        try:
-            bursts.clear(skip_home(), payload)
+            bursts.clear(skip_home(), event.raw_message)
         except Exception as failure:
             logger.warning("linear-agent-session: the Issue burst was not cleared: %s: %s", type(failure).__name__, failure)
-
-    async def dispatch(event: Any) -> Optional[dict[str, str]]:
         if paused():
             return None
         route = _delivery_route(event)

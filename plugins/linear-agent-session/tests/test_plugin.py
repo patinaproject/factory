@@ -998,9 +998,6 @@ def _load_cli():
     return module
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 ROUTE_SCRIPT = Path(PLUGIN_DIR).parents[1] / "skills" / "setup-factory" / "scripts" / "linear-route"
 
@@ -1065,3 +1062,7 @@ class BurstClearTest(unittest.TestCase):
         self.assertEqual(
             self.deliver("2026-11-03T10:00:50Z", {"labelIds": []})["updatedFrom"], {"stateId": "s-1", "labelIds": []}
         )
+
+
+if __name__ == "__main__":
+    unittest.main()
