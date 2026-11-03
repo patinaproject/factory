@@ -49,6 +49,18 @@ names one does not apply, and adds `issue_park` to the result. A URL that is not
 refuses to schedule such as a `goal_mode` card, gets the `needs_input` block above with the whole result as its
 reason. `card_transition.py` releases the card once the issue closes or a person replies.
 
+A report with `signal`, `elapsed`, and `paused` is a run that `claude-session` ended on SIGTERM, SIGINT, or SIGHUP.
+When `paused` is true the hook parks the card in `scheduled` with a reason that starts with
+`result_line.STOPPED_PARK`, and `card_transition.py` releases it once the pause ends. Otherwise, and when Hermes
+refuses to schedule the card, the hook blocks it with kind `transient` and a reason that names the signal.
+
+A finished run whose `result` starts with `Waiting for pull request:` and a GitHub pull request URL is a worker
+whose card must wait for another pull request to merge. On every board the hook parks the card in `scheduled` with
+the reason `result_line.PULL_REQUEST_PARK` and `owner/name#number`, never the URL, and adds `pull_request_park` to
+the result. A line without such a URL, or a card Hermes refuses to schedule, gets the `needs_input` block with the
+whole result as its reason. `card_transition.py` releases the card once the pull request merges or closes, or a
+person replies.
+
 After any successful park on the `triage` board whose reason starts with `Needs input:`, its own or one the
 worker made with `kanban_schedule`, the hook posts the round once per task and run through
 `linear-agent-session`'s `linear_triage_round` tool, which no model sees. It posts after the park, so nobody is
@@ -172,6 +184,39 @@ def park_for_precondition(precondition: str, error: str, dispatch: Dispatch) -> 
     )}
 
 
+def stop_text(report: result_line.Stopped) -> str:
+    where = "during a Hermes pause" if report.paused else "outside a Hermes pause"
+    return f"claude-session was stopped by {report.signal} after {report.elapsed} s, {where}. It was stopped, not crashed."
+
+
+def block_for_stop(report: result_line.Stopped, dispatch: Dispatch) -> dict:
+    reason = stop_text(report)
+    answer = _call(dispatch, "kanban_block", {"reason": reason, "kind": "transient"})
+    if not answer.get("ok"):
+        return {"blocked": False, "instruction": (
+            f"The blocker-order hook could not block this card: {answer.get('error')}. Call kanban_block with "
+            f"kind transient and exactly this reason, then stop: {json.dumps(reason)}. Do not run claude-session again."
+        )}
+    os.environ[STOP_NUDGE] = "off"
+    return {"blocked": True, "instruction": (
+        f"{reason} The blocker-order hook blocked this card with kind transient. Post an error activity with "
+        "that text, then stop: do not block again and do not run claude-session again."
+    )}
+
+
+def park_for_stop(report: result_line.Stopped, dispatch: Dispatch) -> dict:
+    """A card Hermes refuses to schedule (`goal_mode`) gets the transient block of an unpaused stop."""
+    answer = _call(dispatch, SCHEDULE_TOOL, {"reason": f"{result_line.STOPPED_PARK} {stop_text(report)}"})
+    if not answer.get("ok"):
+        return {"stopped_block": block_for_stop(report, dispatch)}
+    os.environ[STOP_NUDGE] = "off"
+    return {"stopped_park": {"parked": True, "instruction": (
+        f"claude-session was stopped by {report.signal} during a Hermes pause, so this card waits in scheduled "
+        "and goes back to the queue once the pause ends. Stop now: call no other tool, do not call kanban_block, "
+        "do not post an activity, and do not run claude-session again."
+    )}}
+
+
 def park_for_issue(result: str, dispatch: Dispatch) -> dict:
     """The result keys for a finished run that waits for a GitHub issue. A URL that is not an issue's, or a card
     Hermes refuses to schedule (`goal_mode`), gets today's `needs_input` block with the whole result."""
@@ -186,6 +231,24 @@ def park_for_issue(result: str, dispatch: Dispatch) -> dict:
     return {"issue_park": {"parked": True, "instruction": (
         f"This card waits in scheduled for {url} and goes back to the queue once that issue is closed or a person "
         "replies. Stop now: call no other tool, do not call kanban_block, and do not run claude-session again."
+    )}}
+
+
+def park_for_pull_request(result: str, dispatch: Dispatch) -> dict:
+    """The result keys for a finished run that waits for a GitHub pull request. A line without one, or a card
+    Hermes refuses to schedule (`goal_mode`), gets today's `needs_input` block with the whole result. The reason
+    names the pull request as `owner/name#number`, never by URL, for the one form every comment shares."""
+    pull = result_line.pull_request(result)
+    if pull is None:
+        return {"needs_input_block": block_for_input(result, dispatch)}
+    answer = _call(dispatch, SCHEDULE_TOOL, {"reason": f"{result_line.PULL_REQUEST_PARK} {pull}"})
+    if not answer.get("ok"):
+        return {"needs_input_block": block_for_input(result, dispatch)}
+    os.environ[STOP_NUDGE] = "off"
+    return {"pull_request_park": {"parked": True, "instruction": (
+        f"This card waits in scheduled for {pull} and goes back to the queue once that pull request merges or "
+        "closes, or a person replies. Stop now: call no other tool, do not call kanban_block, and do not run "
+        "claude-session again."
     )}}
 
 
@@ -331,6 +394,12 @@ def make_hook(ctx: Any):
             if key not in _handled:
                 _handled[key] = json.dumps({**payload, **park_for_issue(issue_result, ctx.dispatch_tool)})
             return _handled[key]
+        pull_result = result_line.waiting_for_pull_request(report)
+        if pull_result is not None:
+            key = (task, run, pull_result)
+            if key not in _handled:
+                _handled[key] = json.dumps({**payload, **park_for_pull_request(pull_result, ctx.dispatch_tool)})
+            return _handled[key]
         reason = result_line.needs_input(report)
         if reason is not None:
             key = (task, run, reason)
@@ -339,6 +408,15 @@ def make_hook(ctx: Any):
                 _handled[key] = json.dumps({**payload, "triage_round": park_round(task, run, marked, ctx.dispatch_tool)})
             elif key not in _handled:
                 _handled[key] = json.dumps({**payload, "needs_input_block": block_for_input(reason, ctx.dispatch_tool)})
+            return _handled[key]
+        stop = result_line.stopped(report)
+        if stop is not None:
+            key = (task, run, stop)
+            if key not in _handled:
+                _handled[key] = json.dumps({**payload, **(
+                    park_for_stop(stop, ctx.dispatch_tool) if stop.paused
+                    else {"stopped_block": block_for_stop(stop, ctx.dispatch_tool)}
+                )})
             return _handled[key]
         refusal = result_line.precondition_refusal(report)
         if refusal is not None:

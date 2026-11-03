@@ -20,6 +20,7 @@ ROUTE = install(Step.ROUTES, "hermes", "config", "set", "routes.github", "{}", r
 PROFILE = install(Step.PROFILE, "hermes", "profile", "update", "claude-worker", "-y")
 BOARD = install(Step.BOARDS, "hermes", "kanban", "boards", "create", "triage")
 WRAPPER = install(Step.WRAPPERS, "install", "-m", "0644", "a", "b")
+ROUTE_SCRIPT = install(Step.ROUTE_SCRIPTS, "install", "-m", "0644", "linear-route", "b")
 
 
 class PlanTest(unittest.TestCase):
@@ -37,6 +38,21 @@ class PlanTest(unittest.TestCase):
             (BOARD, PROFILE, ROUTE, WRAPPER),
             (install_plan.ManualLine("dashboard sign-in /root: dashboard.public_url is not set", "follow step 6"),),
         ))
+
+    def test_a_route_script_installs_before_the_route_that_names_it(self) -> None:
+        drifts = [
+            Drift("webhook config", "routes.linear", "not installed", ROUTE),
+            Drift("script", "/root/scripts/linear-route", "is missing", ROUTE_SCRIPT),
+            Drift("script", "/root/scripts/x", "is missing", WRAPPER),
+        ]
+
+        self.assertEqual(install_plan.plan(drifts).installs, (ROUTE_SCRIPT, ROUTE, WRAPPER))
+
+    def test_the_linear_route_script_install_is_a_route_script_step(self) -> None:
+        homes = install_plan.Homes("hermes", "python", Path("/root"), Path("/root/profiles/w"), Path("/repo"))
+
+        self.assertEqual(install_plan.wrapper_install(homes, "linear-route").step, Step.ROUTE_SCRIPTS)
+        self.assertEqual(install_plan.wrapper_install(homes, "auto-deploy").step, Step.WRAPPERS)
 
     def test_a_manual_line_never_removes_an_install(self) -> None:
         drifts = [
