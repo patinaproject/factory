@@ -321,8 +321,8 @@ class HookTest(unittest.TestCase):
     def test_a_resuming_comment_gets_the_intent_block_and_no_acknowledgement(self):
         result = self.deliver(comment_event())
         self.assertEqual(result["action"], "rewrite")
-        self.assertTrue(result["text"].startswith("## Computed triage intent\n\n<triage_intent>\n{"))
-        self.assertTrue(result["text"].endswith("</triage_intent>\n\nrendered prompt"))
+        self.assertTrue(result["text"].startswith("rendered prompt\n\n## Computed triage intent\n\n<triage_intent>\n{"))
+        self.assertTrue(result["text"].endswith("</triage_intent>\n\n"))
         self.assertIn('"action": "comment_resume"', result["text"])
         self.assertIn(f'"comment_id": "{COMMENT_ID}"', result["text"])
         self.assertEqual(self.client.activities, [])
