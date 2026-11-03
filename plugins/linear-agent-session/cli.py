@@ -68,6 +68,11 @@ def main(argv: Optional[list] = None) -> int:
     )
     teammate.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
 
+    comment_skip = commands.add_parser(
+        "comment-skip", help="say whether a Linear Comment payload resumes no card, so a replay needs no turn"
+    )
+    comment_skip.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
+
     reask_exit = commands.add_parser(
         "reask-exit", help="ask the person again for a reply re-ask whose Hermes exited before its turn-end hook"
     )
@@ -91,6 +96,8 @@ def main(argv: Optional[list] = None) -> int:
         return _triage_exit(plugin, args.payload_file)
     if args.command == "teammate-reply":
         return _teammate_reply(plugin, args.payload_file)
+    if args.command == "comment-skip":
+        return _comment_skip(plugin, args.payload_file)
     if args.command == "reask-exit":
         replies = plugin.replies
         log = Path(replies.hermes_home()) / "logs" / replies.EXIT_LOG
@@ -181,12 +188,29 @@ def _triage_intent(plugin, payload_file: str, now: Optional[str]) -> int:
             operator_user_ids=triage_exit.configured_operator_user_ids,
             client=plugin.linear.client_from_env,
             cards=triage_exit.listed_cards,
+            history=triage_exit.listed_history,
             now=moment,
             opened_by_factory=lambda sid: plugin.opened_sessions.recorded(plugin.opened_sessions.store_dir(os.environ), sid),
         )
     except Exception as failure:
         intent = triage_intent.error_intent(type(failure).__name__)
     print(triage_intent.render(intent), end="")
+    return 0
+
+
+def _comment_skip(plugin, payload_file: str) -> int:
+    triage_exit, triage_intent = plugin.triage_exit, plugin.triage_intent
+    with open(payload_file, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    intent = triage_intent.compute(
+        payload,
+        app_user_id=triage_exit.configured_app_user_id,
+        operator_user_ids=triage_exit.configured_operator_user_ids,
+        client=plugin.linear.client_from_env,
+        cards=triage_exit.listed_cards,
+        history=triage_exit.listed_history,
+    )
+    print(json.dumps({"skip": intent.action != "comment_resume"}))
     return 0
 
 

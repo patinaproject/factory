@@ -814,7 +814,8 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         class Plugin:
             linear = types.SimpleNamespace(client_from_env=lambda: "client", ACTIVITY_TYPES=[])
             triage_exit = types.SimpleNamespace(
-                configured_app_user_id=lambda: "app", configured_operator_user_ids=lambda: [], listed_cards=lambda board: []
+                configured_app_user_id=lambda: "app", configured_operator_user_ids=lambda: [], listed_cards=lambda board: [],
+                listed_history=lambda board, task_id: None,
             )
             triage_intent = types.SimpleNamespace(
                 parse_time=lambda text: ("parsed", text),

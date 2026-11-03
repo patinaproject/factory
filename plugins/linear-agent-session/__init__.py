@@ -231,6 +231,7 @@ def make_dispatch_hook(
     handle_triage_exit: Callable[[Any], triage_exit.Verdict],
     compute_intent: Optional[Callable[[Any], triage_intent.Intent]] = None,
     skip_home: Callable[[], Path] = triage_exit.gateway_home,
+    comment_store: Callable[[], Optional[str]] = lambda: idempotency.store_dir(os.environ),
 ) -> Callable[..., Any]:
     pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-exit")
     # A bulk move can hold every triage-exit worker for minutes, and an intent must not wait behind it.
@@ -253,6 +254,8 @@ def make_dispatch_hook(
         if route == webhook_route() and addressed_to_teammate(event.raw_message):
             logger.info("linear-agent-session: %s; no acknowledgement or triage turn", TEAMMATE_REPLY)
             return {"action": "skip", "reason": TEAMMATE_REPLY}
+        if route == webhook_route() and compute_intent is not None and _is_comment(event.raw_message):
+            return await resume_from_comment(event)
         await acknowledge_best_effort(event, route)
         skipped = await archive_triage_exit(event, route)
         if skipped is not None or route != webhook_route() or compute_intent is None:
@@ -304,7 +307,49 @@ def make_dispatch_hook(
         intent = compute_intent(payload)
         return compute_intent(payload) if intent.action == "error" else intent
 
+    def first_delivery(comment_id: str) -> Optional[str]:
+        """None when this delivery is the comment's first, else why it is not.
+
+        The id is recorded as done before the turn runs. A crash before the turn finishes leaves it recorded, so no
+        later delivery of the comment resumes the card and the person answers again. Forgetting the id on failure
+        could resume the card twice."""
+        ran = []
+        try:
+            idempotency.once(comment_store(), "comment_resume", comment_id, {}, lambda: ran.append(True) or {"recorded": True})
+        except linear.LinearError as failure:
+            return f"the comment's id could not be recorded: {failure}"
+        return None if ran else "the comment already resumed its card"
+
+    async def resume_from_comment(event: Any) -> dict[str, str]:
+        intent = await compute_for(event)
+        if intent.action == "comment_resume":
+            reason = first_delivery(intent.comment_id)
+            if reason is None:
+                return rewrite(intent, event)
+        elif intent.action == "error":
+            reason = f"the comment's intent failed: {intent.error}"
+        else:
+            reason = intent.skip_reason
+        logger.info("linear-agent-session: skipped a comment: %s", reason)
+        return {"action": "skip", "reason": reason}
+
     async def prepend_intent(event: Any) -> dict[str, str]:
+        intent = await compute_for(event)
+        if triage_intent.needs_no_turn(intent, event.raw_message):
+            reason = f"{intent.action}: the computed intent needs no action"
+            try:
+                write_skip_record(skip_home(), event.source.chat_id)
+            except Exception as failure:
+                logger.warning("linear-agent-session: no skip record, so the turn runs: %s: %s", type(failure).__name__, failure)
+            else:
+                logger.info("linear-agent-session: %s; no triage turn", reason)
+                return {"action": "skip", "reason": reason}
+        return rewrite(intent, event)
+
+    def rewrite(intent: triage_intent.Intent, event: Any) -> dict[str, str]:
+        return {"action": "rewrite", "text": triage_intent.render(intent) + event.text}
+
+    async def compute_for(event: Any) -> triage_intent.Intent:
         try:
             loop = asyncio.get_running_loop()
             intent = await asyncio.wait_for(
@@ -318,16 +363,7 @@ def make_dispatch_hook(
             )
             logger.warning("linear-agent-session: no triage intent: %s", message)
             intent = triage_intent.error_intent(message)
-        if triage_intent.needs_no_turn(intent, event.raw_message):
-            reason = f"{intent.action}: the computed intent needs no action"
-            try:
-                write_skip_record(skip_home(), event.source.chat_id)
-            except Exception as failure:
-                logger.warning("linear-agent-session: no skip record, so the turn runs: %s: %s", type(failure).__name__, failure)
-            else:
-                logger.info("linear-agent-session: %s; no triage turn", reason)
-                return {"action": "skip", "reason": reason}
-        return {"action": "rewrite", "text": triage_intent.render(intent) + event.text}
+        return intent
 
     return guard_then_acknowledge
 
@@ -338,6 +374,10 @@ def write_skip_record(home: Path, chat_id: str) -> None:
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(directory / hashlib.sha256(chat_id.encode()).hexdigest(), os.O_CREAT | os.O_WRONLY, 0o600)
     os.close(fd)
+
+
+def _is_comment(payload: Any) -> bool:
+    return isinstance(payload, dict) and payload.get("type") == "Comment"
 
 
 def _delivery_route(event: Any) -> Optional[str]:

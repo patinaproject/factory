@@ -25,7 +25,7 @@ REPLY_INBOX = Path("profiles") / "claude-worker" / "scripts" / "reply_inbox.py"
 GITHUB_ROUTE = "github"
 ROUTINGS = ("default", "synced_github")
 TOOLSETS = ["terminal", "kanban", "linear_agent_session"]
-LINEAR_EVENTS = ["AgentSessionEvent", "Issue"]
+LINEAR_EVENTS = ["AgentSessionEvent", "Comment", "Issue"]
 # Hermes resolves a relative in_file path against the gateway's home.
 OWNED_REFS_FILE = "owned-refs.json"
 TRIAGE_REFS_FILE = "triage-refs.json"
@@ -72,6 +72,14 @@ def linear_filters(app_user_id: str) -> list:
         {
             "any": [
                 {"field": "event", "equals": "AgentSessionEvent"},
+                {
+                    "all": [
+                        {"field": "event", "equals": "Comment"},
+                        {"field": "action", "equals": "create"},
+                        {"any": [{"field": "data.parentId", "missing": True}, {"field": "data.parentId", "equals": None}]},
+                        {"any": [owned("data.issueId"), {"field": "data.issueId", "in_file": TRIAGE_REFS_FILE}]},
+                    ]
+                },
                 {"field": "updatedFrom.delegateId", "exists": True},
                 {
                     "all": [

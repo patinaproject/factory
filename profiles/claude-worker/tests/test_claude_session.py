@@ -83,7 +83,8 @@ TODAYS_SYSTEM_PROMPT = (
     "check failed, and 3 means checks are still running, so run it again. A hook refuses `gh pr checks "
     "--watch`, `gh run watch`, any sleep or polling loop that waits longer, and any `until` or `while` loop "
     "that runs `sleep` with no limit. Bound such a loop with `timeout <N>`, a counter that breaks, or a "
-    "deadline in `$SECONDS`, or use `wait-for-checks` for CI. A background command's `timeout` must not "
+    "deadline in `$SECONDS`, or use `wait-for-checks` for CI. A loop's bound, a `timeout N`, and a raised tool `timeout` must "
+    "stay at or under 270 seconds. A background command's `timeout` must not "
     "exceed 600 seconds."
 )
 ISSUE_ENDING = (

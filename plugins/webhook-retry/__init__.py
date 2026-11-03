@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?[A-Za-z_][A-Za-z0-9_]*\}$")
 GITHUB_EVENT_LINE = re.compile(r"^- Event: (\S+), action (\S+)$", re.MULTILINE)
 SUMMARY_LIMIT = 120
-LINEAR_PAYLOAD_TYPES = ("Issue", "AgentSessionEvent")
+LINEAR_PAYLOAD_TYPES = ("Issue", "AgentSessionEvent", "Comment")
 PUSH_KEYS = ("ref", "before", "after", "pusher")
 
 _session_store: Any = None
