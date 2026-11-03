@@ -2565,6 +2565,42 @@ Hermes process starts. The new helper also writes
 9. Remove the lock and start `auto-deploy` once with the `launchctl kickstart`
    command above. Record the deployed commit in the private configuration record.
 
+## Report token spend
+
+`token-spend` shows where the factory's model tokens and estimated cost went.
+It reads the Hermes session tables, the Kanban run history, and Claude Code's
+transcripts, and it writes nothing. Run it as the worker:
+
+```bash
+HERMES_HOME=<worker profile home> python3 <worker profile home>/scripts/token-spend --since 2026-11-01
+```
+
+Flags:
+
+- `--since` and `--until` take an ISO date or datetime (naive means UTC) or
+  epoch seconds. A session or run counts when its start falls in
+  `[since, until)`.
+- `--card <task id or issue identifier>` limits the report to one card and
+  lists its worker runs and Kanban sessions.
+- `--top <n>` sets how many cards the ranking shows. The default is 10.
+- `--json` prints the same report as one JSON object.
+- `--worker-home`, `--gateway-home`, `--claude-config-dir`, and `--prices`
+  override `$HERMES_HOME`, the gateway home beside `profiles/`,
+  `$CLAUDE_CONFIG_DIR` or `~/.claude`, and the `token_prices.json` beside the
+  script.
+
+The five buckets are:
+
+- **Webhook triggers.** Gateway sessions that webhook routes started.
+- **Worker dispatch.** The worker profile's Hermes `kanban` sessions.
+- **Startup context.** The first main-thread message of each Claude Code run,
+  which loads the context.
+- **Main-thread conversation.** The rest of the run's main thread.
+- **Subagent fan-out.** The run's subagent transcripts.
+
+Cost is the token counts times the list prices in `token_prices.json`. A model
+that file does not list shows its tokens and `unpriced`, never a zero cost.
+
 ## Report
 
 End with one line per part: already configured, configured now, or blocked.
