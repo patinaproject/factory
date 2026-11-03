@@ -1305,7 +1305,14 @@ config keys, such as `platforms.webhook.extra.routes.linear` and
 python3 <repo>/templates/render.py > <scratch>/webhook-config.json
 ```
 
-**Install** each key that `--check` reports as not installed, as differing, or
+**Install** first the `linear` route's script, because Hermes drops every
+delivery of a route whose script is missing:
+
+```sh
+install -m 0644 <repo>/skills/setup-factory/scripts/linear-route <root>/scripts/linear-route
+```
+
+Then install each key that `--check` reports as not installed, as differing, or
 with the wrong secret:
 
 ```sh

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -999,3 +1000,68 @@ def _load_cli():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+ROUTE_SCRIPT = Path(PLUGIN_DIR).parents[1] / "skills" / "setup-factory" / "scripts" / "linear-route"
+
+
+class BurstClearTest(unittest.TestCase):
+    """The hook clears what `linear-route` accumulated for the settled issue on every exit."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.home)
+        (self.home / "scripts").mkdir()
+        (self.home / "scripts" / "linear-route").write_bytes(ROUTE_SCRIPT.read_bytes())
+
+    def deliver(self, created, updated_from):
+        payload = {
+            "type": "Issue", "action": "update", "createdAt": created, "updatedFrom": updated_from,
+            "data": {"id": "issue-1", "identifier": "ABC-1"},
+        }
+        script = self.home / "scripts" / "linear-route"
+        done = subprocess.run(
+            [sys.executable, str(script)], input=json.dumps(payload), capture_output=True, text=True, cwd=script.parent,
+        )
+        return json.loads(done.stdout)
+
+    def settle(self, payload, intent=None, paused=False):
+        def compute(_):
+            return intent or plugin.triage_intent.Intent(action="create_card")
+
+        hook = plugin.make_dispatch_hook(
+            lambda: RecordingClient(), lambda: "linear", lambda: RESOLVED_CONFIG,
+            lambda _: types.SimpleNamespace(handled=False, action="none", reason=""), compute, lambda: self.home,
+        )
+        with mock.patch.object(plugin, "paused", return_value=paused):
+            return asyncio.run(hook(event=event(payload)))
+
+    def test_a_rewritten_turn_clears_its_burst(self):
+        settled = self.deliver("2026-11-03T10:00:00Z", {"delegateId": None})
+        self.assertEqual(self.settle(settled)["action"], "rewrite")
+
+        self.assertEqual(self.deliver("2026-11-03T10:05:00Z", {"labelIds": []})["updatedFrom"], {"labelIds": []})
+
+    def test_a_skipped_turn_clears_its_burst_so_the_next_burst_has_only_its_own_keys(self):
+        self.deliver("2026-11-03T10:00:00Z", {"delegateId": None})
+        settled = self.deliver("2026-11-03T10:00:10Z", {"stateId": "s-1"})
+        issue = {"id": "issue-1", "identifier": "ABC-1", "state_type": "backlog"}
+        skipped = self.settle(settled, plugin.triage_intent.Intent(action="issue_closed", issue=issue))
+        self.assertEqual(skipped["action"], "skip")
+
+        self.assertEqual(self.deliver("2026-11-03T10:05:00Z", {"labelIds": []})["updatedFrom"], {"labelIds": []})
+
+    def test_a_turn_dropped_while_paused_still_clears_its_burst(self):
+        settled = self.deliver("2026-11-03T10:00:00Z", {"delegateId": None})
+        self.assertIsNone(self.settle(settled, paused=True))
+
+        self.assertEqual(self.deliver("2026-11-03T10:05:00Z", {"labelIds": []})["updatedFrom"], {"labelIds": []})
+
+    def test_an_update_that_arrives_between_settle_and_clear_keeps_its_keys(self):
+        settled = self.deliver("2026-11-03T10:00:00Z", {"delegateId": None})
+        self.deliver("2026-11-03T10:00:40Z", {"stateId": "s-1"})
+        self.settle(settled)
+
+        self.assertEqual(
+            self.deliver("2026-11-03T10:00:50Z", {"labelIds": []})["updatedFrom"], {"stateId": "s-1", "labelIds": []}
+        )

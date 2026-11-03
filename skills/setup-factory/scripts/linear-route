@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Hermes runs this script on a Linear delivery that passed the route's filters, before it renders the prompt.
+
+It drops a delivery that Linear sent again, and it records each `Issue` update's `updatedFrom` keys so Hermes'
+latest-wins coalescer, which keeps only the newest payload of a burst, still hands the turn every key the burst changed.
+
+Hermes treats a non-zero exit, empty stdout, or `[SILENT]` as a drop and a JSON object as the new payload. Any failure
+here must therefore echo the payload unchanged, so a broken store never costs an event.
+
+State lives in `<home>/linear-route/`. The `linear-agent-session` plugin's `bursts.py` clears the accumulator and shares
+its file format, lock, and stamp name.
+"""
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Optional
+
+SILENT = "[SILENT]"
+STORE = "linear-route"
+SEEN_TTL = 7 * 3600
+# A hook that never cleared (a crash) must not widen later bursts for good.
+BURST_TTL = 15 * 60
+STAMP = "factoryRoute"
+
+
+def text_field(source, *path) -> Optional[str]:
+    for key in path:
+        source = source.get(key) if isinstance(source, dict) else None
+    return source if isinstance(source, str) and source else None
+
+
+def identity(payload: dict) -> Optional[str]:
+    """The fields a redelivery shares. `webhookTimestamp` is send time, so it differs between copies."""
+    kind, action = payload.get("type"), payload.get("action")
+    if kind in ("Issue", "Comment"):
+        parts = [kind, action, text_field(payload, "createdAt"), text_field(payload, "data", "id")]
+    elif kind == "AgentSessionEvent" and action in ("created", "prompted"):
+        parts = [kind, action, text_field(payload, "createdAt"), text_field(payload, "agentSession", "id")]
+        if action == "prompted":
+            parts.append(text_field(payload, "agentActivity", "id"))
+    else:
+        return None
+    return json.dumps(parts) if all(isinstance(part, str) and part for part in parts) else None
+
+
+def read_json(path: Path) -> dict:
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return {}
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} does not hold a JSON object")
+    return value
+
+
+def write_json(path: Path, value: dict) -> None:
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(value, handle)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def accumulate(bursts: dict, issue: str, updated_from, now: float) -> tuple:
+    """Append this update and return its seq with the union of the issue's keys, the earliest value of each."""
+    seq = int(bursts.get("seq", 0)) + 1
+    issues = bursts.setdefault("issues", {})
+    kept = [entry for entry in issues.get(issue, []) if now - entry["at"] <= BURST_TTL]
+    kept.append({"seq": seq, "at": now, "updatedFrom": updated_from if isinstance(updated_from, dict) else {}})
+    issues[issue] = kept
+    bursts["seq"] = seq
+    union: dict = {}
+    for entry in sorted(kept, key=lambda entry: entry["seq"]):
+        for key, value in entry["updatedFrom"].items():
+            union.setdefault(key, value)
+    return seq, union
+
+
+def route(text: str, home: Path, now: float) -> str:
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        return text
+    store = home / STORE
+    store.mkdir(parents=True, exist_ok=True)
+    with open(store / "lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        seen = {key: at for key, at in read_json(store / "seen.json").items() if now - at <= SEEN_TTL}
+        key = identity(payload)
+        if key in seen:
+            return SILENT
+        if key is not None:
+            seen[key] = now
+        issue = text_field(payload, "data", "id") if payload.get("type") == "Issue" else None
+        if issue is not None:
+            bursts = read_json(store / "bursts.json")
+            seq, union = accumulate(bursts, issue, payload.get("updatedFrom"), now)
+            if union:
+                payload["updatedFrom"] = union
+            payload[STAMP] = {"issue": issue, "seq": seq}
+            write_json(store / "bursts.json", bursts)
+        write_json(store / "seen.json", seen)
+    return json.dumps(payload)
+
+
+def main() -> int:
+    text = sys.stdin.read()
+    try:
+        output = route(text, Path(__file__).resolve().parent.parent, time.time())
+    except Exception as failure:
+        print(f"linear-route: passing the event through: {type(failure).__name__}: {failure}", file=sys.stderr)
+        output = text
+    sys.stdout.write(output)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
