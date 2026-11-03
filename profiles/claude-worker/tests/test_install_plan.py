@@ -25,19 +25,35 @@ ROUTE_SCRIPT = install(Step.ROUTE_SCRIPTS, "install", "-m", "0644", "linear-rout
 
 class PlanTest(unittest.TestCase):
     def test_installs_come_in_step_order_and_manual_lines_apart(self) -> None:
+        route = Drift("webhook config", "routes.github", "differs", ROUTE)
+        wrapper = Drift("script", "/root/scripts/x", "is missing", WRAPPER)
+        profile = Drift("profile", "claude-worker", "SOUL.md is missing", PROFILE)
+        board = Drift("kanban board", "triage", "is missing", BOARD)
         drifts = [
-            Drift("webhook config", "routes.github", "differs", ROUTE),
+            route,
             Drift("dashboard sign-in", "/root", "dashboard.public_url is not set", Manual("follow step 6")),
-            Drift("script", "/root/scripts/x", "is missing", WRAPPER),
-            Drift("profile", "claude-worker", "SOUL.md is missing", PROFILE),
+            wrapper,
+            profile,
             Drift("webhook route", "github", "3 rejected", ADVISORY),
-            Drift("kanban board", "triage", "is missing", BOARD),
+            board,
         ]
 
         self.assertEqual(install_plan.plan(drifts), Plan(
             (BOARD, PROFILE, ROUTE, WRAPPER),
             (install_plan.ManualLine("dashboard sign-in /root: dashboard.public_url is not set", "follow step 6"),),
+            (board, profile, route, wrapper),
         ))
+
+    def test_one_install_that_stands_for_several_drifts_carries_each_of_them(self) -> None:
+        first = Drift("webhook config", "routes.github", "differs", ROUTE)
+        second = Drift("webhook config", "routes.linear", "not installed", ROUTE)
+        manual = Drift("dashboard sign-in", "/root", "not set", Manual("follow step 6"))
+        profile = Drift("profile", "claude-worker", "SOUL.md is missing", PROFILE)
+
+        planned = install_plan.plan([first, manual, profile, second])
+
+        self.assertEqual(planned.installs, (PROFILE, ROUTE))
+        self.assertEqual(planned.install_drifts, (profile, first, second))
 
     def test_a_route_script_installs_before_the_route_that_names_it(self) -> None:
         drifts = [

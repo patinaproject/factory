@@ -143,7 +143,8 @@ class Refused:
     """`claude-session` stopped without a Claude session, on a refusal or an unexpected error. A transient
     one goes back to the queue. `precondition` names a machine condition that, once met, lets the card run:
     `gh_login` parks the card until the worker's gh login is fresh, `install_skew` until the install matches
-    the commit auto-deploy recorded as deployed, `needs_brief` until triage writes the issue's Agent brief, `worktree_held` until no run holds the card's
+    the commit auto-deploy recorded as deployed (a deploy that failed or was blocked keeps the card parked until a
+    person finishes it and runs `auto-deploy --retry`), `needs_brief` until triage writes the issue's Agent brief, `worktree_held` until no run holds the card's
     worktree, and `server_error` until five minutes have passed since the park."""
 
     error: str

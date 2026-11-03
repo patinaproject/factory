@@ -487,8 +487,10 @@ class Deploy:
                 self.set_hold(pause=None)
         after = self.plan()
         if after.installs:
+            commands = "; ".join(" ".join(i.argv) for i in after.installs)
+            remaining = "; ".join(f"{d.where}: {d.detail}" for d in after.install_drifts)
             return self.record(FAILED, target, f"check-install still reports {len(after.installs)} install(s): "
-                               + "; ".join(" ".join(i.argv) for i in after.installs), after.manual)
+                               f"{commands}. Remaining drift: {remaining}", after.manual)
         settings = self.run([sys.executable, str(self.source / "skills" / "setup-factory" / "scripts" / "check-settings")], self.root_env)
         if settings.returncode != 0:
             lines = [line.strip() for line in settings.stdout.splitlines() if line.strip()]

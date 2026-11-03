@@ -188,9 +188,10 @@ message, because the `blocker-order` hook sees tool results and not that message
   be scheduled, so treat the line as the `"transient": true` case below.
 - A line that holds `"precondition": "install_skew"` means the factory's
   install differs from the commit `auto-deploy` recorded as deployed, so a
-  factory deploy is pending. The `blocker-order` hook parks the card the same
-  way and adds `install_skew_park` to the result, and a sweep returns the card
-  to the queue once the install matches. Follow `install_skew_park` exactly as
+  factory deploy is pending or failed. The `blocker-order` hook parks the card
+  the same way and adds `install_skew_park` to the result, and a sweep returns
+  the card to the queue once the install matches. A failed deploy keeps the card
+  parked until a person finishes it and runs `auto-deploy --retry`. Follow `install_skew_park` exactly as
   `gh_login_park` above: stop, post no activity, never call `kanban_block`, and
   treat a result without it as the `"transient": true` case below.
 - A line that holds `"precondition": "needs_brief"` means the issue has no

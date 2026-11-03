@@ -589,6 +589,30 @@ class AutoDeployTest(unittest.TestCase):
         self.assertEqual(self.m.state()["outcome"], "FAILED")
         self.assertIn("still reports 1 install", self.m.state()["detail"])
 
+    def test_the_failed_event_names_each_drift_that_remains(self) -> None:
+        argv = [str(self.m.hermes), "plugins", "install", "x"]
+        drift = {**self.m.install("plugins", "install", "x"), "sticky": True}
+        self.m.drifts([drift])
+        self.deploy()
+
+        self.assertEqual(
+            self.m.state()["events"][-1]["detail"],
+            f"check-install still reports 1 install(s): {' '.join(argv)}. Remaining drift: x in {self.m.root}: differs",
+        )
+
+    def test_a_secret_in_a_remaining_drift_is_redacted_from_the_failed_event(self) -> None:
+        secret = "drift-api-token-value-77c1"
+        drift = {**self.m.install("plugins", "install", "x"), "detail": f"holds {secret}", "sticky": True}
+        self.m.drifts([drift])
+        self.deploy(DRIFT_API_TOKEN=secret)
+
+        state = (self.m.root / "auto-deploy.json").read_text()
+        self.assertNotIn(secret, state)
+        self.assertEqual(
+            self.m.state()["events"][-1]["detail"].rsplit(". ", 1)[1],
+            f"Remaining drift: x in {self.m.root}: holds [redacted]",
+        )
+
     def test_a_dispatch_profiles_key_a_person_set_blocks_and_stays(self) -> None:
         self.m.update_hermes(key=True)
         self.deploy()

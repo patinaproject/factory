@@ -941,8 +941,7 @@ def plugin_module(plugin: str, name: str):
 
 class Skew(NamedTuple):
     message: str
-    # True while auto-deploy has neither failed nor been blocked, so a deploy that records the install's commit is
-    # still to come and the card can wait for it instead of being blocked.
+    # False when the install cannot be compared with a recorded commit, so no deploy is known to be coming.
     waits: bool
 
 
@@ -968,11 +967,22 @@ def install_skew() -> Skew | None:
         return None
     parts = " and ".join("the profile scripts" if name == "profile" else f"the {name} plugin" for name in differing)
     against = f"the deployed commit {deployed[:12]}" if deployed else "the factory checkout"
-    return Skew(
-        f"{parts} in {home} differ from {against} at {repo}, so a factory deploy is in progress or was left "
-        f"unfinished. {FINISH_DEPLOY}",
-        waits=not state.get("failed") and not state.get("blocked"),
+    root = home.parent.parent
+    retry = f"HERMES_HOME={root} python3 {root}/scripts/auto-deploy --retry"
+    stopped = (
+        (state["failed"], "failed") if state.get("failed")
+        else (state["blocked"], "was blocked by a run-gating manual line") if state.get("blocked")
+        else None
     )
+    if stopped:
+        commit, outcome = stopped
+        cause = (
+            f"the automatic deploy of {commit[:12]} {outcome}. A person must finish that deploy, then run {retry}. "
+            f"{FINISH_DEPLOY}"
+        )
+    else:
+        cause = f"a factory deploy is in progress or was left unfinished. {FINISH_DEPLOY}"
+    return Skew(f"{parts} in {home} differ from {against} at {repo}, so {cause}", waits=True)
 
 
 def skew_line(skew: Skew) -> dict:

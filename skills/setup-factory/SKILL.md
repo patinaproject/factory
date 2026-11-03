@@ -2581,6 +2581,14 @@ launchctl kickstart gui/$(id -u)/ai.patinaproject.factory.auto-deploy
 
 Over SSH, use `user/$(id -u)` in place of `gui/$(id -u)`.
 
+Check `HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --status` first.
+When it shows `failed` or `blocked` set, `auto-deploy` skips that commit and
+records nothing, so the `launchctl kickstart` command leaves `deployed` at the
+old commit. Run `HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --retry`
+in its place. It clears both records and runs a full deploy under the hold.
+Cards stay parked on `Waiting for a factory deploy:` until it records
+`DEPLOYED`.
+
 A merged change to `skills/setup-factory/scripts/factory-secrets` is live only
 after the render steps in
 [Configure both homes](references/infisical.md#configure-both-homes) install
@@ -2845,8 +2853,10 @@ Hermes process starts. The new helper also writes
    restart that step 7 calls for. Until then a worker run on a half-installed
    home refuses as `transient`. `auto-deploy` records `BLOCKED` while an
    operator's pause is engaged, so resume before the next step.
-9. Remove the lock and start `auto-deploy` once with the `launchctl kickstart`
-   command above. Record the deployed commit in the private configuration record.
+9. Remove the lock. When `auto-deploy --status` shows `failed` or `blocked` set,
+   run `HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --retry`.
+   Otherwise start `auto-deploy` once with the `launchctl kickstart` command
+   above. Record the deployed commit in the private configuration record.
 
 ## Update Xcode or macOS
 

@@ -404,21 +404,29 @@ class DeployReleaseTest(ParkedHarness):
         self.assertEqual((proc.returncode, proc.stdout), (0, ""))
         self.assertEqual({status for status, _ in self.statuses().values()}, {"scheduled"})
 
-    def test_a_failed_or_blocked_deploy_releases_the_card_so_its_run_is_blocked(self) -> None:
+    def test_a_failed_or_blocked_deploy_keeps_the_card_parked_until_a_deploy_installs_the_commit(self) -> None:
         for field in ("failed", "blocked"):
             with self.subTest(field):
                 self.tmp_board = self.tmp / f"{field}.db"
                 with closing(sqlite3.connect(self.tmp_board)) as db:
                     db.execute(TASKS)
                     db.executescript(COMMENTS_AND_EVENTS)
-                self.record(self.commit(f"TOOL = {field}\n"))
+                commit = self.commit(f"TOOL = {field}\n")
+                self.record(commit)
                 self.state_file.write_text(json.dumps({**json.loads(self.state_file.read_text()), field: "a" * 40}))
                 self.park(self.tmp_board, "t_default")
+                tasks = [task("t_default", "scheduled", "claude-worker")]
 
-                proc = self.run_script([], default_tasks=[task("t_default", "scheduled", "claude-worker")],
-                                       default_db=str(self.tmp_board))
+                held = self.run_script([], default_tasks=tasks, default_db=str(self.tmp_board))
 
-                self.assertEqual((proc.returncode, proc.stdout), (0, "released t_default\n"))
+                self.assertEqual((held.returncode, held.stdout), (0, ""))
+
+                (self.home / "scripts" / "tool.py").write_text(f"TOOL = {field}\n")
+                self.record(commit)
+
+                released = self.run_script([], default_tasks=tasks, default_db=str(self.tmp_board))
+
+                self.assertEqual((released.returncode, released.stdout), (0, "released t_default\n"))
 
     def test_a_deployed_commit_the_checkout_lacks_releases_nothing(self) -> None:
         self.record("f" * 40)
