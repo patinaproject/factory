@@ -60,15 +60,24 @@ def find_hermes() -> str:
     raise SystemExit("retry-failed-webhooks: hermes is not on PATH or in ~/.local/bin; set HERMES_BIN")
 
 
-def route_toolsets(hermes: str, home: Path, route: str) -> str:
+def route_setting(hermes: str, home: Path, route: str, key: str) -> Any:
     proc = subprocess.run(
-        [hermes, "config", "get", f"platforms.webhook.extra.routes.{route}.toolsets", "--json"],
+        [hermes, "config", "get", f"platforms.webhook.extra.routes.{route}.{key}", "--json"],
         env={**os.environ, "HERMES_HOME": str(home)}, capture_output=True, text=True,
     )
     try:
-        value = json.loads(proc.stdout) if proc.returncode == 0 else None
+        return json.loads(proc.stdout) if proc.returncode == 0 else None
     except ValueError:
-        return ""
+        return None
+
+
+def route_toolsets(hermes: str, home: Path, route: str) -> str:
+    value = route_setting(hermes, home, route, "toolsets")
+    return ",".join(value) if isinstance(value, list) else (value or "")
+
+
+def route_skills(hermes: str, home: Path, route: str) -> str:
+    value = route_setting(hermes, home, route, "skills")
     return ",".join(value) if isinstance(value, list) else (value or "")
 
 
@@ -210,9 +219,10 @@ class Run:
         return answer is not None and answer.get("skip") is True
 
     def intent_block(self, entry: dict[str, Any]) -> str:
-        """The block the dispatch hook adds, recomputed for the stored delivery time because a replay skips the hook.
+        """The block the dispatch hook adds after the event section, recomputed for the stored delivery time because
+        a replay skips the hook, and led by the blank line that separates it from the stored prompt.
 
-        A Linear delivery whose CLI fails or times out replays with the `error` intent, so the prompt still starts
+        A Linear delivery whose CLI fails or times out replays with the `error` intent, so the prompt still ends
         with a block. Other deliveries have none.
         """
         payload = entry.get("payload")
@@ -230,24 +240,27 @@ class Run:
                     env={**os.environ, "HERMES_HOME": str(self.home)},
                 )
             except (subprocess.TimeoutExpired, OSError):
-                return ERROR_BLOCK
-        return proc.stdout if proc.returncode == 0 and "<triage_intent>" in proc.stdout else ERROR_BLOCK
+                return "\n\n" + ERROR_BLOCK
+        return "\n\n" + (proc.stdout if proc.returncode == 0 and "<triage_intent>" in proc.stdout else ERROR_BLOCK)
 
     def replay(self, hermes: str, entry: dict[str, Any]) -> tuple[int, str, Optional[dict]]:
         toolsets = route_toolsets(hermes, self.home, entry["route"])
         if not toolsets:
             return 1, f"route {entry['route']} has no toolsets in the config", None
+        skills = route_skills(hermes, self.home, entry["route"])
         with tempfile.TemporaryDirectory(prefix="webhook-retry-") as scratch:
             query = Path(scratch) / "query.txt"
             report = Path(scratch) / "report.json"
             query.write_text(
                 REPLAY_PREAMBLE.format(delivered_at=entry["delivered_at"], cause=CAUSES[store.reason_of(entry)])
-                + self.intent_block(entry) + entry["prompt"]
+                + entry["prompt"] + self.intent_block(entry)
             )
             os.chmod(query, 0o600)
             command = [
                 hermes, "chat", "-Q", "--oneshot", "--query-file", str(query), "-t", toolsets, "--source", "webhook-retry",
             ]
+            if skills:
+                command += ["-s", skills]
             proc = subprocess.run(
                 command, capture_output=True, text=True,
                 env={**os.environ, "HERMES_HOME": str(self.home), store.REPORT_VARIABLE: str(report)},

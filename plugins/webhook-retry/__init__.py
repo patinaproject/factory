@@ -52,6 +52,13 @@ def paused() -> bool:
     return paused_reply() is not None
 
 
+def event_prompt(text: str) -> str:
+    """The per-event text of a turn: a route skill's scaffold, which Hermes caches and replay passes with `-s`, is cut."""
+    from agent.skill_commands import extract_user_instruction_from_skill_message
+
+    return extract_user_instruction_from_skill_message(text) or text
+
+
 def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> Optional[dict[str, str]]:
     global _session_store
     try:
@@ -73,7 +80,7 @@ def record_delivery(event: Any = None, session_store: Any = None, **_: Any) -> O
             "delivery": delivery,
             "delivered_at": queue_store.stamp(delivered_at(event)),
             "summary": summarize(event),
-            "prompt": event.text,
+            "prompt": event_prompt(event.text),
             "payload": linear_payload(event),
             "attempts": 0,
             "last_error": "",
