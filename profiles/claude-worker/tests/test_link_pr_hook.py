@@ -110,7 +110,6 @@ class LinkCreatedPullTest(unittest.TestCase):
             report, {"added": [], "action": "failed", "error": "linking the agent session failed: Entity not found"}
         )
 
-
     def test_a_failed_removal_from_the_older_sessions_is_reported_not_raised(self) -> None:
         client, report = self.link(CREATED, FakeClient(remove_error=RuntimeError("Entity not found")))
 
@@ -158,6 +157,7 @@ class HookHome(unittest.TestCase):
     def set_state(self, **fields) -> None:
         path = self.home / "linear-fake.json"
         path.write_text(json.dumps({**json.loads(path.read_text()), **fields}))
+
 
 class LinkPrHookProcessTest(HookHome):
     def test_a_created_pull_request_is_added_to_the_session_and_the_hook_prints_nothing(self) -> None:
