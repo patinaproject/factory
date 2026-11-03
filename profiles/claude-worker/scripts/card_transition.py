@@ -50,6 +50,10 @@ The deploy release rule is the same for a card whose newest park reason starts w
 `result_line.INSTALL_SKEW_PARK`, which waits for a factory deploy: `sweep_deploy` releases it once the install
 matches the commit auto-deploy recorded as deployed, compared the way `claude-session` compares it.
 
+The resume release rule: a card whose newest park reason starts with `result_line.STOPPED_PARK` was parked by a
+`claude-session` that a signal stopped during a Hermes pause. `sweep_resume` releases it once no `ESTOP` sentinel
+exists, with no reply, and leaves the card's block kind and recurrence count alone.
+
 The worktree and server-error release rules: a card whose newest park reason starts with
 `result_line.WORKTREE_HELD_PARK` is released by `sweep_worktree` once a non-blocking `flock` on its worktree's
 `claude-session.lock` succeeds. One that starts with `result_line.SERVER_ERROR_PARK` is released by
@@ -438,6 +442,16 @@ def sweep_deploy() -> dict:
     if prefix is None:
         return {"released": [], "failed": {}}
     return sweep_parked(prefix, install_matches)
+
+
+def sweep_resume() -> dict:
+    """Release every card parked for a Hermes pause, on every board, once no `ESTOP` sentinel exists.
+    `dispatch-triage` runs it each minute, which Hermes' pause of cron delays until the first tick after resume."""
+    lines = plugin_module("blocker-order", "result_line")
+    if not hasattr(lines, "STOPPED_PARK"):
+        return {"released": [], "failed": {}}
+    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    return sweep_parked(lines.STOPPED_PARK, lambda: not lines.paused(home))
 
 
 def worktree_free(card: Card) -> bool:
