@@ -1012,6 +1012,30 @@ class ClaudeSessionTest(GitFixture):
                 commands = [h["command"] for group in hooks.get("PostToolUse", []) for h in group["hooks"]]
                 self.assertEqual([c for c in commands if "link-pr-hook" in c], [])
 
+    def hook_commands(self) -> list[str]:
+        hooks = self.claude_call()["settings"]["content"]["hooks"]
+        return [h["command"] for group in hooks.get("PostToolUse", []) for h in group["hooks"] if "link-pr-hook" in h["command"]]
+
+    def enable_auto_merge(self, value=True) -> None:
+        self.repository["auto_merge"] = value
+        self.settings = self.write_settings([self.repository], {"max_turns": 40})
+
+    def test_auto_merge_adds_its_flag_to_the_hook_only_when_the_repository_sets_it(self) -> None:
+        hook = f"HERMES_HOME={self.hermes_home} {sys.executable} {(SCRIPTS / 'link-pr-hook').resolve()}"
+        for auto_merge, body, env, expected in (
+            (True, SESSION_BODY, None, [f"{hook} --session-id live-session --auto-merge-repo {REPO}"]),
+            (True, CARD_BODY, None, [f"{hook} --auto-merge-repo {REPO}"]),
+            (False, SESSION_BODY, None, [f"{hook} --session-id live-session"]),
+            (True, SESSION_BODY, TRIAGE_ENV, []),
+        ):
+            with self.subTest(auto_merge=auto_merge, session=body is SESSION_BODY, triage=bool(env)):
+                self.enable_auto_merge(auto_merge)
+                self.set_comments(body=body)
+
+                self.run_session(env=env)
+
+                self.assertEqual(self.hook_commands(), expected)
+
     def test_a_pull_request_claude_opens_is_added_to_the_session_by_the_hook(self) -> None:
         pull = f"https://github.com/{REPO}/pull/42"
         event = {

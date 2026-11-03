@@ -177,12 +177,21 @@ if state.get("errors"):
     error = state["errors"].pop(0)
     json.dump(state, open(state_path, "w"))
     sys.exit(error)
+if args[1] == "graphql":
+    if state.get("graphql_error"):
+        sys.exit(state["graphql_error"])
+    print(json.dumps({"data": {}}))
+    sys.exit(0)
 path, _, query = args[1].partition("?")
 parts = [unquote(part) for part in path.split("/")]
 prefix = "/".join(parts[:3])
 if prefix != "repos/" + state["repo"]:
     sys.exit("gh: Not Found (HTTP 404)")
-if parts[3] == "branches":
+if len(parts) == 3:
+    print(json.dumps(state.get("repository", {})))
+elif parts[3] == "rules":
+    print(json.dumps(state.get("rules", {}).get(parts[5], [])))
+elif parts[3] == "branches":
     if "/".join(parts[4:]) not in state["branches"]:
         sys.exit("gh: Branch not found (HTTP 404)")
     print(json.dumps({"name": "/".join(parts[4:])}))

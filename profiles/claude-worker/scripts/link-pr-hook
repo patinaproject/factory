@@ -1,21 +1,33 @@
 #!/usr/bin/env python3
-"""Claude Code PostToolUse hook for a worker run: add the pull request Claude opens to the card's Linear session.
+"""Claude Code PostToolUse hook for a worker run: act on the pull request Claude opens.
 
-`HERMES_HOME=<worker home> python3 link-pr-hook --session-id <id>` reads the hook event on stdin. When a Bash
-call ran `gh pr create` and printed a pull request URL, it adds `Pull request #<number>` with that URL to the
-agent session, with the run's LINEAR_API_KEY, keeping the links the session holds. A hook that exits 2 would
-block the run, so any error prints nothing and exits 0.
+`HERMES_HOME=<worker home> python3 link-pr-hook [--session-id <id>] [--auto-merge-repo <owner/repo>]` reads the
+hook event on stdin. When a Bash call ran `gh pr create` and printed a pull request URL, it does two independent
+jobs. With `--auto-merge-repo`, it arms squash auto-merge on a pull request in that repository that is not a draft, in a
+repository that allows auto-merge, when its base branch has a required-status-checks rule, so the pull request
+merges only once GitHub finds every required check green. Arming never merges at once. With `--session-id`, it
+adds `Pull request #<number>` with that URL to the Linear agent session, with the run's LINEAR_API_KEY, keeping
+the links the session holds. Neither job stops the other. A hook that exits 2 would block the run, so any error
+is logged to stderr and the hook exits 0 with nothing on stdout.
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib
 import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
+import card_branch
 import session_links
+
+ENABLE_AUTO_MERGE = (
+    "mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) "
+    "{ pullRequest { number } } }"
+)
 
 
 def linear_module():
@@ -31,16 +43,59 @@ def link_created_pull(linear, client, session_id: str, event: dict) -> dict | No
     return session_links.add(linear, client, session_id, [session_links.pull_link(url)])
 
 
-def main() -> int:
+def arm_auto_merge(event: dict, repo: str, gh=card_branch.run_gh) -> str | None:
+    """Arm squash auto-merge on the pull request `gh pr create` printed. None when armed or nothing was created, else why not."""
+    url = session_links.created_pull_url(event)
+    if url is None:
+        return None
+    _, _, _, owner, name, _, number = url.split("/")
+    full_name = f"{owner}/{name}"
+    if full_name.lower() != repo.lower():
+        return f"{full_name} is not {repo}"
+    pull = gh(f"repos/{full_name}/pulls/{number}")
+    if pull["draft"]:
+        return "the pull request is a draft"
+    if not gh(f"repos/{full_name}")["allow_auto_merge"]:
+        return "the repository does not allow auto-merge"
+    base = pull["base"]["ref"]
+    if not any(rule["type"] == "required_status_checks" for rule in gh(f"repos/{full_name}/rules/branches/{quote(base, safe='')}")):
+        return f"{base} has no required status checks rule"
     try:
-        flag, session_id = sys.argv[1:3]
-        if flag != "--session-id":
-            return 0
-        linear = linear_module()
-        client = linear.TokenLinearClient(os.environ["LINEAR_API_KEY"])
-        link_created_pull(linear, client, session_id, json.load(sys.stdin))
-    except Exception:
+        gh("graphql", "-f", f"query={ENABLE_AUTO_MERGE}", "-f", f"id={pull['node_id']}")
+    except card_branch.GhFailed as failure:
+        if "clean status" in str(failure):
+            return "the pull request is already mergeable (clean status)"
+        raise
+    return None
+
+
+def log(message: str) -> None:
+    print(f"link-pr-hook: {message}", file=sys.stderr)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--session-id")
+    parser.add_argument("--auto-merge-repo")
+    try:
+        args = parser.parse_args()
+        event = json.load(sys.stdin)
+    except (SystemExit, ValueError) as failure:
+        log(f"unreadable hook input: {failure}")
         return 0
+    if args.auto_merge_repo:
+        try:
+            if reason := arm_auto_merge(event, args.auto_merge_repo):
+                log(f"auto-merge skipped: {reason}")
+        except Exception as failure:
+            log(f"auto-merge failed: {failure!r}")
+    if args.session_id:
+        try:
+            linear = linear_module()
+            client = linear.TokenLinearClient(os.environ["LINEAR_API_KEY"])
+            link_created_pull(linear, client, args.session_id, event)
+        except Exception as failure:
+            log(f"linking failed: {failure!r}")
     return 0
 
 

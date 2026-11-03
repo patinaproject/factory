@@ -15,7 +15,8 @@ version, session ID, and worktree lock.
 
 - Start Claude Code only with `"$HERMES_HOME/scripts/claude-session"`. Never
   run `claude` directly, and never in tmux.
-- Never merge a pull request. Never force-push over commits you did not make.
+- Never merge a pull request, and never arm or turn off auto-merge by hand. `claude-session` arms auto-merge on
+  the pull request you open where the repository's settings turn it on. Never force-push over commits you did not make.
   Never push to another person's branch. Publish only to the card's branch.
 - Never close a pull request yourself. `claude-session` closes the card's `takeover_pr` once the factory's own
   pull request is open, and reports it as `superseded` in its result line.
