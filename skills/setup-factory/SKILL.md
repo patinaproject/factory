@@ -2598,6 +2598,19 @@ The five buckets are:
 - **Main-thread conversation.** The rest of the run's main thread.
 - **Subagent fan-out.** The run's subagent transcripts.
 
+A transcript joins a card by its working directory, which is the card's
+`workspace_path`, on every board. The script splits that transcript's messages
+across all of the card's runs by time, whether or not a run recorded a session
+id. A message that no run covers, such as a reply after a run ended, shows
+under `outside runs` in the `--card` view and counts toward the card's total.
+Transcripts whose directory matches no card are other Claude Code sessions and
+are left out.
+
+Hermes sessions record one total cache write, which the report prices at the
+five-minute rate. `webhook-retry` and `webhook-replay` sessions have no route
+name, so they group under their source name. Gateway sessions that are not
+webhook triggers, such as Slack or one-shot, fall outside the five buckets.
+
 Cost is the token counts times the list prices in `token_prices.json`. A model
 that file does not list shows its tokens and `unpriced`, never a zero cost.
 

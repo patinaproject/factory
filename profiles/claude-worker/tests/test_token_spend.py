@@ -25,7 +25,7 @@ SESSIONS = (
     "estimated_cost_usd REAL)"
 )
 BOARD = (
-    "CREATE TABLE tasks (id TEXT, title TEXT);"
+    "CREATE TABLE tasks (id TEXT, title TEXT, workspace_path TEXT);"
     "CREATE TABLE task_runs (id INTEGER, task_id TEXT, profile TEXT, status TEXT, started_at INTEGER, "
     "ended_at INTEGER, outcome TEXT, summary TEXT, metadata TEXT)"
 )
@@ -68,7 +68,7 @@ def session(id, source, name, title, model, at, input_, output, read, write):
     return (id, source, name, title, model, at, input_, output, read, write, 999.0)
 
 
-class TokenSpendTests(unittest.TestCase):
+class Harness(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -80,6 +80,26 @@ class TokenSpendTests(unittest.TestCase):
         self.prices.write_text(json.dumps(PRICES))
         self.build()
 
+    def run_script(self, *args: str, text: bool = False):
+        command = [
+            sys.executable, str(SCRIPTS / "token-spend"), "--worker-home", str(self.worker),
+            "--claude-config-dir", str(self.claude), "--prices", str(self.prices), *args,
+        ]
+        done = subprocess.run(command + ([] if text else ["--json"]), capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout if text else json.loads(done.stdout)
+
+    @staticmethod
+    def buckets(report: dict) -> dict:
+        return {b["bucket"]: b for b in report["buckets"]}
+
+    @staticmethod
+    def classes(bucket: dict) -> tuple:
+        t = bucket["tokens"]
+        return t["input"], t["cache_read"], t["cache_write"], t["output"], t["total"]
+
+
+class TokenSpendTests(Harness):
     def build(self):
         database(self.gateway / "state.db", SESSIONS, "sessions", [
             session("w1", "webhook", "webhook/linear", None, SONNET, 1000, 10, 20, 300, 40),
@@ -95,17 +115,22 @@ class TokenSpendTests(unittest.TestCase):
         meta = lambda sid, wt, ws=None: json.dumps({"session_id": sid, "worktree": wt, "worker_session_id": ws})
         database(self.gateway / "kanban.db", BOARD, None)
         with closing(sqlite3.connect(self.gateway / "kanban.db")) as db:
-            db.executemany("INSERT INTO tasks VALUES (?, ?)", [("t_1", "PAT-1: Do thing"), ("t_2", "PAT-2: Other")])
+            db.executemany("INSERT INTO tasks VALUES (?, ?, ?)", [
+                ("t_1", "PAT-1: Do thing", "/wt/one"), ("t_2", "PAT-2: Other", "/wt/two"), ("t_9", "PAT-9: Idle", None),
+            ])
             db.executemany("INSERT INTO task_runs VALUES (?, ?, 'claude-worker', 'done', ?, ?, ?, NULL, ?)", [
                 (1, "t_1", 2000, 3000, "completed", meta("sess-a", "/wt/one", "s1")),
                 (2, "t_1", 3000, None, "completed", meta("sess-a", "/wt/one")),
                 (3, "t_2", 2000, 4000, "blocked", meta("sess-b", "/wt/two")),
-                (4, "t_2", 2000, 4000, "crashed", None),
+                (4, "t_2", 4000, 4100, "crashed", None),
             ])
             db.commit()
         (self.gateway / "kanban" / "boards" / "empty").mkdir(parents=True)
         (self.gateway / "kanban" / "boards" / "empty" / "kanban.db").write_bytes(b"")
-        database(self.gateway / "kanban" / "boards" / "bare" / "kanban.db", "CREATE TABLE tasks (id TEXT, title TEXT)")
+        database(
+            self.gateway / "kanban" / "boards" / "bare" / "kanban.db",
+            "CREATE TABLE tasks (id TEXT, title TEXT, workspace_path TEXT)",
+        )
 
         projects = self.claude / "projects"
         write_lines(projects / "-wt-one" / "sess-a.jsonl", [
@@ -129,24 +154,6 @@ class TokenSpendTests(unittest.TestCase):
             entry(2100, "b1", SONNET, cwd="/wt/two", input_tokens=1, cache_read_input_tokens=2, output_tokens=4, **split_cache(3)),
             entry(2200, "b2", MYSTERY, input_tokens=10, output_tokens=10),
         ])
-
-    def run_script(self, *args: str, text: bool = False):
-        command = [
-            sys.executable, str(SCRIPTS / "token-spend"), "--worker-home", str(self.worker),
-            "--claude-config-dir", str(self.claude), "--prices", str(self.prices), *args,
-        ]
-        done = subprocess.run(command + ([] if text else ["--json"]), capture_output=True, text=True)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        return done.stdout if text else json.loads(done.stdout)
-
-    @staticmethod
-    def buckets(report: dict) -> dict:
-        return {b["bucket"]: b for b in report["buckets"]}
-
-    @staticmethod
-    def classes(bucket: dict) -> tuple:
-        t = bucket["tokens"]
-        return t["input"], t["cache_read"], t["cache_write"], t["output"], t["total"]
 
     def test_each_bucket_holds_exactly_its_fixture_tokens(self):
         report = self.run_script()
@@ -246,6 +253,87 @@ class TokenSpendTests(unittest.TestCase):
             [sys.executable, str(SCRIPTS / "token-spend"), "--worker-home", str(self.claude)], capture_output=True, text=True, env=env
         )
         self.assertIn("--gateway-home", done.stderr)
+
+
+class JoinTests(Harness):
+    """Transcripts join a card by working directory and split across all of its runs by time."""
+
+    def build(self):
+        database(self.gateway / "state.db", SESSIONS)
+        database(self.worker / "state.db", SESSIONS)
+        database(self.gateway / "kanban.db", BOARD)
+        with closing(sqlite3.connect(self.gateway / "kanban.db")) as db:
+            db.execute("INSERT INTO tasks VALUES ('t_3', 'PAT-3: Three runs', '/wt/three')")
+            db.executemany("INSERT INTO task_runs VALUES (?, 't_3', 'claude-worker', 'done', ?, ?, ?, NULL, ?)", [
+                (5, 5000, 5100, "completed", json.dumps({"session_id": "sess-c", "worktree": "/wt/three"})),
+                (6, 5200, 5300, "blocked", None),
+                (7, 5400, None, None, json.dumps({"published_pr": 12})),
+            ])
+            db.commit()
+        triage = self.gateway / "kanban" / "boards" / "triage" / "kanban.db"
+        database(triage, BOARD)
+        with closing(sqlite3.connect(triage)) as db:
+            db.execute("INSERT INTO tasks VALUES ('t_4', 'PAT-4: Triage card', '/wt/four')")
+            db.execute("INSERT INTO task_runs VALUES (5, 't_4', 'claude-worker', 'done', 6000, 6100, 'completed', NULL, NULL)")
+            db.commit()
+        projects = self.claude / "projects"
+        write_lines(projects / "-wt-three" / "any-name.jsonl", [
+            entry(4900, "m0", SONNET, cwd="/wt/three", input_tokens=1, output_tokens=1),
+            entry(5010, "m1", OPUS, input_tokens=2, cache_read_input_tokens=100, output_tokens=5),
+            entry(5050, "m2", OPUS, input_tokens=1, output_tokens=7),
+            entry(5150, "m3", SONNET, input_tokens=3, output_tokens=3),
+            entry(5250, "m4", OPUS, input_tokens=4, cache_read_input_tokens=40, output_tokens=6),
+            entry(5410, "m5", OPUS, input_tokens=8, cache_read_input_tokens=80, output_tokens=2),
+            entry(5450, "m6", OPUS, output_tokens=11),
+        ])
+        write_lines(projects / "-wt-three" / "any-name" / "subagents" / "agent-1.jsonl", [
+            entry(5020, "a1", SONNET, True, input_tokens=5, output_tokens=5),
+            entry(5260, "a2", SONNET, True, input_tokens=7, cache_read_input_tokens=3),
+            entry(5350, "a4", SONNET, True, input_tokens=1, output_tokens=1),
+            entry(5500, "a3", SONNET, True, input_tokens=9, output_tokens=1),
+        ])
+        write_lines(projects / "-wt-four" / "other.jsonl", [
+            entry(6010, "t1", SONNET, cwd="/wt/four", input_tokens=20, output_tokens=1),
+        ])
+        write_lines(projects / "-wt-stranger" / "other.jsonl", [
+            entry(5100, "z", OPUS, cwd="/wt/stranger", input_tokens=777777, output_tokens=777777),
+        ])
+
+    @staticmethod
+    def run_totals(card: dict) -> dict:
+        return {
+            r["run_id"]: tuple(r[k]["tokens"]["total"] for k in ("startup", "conversation", "subagent", "total"))
+            for r in card["runs"]
+        }
+
+    def test_each_of_three_runs_gets_exactly_its_slice(self):
+        report = self.run_script("--card", "PAT-3")
+        self.assertEqual(self.run_totals(report["card"]), {5: (102, 13, 10, 125), 6: (44, 6, 10, 60), 7: (88, 13, 10, 111)})
+        self.assertEqual([r["outcome"] for r in report["card"]["runs"]], ["completed", "blocked", None])
+
+    def test_messages_in_no_run_are_kept_apart_and_counted_once(self):
+        report = self.run_script("--card", "PAT-3")
+        outside = report["card"]["outside_runs"]["tokens"]
+        self.assertEqual((outside["total"], outside["output"]), (10, 5))
+        buckets = self.buckets(report)
+        self.assertEqual((buckets["conversation"]["tokens"]["total"], buckets["subagent"]["tokens"]["total"]), (13 + 6 + 13 + 8, 10 * 3 + 2))
+        self.assertEqual(buckets["startup"]["tokens"]["total"], 102 + 44 + 88)
+        self.assertEqual(report["total"]["tokens"]["total"], 306)
+        self.assertEqual(self.run_script()["total"]["tokens"]["total"], 306 + 21)
+
+    def test_outside_messages_follow_their_own_timestamp_in_a_window(self):
+        report = self.run_script("--until", "5200")
+        self.assertEqual(report["total"]["tokens"]["total"], 125 + 2 + 6)
+        report = self.run_script("--since", "5400")
+        self.assertEqual(report["total"]["tokens"]["total"], 111 + 21)
+
+    def test_transcript_with_no_matching_task_is_ignored(self):
+        self.assertNotIn("777777", json.dumps(self.run_script()))
+
+    def test_task_on_the_triage_board_joins_and_keeps_its_own_run_id(self):
+        card = self.run_script("--card", "PAT-4")["card"]
+        self.assertEqual(self.run_totals(card), {5: (20, 1, 0, 21)})
+        self.assertEqual(card["outside_runs"]["tokens"]["total"], 0)
 
 
 if __name__ == "__main__":

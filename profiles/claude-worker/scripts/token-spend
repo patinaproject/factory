@@ -30,11 +30,9 @@ SESSION_SQL = (
     "COALESCE(output_tokens, 0) AS output_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, "
     "COALESCE(cache_write_tokens, 0) AS cache_write_tokens FROM sessions WHERE source IN ({})"
 )
-RUN_SQL = (
-    "SELECT r.id AS id, r.task_id AS task_id, r.started_at AS started_at, r.ended_at AS ended_at, "
-    "r.outcome AS outcome, r.metadata AS metadata, t.title AS title "
-    "FROM task_runs r LEFT JOIN tasks t ON t.id = r.task_id ORDER BY r.id"
-)
+TASK_SQL = "SELECT id, title, workspace_path FROM tasks"
+RUN_SQL = "SELECT id, task_id, started_at, ended_at, outcome, metadata FROM task_runs ORDER BY started_at, id"
+OUTSIDE_RUNS = "outside runs"
 
 
 @dataclass(frozen=True)
@@ -75,9 +73,15 @@ class Card(NamedTuple):
         return self.issue or self.task_id or "unknown"
 
 
+class RunKey(NamedTuple):
+    board: str
+    id: int
+
+
 class Spend(NamedTuple):
     bucket: str
     card: Card | None
+    run: RunKey | None
     label: str
     model: str
     started_at: float
@@ -91,10 +95,25 @@ class Message(NamedTuple):
     sidechain: bool
 
 
+@dataclass(frozen=True)
+class Run:
+    key: RunKey
+    card: Card
+    started_at: float
+    ended_at: float | None
+    outcome: str | None
+
+
+@dataclass
+class Worktree:
+    cards: list[Card]
+    runs: list[Run]
+
+
 @dataclass
 class Ledger:
     spends: list[Spend]
-    runs: dict[str, dict]
+    runs: dict[RunKey, dict]
     sessions: dict[str, dict]
 
 
@@ -183,14 +202,22 @@ def read_messages(path: Path, sidechain_file: bool) -> list[Message]:
     return list(merged.values())
 
 
-def transcript_messages(config_dir: Path, session_id: str, worktree: str) -> list[Message]:
-    for main in sorted((config_dir / "projects").glob(f"*/{session_id}.jsonl")):
-        if transcript_cwd(main) == worktree:
-            messages = read_messages(main, False)
-            for sub in sorted((main.with_suffix("") / "subagents").glob("agent-*.jsonl")):
-                messages += read_messages(sub, True)
-            return messages
-    return []
+def index_transcripts(config_dir: Path) -> dict[str, list[Path]]:
+    index: dict[str, list[Path]] = {}
+    for main in sorted((config_dir / "projects").glob("*/*.jsonl")):
+        cwd = transcript_cwd(main)
+        if cwd:
+            index.setdefault(cwd, []).append(main)
+    return index
+
+
+def worktree_messages(mains: list[Path]) -> list[Message]:
+    messages: list[Message] = []
+    for main in mains:
+        messages += read_messages(main, False)
+        for sub in sorted((main.with_suffix("") / "subagents").glob("agent-*.jsonl")):
+            messages += read_messages(sub, True)
+    return messages
 
 
 def by_model(messages: list[Message]) -> dict[str, Tokens]:
@@ -200,22 +227,48 @@ def by_model(messages: list[Message]) -> dict[str, Tokens]:
     return totals
 
 
-def run_spends(run: dict, card: Card, messages: list[Message]) -> list[Spend]:
-    label, started, ended = f"run {run['id']}", run["started_at"], run["ended_at"]
-    inside = sorted((m for m in messages if m.at >= started and (ended is None or m.at < ended)), key=lambda m: m.at)
-    main = [m for m in inside if not m.sidechain]
+def split_by_run(runs: list[Run], messages: list[Message]) -> tuple[dict[RunKey, list[Message]], list[Message]]:
+    """A run covers its start up to its end, or up to the next run's start while it has no end."""
+    ordered = sorted(runs, key=lambda r: (r.started_at, r.key.id))
+    spans = []
+    for i, run in enumerate(ordered):
+        following = ordered[i + 1].started_at if i + 1 < len(ordered) else float("inf")
+        spans.append((run, run.started_at, following if run.ended_at is None else run.ended_at))
+    inside: dict[RunKey, list[Message]] = {r.key: [] for r in ordered}
+    outside = []
+    for message in messages:
+        owner = next((r for r, start, end in reversed(spans) if start <= message.at < end), None)
+        (inside[owner.key] if owner else outside).append(message)
+    return inside, outside
+
+
+def run_spends(run: Run, messages: list[Message]) -> list[Spend]:
+    label = f"run {run.key.id}"
+    ordered = sorted(messages, key=lambda m: m.at)
+    main = [m for m in ordered if not m.sidechain]
     spends = [
-        Spend("subagent", card, label, model, started, tokens)
-        for model, tokens in by_model([m for m in inside if m.sidechain]).items()
+        Spend("subagent", run.card, run.key, label, model, run.started_at, tokens)
+        for model, tokens in by_model([m for m in ordered if m.sidechain]).items()
     ]
     conversation = by_model(main)
     if main:
         first = main[0].tokens
         startup = Tokens(first.input, first.cache_read, first.cache_write_5m, first.cache_write_1h)
         conversation[main[0].model] = conversation[main[0].model] - startup
-        spends.append(Spend("startup", card, label, main[0].model, started, startup))
-    spends += [Spend("conversation", card, label, model, started, tokens) for model, tokens in conversation.items()]
+        spends.append(Spend("startup", run.card, run.key, label, main[0].model, run.started_at, startup))
+    spends += [Spend("conversation", run.card, run.key, label, model, run.started_at, t) for model, t in conversation.items()]
     return [s for s in spends if s.tokens.total]
+
+
+def outside_spends(card: Card, messages: list[Message], window: Window) -> list[Spend]:
+    return [
+        Spend("subagent" if m.sidechain else "conversation", card, None, OUTSIDE_RUNS, m.model, m.at, m.tokens)
+        for m in messages if window.has(m.at) and m.tokens.total
+    ]
+
+
+def is_outside_runs(spend: Spend) -> bool:
+    return spend.card is not None and spend.run is None and spend.bucket in ("conversation", "subagent")
 
 
 def session_tokens(row: dict) -> Tokens:
@@ -229,26 +282,43 @@ def collect(gateway: Path, worker: Path, config_dir: Path, window: Window) -> Le
         if window.has(row["started_at"]):
             route = row["display_name"] or row["source"]
             ledger.spends.append(
-                Spend("webhook", None, route, row["model"] or "unknown", row["started_at"], session_tokens(row))
+                Spend("webhook", None, None, route, row["model"] or "unknown", row["started_at"], session_tokens(row))
             )
 
     cards_by_worker_session: dict[str, Card] = {}
-    transcripts: dict[tuple[str, str], list[Message]] = {}
+    worktrees: dict[str, Worktree] = {}
     for board in board_databases(gateway):
-        for run in read_optional(board, RUN_SQL):
-            card = Card(run["task_id"], issue_of(run["title"]))
-            metadata = json.loads(run["metadata"] or "{}")
+        name = board.parent.name if board.parent != gateway else "main"
+        tasks = {t["id"]: t for t in read_optional(board, TASK_SQL)}
+        for task in tasks.values():
+            if task["workspace_path"]:
+                worktrees.setdefault(task["workspace_path"], Worktree([], [])).cards.append(
+                    Card(task["id"], issue_of(task["title"]))
+                )
+        for row in read_optional(board, RUN_SQL):
+            task = tasks.get(row["task_id"]) or {}
+            card = Card(row["task_id"], issue_of(task.get("title")))
+            metadata = json.loads(row["metadata"] or "{}")
             if metadata.get("worker_session_id"):
                 cards_by_worker_session[metadata["worker_session_id"]] = card
-            session_id, worktree = metadata.get("session_id"), metadata.get("worktree")
-            if not (session_id and worktree and window.has(run["started_at"])):
-                continue
-            key = (session_id, worktree)
-            if key not in transcripts:
-                transcripts[key] = transcript_messages(config_dir, session_id, worktree)
-            label = f"run {run['id']}"
-            ledger.runs[label] = {"id": run["id"], "card": card, "started_at": run["started_at"], "outcome": run["outcome"]}
-            ledger.spends += run_spends(run, card, transcripts[key])
+            run = Run(RunKey(name, row["id"]), card, row["started_at"], row["ended_at"], row["outcome"])
+            if task.get("workspace_path"):
+                worktrees[task["workspace_path"]].runs.append(run)
+            if window.has(run.started_at):
+                ledger.runs[run.key] = {
+                    "id": run.key.id, "card": card, "started_at": run.started_at, "outcome": run.outcome,
+                }
+
+    transcripts = index_transcripts(config_dir)
+    for path, worktree in sorted(worktrees.items()):
+        if path not in transcripts:
+            continue
+        inside, outside = split_by_run(worktree.runs, worktree_messages(transcripts[path]))
+        for run in worktree.runs:
+            if window.has(run.started_at):
+                ledger.spends += run_spends(run, inside[run.key])
+        first = min(worktree.runs, key=lambda r: (r.started_at, r.key.id)).card if worktree.runs else worktree.cards[0]
+        ledger.spends += outside_spends(first, outside, window)
 
     for row in kanban_board.read(str(worker / "state.db"), SESSION_SQL.format("?"), ("kanban",)):
         if not window.has(row["started_at"]):
@@ -256,7 +326,7 @@ def collect(gateway: Path, worker: Path, config_dir: Path, window: Window) -> Le
         card = cards_by_worker_session.get(row["id"]) or Card(None, issue_of(row["title"]))
         ledger.sessions[row["id"]] = {"id": row["id"], "card": card, "title": row["title"], "started_at": row["started_at"]}
         ledger.spends.append(
-            Spend("dispatch", card, row["id"], row["model"] or "unknown", row["started_at"], session_tokens(row))
+            Spend("dispatch", card, None, row["id"], row["model"] or "unknown", row["started_at"], session_tokens(row))
         )
     return ledger
 
@@ -335,8 +405,8 @@ def build_report(ledger: Ledger, prices: dict, window: Window, top: int, card: s
     }
     if card:
         runs = []
-        for label, run in sorted(ledger.runs.items(), key=lambda item: item[1]["id"]):
-            mine = [s for s in ledger.spends if s.label == label]
+        for key, run in sorted(ledger.runs.items(), key=lambda item: (item[1]["id"], item[0].board)):
+            mine = [s for s in ledger.spends if s.run == key]
             runs.append({
                 "run_id": run["id"], "task_id": run["card"].task_id, "issue": run["card"].issue,
                 "started_at": run["started_at"], "outcome": run["outcome"],
@@ -348,7 +418,8 @@ def build_report(ledger: Ledger, prices: dict, window: Window, top: int, card: s
              **summarize([e for e in ledger.spends if e.label == s["id"] and e.bucket == "dispatch"], prices)}
             for s in sorted(ledger.sessions.values(), key=lambda s: (s["started_at"], s["id"]))
         ]
-        report["card"] = {"id": card, "runs": runs, "sessions": sessions, "total": total}
+        outside = summarize([s for s in ledger.spends if is_outside_runs(s)], prices)
+        report["card"] = {"id": card, "runs": runs, "outside_runs": outside, "sessions": sessions, "total": total}
     return report
 
 
@@ -419,6 +490,10 @@ def render(report: dict) -> str:
                 ]
                 for r in card["runs"]
             ],
+        )
+        outside = card["outside_runs"]
+        out.append(
+            f"outside runs (no run covers the message): {outside['tokens']['total']:,} tokens, {money(outside['cost_usd'])}"
         )
         out += ["", f"Card {card['id']}: kanban sessions"]
         out += table(
