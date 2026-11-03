@@ -559,6 +559,23 @@ The worker home holds no factory secret of its own. Install the plugin in the
 root home and never in the worker's home. `check-install` reports an install
 in the worker home.
 
+`GITHUB_UPLOAD_TOKEN` belongs to a person, not to the factory's GitHub App,
+because an App installation token cannot upload to GitHub's attachment store.
+This was tested on 2026-10-29 with gh 2.102.0 and a GitHub App installation
+token, which starts with `ghs_`. Two attempts failed:
+
+- `gh issue comment --attach <png>` exits 1 with
+  `unsupported authentication type` before it sends any request. gh accepts
+  only `gho_`, `ghp_`, `github_pat_`, and `ghu_` tokens for uploads.
+- A direct `POST https://uploads.github.com/user-attachments/assets` with the
+  installation token returns HTTP 404, although the App has write access to the
+  repository.
+
+A `ghu_` user-to-server token also acts as a person, so it does not remove the
+person's credential. Before you test again, check GitHub's upstream request
+for an App upload route,
+[community discussion 28219](https://github.com/orgs/community/discussions/28219).
+
 1. **Operator, in their own terminal.** Enter `GITHUB_UPLOAD_TOKEN` in the
    factory's Infisical folder, as in [`references/infisical.md`](references/infisical.md).
    Never ask for the value in chat. The gateway reads secret sources when it
