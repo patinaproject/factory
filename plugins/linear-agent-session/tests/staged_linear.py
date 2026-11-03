@@ -24,10 +24,13 @@ Its title comes from `issue_title`, "Fix checkout" when unset, and its priority 
 links are its `session_urls` list, which an update's `addedExternalUrls` extends, and `session_urls_error` fails the read.
 The app's own user id is app-user.
 An OpenTitledIssues read is logged as `open_titled` with its variables and answers with the `open_issues` list of
-{identifier, title, url}, none when unset; `open_titled_http_status` makes it fail with that HTTP status.
-A TeamForCreate read answers a team ABC whose workflow states come from `team_states` (a triage and an unstarted state
+{identifier, title, url} when set, whatever the filter. Otherwise it applies the filter to the `issues` list of
+{identifier, title, url, team, state_type}: the team key's eq, the title's startsWith or eq, and the state type's nin
+(an issue's state_type is "unstarted" when unset). It answers none when neither list is set;
+`open_titled_http_status` makes it fail with that HTTP status.
+A TeamForCreate read answers the team whose key it asks for, with id team-<KEY>, whose workflow states come from `team_states` (a triage and an unstarted state
 when unset) and whose labels come from `team_labels` and `workspace_labels`, each name's id being label-<name>.
-An IssueCreate is logged as `issue_create` with its variables and answers ABC-900.
+An IssueCreate is logged as `issue_create` with its variables and answers <KEY>-900 for the team id team-<KEY>.
 """
 from __future__ import annotations
 
@@ -39,6 +42,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+
+def _matches(issue: dict, issue_filter: dict) -> bool:
+    title = issue_filter.get("title", {})
+    return (
+        issue["team"] == issue_filter["team"]["key"]["eq"]
+        and ("eq" not in title or issue["title"] == title["eq"])
+        and ("startsWith" not in title or issue["title"].startswith(title["startsWith"]))
+        and issue.get("state_type", "unstarted") not in issue_filter.get("state", {}).get("type", {}).get("nin", [])
+    )
+
 
 BRIEF = {"id": "d-brief", "title": "ABC-123 Agent brief", "creator": "app-user"}
 _REAL = Path(__file__).resolve().parents[1] / "linear.py"
@@ -103,18 +117,27 @@ def _fake_urlopen(request, timeout=None):
             response = _Response(state["open_titled_http_status"], {"errors": [{"message": "Internal Server Error"}]})
         elif "OpenTitledIssues" in query:
             entry["open_titled"] = body["variables"]
-            response = _Response(200, {"data": {"issues": {"nodes": state.get("open_issues", [])}}})
+            if "open_issues" in state:
+                found = state["open_issues"]
+            else:
+                found = [
+                    {key: issue[key] for key in ("identifier", "title", "url")}
+                    for issue in state.get("issues", []) if _matches(issue, body["variables"]["filter"])
+                ]
+            response = _Response(200, {"data": {"issues": {"nodes": found}}})
         elif "TeamForCreate" in query:
             def labels(names):
                 return [{"id": f"label-{n}", "name": n, "isGroup": False, "parent": None} for n in names]
             states = state.get("team_states", [{"id": "state-triage", "type": "triage"}, {"id": "state-todo", "type": "unstarted"}])
-            team = {"id": "team-ABC", "key": "ABC", "states": {"nodes": states},
+            key = body["variables"]["key"]
+            team = {"id": f"team-{key}", "key": key, "states": {"nodes": states},
                     "labels": {"nodes": labels(state.get("team_labels", []))}}
             response = _Response(200, {"data": {"viewer": {"id": "app-user"}, "teams": {"nodes": [team]},
                                                 "issueLabels": {"nodes": labels(state.get("workspace_labels", []))}}})
         elif "mutation IssueCreate" in query:
             entry["issue_create"] = body["variables"]
-            created = {"identifier": "ABC-900", "url": "https://linear.app/example/issue/ABC-900"}
+            team_key = body["variables"]["input"]["teamId"].removeprefix("team-")
+            created = {"identifier": f"{team_key}-900", "url": f"https://linear.app/example/issue/{team_key}-900"}
             response = _Response(200, {"data": {"issueCreate": {"success": True, "issue": created}}})
         elif "IssueRoleLabels" in query:
             def nodes(names):

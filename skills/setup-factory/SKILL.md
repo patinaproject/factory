@@ -917,6 +917,9 @@ key file but does not contain the key.
   "factory_repository": {"full_name": "<owner>/<factory>", "default_branch": "<branch>"},
   "triage": {"max_running": <n>},
   "dependency_updates": {"repository": "<owner>/<name>", "team_key": "<Linear team key>", "theme_label": "<label name>", "type_label": "<label name>"},
+  "recurring_issues": [
+    {"repository": "<owner>/<name>", "team_key": "<Linear team key>", "title_prefix": "<title>, week of ", "cadence": "weekly", "labels": ["<label name>"], "description": "<what the issue asks the agent to do>"}
+  ],
   "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0, "command_timeout_seconds": 600, "idle_limit_seconds": 2700}
 }
 ```
@@ -1003,6 +1006,16 @@ asks the agent to update. `team_key` is the Linear team that gets the issue.
 Security label. `type_label` is the type the issue's description tells triage
 to use, such as the Tools label. The job refuses to run, and `check-install`
 reports the section, when it is missing.
+
+`recurring_issues` is an optional list that configures the `file-recurring-issues`
+job from part 12, default none. Each entry has a `repository` (`<owner>/<name>`
+the issue is about), a Linear `team_key`, a `title_prefix`, a `cadence`
+(`daily`, `weekly`, or `monthly`), a `labels` list of label names that may be
+empty, and the issue's `description`. End the prefix with a space after
+words like "week of", because the job appends the slot's start date. Two entries on one
+team cannot have prefixes that are equal or that start with each other. Real
+values belong in the private record. The job skips a malformed entry and names
+it as `recurring_issues[<index>]`, and `check-install` reports it the same way.
 
 `operator_user_ids` is an optional input the operator supplies, default `[]`: the
 Linear user ids of operators who, like an issue's assignee and the person who
@@ -1295,8 +1308,8 @@ belongs to the worker profile.
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
 jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`,
-`finish-merged`, `dispatch-triage`, and `file-dependency-update`.
-A copy there runs without the worker's scripts and settings, so remove it the
+`finish-merged`, `dispatch-triage`, `file-dependency-update`, and
+`file-recurring-issues`. A copy there runs without the worker's scripts and settings, so remove it the
 same way. The default home holds two jobs, `retry-failed-webhooks` and
 `report-deploy`, described below. A second setup session runs this check before it
 creates anything.
@@ -1372,6 +1385,32 @@ job:
 
 ```sh
 hermes -p claude-worker cron create "every 168h" --name file-dependency-update --no-agent --script file-dependency-update </dev/null
+```
+
+**Recurring issue job.** `file-recurring-issues` runs every hour. It reads
+`recurring_issues` from the factory settings (part 10). A slot is one period of
+an entry's cadence: a UTC day, an ISO week starting Monday, or a UTC month. For
+each valid entry the job asks Linear, as the agent app, for the team's issue
+titled with the entry's `title_prefix` and the slot's start date
+(`<title_prefix><YYYY-MM-DD>`), in any state, so a closed issue still fills its
+slot. When there is one, it prints `slot <index> <identifier> <url>` and files
+nothing. Otherwise, when an issue whose title starts with the prefix is still
+open, it prints `open <index> <identifier> <url>` and files nothing. Otherwise
+it files one issue in the team's Triage status, with the entry's labels only,
+delegated to the agent app, with no assignee and no priority, and prints
+`filed <index> <identifier> <url>`. It also prints `next <index> <ISO start of
+the next slot>` for each valid entry. `FACTORY_NOW`, an ISO 8601 time, replaces
+the clock for a trial run. A malformed entry is named on standard error and
+skipped. A failed Linear read or write, or a label that does not exist, exits 1
+with the failure on standard error and makes no further Linear call. A section
+that is not a list, a bad `FACTORY_NOW`, or a missing `HERMES_HOME` exits 2
+before any Linear call. A malformed entry exits 2 after the valid entries run.
+Otherwise it exits 0. It uses the factory's existing Linear
+access and needs no new credential. Create the job when `cron list` has no
+`file-recurring-issues` job:
+
+```sh
+hermes -p claude-worker cron create "every 1h" --name file-recurring-issues --no-agent --script file-recurring-issues </dev/null
 ```
 
 **Conflict job.** GitHub sends no webhook when a pull request starts to
@@ -2492,9 +2531,14 @@ Hermes process starts. The new helper also writes
      job with the part 12 `cron create` command.
    - A `cron job file-dependency-update` line: after the profile update, create
      the job with the part 12 `cron create` command.
+   - A `cron job file-recurring-issues` line: after the profile update, create
+     the job with the part 12 `cron create` command.
    - A `config plugins.entries.linear-agent-session.settings.dependency_updates`
      line: add the `dependency_updates` section to the factory settings and set
      them in both homes as in part 10, before the profile update.
+   - A `config recurring_issues` line: the line names the entry as
+     `recurring_issues[<index>]`. Fix that entry in the factory settings and set
+     them in both homes as in part 10. The job skips the entry until then.
    - A `waiting triage card <task id>: is blocked with block kind needs_input`
      or `is triage with block kind needs_input` line: the card waits for a
      reply the way triage cards waited before a round parked in `scheduled`.

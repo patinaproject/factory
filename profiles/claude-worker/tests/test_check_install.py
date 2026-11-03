@@ -198,6 +198,7 @@ WORKER_JOBS = [
     cron_job("finish-merged", 5),
     cron_job("dispatch-triage", 1),
     cron_job("file-dependency-update", 10080),
+    cron_job("file-recurring-issues", 60),
 ]
 RETRY_SCRIPT = "retry-failed-webhooks"
 ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack"), cron_job("report-deploy", 5, "slack")]
@@ -1339,6 +1340,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("finish-merged", 5),
             cron_job("dispatch-triage", 1),
             cron_job("file-dependency-update", 10080),
+            cron_job("file-recurring-issues", 60),
         ])
         self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local"), ROOT_JOBS[1]])
 
@@ -1693,6 +1695,42 @@ class CheckInstallTest(unittest.TestCase):
         settings = {**SETTINGS, "claude_session": fields}
         self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
         self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+
+    def recurring_issues(self, section: object) -> None:
+        settings = {**SETTINGS, "recurring_issues": section}
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+
+    def test_valid_and_absent_recurring_issues_are_silent(self) -> None:
+        entry = {
+            "repository": "example-org/example-repo", "team_key": "ABC", "title_prefix": "Audit, week of ",
+            "cadence": "weekly", "labels": ["Security"], "description": "Audit it.",
+        }
+        for section in ([], [entry], [entry, {**entry, "team_key": "DEF"}]):
+            with self.subTest(section=section):
+                self.recurring_issues(section)
+
+                self.assertEqual(self.check(), (0, ""))
+
+    def test_a_malformed_recurring_issue_is_reported_by_index(self) -> None:
+        entry = {
+            "repository": "example-org/example-repo", "team_key": "ABC", "title_prefix": "Audit, week of ",
+            "cadence": "weekly", "labels": [], "description": "Audit it.",
+        }
+        self.recurring_issues([entry, {**entry, "cadence": "yearly"}])
+
+        self.assertEqual(self.check(), (
+            1, f"config recurring_issues in {self.worker}: "
+               "recurring_issues[1] cadence 'yearly' must be one of daily, weekly, monthly\n",
+        ))
+
+    def test_a_recurring_issues_section_that_is_not_a_list_is_reported(self) -> None:
+        self.recurring_issues({"cadence": "weekly"})
+
+        self.assertEqual(self.check(), (
+            1, f"config recurring_issues in {self.worker}: "
+               "recurring_issues {'cadence': 'weekly'} must be a list, so file-recurring-issues files nothing\n",
+        ))
 
     def test_transport_model_without_a_sonnet_tier_is_reported(self) -> None:
         self.claude_session(model="transport-model", tier_models={"haiku": "haiku-model"})

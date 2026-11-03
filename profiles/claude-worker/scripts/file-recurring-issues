@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""File each recurring agent issue that the factory settings declare.
+
+Reads `recurring_issues` from the factory settings. For each valid entry it prints `slot <index> <identifier> <url>`
+when the agent app already has an issue titled for the current slot, `open <index> <identifier> <url>` when an issue
+whose title starts with the entry's prefix is still open, else files one in triage and prints
+`filed <index> <identifier> <url>`. It also prints `next <index> <ISO start of the next slot>` for each valid entry.
+FACTORY_NOW (ISO 8601) replaces the clock. A malformed entry is named on stderr and skipped.
+Exits 1 when Linear or the broker fails (the run then makes no further Linear call), else 2 when an entry is
+malformed, the settings are wrong, or HERMES_HOME or FACTORY_NOW is wrong, else 0.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from datetime import datetime, timezone
+
+import card_transition
+import factory_settings
+import recurring_issues
+
+
+def main() -> int:
+    if not os.environ.get("HERMES_HOME"):
+        print("file-recurring-issues: HERMES_HOME is not set; point it at the claude-worker profile home", file=sys.stderr)
+        return 2
+    try:
+        now = datetime.fromisoformat(os.environ["FACTORY_NOW"]) if "FACTORY_NOW" in os.environ else datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        entries, errors = recurring_issues.parse_entries(factory_settings.read(raw=False))
+    except (factory_settings.SettingsError, recurring_issues.SettingsError, ValueError) as exc:
+        print(f"file-recurring-issues: {exc}", file=sys.stderr)
+        return 2
+    for error in errors:
+        print(f"file-recurring-issues: {error}", file=sys.stderr)
+    linear = card_transition.plugin_module("linear-agent-session", "linear")
+    try:
+        if entries:
+            client = linear.client_from_env()
+        for entry in entries:
+            title = entry.title(now)
+            found = client.issues_titled(entry.team_key, title)
+            if found:
+                print(f"slot {entry.index} {found[0]['identifier']} {found[0]['url']}")
+            elif found := client.open_issues_titled(entry.team_key, entry.title_prefix):
+                print(f"open {entry.index} {found[0]['identifier']} {found[0]['url']}")
+            else:
+                issue = client.create_issue(
+                    entry.team_key, title, entry.description, list(entry.labels), state_type="triage", delegate_self=True,
+                )
+                print(f"filed {entry.index} {issue['identifier']} {issue['url']}")
+            print(f"next {entry.index} {entry.next_slot_start(now).isoformat()}T00:00:00Z")
+    except (*linear.CLIENT_ERRORS, OSError) as exc:
+        print(f"file-recurring-issues: Linear failed: {exc}", file=sys.stderr)
+        return 1
+    return 2 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
