@@ -222,19 +222,14 @@ class ConfigKey(NamedTuple):
 class CronJob(NamedTuple):
     part: int
     name: str
-    minutes: int
+    every: int | str  # minutes between runs, or a cron expression
     deliver: Want
     home: str = WORKER
     script: str = ""
-    cron: str = ""  # a cron expression in the root profile's timezone; `minutes` is 0 then
 
     @property
     def runs(self) -> str:
         return self.script or self.name
-
-    @property
-    def every(self) -> int | str:
-        return self.cron or self.minutes
 
 
 class Service(NamedTuple):
@@ -277,13 +272,11 @@ CONFIG = (
         10, f"{SETTINGS_KEY}.dependency_updates", BOTH, declared("set to the weekly dependency update's repository, team, and labels"),
         same_in_homes=True,
     ),
-    # Unset is fine: a factory with no scheduled command never sets it, unlike dependency_updates, which a job always needs.
     ConfigKey(
         10, f"{SETTINGS_KEY}.scheduled_commands", BOTH,
         Want(lambda live: live is None or isinstance(live, list), "unset or a list of scheduled commands"),
         same_in_homes=True,
     ),
-    # Hermes' default is true, so unset passes. A late scheduled command runs once only while this is true.
     ConfigKey(12, "cron.catch_up_missed", (ROOT,), Want(lambda live: live is not False, "true", True)),
     ConfigKey(10, "kanban.max_in_progress", (ROOT,), positive_int("a positive card limit")),
     ConfigKey(10, "kanban.max_spawn", (ROOT,), positive_int("a positive limit on worker spawns per board")),
@@ -322,7 +315,7 @@ CRON = (
 )
 # Jobs that moved from Hermes' cron to launchd, because `hermes pause` stops Hermes' cron.
 LAUNCHD_JOBS = ("refresh-gh-app-login",)
-OWNED_REFS_MAX_AGE = 5 * 60 * next(job.minutes for job in CRON if job.name == "refresh-owned-refs")
+OWNED_REFS_MAX_AGE = 5 * 60 * next(job.every for job in CRON if job.name == "refresh-owned-refs")
 
 AUTO_DEPLOY_INTERVAL_SECONDS = 300  # equals auto-deploy's INTERVAL_SECONDS
 # macOS only. `plist` is a glob; the runbook lets the operator name the cloudflared plist.
@@ -674,10 +667,10 @@ def cron_differences(job: CronJob, live: dict) -> list:
     if not live["enabled"]:
         details.append(("is disabled", ("resume", job_id)))
     schedule = live["schedule"]
-    if job.cron:
-        on_schedule, wanted = schedule.get("kind") == "cron" and schedule.get("expr") == job.cron, job.cron
+    if isinstance(job.every, str):
+        on_schedule, wanted = schedule.get("kind") == "cron" and schedule.get("expr") == job.every, job.every
     else:
-        on_schedule, wanted = schedule.get("kind") == "interval" and schedule.get("minutes") == job.minutes, f"every {job.minutes}m"
+        on_schedule, wanted = schedule.get("kind") == "interval" and schedule.get("minutes") == job.every, f"every {job.every}m"
     if not on_schedule:
         details.append((
             f"runs {live['schedule_display']}, not {wanted}",
@@ -769,7 +762,6 @@ def unresolved_deliveries(home: Path, live: dict, hermes: str) -> list:
 
 
 def load_runner(commit: Commit):
-    """The scheduled-command runner at `commit`, the one parser of the settings entries, or None when the commit lacks it."""
     files = commit.files(SCHEDULED_RUNNER)
     if SCHEDULED_RUNNER not in files:
         return None
@@ -780,14 +772,13 @@ def load_runner(commit: Commit):
 
 
 def scheduled_entries(runner, settings) -> tuple:
-    """The settings' scheduled_commands entries. Raises the runner's SettingsError for an invalid one."""
     section = settings.get("scheduled_commands") if isinstance(settings, dict) else None
     return runner.parse_entries(section) if runner else ()
 
 
 def scheduled_jobs(entries: tuple) -> tuple:
     chat = declared("the operator's chat platform", besides=("local",))
-    return tuple(CronJob(12, SCHEDULED_PREFIX + entry.name, 0, chat, home=ROOT, cron=entry.schedule) for entry in entries)
+    return tuple(CronJob(12, SCHEDULED_PREFIX + entry.name, entry.schedule, chat, home=ROOT) for entry in entries)
 
 
 def check_root_wrappers(commit: Commit, homes: Homes, entries: tuple = ()) -> list:

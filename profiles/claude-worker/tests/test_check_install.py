@@ -1332,7 +1332,6 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def scheduled(self, entries: list | None = None, *, job: dict | None = None, script: str | None = None) -> None:
-        """One scheduled_commands entry, its root job, and its installed copy of the runner, each replaceable."""
         entries = [SCHEDULED_ENTRY] if entries is None else entries
         for home, config in ((self.root, ROOT_CONFIG), (self.worker, WORKER_CONFIG)):
             self.config(home, {

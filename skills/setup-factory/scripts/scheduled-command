@@ -4,19 +4,9 @@
 Install one copy per `scheduled_commands` entry into the root home's `scripts/` as `scheduled-<name>`.
 Hermes passes a cron script no argument, so the entry is the script's own file name without `scheduled-`.
 
-Each run fetches the entry's repository into the root home's own clone, resets it to origin/HEAD, and
-removes every untracked file. It then runs the entry's commands in order, each in its own process group,
-and stops at the first non-zero exit or when the entry's `timeout_minutes` runs out. It kills the whole
-process group, so no child outlives a run.
-
-The commands run with the real home, the repository's workstation Infisical client ID, and the Node that
-the clone's `.nvmrc` names. The environment holds no factory secret and no Infisical client secret or token.
-
 Prints nothing and exits 0 when every command succeeds. Otherwise prints one block and exits 1. The first
 line is `<name>: <command> exited <code>` or `<name>: <command> timeout after <n> minutes`, followed by the
 last 40 lines of that command's output. A missing prerequisite prints `<name>: <what is missing>`.
-
-Reads the settings with `hermes config get ... --json` and never `--raw`.
 """
 from __future__ import annotations
 
@@ -41,7 +31,6 @@ SECRET_NAMES = Path("plugins/factory-secret-names/plugin.yaml")
 DECLARED_NAME = re.compile(r"^\s*-\s*name:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", re.MULTILINE)
 CLIENT_ID_NAME = "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID"
 CLIENT_ID_LINE = re.compile(rf"^\s*(?:export\s+)?{CLIENT_ID_NAME}=(.*)$", re.MULTILINE)
-# The client ID is the only Infisical value a command gets. Anything else Infisical-shaped is a credential.
 ALWAYS_REMOVED = (
     "INFISICAL_CLIENT_ID", "INFISICAL_TOKEN", "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET",
     "GH_TOKEN", "GITHUB_TOKEN",
@@ -50,7 +39,7 @@ NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 REPOSITORY = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 CRON_FIELD = re.compile(r"[A-Za-z0-9*/,?-]+")
 NVMRC_MAJOR = re.compile(r"v?(\d+)")
-SECONDS_PER_MINUTE = 60  # tests shrink it to run a timeout in a moment
+SECONDS_PER_MINUTE = 60
 TAIL_LINES = 40
 
 
@@ -59,7 +48,7 @@ class SettingsError(Exception):
 
 
 class Missing(Exception):
-    """A prerequisite the factory does not create."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -96,7 +85,6 @@ def parse_entry(raw: object) -> ScheduledCommand:
 
 
 def parse_entries(value: object) -> tuple[ScheduledCommand, ...]:
-    """Every entry, or no entry when the key is unset."""
     if value is None:
         return ()
     if not isinstance(value, list):
@@ -129,7 +117,6 @@ def read_entry(name: str, home: Path, root: Path) -> ScheduledCommand | None:
     raw = json.loads(proc.stdout)
     if not isinstance(raw, list):
         raise SettingsError(f"scheduled_commands {raw!r} must be a list")
-    # Only the named entry has to be valid for this run.
     return next((parse_entry(item) for item in raw if isinstance(item, dict) and item.get("name") == name), None)
 
 
@@ -142,7 +129,6 @@ def run_git(clone: Path, env: dict, *args: str) -> str:
 
 
 def refresh_clone(entry: ScheduledCommand, home: Path, root: Path) -> Path:
-    """Fetch into the root home's own clone and leave exactly origin/HEAD in it. The worker's checkouts are never touched."""
     owner, repo = entry.repository.split("/")
     clone = root / "scheduled" / owner / repo
     clone.mkdir(parents=True, exist_ok=True)
@@ -162,7 +148,6 @@ def refresh_clone(entry: ScheduledCommand, home: Path, root: Path) -> Path:
 
 
 def secret_names(root: Path) -> set:
-    # The installed plugin is the list Hermes itself strips from every process this home starts.
     path = root / SECRET_NAMES
     if not path.is_file():
         raise Missing(f"{path} is missing, so the secret names to remove are unknown")
@@ -218,7 +203,6 @@ def kill_group(pgid: int) -> None:
 
 
 def run_command(argv: tuple, clone: Path, env: dict, deadline: float) -> tuple[str, deque]:
-    """The outcome ("exited <code>" or "timeout"), and the last lines of the command's output."""
     tail: deque = deque(maxlen=TAIL_LINES)
     try:
         proc = subprocess.Popen(
@@ -243,7 +227,6 @@ def run_command(argv: tuple, clone: Path, env: dict, deadline: float) -> tuple[s
 
 
 def run_entry(entry: ScheduledCommand, home: Path, root: Path) -> str:
-    """The failure block, or "" when every command succeeded."""
     lock = root / "scheduled" / f"{entry.repository.replace('/', '__')}.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     with open(lock, "w") as held:
