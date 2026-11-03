@@ -202,6 +202,18 @@ WORKER_JOBS = [
 RETRY_SCRIPT = "retry-failed-webhooks"
 ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack"), cron_job("report-deploy", 5, "slack")]
 RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
+SCHEDULED_SOURCE = "skills/setup-factory/scripts/scheduled-command"
+SCHEDULED_ENTRY = {
+    "name": "weekly-report", "repository": "example-org/example-repo", "schedule": "0 9 * * 1",
+    "commands": [["pnpm", "install", "--frozen-lockfile"], ["pnpm", "report"]], "timeout_minutes": 30,
+}
+SCHEDULED_KEY = "plugins.entries.linear-agent-session.settings.scheduled_commands"
+SCHEDULED_JOB = "scheduled-weekly-report"
+
+
+def cron_expression_job(name: str, expression: str, deliver: str = "slack", **fields) -> dict:
+    return cron_job(name, 0, deliver, schedule={"kind": "cron", "expr": expression, "display": expression},
+                    schedule_display=expression, **fields)
 
 SCRIPT = SCRIPTS / "check-install"
 if str(SCRIPTS) not in sys.path:
@@ -219,10 +231,10 @@ REMEDY_CLASSES = (
     ("plugin import", "", "manual"),
     ("config", r"^config (platforms\.webhook\.(enabled|extra\.host)|kanban\.(review_dispatch|auto_decompose|default_assignee)"
      r"|terminal\.(timeout|env_passthrough)|platforms\.factory_uploads\.enabled|streaming\.enabled"
-     r"|platforms\.slack\.extra\.native_task_cards|\S+\.github\.private_key_path) in ", "install"),
+     r"|platforms\.slack\.extra\.native_task_cards|cron\.catch_up_missed|\S+\.github\.private_key_path) in ", "install"),
     ("config", "", "manual"),
-    ("cron job", r"^cron job (retry-failed-webhooks|report-deploy) in .*: (is missing|delivers to \S+, not )", "manual"),
-    ("cron job", r": (is missing|is disabled|runs .*, not every|is not a script-only job|delivers to \S+, not |belongs to)", "install"),
+    ("cron job", r"^cron job (retry-failed-webhooks|report-deploy|scheduled-\S+) in .*: (is missing|delivers to \S+, not )", "manual"),
+    ("cron job", r": (is missing|is disabled|runs .*, not |is not a script-only job|delivers to \S+, not |belongs to)", "install"),
     ("cron job", ": last run", "advisory"),
     ("cron job", ": is replaced by a launchd job", "manual"),
     ("cron job", "", "manual"),
@@ -300,6 +312,7 @@ REPO_FILES = {
     "plugins/webhook-retry/__init__.py": "# retry\n",
     "templates/render.py": RENDER,
     RETRY_SOURCE: "#!/usr/bin/env python3\nretry\n",
+    SCHEDULED_SOURCE: (REPO / SCHEDULED_SOURCE).read_text(),
 }
 
 
@@ -1317,6 +1330,88 @@ class CheckInstallTest(unittest.TestCase):
                 f'cron job {RETRY_SCRIPT} in {self.root}: delivers to "local", not the operator\'s chat platform '
                 "(part 12)\n"),
         )
+
+    def scheduled(self, entries: list | None = None, *, job: dict | None = None, script: str | None = None) -> None:
+        """One scheduled_commands entry, its root job, and its installed copy of the runner, each replaceable."""
+        entries = [SCHEDULED_ENTRY] if entries is None else entries
+        for home, config in ((self.root, ROOT_CONFIG), (self.worker, WORKER_CONFIG)):
+            self.config(home, {
+                **config, "plugins.entries.linear-agent-session.settings": {**SETTINGS, "scheduled_commands": entries}, SCHEDULED_KEY: entries,
+            })
+        self.cron(self.root, [*ROOT_JOBS, job or cron_expression_job(SCHEDULED_JOB, "0 9 * * 1")])
+        self.install(self.root, f"scripts/{SCHEDULED_JOB}", REPO_FILES[SCHEDULED_SOURCE] if script is None else script)
+
+    def test_a_scheduled_command_that_matches_its_entry_is_silent(self) -> None:
+        self.scheduled()
+
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_scheduled_command_with_no_job_or_script_is_named(self) -> None:
+        self.scheduled()
+        self.cron(self.root, ROOT_JOBS)
+        (self.root / "scripts" / SCHEDULED_JOB).unlink()
+
+        self.assertEqual(self.check(), (1,
+            f"script {self.root}/scripts/{SCHEDULED_JOB}: is missing; install it from {SCHEDULED_SOURCE} (part 12)\n"
+            f"cron job {SCHEDULED_JOB} in {self.root}: is missing (part 12)\n"))
+
+    def test_a_scheduled_command_job_that_exists_twice(self) -> None:
+        job = cron_expression_job(SCHEDULED_JOB, "0 9 * * 1")
+        self.scheduled(job=job)
+        self.cron(self.root, [*ROOT_JOBS, job, job])
+
+        self.assertEqual(self.check(), (1, f"cron job {SCHEDULED_JOB} in {self.root}: exists 2 times (part 12)\n"))
+
+    def test_a_scheduled_command_job_in_the_worker_profile(self) -> None:
+        job = cron_expression_job(SCHEDULED_JOB, "0 9 * * 1")
+        self.scheduled(job=job)
+        self.cron(self.root, ROOT_JOBS)
+        self.cron(self.worker, [*WORKER_JOBS, job])
+
+        self.assertEqual(self.check(), (1,
+            f"cron job {SCHEDULED_JOB} in {self.root}: is missing (part 12)\n"
+            f"cron job {SCHEDULED_JOB} in {self.worker}: belongs to the root profile (part 12)\n"))
+
+    def test_a_scheduled_command_job_on_another_cron_expression(self) -> None:
+        self.scheduled(job=cron_expression_job(SCHEDULED_JOB, "0 8 * * 1"))
+
+        self.assertEqual(self.check(), (1, f"cron job {SCHEDULED_JOB} in {self.root}: runs 0 8 * * 1, not 0 9 * * 1 (part 12)\n"))
+
+    def test_a_scheduled_command_job_that_delivers_nowhere(self) -> None:
+        for deliver in ("local", ""):
+            with self.subTest(deliver):
+                self.scheduled(job=cron_expression_job(SCHEDULED_JOB, "0 9 * * 1", deliver))
+
+                self.assertEqual(self.check(), (1,
+                    f"cron job {SCHEDULED_JOB} in {self.root}: delivers to {json.dumps(deliver)}, "
+                    "not the operator's chat platform (part 12)\n"))
+
+    def test_a_scheduled_command_script_that_differs_from_the_runner(self) -> None:
+        self.scheduled(script="#!/usr/bin/env python3\nold\n")
+
+        code, out = self.check()
+
+        self.assertEqual((code, out), (1,
+            f"script {self.root}/scripts/{SCHEDULED_JOB}: differs from main at {self.sha} (part 12)\n"))
+
+    def test_a_scheduled_job_with_no_entry_is_reported(self) -> None:
+        self.scheduled(entries=[])
+        (self.root / "scripts" / SCHEDULED_JOB).unlink()
+
+        self.assertEqual(self.check(), (1, f"cron job {SCHEDULED_JOB} in {self.root}: has no scheduled_commands entry of that name (part 12)\n"))
+
+    def test_an_invalid_scheduled_entry_is_reported_instead_of_crashing(self) -> None:
+        self.scheduled(entries=[{**SCHEDULED_ENTRY, "schedule": "every day"}])
+
+        code, out = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertIn(f"config scheduled_commands in {self.worker}: is invalid: scheduled_commands weekly-report: schedule 'every day'", out)
+
+    def test_catching_up_missed_runs_turned_off(self) -> None:
+        self.config(self.root, {**ROOT_CONFIG, "cron.catch_up_missed": False})
+
+        self.assertEqual(self.check(), (1, f"config cron.catch_up_missed in {self.root}: is not true (part 12)\n"))
 
     def test_the_login_refresh_cron_job_that_launchd_replaced_is_reported(self) -> None:
         self.cron(self.worker, [*WORKER_JOBS, cron_job("refresh-gh-app-login", 30)])
