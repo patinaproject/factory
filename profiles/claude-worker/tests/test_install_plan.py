@@ -39,6 +39,17 @@ class PlanTest(unittest.TestCase):
             (install_plan.ManualLine("dashboard sign-in /root: dashboard.public_url is not set", "follow step 6"),),
         ))
 
+    def test_one_install_that_stands_for_several_drifts_carries_each_of_them(self) -> None:
+        first = Drift("webhook config", "routes.github", "differs", ROUTE)
+        second = Drift("webhook config", "routes.linear", "not installed", ROUTE)
+        manual = Drift("dashboard sign-in", "/root", "not set", Manual("follow step 6"))
+        profile = Drift("profile", "claude-worker", "SOUL.md is missing", PROFILE)
+
+        planned = install_plan.plan([first, manual, profile, second])
+
+        self.assertEqual(planned.installs, (PROFILE, ROUTE))
+        self.assertEqual(planned.install_drifts, (profile, first, second))
+
     def test_a_route_script_installs_before_the_route_that_names_it(self) -> None:
         drifts = [
             Drift("webhook config", "routes.linear", "not installed", ROUTE),

@@ -2681,14 +2681,19 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual((status, report["session_id"]), (0, SESSION_ID))
         self.assertTrue(self.log.exists())
 
-    def test_an_install_that_differs_from_the_deployed_commit_waits_unless_a_deploy_failed_or_was_blocked(self) -> None:
+    def test_an_install_that_differs_from_the_deployed_commit_waits_and_names_a_failed_or_blocked_deploy(self) -> None:
         checkout = self.deploy(**{"plugins/blocker-order/result_line.py": "# the next commit\n"})
         deployed = git(checkout, "rev-parse", "HEAD")
-        for fields, precondition in (
-            ({}, "install_skew"),
-            ({"outcome": "WAITING", "events": [{"outcome": "FAILED", "commit": None}]}, "install_skew"),
-            ({"failed": "a" * 40}, None),
-            ({"blocked": "b" * 40}, None),
+        failed, blocked = "a" * 40, "b" * 40
+        retry = f"HERMES_HOME={self.hermes_home.parent.parent} python3 {self.hermes_home.parent.parent}/scripts/auto-deploy --retry"
+        for fields, expected in (
+            ({}, ["a factory deploy is in progress or was left unfinished"]),
+            (
+                {"outcome": "WAITING", "events": [{"outcome": "FAILED", "commit": None}]},
+                ["a factory deploy is in progress or was left unfinished"],
+            ),
+            ({"failed": failed}, [f"the automatic deploy of {failed[:12]} failed", retry]),
+            ({"blocked": blocked}, [f"the automatic deploy of {blocked[:12]} was blocked by a run-gating manual line", retry]),
         ):
             with self.subTest(fields):
                 self.record_deploy(deployed=deployed, **fields)
@@ -2697,8 +2702,12 @@ class ClaudeSessionTest(GitFixture):
 
                 self.assertEqual(status, 2)
                 self.assertTrue(report["transient"])
-                self.assertEqual(report.get("precondition"), precondition)
+                self.assertEqual(report["precondition"], "install_skew")
                 self.assertIn(f"differ from the deployed commit {deployed[:12]}", report["error"])
+                for text in expected:
+                    self.assertIn(text, report["error"])
+                if fields.get("failed") or fields.get("blocked"):
+                    self.assertNotIn("in progress or was left unfinished", report["error"])
                 self.assertFalse(self.log.exists())
 
     def test_an_installed_result_line_without_the_constant_gets_todays_line(self) -> None:
