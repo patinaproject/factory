@@ -214,7 +214,7 @@ class ArmAutoMergeTest(unittest.TestCase):
         )
 
     def arm(self, **kwargs):
-        return self.run_hook("--auto-merge", "--repo", REPO, **kwargs)
+        return self.run_hook("--auto-merge-repo", REPO, **kwargs)
 
     def assert_nothing_merged(self) -> None:
         for call in self.github.calls():
@@ -227,8 +227,8 @@ class ArmAutoMergeTest(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         self.assertEqual(self.github.calls(), [
             ["api", f"repos/{REPO}/pulls/42"],
-            ["api", f"repos/{REPO}/rules/branches/main"],
             ["api", f"repos/{REPO}"],
+            ["api", f"repos/{REPO}/rules/branches/main"],
             MUTATION_ARGV,
         ])
         self.assert_nothing_merged()
@@ -242,7 +242,7 @@ class ArmAutoMergeTest(unittest.TestCase):
         self.assertIn(MUTATION_ARGV, self.github.calls())
 
     def test_the_repository_is_matched_ignoring_case(self) -> None:
-        result = self.run_hook("--auto-merge", "--repo", REPO.upper())
+        result = self.run_hook("--auto-merge-repo", REPO.upper())
 
         self.assertEqual((result.stderr, MUTATION_ARGV in self.github.calls()), ("", True))
 
@@ -271,8 +271,15 @@ class ArmAutoMergeTest(unittest.TestCase):
                 self.assertEqual(MUTATION_ARGV in self.github.calls(), name == "clean status")
                 self.assert_nothing_merged()
 
+    def test_a_draft_is_skipped_after_reading_only_the_pull_request(self) -> None:
+        self.configure(draft=True)
+
+        self.arm()
+
+        self.assertEqual(self.github.calls(), [["api", f"repos/{REPO}/pulls/42"]])
+
     def test_another_repository_is_skipped_without_reading_github(self) -> None:
-        result = self.run_hook("--auto-merge", "--repo", "example-org/other")
+        result = self.run_hook("--auto-merge-repo", "example-org/other")
 
         self.assertEqual(
             (result.returncode, result.stderr, self.github.calls()),
@@ -302,7 +309,7 @@ class ArmAutoMergeTest(unittest.TestCase):
         self.assertEqual(self.github.calls().count(MUTATION_ARGV), 1)
 
     def test_a_missing_linear_key_does_not_stop_arming(self) -> None:
-        result = self.run_hook("--session-id", "live-session", "--auto-merge", "--repo", REPO)
+        result = self.run_hook("--session-id", "live-session", "--auto-merge-repo", REPO)
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("link-pr-hook: linking failed: KeyError('LINEAR_API_KEY')", result.stderr)
@@ -311,7 +318,7 @@ class ArmAutoMergeTest(unittest.TestCase):
     def test_a_failure_to_arm_does_not_stop_the_link(self) -> None:
         self.configure(graphql_error="gh: boom")
 
-        result = self.run_hook("--session-id", "live-session", "--auto-merge", "--repo", REPO, token="run-token")
+        result = self.run_hook("--session-id", "live-session", "--auto-merge-repo", REPO, token="run-token")
 
         self.assertEqual(result.returncode, 0)
         updates = [e["session_update"] for e in GitFixture.linear_requests(self.home) if "session_update" in e]

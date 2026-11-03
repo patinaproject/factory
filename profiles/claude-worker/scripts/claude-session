@@ -1233,12 +1233,12 @@ def claude_settings(
             command = f"{shlex.quote(sys.executable)} {shlex.quote(str(REPLY_HOOK))} {mode} --inbox {shlex.quote(str(inbox))}"
             settings["hooks"][event] = [{"hooks": [{"type": "command", "command": command}]}]
     # One hook acts on the pull request Claude opens: it links the Linear session and arms auto-merge, each when asked.
-    pull_hook = [
+    hook_arguments = [
         *(["--session-id", shlex.quote(session_id)] if session_id else []),
-        *(["--auto-merge", "--repo", shlex.quote(auto_merge_repo)] if auto_merge_repo else []),
+        *(["--auto-merge-repo", shlex.quote(auto_merge_repo)] if auto_merge_repo else []),
     ]
-    if pull_hook and not triage:
-        link = {"type": "command", "command": " ".join([helper_command(LINK_PR_HOOK), *pull_hook])}
+    if hook_arguments and not triage:
+        link = {"type": "command", "command": " ".join([helper_command(LINK_PR_HOOK), *hook_arguments])}
         settings["hooks"].setdefault("PostToolUse", []).append({"matcher": "Bash", "hooks": [link]})
     if transport.get("auth_token_env"):
         settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Claude Code PostToolUse hook for a worker run: act on the pull request Claude opens.
 
-`HERMES_HOME=<worker home> python3 link-pr-hook [--session-id <id>] [--auto-merge --repo <owner/repo>]` reads the
+`HERMES_HOME=<worker home> python3 link-pr-hook [--session-id <id>] [--auto-merge-repo <owner/repo>]` reads the
 hook event on stdin. When a Bash call ran `gh pr create` and printed a pull request URL, it does two independent
-jobs. With `--auto-merge`, it arms squash auto-merge on a pull request in `--repo` that is not a draft, in a
+jobs. With `--auto-merge-repo`, it arms squash auto-merge on a pull request in that repository that is not a draft, in a
 repository that allows auto-merge, when its base branch has a required-status-checks rule, so the pull request
 merges only once GitHub finds every required check green. Arming never merges at once. With `--session-id`, it
 adds `Pull request #<number>` with that URL to the Linear agent session, with the run's LINEAR_API_KEY, keeping
@@ -53,16 +53,13 @@ def arm_auto_merge(event: dict, repo: str, gh=card_branch.run_gh) -> str | None:
     if full_name.lower() != repo.lower():
         return f"{full_name} is not {repo}"
     pull = gh(f"repos/{full_name}/pulls/{number}")
+    if pull["draft"]:
+        return "the pull request is a draft"
+    if not gh(f"repos/{full_name}")["allow_auto_merge"]:
+        return "the repository does not allow auto-merge"
     base = pull["base"]["ref"]
-    rules = gh(f"repos/{full_name}/rules/branches/{quote(base, safe='')}")
-    skips = (
-        (pull["draft"], "the pull request is a draft"),
-        (not gh(f"repos/{full_name}")["allow_auto_merge"], "the repository does not allow auto-merge"),
-        (not any(rule["type"] == "required_status_checks" for rule in rules), f"{base} has no required status checks rule"),
-    )
-    for skip, reason in skips:
-        if skip:
-            return reason
+    if not any(rule["type"] == "required_status_checks" for rule in gh(f"repos/{full_name}/rules/branches/{quote(base, safe='')}")):
+        return f"{base} has no required status checks rule"
     try:
         gh("graphql", "-f", f"query={ENABLE_AUTO_MERGE}", "-f", f"id={pull['node_id']}")
     except card_branch.GhFailed as failure:
@@ -79,17 +76,16 @@ def log(message: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--session-id")
-    parser.add_argument("--auto-merge", action="store_true")
-    parser.add_argument("--repo")
+    parser.add_argument("--auto-merge-repo")
     try:
         args = parser.parse_args()
         event = json.load(sys.stdin)
     except (SystemExit, ValueError) as failure:
         log(f"unreadable hook input: {failure}")
         return 0
-    if args.auto_merge:
+    if args.auto_merge_repo:
         try:
-            if reason := arm_auto_merge(event, args.repo or ""):
+            if reason := arm_auto_merge(event, args.auto_merge_repo):
                 log(f"auto-merge skipped: {reason}")
         except Exception as failure:
             log(f"auto-merge failed: {failure!r}")

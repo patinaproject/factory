@@ -995,8 +995,8 @@ class ClaudeSessionTest(GitFixture):
     def test_auto_merge_adds_its_flag_to_the_hook_only_when_the_repository_sets_it(self) -> None:
         hook = f"HERMES_HOME={self.hermes_home} {sys.executable} {(SCRIPTS / 'link-pr-hook').resolve()}"
         for auto_merge, body, env, expected in (
-            (True, SESSION_BODY, None, [f"{hook} --session-id live-session --auto-merge --repo {REPO}"]),
-            (True, CARD_BODY, None, [f"{hook} --auto-merge --repo {REPO}"]),
+            (True, SESSION_BODY, None, [f"{hook} --session-id live-session --auto-merge-repo {REPO}"]),
+            (True, CARD_BODY, None, [f"{hook} --auto-merge-repo {REPO}"]),
             (False, SESSION_BODY, None, [f"{hook} --session-id live-session"]),
             (True, SESSION_BODY, TRIAGE_ENV, []),
         ):
