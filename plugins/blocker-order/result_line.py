@@ -27,6 +27,12 @@ INSTALL_SKEW = "install_skew"
 INSTALL_SKEW_PARK = "Waiting for a factory deploy:"
 NEEDS_BRIEF = "needs_brief"
 NEEDS_BRIEF_PARK = "Waiting for triage:"
+# A live claude-session holds the card's worktree; the card waits until the lock is free.
+WORKTREE_HELD = "worktree_held"
+WORKTREE_HELD_PARK = "Waiting for the worktree:"
+# GitHub or the gateway's token broker answered with a server error; the card waits a few minutes and runs again.
+SERVER_ERROR = "server_error"
+SERVER_ERROR_PARK = "Waiting after a server error:"
 # A finished implementation run that waits for a GitHub issue ends with this first line, then the issue's URL.
 # The hook parks the card with a reason that starts with ISSUE_PARK and the URL, which `card_transition.py` reads
 # back. It is not a `Refused` precondition, so it is in MACHINE_PARKS but not in PRECONDITION_PARKS.
@@ -48,7 +54,13 @@ _PULL_REQUEST_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/([0-
 _PULL_REQUEST_REF = re.compile(r"([\w.-]+/[\w.-]+)#([0-9]+)")
 # The park reason prefix of each machine condition a refusal can wait for. No reply releases such a park.
 # claude-session sends a precondition only when its key is here, so an older copy blocks no card on a new key.
-PRECONDITION_PARKS = {GH_LOGIN: GH_LOGIN_PARK, INSTALL_SKEW: INSTALL_SKEW_PARK, NEEDS_BRIEF: NEEDS_BRIEF_PARK}
+PRECONDITION_PARKS = {
+    GH_LOGIN: GH_LOGIN_PARK,
+    INSTALL_SKEW: INSTALL_SKEW_PARK,
+    NEEDS_BRIEF: NEEDS_BRIEF_PARK,
+    WORKTREE_HELD: WORKTREE_HELD_PARK,
+    SERVER_ERROR: SERVER_ERROR_PARK,
+}
 MACHINE_PARKS = (*PRECONDITION_PARKS.values(), ISSUE_PARK, PULL_REQUEST_PARK)
 _COMMENTS_SEEN_LINE = re.compile(r"\s*^" + COMMENTS_SEEN + r"[ \t]*(\d+)[ \t]*\Z", re.MULTILINE)
 
@@ -128,7 +140,8 @@ class Refused:
     """`claude-session` stopped without a Claude session, on a refusal or an unexpected error. A transient
     one goes back to the queue. `precondition` names a machine condition that, once met, lets the card run:
     `gh_login` parks the card until the worker's gh login is fresh, `install_skew` until the install matches
-    the commit auto-deploy recorded as deployed, and `needs_brief` until triage writes the issue's Agent brief."""
+    the commit auto-deploy recorded as deployed, `needs_brief` until triage writes the issue's Agent brief, `worktree_held` until no run holds the card's
+    worktree, and `server_error` until five minutes have passed since the park."""
 
     error: str
     transient: bool = False

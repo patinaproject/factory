@@ -35,7 +35,10 @@ with a reason that starts with `result_line.INSTALL_SKEW_PARK`, and `card_transi
 once the install matches that commit. A report with `"precondition": "needs_brief"` is a refusal because the
 issue carries `ready-for-agent` but has no `<ID> Agent brief` Document. The hook parks it with a reason that
 starts with `result_line.NEEDS_BRIEF_PARK`, and `card_transition.py` queues one triage card for the issue and
-releases the card once the brief exists or the issue no longer carries the label. Hermes refuses to schedule a
+releases the card once the brief exists or the issue no longer carries the label. `worktree_held` (a live run
+holds the card's worktree) and `server_error` (GitHub or the broker answered with a server error) park the same
+way under `result_line.WORKTREE_HELD_PARK` and `result_line.SERVER_ERROR_PARK`, and `card_transition.py` releases
+the card once the lock is free or five minutes have passed. Hermes refuses to schedule a
 `goal_mode` card, and that card keeps the transient block the worker's prompt gives a `"transient": true`
 refusal.
 
@@ -143,6 +146,16 @@ PRECONDITION_PARKED = {
         "needs_brief_park",
         "The issue has no Agent brief yet, so this card waits in scheduled while triage writes it and goes back to "
         "the queue once the brief exists.",
+    ),
+    result_line.WORKTREE_HELD: (
+        "worktree_held_park",
+        "Another claude-session holds this card's worktree, so this card waits in scheduled and goes back to the "
+        "queue once the worktree is free.",
+    ),
+    result_line.SERVER_ERROR: (
+        "server_error_park",
+        "GitHub or the gateway's broker answered with a server error, so this card waits in scheduled and goes "
+        "back to the queue after a short wait.",
     ),
 }
 

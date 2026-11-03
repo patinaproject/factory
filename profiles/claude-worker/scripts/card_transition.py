@@ -50,6 +50,13 @@ The deploy release rule is the same for a card whose newest park reason starts w
 `result_line.INSTALL_SKEW_PARK`, which waits for a factory deploy: `sweep_deploy` releases it once the install
 matches the commit auto-deploy recorded as deployed, compared the way `claude-session` compares it.
 
+The worktree and server-error release rules: a card whose newest park reason starts with
+`result_line.WORKTREE_HELD_PARK` is released by `sweep_worktree` once a non-blocking `flock` on its worktree's
+`claude-session.lock` succeeds. One that starts with `result_line.SERVER_ERROR_PARK` is released by
+`sweep_server_error` 300 seconds after its newest `scheduled` event. Each card is judged alone, so a card that
+is not ready never holds back another. A released card's agent session gets one `thought` naming the cleared
+cause, and a `Resumed:` card comment records it; a post that fails is recorded in that comment, and the release stands.
+
 The brief release rule: a card whose newest park reason starts with `result_line.NEEDS_BRIEF_PARK` waits for its
 issue's `<ID> Agent brief` Document. `sweep_brief` reads the issue's labels and Documents for each such card still
 assigned to `claude-worker` that no `stopped` comment follows. It releases the card once the brief exists and the
@@ -114,6 +121,7 @@ because Hermes treats a card whose comments hold a pull request URL as already h
 from __future__ import annotations
 
 import argparse
+import fcntl
 import importlib.util
 import json
 import re
@@ -140,6 +148,10 @@ from archive_card import Failed, archive, kanban_command, last_line, run, run_ka
 WORKER = "claude-worker"
 TRIAGE_BOARD = "triage"
 STOPPED = "stopped"
+WORKTREE_LOCK = "claude-session.lock"
+SERVER_ERROR_WAIT_SECONDS = 300
+# A card comment that starts with this records that a sweep resumed the card and told its agent session.
+RESUMED_NOTED = "Resumed:"
 RELEASED = "Released from scheduled for a Linear reply."
 READY_LABEL = "ready-for-agent"
 # The comment that records the triage card a brief wait queued, so a later sweep queues no second one.
@@ -428,6 +440,110 @@ def sweep_deploy() -> dict:
     return sweep_parked(prefix, install_matches)
 
 
+def worktree_free(card: Card) -> bool:
+    """Whether no claude-session holds the card's worktree lock: a non-blocking `flock` succeeds and is dropped
+    at once. The lock is where `claude-session` puts it, in the worktree's git dir. A worktree or lock that is
+    gone is free, because the resumed run says what is wrong with it."""
+    workspace = card.show()["task"].get("workspace_path")
+    if not workspace or not os.path.isdir(workspace):
+        return True
+    proc = subprocess.run(["git", "-C", workspace, "rev-parse", "--absolute-git-dir"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return True
+    try:
+        fd = os.open(Path(proc.stdout.strip()) / WORKTREE_LOCK, os.O_RDONLY)
+    except FileNotFoundError:
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+def server_wait_over(show: dict) -> bool:
+    """Five minutes since the newest park. Hermes stamps whole seconds."""
+    park = [event for event in show["events"] if event["kind"] == "scheduled"][-1]
+    return time.time() - park["created_at"] >= SERVER_ERROR_WAIT_SECONDS
+
+
+def linear_poster() -> Callable[[str, str], None]:
+    """A function that puts a thought on an agent session. The Linear client is made on the first post."""
+    made = []
+
+    def post(session_id: str, text: str) -> None:
+        module = plugin_module("linear-agent-session", "linear")
+        try:
+            if not made:
+                made.append(module.client_from_env())
+            made[0].create_activity(session_id, module.activity_content("thought", text))
+        except (*module.CLIENT_ERRORS, OSError) as error:
+            raise Failed(f"posting the note on Linear failed: {error}") from None
+
+    return post
+
+
+def sweep_cause(prefix: str | None, over: Callable[[Card, dict], bool], cleared: str) -> dict:
+    """Release each card parked with `prefix` whose own wait `over` says is over, on every board. A card that is
+    not ready is skipped and the next is asked. A released card's agent session gets one thought that `cleared`
+    names. A failed post never undoes the release: it is a card comment instead."""
+    released, failed = [], {}
+    if prefix is None:
+        return {"released": released, "failed": failed}
+    post = linear_poster()
+    for each in boards():
+        slug, path = each["slug"], each["db_path"]
+        if not os.path.exists(path):
+            continue
+        try:
+            waiting = kanban_board.scheduled(path)
+        except sqlite3.Error as failure:
+            failed[slug] = f"cannot read the board: {failure}"
+            continue
+        for task_id, show in sorted(waiting.items()):
+            if not wait_over(show, prefix):
+                continue
+            card = Card(slug, task_id)
+            try:
+                if not over(card, show) or not release_parked(card, slug):
+                    continue
+                released.append(task_id)
+                note_resumed(card, cleared, post)
+            except Failed as failure:
+                failed[task_id] = str(failure)
+    return {"released": released, "failed": failed}
+
+
+def note_resumed(card: Card, cleared: str, post: Callable[[str, str], None]) -> None:
+    """After a release, one thought on the card's agent session, and a card comment that records it."""
+    note = f"{RESUMED_NOTED} {cleared}."
+    try:
+        session_id = card_field(card.show()["task"]["body"], "linear_agent_session_id")
+        post(session_id, f"{cleared[0].upper()}{cleared[1:]}, so this card runs again.")
+    except Failed as failure:
+        note = f"{RESUMED_NOTED} {cleared}, but the note on the agent session was not posted: {failure}"
+    try:
+        card.comment(note)
+    except Failed:
+        pass
+
+
+def sweep_worktree() -> dict:
+    """Release every card parked for its worktree once no claude-session holds the card's lock. `dispatch-triage`
+    runs it each minute."""
+    prefix = getattr(plugin_module("blocker-order", "result_line"), "WORKTREE_HELD_PARK", None)
+    return sweep_cause(prefix, lambda card, show: worktree_free(card), "the worktree is free")
+
+
+def sweep_server_error() -> dict:
+    """Release every card parked after a server error once five minutes have passed since its park. The resumed
+    run is the check that the service answers. `dispatch-triage` runs it each minute."""
+    prefix = getattr(plugin_module("blocker-order", "result_line"), "SERVER_ERROR_PARK", None)
+    return sweep_cause(prefix, lambda card, show: server_wait_over(show), "the server-error wait is over")
+
+
 def sweep_parked(prefix: str, ready: Callable[[], bool]) -> dict:
     """Release each card parked with `prefix` once `ready`, which is asked only when such a card waits."""
     released, failed = [], {}
@@ -636,7 +752,7 @@ def sweep_issue() -> dict:
     if prefix is None or not gh_login.is_fresh(Path(os.environ["HERMES_HOME"]) / "gh", time.time()):
         return {"released": released, "failed": failed}
     reads: dict[str, str | Failed | None] = {}
-    linear = []
+    post = linear_poster()
 
     def closed(url: str) -> str | None:
         if url not in reads:
@@ -647,16 +763,6 @@ def sweep_issue() -> dict:
         if isinstance(reads[url], Failed):
             raise reads[url]
         return reads[url]
-
-    def post(session_id: str, text: str) -> None:
-        if not linear:
-            module = plugin_module("linear-agent-session", "linear")
-            linear.extend([module, module.client_from_env()])
-        module, client = linear
-        try:
-            client.create_activity(session_id, module.activity_content("thought", text))
-        except (*module.CLIENT_ERRORS, OSError) as error:
-            raise Failed(f"posting the note on Linear failed: {error}") from None
 
     for each in boards():
         slug, path = each["slug"], each["db_path"]

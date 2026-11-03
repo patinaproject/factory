@@ -15,6 +15,9 @@ It then releases, on every board, each card parked for the worker's gh login onc
 and the next step assigns it; on any other board it lands `ready` and assigned.
 It releases each card parked for a factory deploy the same way once the install
 matches the commit auto-deploy recorded as deployed (`card_transition.sweep_deploy`).
+It releases each card parked for its worktree once no claude-session holds the card's lock
+(`card_transition.sweep_worktree`), and each card parked after a server error five minutes after its park
+(`card_transition.sweep_server_error`), and posts one thought on the card's agent session for each.
 For each card parked for its issue's Agent brief it applies `card_transition.sweep_brief`:
 it releases the card with the same line, or queues the issue's triage card and prints
 `queued <triage task id> for <task id>`, so the next step can assign that triage card.
@@ -114,6 +117,8 @@ def main() -> int:
         released = release_waiting()
         released = release_parked(card_transition.sweep_login, "the gh login") and released
         released = release_parked(card_transition.sweep_deploy, "a factory deploy") and released
+        released = release_parked(card_transition.sweep_worktree, "a free worktree") and released
+        released = release_parked(card_transition.sweep_server_error, "a server-error wait") and released
         released = release_parked(card_transition.sweep_brief, "an Agent brief") and released
         released = release_parked(card_transition.sweep_issue, "a GitHub issue") and released
         released = release_parked(card_transition.sweep_pull_request, "a GitHub pull request") and released

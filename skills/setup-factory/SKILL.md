@@ -559,6 +559,23 @@ The worker home holds no factory secret of its own. Install the plugin in the
 root home and never in the worker's home. `check-install` reports an install
 in the worker home.
 
+`GITHUB_UPLOAD_TOKEN` belongs to a person, not to the factory's GitHub App,
+because an App installation token cannot upload to GitHub's attachment store.
+This was tested on 2026-10-29 with gh 2.102.0 and a GitHub App installation
+token, which starts with `ghs_`. Two attempts failed:
+
+- `gh issue comment --attach <png>` exits 1 with
+  `unsupported authentication type` before it sends any request. gh accepts
+  only `gho_`, `ghp_`, `github_pat_`, and `ghu_` tokens for uploads.
+- A direct `POST https://uploads.github.com/user-attachments/assets` with the
+  installation token returns HTTP 404, although the App has write access to the
+  repository.
+
+A `ghu_` user-to-server token also acts as a person, so it does not remove the
+person's credential. Before you test again, check GitHub's upstream request
+for an App upload route,
+[community discussion 28219](https://github.com/orgs/community/discussions/28219).
+
 1. **Operator, in their own terminal.** Enter `GITHUB_UPLOAD_TOKEN` in the
    factory's Infisical folder, as in [`references/infisical.md`](references/infisical.md).
    Never ask for the value in chat. The gateway reads secret sources when it
@@ -917,6 +934,7 @@ key file but does not contain the key.
   "factory_repository": {"full_name": "<owner>/<factory>", "default_branch": "<branch>"},
   "triage": {"max_running": <n>},
   "dependency_updates": {"repository": "<owner>/<name>", "team_key": "<Linear team key>", "theme_label": "<label name>", "type_label": "<label name>"},
+  "scheduled_commands": [],
   "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0, "command_timeout_seconds": 600, "idle_limit_seconds": 2700}
 }
 ```
@@ -1004,6 +1022,25 @@ Security label. `type_label` is the type the issue's description tells triage
 to use, such as the Tools label. The job refuses to run, and `check-install`
 reports the section, when it is missing.
 
+`scheduled_commands` lists repository commands that run on a cron schedule, default `[]`. Part 12 installs
+a runner and a job for each entry. An entry has five keys:
+
+```json
+{
+  "name": "example-job",
+  "repository": "example-org/example-repo",
+  "schedule": "0 9 * * 1",
+  "commands": [["pnpm", "install", "--frozen-lockfile"], ["pnpm", "run", "example"]],
+  "timeout_minutes": 30
+}
+```
+
+`name` is lowercase words joined by hyphens and is unique. `schedule` is a
+five-field cron expression. Hermes reads it in the root profile's `timezone`
+setting, or in the machine's local time when that is unset. `commands` are argv lists, each run in
+order, with no shell. `timeout_minutes` is the budget for all of the entry's commands together. The
+real entries belong in the private record. A factory with no entry sets nothing.
+
 `operator_user_ids` is an optional input the operator supplies, default `[]`: the
 Linear user ids of operators who, like an issue's assignee and the person who
 delegated it, can start card work with a reply or a pull request review or
@@ -1070,6 +1107,11 @@ request, not the label that a person adds to ask for queueing. The rule needs a
 repository whose branch rules live in a ruleset: the gate reads rules only from
 the rulesets endpoint and cannot see classic branch protection. The default is
 empty, which leaves only GitHub's own queue report.
+
+An entry also declares the repository's queue, even an empty one (`{}`). With
+an entry, an approved, unqueued pull request on a base branch with an `update`
+rule hands off to review for a person to add it to the queue. Without an entry,
+that pull request stays refused.
 
 **GitHub login.** Return to [`references/github.md`](references/github.md)
 and run its "Sign the worker's `gh` in" section now. It needs only the
@@ -1703,6 +1745,64 @@ its log in `<root>/logs/auto-deploy.log`. A first run that failed, for example
 because the gateway service from part 15 does not exist yet, deploys again
 with `HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --retry` once the
 cause is fixed.
+
+**Scheduled commands.** Skip this section when `scheduled_commands` (part 10)
+is empty. For each entry, the root profile runs one `--no-agent` job named
+`scheduled-<name>`. The job runs the script `scheduled-<name>`, a copy of
+`skills/setup-factory/scripts/scheduled-command`. Hermes passes a cron script no
+argument, so the script takes the entry from its own file name.
+
+Each run keeps one clone of the entry's repository under `<root>/scheduled/`,
+separate from the worker's checkouts. It fetches through `gh auth git-credential`
+and the root `GH_CONFIG_DIR`, resets the clone to `origin/HEAD`, and removes
+every untracked file. It then runs the entry's commands in order, each in its own process group. It
+stops at the first non-zero exit, or when `timeout_minutes` runs out, and kills
+the whole process tree. The commands run with the real home, the repository's
+`INFISICAL_UNIVERSAL_AUTH_CLIENT_ID`, and the newest Node under `~/.nvm` whose major
+version matches the clone's `.nvmrc`. The runner removes `INFISICAL_CLIENT_ID`,
+`INFISICAL_TOKEN`, and every name in `plugins/factory-secret-names/plugin.yaml`
+from that environment, and never reads the client secret. A run that succeeds
+prints nothing. A failure prints `<name>: <command> exited <code>` or
+`<name>: <command> timeout after <n> minutes`, then the last 40 lines of that
+command's output, and Hermes delivers it to `<platform>`.
+
+Prerequisites. The factory creates neither. Both must exist before the first run, and a run
+that finds one missing fails and names it:
+
+- The repository's workstation Infisical identity. `~/.config/infisical/config`
+  holds an `export INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=...` line, or
+  `~/.config/infisical/client-id` holds the ID.
+- An nvm Node install whose major version matches the repository's `.nvmrc`.
+
+Install each entry's script and create its job from the factory checkout.
+Take `<name>`, `<cron>`, and `<n>` from the entry. `<platform>` is the operator's chat platform
+with a home channel in the root profile:
+
+```sh
+install -d <root>/scripts
+install -m 0644 skills/setup-factory/scripts/scheduled-command <root>/scripts/scheduled-<name>
+hermes cron create "<cron>" --name scheduled-<name> --no-agent --script scheduled-<name> --deliver <platform> </dev/null
+```
+
+Hermes caps a cron script at `cron.script_timeout_seconds`, 3600 by default. Set it to
+the largest `timeout_minutes` times 60, plus 300, only when that is more than 3600:
+
+```sh
+hermes config set cron.script_timeout_seconds <seconds>
+```
+
+Catch-up. Hermes runs a late recurring job once and skips the slots it missed, but
+only while `cron.catch_up_missed` is true, its default. `check-install` reports
+the key when it is false.
+
+Limit. The commands run as the gateway's macOS user, with that user's file
+access. Repository code can read any file that user owns, such as the root
+`.env`. Name only repositories the operator trusts with that access. See
+[`references/infisical.md`](references/infisical.md).
+
+`check-install` reports a missing, duplicated, or disabled job, a job in the
+wrong profile, a different cron expression, a job that delivers nowhere, a script that
+differs from the runner, and a `scheduled-*` job with no entry.
 
 **Verify.** Run each job through Hermes once, then read its status:
 
@@ -2479,6 +2579,11 @@ Hermes process starts. The new helper also writes
      the line names the issuer. Then restart the dashboard service.
    - A `script <root>/scripts/retry-failed-webhooks` line: install the wrapper again
      with the part 12 `install` commands, which create `<root>/scripts` first.
+   - A `script <root>/scripts/scheduled-<name>` line, a `cron job scheduled-<name>`
+     line, or a `config scheduled_commands` line: follow the part 12 "Scheduled
+     commands" steps for that entry. Install the script again with the same
+     `install` command. A `scheduled-*` job with no entry is removed with
+     `hermes cron remove <job id>` once the operator agrees.
    - A `script <root>/scripts/watch-gateway` or
      `<root>/scripts/restart-gateway` line, a `service gateway watch` line, or
      a `gateway watch` line: follow the part 12 "Gateway watch" steps. A
