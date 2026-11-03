@@ -164,6 +164,11 @@ The full payload, truncated to 4000 characters:
 
 {__raw__}
 
+A note at the end of this prompt that says several webhook events arrived in
+quick succession and were coalesced only means earlier events were merged. This
+payload is the newest state, and its `updatedFrom` holds the keys of the whole
+burst. The note changes no decision.
+
 ## Sessions created on an issue
 
 Actions `ignore_factory_session` and `answer_mention`: an `AgentSessionEvent` of
