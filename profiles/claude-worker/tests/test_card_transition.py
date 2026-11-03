@@ -431,6 +431,13 @@ class ReleaseRuleTest(CardTransitionTest):
         self.assertFalse(self.released(["Asked."], [park(0), deploy]))
         self.assertEqual(self.state_changes(), [])
 
+    def test_a_reply_never_releases_a_park_that_waits_for_a_pull_request(self):
+        pull = {"kind": "scheduled", "created_at": 500, "run_id": 1,
+                "payload": {"reason": "Waiting for a pull request: example-org/app#7"}}
+        self.assertFalse(self.released(["Asked."], [pull]))
+        self.assertFalse(self.released(["Asked."], [park(0), pull]))
+        self.assertEqual(self.state_changes(), [])
+
     def test_a_question_parked_after_a_login_park_is_released_by_a_reply_again(self):
         login = {"kind": "scheduled", "created_at": 100, "run_id": 1,
                  "payload": {"reason": "Waiting for the worker's gh login: the login is stale"}}
@@ -1457,6 +1464,247 @@ class CauseWaitTest(BriefHarness):
             }
             with self.subTest(reason):
                 self.assertIs(self.call(f"card_transition.replied({show!r})"), False)
+
+
+FAKE_PULL_GH = """#!/usr/bin/env python3
+import json, os, sys
+path = os.environ["FAKE_GH_PULLS"]
+with open(path + ".log", "a") as log:
+    log.write(json.dumps({"argv": sys.argv[1:], "config": os.environ.get("GH_CONFIG_DIR")}) + "\\n")
+answer = json.load(open(path))[sys.argv[5] + "#" + sys.argv[3]]
+if "error" in answer:
+    sys.stderr.write(answer["error"] + "\\n")
+    sys.exit(1)
+print(json.dumps(answer))
+"""
+PULL = "example-org/app#7"
+PULL_PARKED = f"Waiting for a pull request: {PULL}"
+PULL_OPEN = {"state": "OPEN"}
+PULL_NOTED = f"Parked on pull request {PULL}"
+
+
+class PullRequestWaitTest(BriefHarness):
+    """`sweep_pull_request` against fake boards and a fake gh, with the real Linear client on a fake Linear."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.default_board.unlink()
+        with closing(sqlite3.connect(self.default_board)) as db:
+            db.execute(TASKS)
+            db.executescript(COMMENTS_AND_EVENTS)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "gh").write_text(with_interpreter(FAKE_PULL_GH))
+        os.chmod(bin_dir / "gh", 0o755)
+        self.bin = bin_dir
+        self.pulls = self.tmp / "pulls.json"
+        self.read_pull(PULL_OPEN)
+        self.login(30 * 60)
+        self.tasks: dict[str, list] = {"default": [], "triage": []}
+
+    def login(self, seconds_left: float | None) -> None:
+        gh = self.home / "gh"
+        gh.mkdir(exist_ok=True)
+        (gh / "token-expiry.json").unlink(missing_ok=True)
+        if seconds_left is not None:
+            (gh / "token-expiry.json").write_text(json.dumps({"expires_at": time.time() + seconds_left}))
+
+    def wait(self, board: str, task_id: str, reason: str = PULL_PARKED, assignee: str | None = "claude-worker",
+             comments: tuple = ()) -> None:
+        self.park(self.default_board if board == "default" else self.board, task_id, reason, assignee, comments)
+        self.tasks[board].append({**task(task_id, "scheduled", assignee), "body": IMPLEMENTATION_BODY})
+
+    def read_pull(self, answer: dict, pull: str = PULL) -> None:
+        current = json.loads(self.pulls.read_text()) if self.pulls.exists() else {}
+        self.pulls.write_text(json.dumps({**current, pull: answer}))
+
+    def env(self) -> dict:
+        return {"FAKE_GH_PULLS": str(self.pulls), "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
+
+    def sweep(self) -> dict:
+        self.state_path.write_text(json.dumps({
+            "default_tasks": self.tasks["default"], "tasks": self.tasks["triage"], "settings": BRIEF_SETTINGS,
+            "db_path": str(self.board), "default_db": str(self.default_board),
+        }))
+        env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path),
+               "HERMES_HOME": str(self.home), **self.env()}
+        proc = subprocess.run(
+            [sys.executable, "-c", "import json, card_transition; print(json.dumps(card_transition.sweep_pull_request()))"],
+            cwd=SCRIPTS, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def gh_calls(self) -> list:
+        log = Path(f"{self.pulls}.log")
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def hermes_log(self) -> list:
+        log = Path(f"{self.state_path}.log")
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def comments(self) -> list:
+        return [call[2:] for call in self.hermes_log() if call[:2] == ["kanban", "--board"] and call[3] == "comment"]
+
+    def assert_no_url_written(self) -> None:
+        texts = [call[3] for call in self.comments()] + [a["content"]["body"] for a in self.activities()]
+        self.assertTrue(texts)
+        for text in texts:
+            self.assertIsNone(card_transition_module().PULL_URL.search(text), text)
+
+    def test_a_merged_pull_request_releases_the_card_on_the_default_board_and_the_triage_board(self) -> None:
+        self.read_pull({"state": "MERGED"})
+        self.wait("default", "t_default")
+        self.wait("triage", "t_triage")
+
+        swept = self.sweep()
+
+        self.assertEqual(swept, {"released": ["t_default", "t_triage"], "failed": {}})
+        self.assertEqual(self.statuses()["t_default"], ("ready", "claude-worker"))
+        self.assertEqual(self.statuses()["t_triage"], ("ready", None))
+        note = f"{PULL_NOTED}, and it merged."
+        self.assertEqual(self.comments(), [["default", "comment", "t_default", note], ["triage", "comment", "t_triage", note]])
+        self.assert_no_url_written()
+
+    def test_a_closed_pull_request_releases_the_card_with_its_own_reason(self) -> None:
+        self.read_pull({"state": "CLOSED"})
+        self.wait("default", "t_default")
+
+        self.assertEqual(self.sweep(), {"released": ["t_default"], "failed": {}})
+        self.assertEqual(self.comments(), [["default", "comment", "t_default", f"{PULL_NOTED}, and it closed without merging."]])
+
+    def test_an_open_pull_request_keeps_the_card_parked_and_writes_the_marker_and_the_thought_once(self) -> None:
+        self.wait("default", "t_default")
+
+        first = self.sweep()
+        second = self.sweep()
+
+        self.assertEqual((first, second), ({"released": [], "failed": {}}, {"released": [], "failed": {}}))
+        self.assertEqual(self.statuses()["t_default"], ("scheduled", "claude-worker"))
+        self.assertEqual(self.comments(), [[
+            "default", "comment", "t_default",
+            f"{PULL_NOTED}. This card continues once the pull request merges or closes, or a person replies.",
+        ]])
+        self.assertEqual([activity["content"] for activity in self.activities()], [
+            {"type": "thought", "body": f"This card waits for {PULL} to merge and continues when it merges or closes."},
+        ])
+        self.assert_no_url_written()
+
+    def test_a_marker_for_a_longer_pull_request_number_does_not_stand_for_this_one(self) -> None:
+        self.wait("default", "t_default", comments=("Parked on pull request example-org/app#70. Waiting.",))
+
+        self.sweep()
+
+        self.assertEqual(len(self.comments()), 1)
+
+    def test_a_gh_error_or_output_without_a_state_releases_nothing_and_fails_the_card(self) -> None:
+        self.wait("default", "t_default")
+        for name, answer, error in (
+            ("error", {"error": "gh: HTTP 502"}, f"gh pr view {PULL} failed: gh: HTTP 502"),
+            ("unresolved", {"error": "GraphQL: Could not resolve to a PullRequest with the number of 7."},
+             f"gh pr view {PULL} failed: GraphQL: Could not resolve to a PullRequest with the number of 7."),
+            ("no state", {"title": "x"}, f"gh pr view {PULL} printed no pull request state"),
+            ("unknown state", {"state": "DRAFT"}, f"gh pr view {PULL} printed no pull request state"),
+        ):
+            with self.subTest(name):
+                self.read_pull(answer)
+
+                self.assertEqual(self.sweep(), {"released": [], "failed": {"t_default": error}})
+                self.assertEqual(self.statuses()["t_default"], ("scheduled", "claude-worker"))
+        self.assertEqual(self.comments(), [])
+
+    def test_a_reply_after_the_park_releases_the_card_with_an_open_pull_request(self) -> None:
+        self.wait("default", "t_default", comments=("Linear reply: go on without it",))
+
+        self.assertEqual(self.sweep(), {"released": ["t_default"], "failed": {}})
+        self.assertEqual(self.comments(), [["default", "comment", "t_default", f"{PULL_NOTED}, and a person replied."]])
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_a_reply_releases_the_card_even_when_gh_fails(self) -> None:
+        self.read_pull({"error": "gh: HTTP 502"})
+        self.wait("default", "t_default", comments=("Linear reply: go on without it",))
+
+        self.assertEqual(self.sweep(), {"released": ["t_default"], "failed": {}})
+
+    def test_a_stopped_or_unassigned_card_is_not_released(self) -> None:
+        self.read_pull({"state": "MERGED"})
+        self.wait("default", "t_stopped", comments=("stopped",))
+        self.wait("default", "t_unassigned", assignee=None)
+
+        self.assertEqual(self.sweep(), {"released": [], "failed": {}})
+        self.assertEqual({status for status, _ in self.statuses().values()}, {"scheduled"})
+        self.assertEqual(self.comments(), [])
+
+    def test_each_pull_request_is_read_once_per_sweep_and_one_failure_does_not_stop_the_others(self) -> None:
+        other = "example-org/app#8"
+        self.read_pull({"state": "MERGED"})
+        self.read_pull({"error": "gh: HTTP 502"}, other)
+        self.wait("default", "t_a")
+        self.wait("default", "t_b", reason=f"Waiting for a pull request: {other}")
+        self.wait("triage", "t_c")
+
+        swept = self.sweep()
+
+        self.assertEqual(swept, {"released": ["t_a", "t_c"], "failed": {"t_b": f"gh pr view {other} failed: gh: HTTP 502"}})
+        config = str(self.home / "gh")
+        self.assertEqual(self.gh_calls(), [
+            {"argv": ["pr", "view", "7", "--repo", "example-org/app", "--json", "state"], "config": config},
+            {"argv": ["pr", "view", "8", "--repo", "example-org/app", "--json", "state"], "config": config},
+        ])
+
+    def test_no_waiting_card_and_a_stale_login_read_nothing(self) -> None:
+        self.assertEqual(self.sweep(), {"released": [], "failed": {}})
+        self.read_pull({"state": "MERGED"})
+        self.wait("default", "t_default")
+        self.login(14 * 60)
+
+        self.assertEqual(self.sweep(), {"released": [], "failed": {}})
+        self.assertEqual((self.gh_calls(), self.statuses()["t_default"]), ([], ("scheduled", "claude-worker")))
+
+    def test_an_installed_result_line_without_the_park_prefix_calls_neither_gh_nor_hermes(self) -> None:
+        plugin = self.home / "plugins" / "blocker-order"
+        plugin.unlink()
+        shutil.copytree(REPO / "plugins" / "blocker-order", plugin)
+        text = (plugin / "result_line.py").read_text()
+        self.assertIn(", PULL_REQUEST_PARK)", text)
+        (plugin / "result_line.py").write_text(text.replace(", PULL_REQUEST_PARK)", ")").replace(
+            'PULL_REQUEST_PARK = "Waiting for a pull request:"\n', ""))
+        self.read_pull({"state": "MERGED"})
+        self.wait("default", "t_default")
+
+        self.assertEqual(self.sweep(), {"released": [], "failed": {}})
+        self.assertEqual((self.gh_calls(), self.hermes_log()), ([], []))
+
+    def test_dispatch_triage_reports_a_failed_read_and_still_assigns_the_waiting_card(self) -> None:
+        self.read_pull({"error": "gh: HTTP 502"})
+        self.wait("default", "t_default")
+        self.tasks["triage"].append(task("t_ready", "ready"))
+
+        proc = self.run_script(
+            self.tasks["triage"], settings=BRIEF_SETTINGS, default_tasks=self.tasks["default"],
+            default_db=str(self.default_board), _env=self.env(),
+        )
+
+        self.assertEqual((proc.returncode, proc.stdout), (1, "assigned t_ready\n"))
+        self.assertIn(f"releasing t_default for a GitHub pull request failed: gh pr view {PULL} failed: gh: HTTP 502", proc.stderr)
+
+    def test_dispatch_triage_releases_a_card_whose_pull_request_merged(self) -> None:
+        self.read_pull({"state": "MERGED"})
+        self.wait("default", "t_default")
+
+        proc = self.run_script(
+            self.tasks["triage"], settings=BRIEF_SETTINGS, default_tasks=self.tasks["default"],
+            default_db=str(self.default_board), _env=self.env(),
+        )
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "released t_default\n", ""))
+
+
+def card_transition_module():
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+    import card_transition
+    return card_transition
 
 
 if __name__ == "__main__":

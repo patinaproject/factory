@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import types
 import unittest
 import uuid
 from unittest import mock
@@ -107,7 +108,13 @@ TODAYS_ENDING = (
     "When a re-run fails again, stop, "
     "and make the first line of your final message `Needs input:` followed by both attempts' URLs."
 )
-SYSTEM_PROMPT = TODAYS_SYSTEM_PROMPT.replace(TODAYS_ENDING, ISSUE_ENDING)
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+_session_loader = importlib.machinery.SourceFileLoader("claude_session_prompt", str(SCRIPTS / "claude-session"))
+_SESSION = importlib.util.module_from_spec(importlib.util.spec_from_loader(_session_loader.name, _session_loader))
+_session_loader.exec_module(_SESSION)
+SYSTEM_PROMPT = TODAYS_SYSTEM_PROMPT.replace(TODAYS_ENDING, ISSUE_ENDING) + "\n\n" + _SESSION.PULL_REQUEST_WAIT.format(
+    waiting=RESULT_LINE.WAITING_FOR_PULL_REQUEST, noted=RESULT_LINE.PULL_REQUEST_NOTED)
 REPO = "example-org/example-repo"
 LINEAR_MCP_CONFIG = (
     '{"mcpServers": {"linear": {"type": "http", "url": "https://mcp.linear.app/mcp", '
@@ -636,10 +643,12 @@ class ClaudeSessionTest(GitFixture):
         module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
         text = module.read_text()
         self.assertIn('ISSUE_PARK = "Waiting for an issue:"\n', text)
-        self.assertIn("(*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK)", text)
+        self.assertIn("(*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK, PULL_REQUEST_PARK)", text)
         module.unlink()
         module.write_text(text.replace('ISSUE_PARK = "Waiting for an issue:"\n', "").replace(
-            "(*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK)", "(*PRECONDITION_PARKS.values(), STOPPED_PARK)"))
+            'PULL_REQUEST_PARK = "Waiting for a pull request:"\n', "").replace(
+            "(*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK, PULL_REQUEST_PARK)",
+            "(*PRECONDITION_PARKS.values(), STOPPED_PARK)"))
         self.set_documents(("d1", "ABC-123 Agent brief", "someone-else"))
 
         status, _ = self.run_session()
@@ -647,6 +656,25 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(status, 0)
         argv = self.claude_call()["argv"]
         self.assertEqual(argv[argv.index("--append-system-prompt") + 1], TODAYS_SYSTEM_PROMPT)
+
+    def test_the_implementation_prompt_follows_the_constants_the_installed_result_line_has(self) -> None:
+        module = self.session_module()
+        neither = types.SimpleNamespace()
+        issue_only = types.SimpleNamespace(
+            ISSUE_PARK="Waiting for an issue:", WAITING_FOR_ISSUE="Waiting for issue:", ISSUE_NOTED="Parked on issue")
+        both = types.SimpleNamespace(
+            **vars(issue_only), PULL_REQUEST_PARK="Waiting for a pull request:",
+            WAITING_FOR_PULL_REQUEST="Waiting for pull request:", PULL_REQUEST_NOTED="Parked on pull request")
+
+        self.assertEqual(module.implementation_prompt(neither), module.SYSTEM_PROMPT)
+        self.assertNotEqual(module.implementation_prompt(issue_only), module.SYSTEM_PROMPT)
+        self.assertNotEqual(module.implementation_prompt(both), module.implementation_prompt(issue_only))
+        self.assertEqual(
+            module.implementation_prompt(issue_only),
+            module.SYSTEM_PROMPT.replace(
+                module.CHECKS_RULE,
+                module.CHECKS_START + module.CHECKS_ISSUE_ENDING.format(waiting="Waiting for issue:", noted="Parked on issue")),
+        )
 
     def test_an_implementation_card_with_the_agent_brief_starts(self) -> None:
         self.set_documents(("d1", "ABC-123 Agent brief", "someone-else"))

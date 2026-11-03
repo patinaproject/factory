@@ -144,6 +144,17 @@ message, because the `blocker-order` hook sees tool results and not that message
   `needs_input_block`. Follow its `instruction`: stop, and do not run
   `claude-session` again. The sweep returns the card once the issue closes or a
   person replies. Skip steps 4 and 5.
+- When the `result` starts with `Waiting for pull request:`, a person decided
+  that the card's work must wait for another pull request to merge. The
+  `blocker-order` hook parks the card in `scheduled` and adds
+  `pull_request_park` to the tool result, or, when the line holds no GitHub pull
+  request URL or Hermes refuses the park, blocks the card and adds
+  `needs_input_block`. Follow its `instruction`: stop, and do not run
+  `claude-session` again. The sweep returns the card once the pull request
+  merges or closes, or a person replies. Skip steps 4 and 5. Never call
+  `kanban_schedule` on an implementation card except with exactly the reason a
+  hook instruction gives. A wait for a pull request that Claude did not report
+  with that first line has no sweep, so nothing would release the card.
 - A line of only `waiting_on`, a list of card ids, means that cards of the
   issue's blockers are still open, so Claude did not start. The
   `blocker-order` hook adds `blocker_order` to the tool result. Follow its

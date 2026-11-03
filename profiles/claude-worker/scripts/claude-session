@@ -276,14 +276,29 @@ TRIAGE_RULE = (
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{CLOSING_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 TRIAGE_SYSTEM_PROMPT = f"{TRIAGE_RULE}\n\n{LINEAR_RULE}\n\n{STOP_RULE}"
 
+# Used only when the installed blocker-order parks a card on `Waiting for pull request:`. The steps to take after
+# the merge stay in the Claude session, which the next run resumes, so the park reason holds only the pull request.
+PULL_REQUEST_WAIT = (
+    "When a person decided that this card's work must wait for another pull request to merge, and nothing "
+    "else can be done until then, make the first line of your final message `{waiting} <url>` and put the steps "
+    "to take after the merge in the rest of the message. The worker reads that line and parks the card until "
+    "that pull request merges or closes. Make the first line `Needs input:` instead when a card comment starts "
+    "`{noted} <owner>/<name>#<number>` for the same pull request, because this card already waited for it once."
+)
+
 
 def implementation_prompt(result_line) -> str:
     """SYSTEM_PROMPT, with the checks rule that files an issue when the installed `blocker-order` parks a card on
-    one. A deploy can install these scripts before the plugin, so an older `result_line` keeps `Needs input:`."""
-    if not hasattr(result_line, "ISSUE_PARK"):
-        return SYSTEM_PROMPT
-    ending = CHECKS_ISSUE_ENDING.format(waiting=result_line.WAITING_FOR_ISSUE, noted=result_line.ISSUE_NOTED)
-    return SYSTEM_PROMPT.replace(CHECKS_RULE, CHECKS_START + ending)
+    one, and the pull request wait when it parks a card on that. A deploy can install these scripts before the
+    plugin, so an older `result_line` keeps `Needs input:` and gets neither."""
+    prompt = SYSTEM_PROMPT
+    if hasattr(result_line, "ISSUE_PARK"):
+        ending = CHECKS_ISSUE_ENDING.format(waiting=result_line.WAITING_FOR_ISSUE, noted=result_line.ISSUE_NOTED)
+        prompt = prompt.replace(CHECKS_RULE, CHECKS_START + ending)
+    if hasattr(result_line, "PULL_REQUEST_PARK"):
+        prompt += "\n\n" + PULL_REQUEST_WAIT.format(
+            waiting=result_line.WAITING_FOR_PULL_REQUEST, noted=result_line.PULL_REQUEST_NOTED)
+    return prompt
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
 LINEAR_MCP_SERVER = {
