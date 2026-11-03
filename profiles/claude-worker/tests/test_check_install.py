@@ -36,8 +36,13 @@ ROUTE = {
     "filters": [{"field": "data.id", "in_file": "owned-refs.json"}],
 }
 
-RENDER = f"""import json
-print(json.dumps({{{RATE_LIMIT_KEY!r}: 600, {ROUTE_KEY!r}: {ROUTE!r}}}))
+SKILL_NAME = "factory-linear-triage"
+SKILL_TEXT = "---\nname: factory-linear-triage\n---\n\nrules\n"
+RENDER = f"""import json, sys
+if "--skills-json" in sys.argv:
+    print(json.dumps({{{SKILL_NAME!r}: {SKILL_TEXT!r}}}))
+else:
+    print(json.dumps({{{RATE_LIMIT_KEY!r}: 600, {ROUTE_KEY!r}: {ROUTE!r}}}))
 """
 
 FAKE_HERMES = """#!/usr/bin/env python3
@@ -236,6 +241,7 @@ REMEDY_CLASSES = (
     ("broker user", "", "manual"),
     ("secret", "", "manual"),
     ("dashboard sign-in", "", "manual"),
+    ("route skill", "", "install"),
     ("webhook config", "render.py failed", "manual"),
     ("webhook config", "", "install"),
     ("webhook deliveries", "", "advisory"),
@@ -353,6 +359,7 @@ class CheckInstallTest(unittest.TestCase):
         )
         self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps({**ROUTE, "secret": "abc...1234"}))
         self.install(self.root, f"installed-config/{RATE_LIMIT_KEY}.json", "600")
+        self.install(self.root, f"skills/{SKILL_NAME}/SKILL.md", SKILL_TEXT)
         self.install(self.root, "logs/agent.log", "")
         self.install(self.root, f"scripts/{RETRY_SCRIPT}", REPO_FILES[RETRY_SOURCE])
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C0123\n")
@@ -875,6 +882,30 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(
             self.check(), (1, f"webhook config {ROUTE_KEY}: differs from the value rendered at {self.sha}\n")
         )
+
+    def test_a_missing_route_skill_is_installed_before_the_routes(self) -> None:
+        (self.root / "skills" / SKILL_NAME / "SKILL.md").unlink()
+        stale = {**ROUTE, "prompt": "old triage", "secret": "abc...1234"}
+        self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps(stale))
+
+        code, out = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(out.splitlines(), [
+            f"route skill {self.root}/skills/{SKILL_NAME}/SKILL.md: is missing; a route at {self.sha} names it",
+            f"webhook config {ROUTE_KEY}: differs from the value rendered at {self.sha}",
+        ])
+        installs = check_install.install_plan.plan([check_install.install_plan.drift_from_json(r) for r in json.loads(self.raw)]).installs
+        self.assertEqual([install.step.name for install in installs], ["SKILLS", "ROUTES"])
+        self.assertEqual(installs[0].argv[-1], "--install-skills")
+        self.assertTrue(installs[0].restarts_gateway)
+
+    def test_a_differing_route_skill_is_reported(self) -> None:
+        self.install(self.root, f"skills/{SKILL_NAME}/SKILL.md", "old rules\n")
+
+        self.assertEqual(self.check(), (
+            1, f"route skill {self.root}/skills/{SKILL_NAME}/SKILL.md: differs from the skill rendered at {self.sha}\n"
+        ))
 
     def test_missing_route(self) -> None:
         (self.root / "installed-config" / f"{ROUTE_KEY}.json").unlink()
