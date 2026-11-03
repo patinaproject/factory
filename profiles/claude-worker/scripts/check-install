@@ -226,7 +226,7 @@ class CronJob(NamedTuple):
     deliver: Want
     home: str = WORKER
     script: str = ""
-    cron: str = ""  # a cron expression in UTC; `minutes` is 0 then
+    cron: str = ""  # a cron expression in the root profile's timezone; `minutes` is 0 then
 
     @property
     def runs(self) -> str:

@@ -83,7 +83,7 @@ def parse_entry(raw: object) -> ScheduledCommand:
         raise SettingsError(f"{where}: repository {repository!r} must be <owner>/<repo>")
     fields = schedule.split() if isinstance(schedule, str) else []
     if len(fields) != 5 or not all(CRON_FIELD.fullmatch(field) for field in fields):
-        raise SettingsError(f"{where}: schedule {schedule!r} must be a five-field cron expression in UTC")
+        raise SettingsError(f"{where}: schedule {schedule!r} must be a five-field cron expression")
     commands = raw.get("commands")
     if not isinstance(commands, list) or not commands or not all(
         isinstance(argv, list) and argv and all(isinstance(arg, str) and arg for arg in argv) for argv in commands

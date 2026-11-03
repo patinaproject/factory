@@ -90,7 +90,7 @@ config_schema:
     default: []
     description: >-
       Repository commands that run on a Hermes cron schedule. Each entry has name (lowercase words joined by
-      hyphens, unique), repository (<owner>/<name>), schedule (a five-field cron expression in UTC), commands
+      hyphens, unique), repository (<owner>/<name>), schedule (a five-field cron expression in the root profile's timezone), commands
       (a list of argv lists, run in order in a clean clone), and timeout_minutes (the budget for the whole run).
       The scheduled-command script reads it. Leave it empty to schedule nothing.
   claude_session:
