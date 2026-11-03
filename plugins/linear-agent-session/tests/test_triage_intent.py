@@ -315,7 +315,17 @@ class SessionCreatedTest(unittest.TestCase):
                 )
 
     def test_a_session_the_factory_did_not_open_still_creates_or_reuses_the_card(self):
-        self.assertEqual(decide(session_event("created"), factory_session=False), expected("create_card"))
+        existing = card("t_work", status="blocked", body=id_line())
+        self.assertEqual(
+            (
+                decide(session_event("created"), factory_session=False),
+                decide(session_event("created"), work=[existing], factory_session=False),
+            ),
+            (
+                expected("create_card"),
+                expected("reuse_card", card={"id": "t_work", "status": "blocked", "matched_by": "linear_issue_id"}),
+            ),
+        )
 
     def test_a_session_the_factory_opened_is_ignored_on_an_undelegated_issue_whoever_the_creator_is(self):
         self.assertEqual(
