@@ -12,8 +12,8 @@ import time
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Mapping, NamedTuple, Optional
 
-from . import blocks, linear, triage_exit
-from .triage_exit import Card
+from . import blocks, comment_resume, linear, triage_exit
+from .triage_exit import Card, History
 
 TRIAGE_BOARD = triage_exit.TRIAGE_BOARD
 DUPLICATE_WINDOW = dt.timedelta(minutes=5)
@@ -32,6 +32,8 @@ ACTIONS = {
     "create_card": "create the issue's implementation card",
     "reuse_card": "the issue has a card; move it to this session and handle its status",
     "card_reply": "the issue's assignee, its delegator, or a configured operator replied on an issue with a card",
+    "comment_resume": "an approver answered in a top-level issue comment while a card waits for a person; resume that card",
+    "skip_comment": "a Comment that resumes no card; the hook skips it and no turn runs",
     "card_reply_not_assignee": "someone who is none of the issue's assignee, delegator, or configured operators replied on an issue with a card; wake no card",
     "triage_card_reply": "a reply on an issue whose triage card is live",
     "answer_reply": "a reply on an undelegated issue with no card; answer once",
@@ -101,6 +103,9 @@ class Intent:
     not_assignee_reason: Optional[str] = None
     thread: Optional[list] = None
     thread_source: Optional[str] = None
+    comment_id: Optional[str] = None
+    comment_url: Optional[str] = None
+    skip_reason: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -378,6 +383,67 @@ def _issue_id(payload: Mapping[str, Any]) -> str:
     return payload["agentSession"]["issue"]["id"]
 
 
+def skip_intent(reason: str) -> Intent:
+    return Intent(action="skip_comment", skip_reason=reason)
+
+
+def comment_intent(
+    payload: Mapping[str, Any],
+    *,
+    app_user_id: Callable[[], str],
+    operator_user_ids: Callable[[], list[str]],
+    client: Callable[[], Any],
+    cards: Callable[[Optional[str]], list[Card]],
+    history: Callable[[Optional[str], str], History],
+) -> Intent:
+    comment = comment_resume.parse(payload)
+    if isinstance(comment, str):
+        return skip_intent(comment)
+    linear_client = client()
+    kind = "unknown"
+    if comment.author_id:
+        try:
+            kind = _kind(linear_client.user_is_app(comment.author_id))
+        except Exception:
+            pass
+    if kind != "person":
+        return skip_intent(f"the comment's author is {kind}, not a person")
+    issue = linear_client.get_issue(comment.issue_id)
+    app = app_user_id()
+    delegated = bool(app) and issue["delegate"] == app
+    work = triage_exit.find_card(cards(None), issue["id"], issue["identifier"], issue["gitBranchName"])
+    waiting = comment_resume.waiting_card(
+        find_triage_card(cards(TRIAGE_BOARD), issue["id"]),
+        work[0] if work else None,
+        delegated,
+        lambda task_id: history(TRIAGE_BOARD, task_id),
+    )
+    if waiting is None:
+        return skip_intent("no card of the issue waits for a person")
+    operators = operator_user_ids()
+    people = linear.lookup_approvers(linear_client, issue, app, operators)
+    facts = _with_authority(Intent(action=""), people, comment.author_id, kind, bool(operators))
+    if not facts.from_assignee:
+        return skip_intent("the comment's author is not an approver")
+    mentioned = comment_resume.profile_slugs(comment.body)
+    if mentioned and (comment_resume.profile_slug(linear_client.user_profile_url(app)) or "").lower() not in mentioned:
+        return skip_intent("the comment mentions people and not the agent app")
+    card = {"id": waiting.card.id, "status": waiting.card.status}
+    return replace(
+        facts,
+        action="comment_resume",
+        issue={"id": issue["id"], "identifier": issue["identifier"], "state_type": issue["stateType"]},
+        delegated=delegated,
+        card=None if waiting.kind == "triage" else {**card, "matched_by": work[1]},
+        triage_card=card if waiting.kind == "triage" else None,
+        agent_session_id=blocks.session_id(waiting.card.body) or _open_session(issue, app),
+        reply=comment.body,
+        reply_source="payload",
+        comment_id=comment.id,
+        comment_url=comment_resume.comment_url(comment, issue.get("url")),
+    )
+
+
 # Linear can serve a delegate-less issue for a few seconds after the delegation that opened the session.
 DELEGATE_REREAD_DELAYS = (1, 1, 2, 2, 4)
 
@@ -399,13 +465,18 @@ def compute(
     client: Callable[[], Any],
     cards: Callable[[Optional[str]], list[Card]],
     now: Optional[dt.datetime] = None,
+    history: Callable[[Optional[str], str], History] = triage_exit.kanban_history,
     redact: Callable[[str], str] = blocks.hermes_redact,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Intent:
     """Read the issue and both boards, then decide. Any failure becomes the `error` intent, never an exception."""
     try:
-        if not isinstance(payload, Mapping) or payload.get("type") not in ("Issue", "AgentSessionEvent"):
-            raise ValueError("the payload is not a Linear Issue or AgentSessionEvent")
+        if not isinstance(payload, Mapping) or payload.get("type") not in ("Issue", "AgentSessionEvent", "Comment"):
+            raise ValueError("the payload is not a Linear Issue, AgentSessionEvent, or Comment")
+        if payload["type"] == "Comment":
+            return comment_intent(
+                payload, app_user_id=app_user_id, operator_user_ids=operator_user_ids, client=client, cards=cards, history=history
+            )
         linear_client = client()
         issue = linear_client.get_issue(_issue_id(payload))
         if _delegation_may_be_pending(payload, issue):

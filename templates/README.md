@@ -19,6 +19,10 @@ the issue's id is listed in `<home>/owned-refs.json`, which holds each card's
 `linear_issue_id`. Deploy the profile and run `refresh-owned-refs` once before
 you re-render this route.
 
+The route also keeps a created top-level `Comment` whose `data.issueId` is listed in
+`owned-refs.json` or `triage-refs.json`. The `linear-agent-session` plugin skips it
+unless an approver answers a card that waits for a person.
+
 For the Triage board, the route also keeps an `Issue` that is created in the
 Triage status or moved into it, a status change of an issue listed in
 `<home>/triage-refs.json`, which holds each triage card's `linear_issue_id`, and

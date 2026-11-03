@@ -198,6 +198,17 @@ class Run:
         answer = self.cli_answer(entry, "teammate-reply", TEAMMATE_REPLY_TIMEOUT_SECONDS)
         return answer is not None and answer.get("addressed") is True
 
+    def comment_skipped(self, entry: dict[str, Any]) -> bool:
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "Comment":
+            return False
+        # The hook decided an unadmitted comment already: it skipped it, or recorded its id. A replay later could
+        # release a card that parked after the comment was written.
+        if entry.get("reason") == "unadmitted":
+            return True
+        answer = self.cli_answer(entry, "comment-skip", TRIAGE_INTENT_TIMEOUT_SECONDS)
+        return answer is not None and answer.get("skip") is True
+
     def intent_block(self, entry: dict[str, Any]) -> str:
         """The block the dispatch hook adds, recomputed for the stored delivery time because a replay skips the hook.
 
@@ -271,6 +282,11 @@ class Run:
                 retried += 1
                 self.update(key, "retry_succeeded")
                 self.say(f"retried {who}: skipped a reply addressed to a teammate")
+                continue
+            if self.comment_skipped(entry):
+                retried += 1
+                self.update(key, "retry_succeeded")
+                self.say(f"retried {who}: skipped a comment that resumes no card")
                 continue
             code, stderr, usage = self.replay(hermes, entry)
             retried += 1

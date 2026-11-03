@@ -752,12 +752,13 @@ class RenderTest(unittest.TestCase):
 class FakeLinearClient(plugin.linear.LinearClient):
     """The real delegator and operator lookups over a fake GraphQL: `history` is newest first, `users` maps id to a user."""
 
-    def __init__(self, live, error=None, reads=None, thread_error=None, titles=BRIEF, documents_error=None, history=(), users=None, lookup_error=None):
+    def __init__(self, live, error=None, reads=None, thread_error=None, titles=BRIEF, documents_error=None, history=(), users=None, lookup_error=None, profiles=None):
         super().__init__("client-id", "client-secret")
         self.live, self.error, self.thread_error, self.asked = live, error, thread_error, []
         self.reads = list(reads or [])
         self.titles, self.documents_error = titles, documents_error
         self.history, self.users, self.lookup_error = list(history), users or {}, lookup_error
+        self.profiles = profiles or {}
 
     def _graphql(self, query, variables):
         if self.lookup_error:
@@ -767,6 +768,9 @@ class FakeLinearClient(plugin.linear.LinearClient):
             page = self.history[start : start + 50]
             more = start + 50 < len(self.history)
             return {"issue": {"history": {"nodes": page, "pageInfo": {"hasNextPage": more, "endCursor": str(start + 50)}}}}
+        if "query UserUrl(" in query:
+            url = self.profiles.get(variables["id"])
+            return {"user": {"url": url} if url else None}
         assert "query OperatorUsers(" in query, query
         return {"users": {"nodes": [self.users[i] for i in variables["ids"] if i in self.users]}}
 
@@ -1130,7 +1134,7 @@ class ComputeTest(unittest.TestCase):
         self.assertIn("database is locked", result.error)
 
     def test_other_payloads_are_the_error_intent(self):
-        for payload in ("text", {"type": "Comment"}, None):
+        for payload in ("text", {"type": "Project"}, None):
             with self.subTest(payload):
                 self.assertEqual(self.compute(payload, FakeLinearClient(issue())).action, "error")
 
