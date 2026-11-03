@@ -855,6 +855,62 @@ class IssueParkTest(Hooked):
         self.assertNotIn("Waiting for an issue:", result_line.PRECONDITION_PARKS.values())
 
 
+class StoppedTest(Hooked):
+    def setUp(self) -> None:
+        super().setUp()
+        self.board.add("t_1", "todo")
+        self.board.start("t_1")
+
+    def stopped(self, paused: bool) -> str:
+        return process_result(result_line.line(result_line.Stopped("SIGTERM", 42, paused, "s-1")))
+
+    def test_a_stop_during_a_pause_parks_the_card_and_leaves_its_block_history_alone(self):
+        self.board.block_kind["t_1"], self.board.recurrences["t_1"] = "needs_input", 1
+
+        outcome = json.loads(self.call(self.stopped(True)))["stopped_park"]
+
+        self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule"])
+        self.assertTrue(self.board.reasons["t_1"].startswith("Waiting for hermes resume: "))
+        self.assertIn("SIGTERM", self.board.reasons["t_1"])
+        self.assertTrue(outcome["parked"])
+        self.assertEqual(os.environ[order.STOP_NUDGE], "off")
+        self.board.unblock("t_1")
+        self.assertEqual((self.board.block_kind["t_1"], self.board.recurrences["t_1"]), ("needs_input", 1))
+
+    def test_a_stop_outside_a_pause_blocks_the_card_as_transient_and_names_the_signal(self):
+        outcome = json.loads(self.call(self.stopped(False)))["stopped_block"]
+
+        (name, args), = self.board.calls
+        self.assertEqual((name, args["kind"]), ("kanban_block", "transient"))
+        self.assertIn("SIGTERM", args["reason"])
+        self.assertIn("stopped, not crashed", args["reason"])
+        self.assertTrue(outcome["blocked"])
+
+    def test_a_refused_schedule_falls_back_to_the_transient_block(self):
+        self.board.goal_mode.add("t_1")
+
+        outcome = json.loads(self.call(self.stopped(True)))
+
+        self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule", "kanban_block"])
+        self.assertEqual(self.board.calls[1][1]["kind"], "transient")
+        self.assertTrue(outcome["stopped_block"]["blocked"])
+
+    def test_the_same_report_read_twice_acts_once(self):
+        first = self.call(self.stopped(False))
+
+        self.assertEqual(self.call(self.stopped(False)), first)
+        self.assertEqual(len(self.board.calls), 1)
+
+    def test_the_park_is_a_machine_park_and_not_a_precondition(self):
+        self.assertIn(result_line.STOPPED_PARK, result_line.MACHINE_PARKS)
+        self.assertNotIn(result_line.STOPPED_PARK, result_line.PRECONDITION_PARKS.values())
+
+    def test_the_line_round_trips(self):
+        for session_id in (None, "s-1"):
+            report = result_line.Stopped("SIGHUP", 0, False, session_id)
+            self.assertEqual(result_line.last(result_line.line(report)), report)
+
+
 class Factory(Hooked):
     """Triage creates one card per delegated issue, the dispatcher runs ready cards, and each run first asks
     claude-session's blocker check, then the hook, the way a worker does. A card's run ends with its merge."""
