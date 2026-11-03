@@ -327,7 +327,12 @@ def review_links(text: str) -> str:
     return "".join(parts)
 
 
-PULL_REQUEST_LINK = re.compile(r"https://(?:github\.com|linear\.review)/[^/\s]+/[^/\s]+/pull/[0-9]+")
+def pull_request_urls(url: str) -> tuple[str, str] | None:
+    match = GITHUB_PULL_URL.fullmatch(re.sub(r"^https://linear\.review/", "https://github.com/", url))
+    if match is None:
+        return None
+    path = "{}/{}/pull/{}".format(*match.groups())
+    return f"https://github.com/{path}", f"https://linear.review/{path}"
 
 
 def session_links(session: dict) -> list:
@@ -471,13 +476,13 @@ class LinearClient:
         return closed
 
     def _carry_pull_requests(self, agent_session_id: str, session: dict, older: list) -> None:
-        held = {review_links(u["url"]) for u in session_links(session)}
+        held = {u["url"] for u in session_links(session)}
         missing = {}
         for other in older:
             for u in session_links(other):
-                url = review_links(u["url"])
-                if PULL_REQUEST_LINK.fullmatch(url) and url not in held:
-                    missing.setdefault(url, {"label": u["label"], "url": url})
+                for url in pull_request_urls(u["url"]) or ():
+                    if url not in held:
+                        missing.setdefault(url, {"label": u["label"], "url": url})
         if not missing:
             return
         try:
@@ -497,9 +502,9 @@ class LinearClient:
             held = set()
         missing = {}
         for u in urls:
-            url = review_links(u["url"])
-            if url not in held and url not in missing:
-                missing[url] = {"label": u["label"], "url": url}
+            for url in pull_request_urls(u["url"]) or (u["url"],):
+                if url not in held and url not in missing:
+                    missing[url] = {"label": u["label"], "url": url}
         if missing:
             self._update_session(agent_session_id, {"addedExternalUrls": list(missing.values())})
         return list(missing)

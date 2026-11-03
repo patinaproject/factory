@@ -16,7 +16,7 @@ from .linear import (
     approver_summary,
     authority,
     lookup_approvers,
-    review_links,
+    pull_request_urls,
 )
 
 logger = logging.getLogger(__name__)
@@ -322,7 +322,9 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
         result = {"ok": True, "agent_activity_id": activity_id}
         if args.get("external_urls"):
             client.add_external_urls(session_id, args["external_urls"])
-            result["external_urls"] = [review_links(u["url"]) for u in args["external_urls"]]
+            result["external_urls"] = [
+                url for u in args["external_urls"] for url in pull_request_urls(u["url"]) or (u["url"],)
+            ]
         if not args.get("ephemeral"):
             try:
                 result["closed_sessions"] = client.close_older_sessions(session_id)

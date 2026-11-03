@@ -52,8 +52,8 @@ def sync_card(linear, client, card: dict, check: bool) -> str | None:
     if not (session_id and repo and branch):
         return None
     if check:
-        held = {linear.review_links(url) for url in client.external_urls(session_id)}
-        wanted = (linear.review_links(link["url"]) for link in session_links.branch_pull_links(repo, branch))
+        held = client.external_urls(session_id)
+        wanted = [url for link in session_links.branch_pull_links(repo, branch) for url in linear.pull_request_urls(link["url"])]
         lacking = [url for url in wanted if url not in held]
         return f"{card['id']} {session_id} lacks {' '.join(lacking)}" if lacking else None
     report = session_links.sync_session_pull_requests(linear, client, session_id, repo, branch)
