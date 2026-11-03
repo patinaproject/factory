@@ -33,7 +33,7 @@
 │       ├── SOUL.md            # Worker instructions
 │       ├── config.yaml        # Toolsets, skills, plugins, and placeholder settings
 │       ├── distribution.yaml  # Profile distribution manifest
-│       └── scripts/           # claude-session, card_branch.py, factory_source.py, archive_card.py, blockers.py, kanban_board.py, github-upload-image, guard-ci-wait, guard-commit-closes, wait-for-checks, push-signed, worker-secrets, proxy-token, mcp-headers, check-install, and the refresh cron scripts
+│       └── scripts/           # claude-session, card_branch.py, factory_source.py, archive_card.py, blockers.py, kanban_board.py, github-upload-image, guard-ci-wait, guard-commit-closes, wait-for-checks, token-spend, push-signed, worker-secrets, proxy-token, mcp-headers, check-install, and the refresh cron scripts
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
 │   ├── skills-sync            # Syncs the vendored skills and agents from the latest stable skills release

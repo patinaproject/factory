@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import enum
+import hashlib
 import io
 import json
 import os
@@ -36,8 +37,8 @@ class Platform(enum.Enum):
     SLACK = "slack"
 
 
-def event(payload, route="linear", platform=Platform.WEBHOOK):
-    source = SimpleNamespace(platform=platform, user_id=f"webhook:{route}", chat_type="webhook")
+def event(payload, route="linear", platform=Platform.WEBHOOK, chat_id="webhook:v2:chat-1"):
+    source = SimpleNamespace(platform=platform, user_id=f"webhook:{route}", chat_type="webhook", chat_id=chat_id)
     return SimpleNamespace(source=source, raw_message=payload, text="rendered prompt")
 
 
@@ -231,9 +232,14 @@ class PausedHookTest(unittest.TestCase):
 class IntentHookTest(unittest.TestCase):
     """The hook puts the computed intent in front of a Linear turn through Hermes' `rewrite` action."""
 
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+
     def run_intent_hook(self, evt, compute, route="linear", triage_exit=no_triage_exit):
         hook = plugin.make_dispatch_hook(
-            lambda: RecordingClient(), lambda: route, lambda: RESOLVED_CONFIG, triage_exit, compute
+            lambda: RecordingClient(), lambda: route, lambda: RESOLVED_CONFIG, triage_exit, compute,
+            lambda: Path(self.home.name),
         )
         return asyncio.run(hook(event=evt, gateway=object(), session_store=None))
 
@@ -278,7 +284,7 @@ class IntentHookTest(unittest.TestCase):
         self.assertEqual(self.run_intent_hook(reply_event(f"{LUKE} what do you think?"), compute), SKIP_TEAMMATE)
 
     def test_an_error_intent_is_computed_once_more(self):
-        intents = [plugin.triage_intent.error_intent("URLError: timed out"), plugin.triage_intent.Intent(action="issue_closed")]
+        intents = [plugin.triage_intent.error_intent("URLError: timed out"), plugin.triage_intent.Intent(action="create_card")]
         calls = []
 
         def compute(payload):
@@ -287,7 +293,63 @@ class IntentHookTest(unittest.TestCase):
 
         result = self.run_intent_hook(event(session_event("created")), compute)
         self.assertEqual(len(calls), 2)
-        self.assertIn('"action": "issue_closed"', result["text"])
+        self.assertIn('"action": "create_card"', result["text"])
+
+    def test_an_intent_that_needs_no_turn_is_skipped_with_a_record(self):
+        issue = {"id": "i", "identifier": "ABC-1", "state_type": "backlog"}
+        payload = {"type": "Issue", "action": "update", "updatedFrom": {"labelIds": []}, "data": {"id": "i"}}
+        intents = {
+            "ignore_factory_session": plugin.triage_intent.Intent(action="ignore_factory_session", issue=issue),
+            "session_created_handles_it": plugin.triage_intent.Intent(action="session_created_handles_it", issue=issue),
+            "issue_closed": plugin.triage_intent.Intent(action="issue_closed", issue=issue),
+            "undelegated": plugin.triage_intent.Intent(action="undelegated", issue=issue),
+            "reuse_card": plugin.triage_intent.Intent(
+                action="reuse_card",
+                issue=issue,
+                agent_session_id="s-1",
+                card={"id": "t", "status": "running", "matched_by": "branch", "session_id": "s-1"},
+            ),
+        }
+        digest = hashlib.sha256(b"webhook:v2:chat-1").hexdigest()
+        for action, intent in intents.items():
+            with self.subTest(action), self.assertLogs("linear_agent_session", "INFO") as logs:
+                result = self.run_intent_hook(event(payload), lambda _: intent)
+                self.assertEqual(
+                    result, {"action": "skip", "reason": f"{action}: the computed intent needs no action"}
+                )
+                self.assertIn(
+                    f"INFO:linear_agent_session:linear-agent-session: {action}: the computed intent needs no action; no triage turn",
+                    logs.output,
+                )
+                self.assertTrue((Path(self.home.name) / "webhook-retry" / "skipped" / digest).is_file())
+
+    def test_an_error_intent_still_gets_a_rewrite_and_no_record(self):
+        def compute(_):
+            return plugin.triage_intent.error_intent("URLError: timed out")
+
+        result = self.run_intent_hook(event(session_event("created")), compute)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn('"action": "error"', result["text"])
+        self.assertFalse((Path(self.home.name) / "webhook-retry").exists())
+
+    def test_a_failed_computation_still_gets_a_rewrite_and_no_record(self):
+        def compute(_):
+            raise RuntimeError("boom")
+
+        with self.assertLogs("linear_agent_session", "WARNING"), mock.patch.object(
+            plugin.blocks, "hermes_redact", side_effect=lambda text: text
+        ):
+            result = self.run_intent_hook(event(session_event("created")), compute)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertFalse((Path(self.home.name) / "webhook-retry").exists())
+
+    def test_an_unwritable_skip_record_sends_the_turn_to_triage(self):
+        intent = plugin.triage_intent.Intent(action="ignore_factory_session", issue={"state_type": "backlog"})
+        (Path(self.home.name) / "webhook-retry").write_text("not a directory")
+        with self.assertLogs("linear_agent_session", "WARNING"):
+            result = self.run_intent_hook(event(session_event("created")), lambda _: intent)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn('"action": "ignore_factory_session"', result["text"])
 
     def test_a_slow_intent_becomes_the_error_block_not_a_dropped_turn(self):
         def compute(_):
@@ -752,7 +814,8 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         class Plugin:
             linear = types.SimpleNamespace(client_from_env=lambda: "client", ACTIVITY_TYPES=[])
             triage_exit = types.SimpleNamespace(
-                configured_app_user_id=lambda: "app", configured_operator_user_ids=lambda: [], listed_cards=lambda board: []
+                configured_app_user_id=lambda: "app", configured_operator_user_ids=lambda: [], listed_cards=lambda board: [],
+                listed_history=lambda board, task_id: None,
             )
             triage_intent = types.SimpleNamespace(
                 parse_time=lambda text: ("parsed", text),

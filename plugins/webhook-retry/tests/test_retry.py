@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -54,6 +56,9 @@ FAKE_TRIAGE_EXIT = textwrap.dedent(
     behavior = json.load(open(os.environ["FAKE_TRIAGE_BEHAVIOR"]))
     if args[0] == "teammate-reply":
         print(json.dumps({"addressed": behavior.get("addressed", False)}))
+        sys.exit(behavior.get("exit", 0))
+    if args[0] == "comment-skip":
+        print(json.dumps({"skip": behavior.get("skip", False)}))
         sys.exit(behavior.get("exit", 0))
     if args[0] == "triage-intent":
         if behavior.get("intent_exit"):
@@ -418,6 +423,48 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(result.stdout, "retried linear dropped: succeeded\nwebhook retry queue drained\n")
         self.assertEqual([e["delivery"] for e in self.entries().values()], ["recent"])
 
+    def skip_marker(self, delivery):
+        marker = self.queue / "skipped" / hashlib.sha256(chat_key(delivery).encode()).hexdigest()
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text("")
+        return marker
+
+    def test_a_skipped_delivery_is_never_replayed_whichever_hook_ran_first(self):
+        for order in ("marker before the entry", "marker after the entry"):
+            with self.subTest(order):
+                self.setUp()
+                self.install_triage_exit(handled=False)
+                if order == "marker before the entry":
+                    marker = self.skip_marker("skipped")
+                self.seed(entry("skipped", state="pending", delivered=ago(minutes=11), next_try_at=None, admitted=False))
+                if order == "marker after the entry":
+                    marker = self.skip_marker("skipped")
+
+                result = self.run_retry()
+
+                self.assertEqual(self.chats(), [])
+                self.assertEqual(self.intent_checks(), [])
+                self.assertEqual(result.stdout, "")
+                self.assertEqual((self.entries(), marker.exists()), ({}, False))
+
+    def test_a_skip_marker_leaves_an_admitted_entry_alone(self):
+        self.seed(entry("admitted", state="pending", delivered=ago(minutes=11), next_try_at=None, admitted=True))
+        marker = self.skip_marker("admitted")
+
+        self.run_retry()
+
+        self.assertEqual(([e["state"] for e in self.entries().values()], marker.exists()), (["pending"], True))
+
+    def test_an_orphan_skip_marker_is_pruned_after_a_day(self):
+        self.seed()
+        old, recent = self.skip_marker("old"), self.skip_marker("recent")
+        aged = time.time() - 25 * 3600
+        os.utime(old, (aged, aged))
+
+        self.run_retry()
+
+        self.assertEqual((old.exists(), recent.exists()), (False, True))
+
     def test_an_admitted_pending_entry_stays_pending(self):
         self.seed(entry("running", state="pending", delivered=ago(minutes=30), admitted=True))
 
@@ -473,6 +520,51 @@ class RetryTest(unittest.TestCase):
         reply = {"type": "AgentSessionEvent", "action": "prompted"}
         self.install_triage_exit(handled=False, addressed=True, exit=1)
         self.seed(entry("talk", payload=reply))
+
+        self.run_retry()
+
+        self.assertEqual(len(self.chats()), 1)
+
+    def test_a_comment_that_resumes_no_card_is_not_replayed(self):
+        comment = {"type": "Comment", "action": "create", "data": {"id": "c1", "issueId": "issue-1"}}
+        self.install_triage_exit(handled=False, skip=True)
+        self.seed(entry("comment", delivered=ago(minutes=30), reason="paused", payload=comment, admitted=False))
+
+        result = self.run_retry()
+
+        self.assertEqual(self.chats(), [])
+        self.assertEqual(
+            result.stdout, "retried linear comment: skipped a comment that resumes no card\nwebhook retry queue drained\n"
+        )
+        self.assertEqual(self.entries(), {})
+
+    def test_a_comment_that_resumes_a_card_is_replayed_with_its_intent_block(self):
+        comment = {"type": "Comment", "action": "create", "data": {"id": "c1", "issueId": "issue-1"}}
+        self.install_triage_exit(handled=False, skip=False)
+        self.seed(entry("comment", payload=comment))
+
+        self.run_retry()
+
+        queries = [c["query"] for c in self.chats()]
+        self.assertEqual(len(queries), 1)
+        self.assertIn('"action": "card_reply"', queries[0])
+        self.assertEqual([c["payload"] for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "triage-intent"], [comment])
+
+    def test_an_unadmitted_comment_is_not_replayed(self):
+        comment = {"type": "Comment", "action": "create", "data": {"id": "c1", "issueId": "issue-1"}}
+        self.install_triage_exit(handled=False, skip=False)
+        self.seed(entry("comment", state="pending", delivered=ago(minutes=30), payload=comment, admitted=False))
+
+        result = self.run_retry()
+
+        self.assertEqual(self.chats(), [])
+        self.assertIn("retried linear comment: skipped a comment that resumes no card\n", result.stdout)
+        self.assertEqual([c for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "comment-skip"], [])
+
+    def test_a_failed_comment_check_replays_the_turn(self):
+        comment = {"type": "Comment", "action": "create", "data": {"id": "c1", "issueId": "issue-1"}}
+        self.install_triage_exit(handled=False, skip=True, exit=1)
+        self.seed(entry("comment", payload=comment))
 
         self.run_retry()
 

@@ -23,6 +23,7 @@ ARCHIVE_TIMEOUT_SECONDS = 120.0
 HERMES_TIMEOUT_SECONDS = 60.0
 TAKEOVER_SUFFIX = "-takeover"
 CLOSED_STATE_TYPES = ("completed", "canceled", "duplicate")
+STOPPED = "stopped"
 LINEAR_ISSUE_ID = re.compile(r"^linear_issue_id:\s*(\S+)\s*$", re.MULTILINE)
 
 
@@ -33,6 +34,25 @@ class Card:
     title: str
     body: str
     branch_name: Optional[str] = None
+
+
+class Park(NamedTuple):
+    reason: Optional[str]
+    at: int
+
+
+class History(NamedTuple):
+    parks: list[Park]
+    stops: list[int]
+
+
+def history_of(events: list, comments: list) -> History:
+    parks = []
+    for event in events:
+        if event["kind"] == "scheduled":
+            reason = (event["payload"] or {}).get("reason")
+            parks.append(Park(reason if isinstance(reason, str) else None, event["created_at"]))
+    return History(parks, [comment["created_at"] for comment in comments if comment["body"] == STOPPED])
 
 
 class Verdict(NamedTuple):
@@ -168,6 +188,21 @@ def kanban_cards(board: Optional[str]) -> list[Card]:
     with kanban_db_connect.connect_closing(board=board) as conn:
         tasks = kanban_db.list_tasks(conn)
     return [Card(task.id, task.status, task.title or "", task.body or "", task.branch_name) for task in tasks]
+
+
+def kanban_history(board: Optional[str], task_id: str) -> History:
+    from hermes_cli import kanban_db, kanban_db_connect
+
+    with kanban_db_connect.connect_closing(board=board) as conn:
+        events = [{"kind": e.kind, "payload": e.payload, "created_at": e.created_at} for e in kanban_db.list_events(conn, task_id)]
+        comments = [{"body": c.body, "created_at": c.created_at} for c in kanban_db.list_comments(conn, task_id)]
+    return history_of(events, comments)
+
+
+def listed_history(board: Optional[str], task_id: str) -> History:
+    pinned = ["--board", board] if board else []
+    show = json.loads(_hermes("kanban", *pinned, "show", task_id, "--json"))
+    return history_of(show["events"], show["comments"])
 
 
 def listed_cards(board: Optional[str]) -> list[Card]:

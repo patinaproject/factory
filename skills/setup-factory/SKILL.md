@@ -1481,7 +1481,11 @@ Linear `Issue` update, it runs the `triage-exit` command of the
 that command archived the triage card or left a running one to its worker, the
 delivery is done without a turn. Before it reruns an agent session reply, it
 runs the `teammate-reply` command, and a reply addressed to a teammate is
-dropped without a turn. It prints a line only when something happened,
+dropped without a turn. When the dispatch hook skipped a delivery because
+its computed intent needs no action, it left a skip marker under
+`<root>/webhook-retry/skipped/`, and the job drops the pending delivery
+without a turn and without an `unadmitted` replay. It prunes markers older
+than a day. It prints a line only when something happened,
 so Hermes delivers nothing on a quiet run. It belongs to the root profile,
 unlike the other jobs in this part, because only that profile runs the chat
 platform from part 13 and has its home channel. Hermes drops the output of a
@@ -2069,6 +2073,16 @@ each check. Report each result.
     `review_reopened` with no `CHANGES REQUESTED` comment. After the worker's
     run the card is back in `review`, with no `blocked` event of kind
     `needs_input`.
+34. Let a triage card ask a question, so it is in Scheduled. As the issue's
+    assignee, the delegator, or a configured operator, answer it with a
+    top-level comment on the issue, not in the agent session. Within a
+    minute the card gets one comment that starts `Linear reply:`, it leaves
+    Scheduled, and its session gets one `thought` naming the comment's link.
+    Wait for the Linear retry window and confirm no second `Linear reply:`
+    appears. A top-level comment from anyone else, or one that mentions only
+    other people, changes nothing, and neither does the factory's own
+    top-level comment. If no comment arrives, check that the Linear app
+    subscribes to comment events (`references/linear-app.md`).
 
 **Known limitation.** Only the Kanban dashboard reopens a `done` card. The
 operator drags the card to Ready, which Hermes documents as a deliberate
@@ -2118,6 +2132,19 @@ the rule for privileged steps:
 
 macOS starts sshd for each connection, so new connections use the change
 without a restart. Run the check again. It must print only `PASS` lines.
+
+An unattended Xcode or macOS update changes the toolchain under running cards.
+Turn off the App Store's and macOS's automatic installs. The script needs
+root, so follow the rule for privileged steps. Name the terminal and ask the
+operator to run it there with `sudo`, then wait:
+
+```sh
+sudo python3 <factory checkout>/skills/setup-factory/scripts/disable-auto-updates
+```
+
+It prints one line for each setting it changed, or `no change`, and a second
+run changes nothing. `check-install` reports an `app auto-update` or
+`macos auto-update` line while a setting is on or unset.
 
 ## 17. Agent instructions
 
@@ -2564,6 +2591,82 @@ Hermes process starts. The new helper also writes
    operator's pause is engaged, so resume before the next step.
 9. Remove the lock and start `auto-deploy` once with the `launchctl kickstart`
    command above. Record the deployed commit in the private configuration record.
+
+## Update Xcode or macOS
+
+Update them only on purpose. A new Xcode blocks `xcrun` until its first
+launch runs, and a macOS update can restart the host under running cards.
+
+1. Pause the board and let running cards finish, as step 1 of
+   [Deploy a merged factory change](#deploy-a-merged-factory-change) does:
+
+   ```sh
+   hermes pause --reason "xcode or macos update"
+   python3 <repo>/skills/setup-factory/scripts/restart-gateway --wait-only
+   ```
+
+   Run the second command again until it exits `0`.
+2. Install the update.
+3. In the operator's terminal, finish the Xcode first launch:
+
+   ```sh
+   sudo xcodebuild -runFirstLaunch
+   ```
+
+4. Check that `xcrun` answers: `xcrun simctl help`.
+5. Run `HERMES_HOME=<worker> python3 <source checkout>/profiles/claude-worker/scripts/check-install`.
+   It must print no `xcode first launch`, `app auto-update`, or `macos auto-update` line. Run
+   `disable-auto-updates` again when an update turned an automatic install back on.
+6. Run `hermes resume`.
+
+## Report token spend
+
+`token-spend` shows where the factory's model tokens and estimated cost went.
+It reads the Hermes session tables, the Kanban run history, and Claude Code's
+transcripts, and it writes nothing. Run it as the worker:
+
+```bash
+HERMES_HOME=<worker profile home> python3 <worker profile home>/scripts/token-spend --since 2026-11-01
+```
+
+Flags:
+
+- `--since` and `--until` take an ISO date or datetime (naive means UTC) or
+  epoch seconds. A session or run counts when its start falls in
+  `[since, until)`.
+- `--card <task id or issue identifier>` limits the report to one card and
+  lists its worker runs and Kanban sessions.
+- `--top <n>` sets how many cards the ranking shows. The default is 10.
+- `--json` prints the same report as one JSON object.
+- `--worker-home`, `--gateway-home`, `--claude-config-dir`, and `--prices`
+  override `$HERMES_HOME`, the gateway home beside `profiles/`,
+  `$CLAUDE_CONFIG_DIR` or `~/.claude`, and the `token_prices.json` beside the
+  script.
+
+The five buckets are:
+
+- **Webhook triggers.** Gateway sessions that webhook routes started.
+- **Worker dispatch.** The worker profile's Hermes `kanban` sessions.
+- **Startup context.** The first main-thread message of each Claude Code run,
+  which loads the context.
+- **Main-thread conversation.** The rest of the run's main thread.
+- **Subagent fan-out.** The run's subagent transcripts.
+
+A transcript joins a card by its working directory, which is the card's
+`workspace_path`, on every board. The script splits that transcript's messages
+across all of the card's runs by time, whether or not a run recorded a session
+id. A message that no run covers, such as a reply after a run ended, shows
+under `outside runs` in the `--card` view and counts toward the card's total.
+Transcripts whose directory matches no card are other Claude Code sessions and
+are left out.
+
+Hermes sessions record one total cache write, which the report prices at the
+five-minute rate. `webhook-retry` and `webhook-replay` sessions have no route
+name, so they group under their source name. Gateway sessions that are not
+webhook triggers, such as Slack or one-shot, fall outside the five buckets.
+
+Cost is the token counts times the list prices in `token_prices.json`. A model
+that file does not list shows its tokens and `unpriced`, never a zero cost.
 
 ## Report
 

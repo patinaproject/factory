@@ -147,7 +147,7 @@ ISSUE_QUERY = """query Issue($id: String!) {
   issue(id: $id) {
     id identifier title description url branchName priority archivedAt
     state { name type }
-    delegate { id }
+    delegate { id name }
     assignee { id name gitHubUserId app }
     labels { nodes { name } }
     attachments { nodes { url sourceType } }
@@ -173,6 +173,10 @@ OPERATORS_QUERY = """query OperatorUsers($ids: [ID!]) {
 
 USER_APP_QUERY = """query UserApp($id: String!) {
   user(id: $id) { app }
+}"""
+
+USER_URL_QUERY = """query UserUrl($id: String!) {
+  user(id: $id) { url }
 }"""
 
 ISSUE_BLOCKERS_QUERY = """query IssueBlockers($id: String!) {
@@ -620,6 +624,7 @@ class LinearClient:
             "description": issue["description"] or "",
             "githubIssues": [a["url"] for a in issue["attachments"]["nodes"] if GITHUB_ISSUE_URL.fullmatch(a["url"])],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
+            "delegateName": issue["delegate"]["name"] if issue["delegate"] else None,
             "assignee": issue["assignee"],
             "labels": _label_names(issue),
             "blockedBy": _blocking_issues(issue["inverseRelations"]),
@@ -663,6 +668,12 @@ class LinearClient:
         if not isinstance(user["app"], bool):
             raise LinearError(f"Linear did not say whether user {user_id} is an app")
         return user["app"]
+
+    def user_profile_url(self, user_id: str) -> str:
+        user = self._graphql(USER_URL_QUERY, {"id": user_id})["user"]
+        if user is None or not isinstance(user["url"], str):
+            raise LinearError(f"Linear gave no profile URL for user {user_id}")
+        return user["url"]
 
     def operators(self, user_ids: list[str]) -> list[dict]:
         """The people the ids name, in order. An id that resolves to nobody or to an app is logged and left out."""

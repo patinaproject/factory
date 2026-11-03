@@ -1,6 +1,9 @@
 # Linear agent app
 
-The factory acts in Linear as an OAuth application with agent session events.
+The factory acts in Linear as an OAuth application with agent session events,
+issue events, and comment events. Comment events let a person answer a waiting
+card in a top-level issue comment. Until the app subscribes to them, no comment
+reaches the gateway and behavior is unchanged.
 Every comment and activity comes from the app. The `linear-agent-session`
 plugin authenticates with the app's `LINEAR_CLIENT_ID` and
 `LINEAR_CLIENT_SECRET`. It mints client credentials tokens with the scopes
@@ -31,7 +34,7 @@ If all of them hold, skip to the live test.
 >
 > - **Name:** the operator's choice for the agent's display name.
 > - **Webhooks:** enabled, with the URL `https://<hostname>/webhooks/linear`.
-> - **Events:** agent session events, plus issue events.
+> - **Events:** agent session events, plus issue events and comment events.
 > - **Client credentials:** enabled.
 >
 > Then ask the operator to store the client ID and client secret with the
@@ -39,7 +42,9 @@ If all of them hold, skip to the live test.
 
 **Existing app.** If the operator already has an agent app, keep it. Ask
 the operator to turn on **Client credentials** in the app's settings, confirm
-that its webhook URL and events match the values above, and store its client
+that its webhook URL matches the value above and that its events include
+comment events, which an app created before the factory resumed cards from
+top-level comments lacks, and store its client
 ID and client secret the same way.
 
 Check `<home>/.env` with `env_has` afterwards.

@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import time
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Mapping, NamedTuple, Optional
 
-from . import blocks, linear, triage_exit
-from .triage_exit import Card
+from . import blocks, comment_resume, linear, triage_exit
+from .triage_exit import Card, History
 
 TRIAGE_BOARD = triage_exit.TRIAGE_BOARD
 DUPLICATE_WINDOW = dt.timedelta(minutes=5)
@@ -31,6 +32,8 @@ ACTIONS = {
     "create_card": "create the issue's implementation card",
     "reuse_card": "the issue has a card; move it to this session and handle its status",
     "card_reply": "the issue's assignee, its delegator, or a configured operator replied on an issue with a card",
+    "comment_resume": "an approver answered in a top-level issue comment while a card waits for a person; resume that card",
+    "skip_comment": "a Comment that resumes no card; the hook skips it and no turn runs",
     "card_reply_not_assignee": "someone who is none of the issue's assignee, delegator, or configured operators replied on an issue with a card; wake no card",
     "triage_card_reply": "a reply on an issue whose triage card is live",
     "answer_reply": "a reply on an undelegated issue with no card; answer once",
@@ -81,6 +84,7 @@ class Intent:
     action: str
     issue: Optional[dict] = None
     delegated: bool = False
+    delegate: Optional[dict] = None
     gate: Optional[str] = None
     card: Optional[dict] = None
     triage_card: Optional[dict] = None
@@ -99,6 +103,9 @@ class Intent:
     not_assignee_reason: Optional[str] = None
     thread: Optional[list] = None
     thread_source: Optional[str] = None
+    comment_id: Optional[str] = None
+    comment_url: Optional[str] = None
+    skip_reason: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -216,8 +223,18 @@ def decide(
         action="",
         issue={"id": issue["id"], "identifier": issue["identifier"], "state_type": issue["stateType"]},
         delegated=delegated,
+        delegate={"id": issue["delegate"], "name": issue["delegateName"]} if issue["delegate"] else None,
         gate=gate_verdict(issue["labels"], issue["identifier"], document_titles),
-        card={"id": found[0].id, "status": found[0].status, "matched_by": found[1]} if found else None,
+        card=(
+            {
+                "id": found[0].id,
+                "status": found[0].status,
+                "matched_by": found[1],
+                "session_id": blocks.session_id(found[0].body),
+            }
+            if found
+            else None
+        ),
         triage_card={"id": triage_card.id, "status": triage_card.status} if triage_card else None,
         foreign_cards=[] if found else foreign_card_ids(work_cards, issue),
         session_duplicate=_recent_person_session(issue, app_user_id, now),
@@ -259,6 +276,45 @@ def _with_authority(
         approvers=linear.approver_summary(approvers),
         not_assignee_reason=reason,
     )
+
+
+def _triage_inbox_is_noop(intent: Intent, payload: Mapping[str, Any]) -> bool:
+    moved = "stateId" in (payload.get("updatedFrom") or {})
+    if intent.issue["state_type"] != "triage":
+        return intent.triage_card is None or not moved
+    return payload.get("action") != "create" and not moved
+
+
+def _undelegated_needs_no_turn(intent: Intent, payload: Mapping[str, Any]) -> bool:
+    card_gone = intent.card is None or intent.card["status"] == "done"
+    return card_gone and intent.triage_card is None and _triage_inbox_is_noop(intent, payload)
+
+
+def _reuse_card_needs_no_turn(intent: Intent, payload: Mapping[str, Any]) -> bool:
+    card = intent.card
+    return (
+        card is not None
+        and card["session_id"] is not None
+        and card["session_id"] == intent.agent_session_id
+        and card["status"] not in ("blocked", "triage", "done")
+        and intent.issue["state_type"] != "triage"
+    )
+
+
+# The actions the route prompt answers by doing nothing, each with the condition that makes it so.
+NO_TURN_RULES: dict[str, Callable[[Intent, Mapping[str, Any]], bool]] = {
+    "ignore_factory_session": lambda intent, payload: True,
+    "session_created_handles_it": _triage_inbox_is_noop,
+    "issue_closed": lambda intent, payload: intent.card is None and intent.triage_card is None,
+    "undelegated": _undelegated_needs_no_turn,
+    "reuse_card": _reuse_card_needs_no_turn,
+}
+
+
+def needs_no_turn(intent: Intent, payload: Mapping[str, Any]) -> bool:
+    """True when the prompt would do nothing for this intent, so the hook can skip the turn."""
+    rule = NO_TURN_RULES.get(intent.action)
+    return rule is not None and rule(intent, payload)
 
 
 def carries_no_reply(payload: Mapping[str, Any]) -> bool:
@@ -327,6 +383,80 @@ def _issue_id(payload: Mapping[str, Any]) -> str:
     return payload["agentSession"]["issue"]["id"]
 
 
+def skip_intent(reason: str) -> Intent:
+    return Intent(action="skip_comment", skip_reason=reason)
+
+
+def comment_intent(
+    payload: Mapping[str, Any],
+    *,
+    app_user_id: Callable[[], str],
+    operator_user_ids: Callable[[], list[str]],
+    client: Callable[[], Any],
+    cards: Callable[[Optional[str]], list[Card]],
+    history: Callable[[Optional[str], str], History],
+) -> Intent:
+    comment = comment_resume.parse(payload)
+    if isinstance(comment, str):
+        return skip_intent(comment)
+    linear_client = client()
+    kind = "unknown"
+    if comment.author_id:
+        try:
+            kind = _kind(linear_client.user_is_app(comment.author_id))
+        except Exception:
+            pass
+    if kind != "person":
+        return skip_intent(f"the comment's author is {kind}, not a person")
+    issue = linear_client.get_issue(comment.issue_id)
+    app = app_user_id()
+    delegated = bool(app) and issue["delegate"] == app
+    work = triage_exit.find_card(cards(None), issue["id"], issue["identifier"], issue["gitBranchName"])
+    waiting = comment_resume.waiting_card(
+        find_triage_card(cards(TRIAGE_BOARD), issue["id"]),
+        work[0] if work else None,
+        delegated,
+        lambda task_id: history(TRIAGE_BOARD, task_id),
+    )
+    if waiting is None:
+        return skip_intent("no card of the issue waits for a person")
+    operators = operator_user_ids()
+    people = linear.lookup_approvers(linear_client, issue, app, operators)
+    facts = _with_authority(Intent(action=""), people, comment.author_id, kind, bool(operators))
+    if not facts.from_assignee:
+        return skip_intent("the comment's author is not an approver")
+    mentioned = comment_resume.profile_slugs(comment.body)
+    if mentioned and (comment_resume.profile_slug(linear_client.user_profile_url(app)) or "").lower() not in mentioned:
+        return skip_intent("the comment mentions people and not the agent app")
+    card = {"id": waiting.card.id, "status": waiting.card.status}
+    return replace(
+        facts,
+        action="comment_resume",
+        issue={"id": issue["id"], "identifier": issue["identifier"], "state_type": issue["stateType"]},
+        delegated=delegated,
+        card=None if waiting.kind == "triage" else {**card, "matched_by": work[1]},
+        triage_card=card if waiting.kind == "triage" else None,
+        agent_session_id=blocks.session_id(waiting.card.body) or _open_session(issue, app),
+        reply=comment.body,
+        reply_source="payload",
+        comment_id=comment.id,
+        comment_url=comment_resume.comment_url(comment, issue.get("url")),
+    )
+
+
+# Linear can serve a delegate-less issue for a few seconds after the delegation that opened the session.
+DELEGATE_REREAD_DELAYS = (1, 1, 2, 2, 4)
+
+
+def _delegation_may_be_pending(payload: Mapping[str, Any], issue: Mapping[str, Any]) -> bool:
+    return (
+        payload["type"] == "AgentSessionEvent"
+        and payload["action"] == "created"
+        and payload["agentSession"].get("creatorId") is not None
+        and issue["delegate"] is None
+    )
+
+
 def compute(
     payload: Any,
     *,
@@ -335,14 +465,26 @@ def compute(
     client: Callable[[], Any],
     cards: Callable[[Optional[str]], list[Card]],
     now: Optional[dt.datetime] = None,
+    history: Callable[[Optional[str], str], History] = triage_exit.kanban_history,
     redact: Callable[[str], str] = blocks.hermes_redact,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Intent:
     """Read the issue and both boards, then decide. Any failure becomes the `error` intent, never an exception."""
     try:
-        if not isinstance(payload, Mapping) or payload.get("type") not in ("Issue", "AgentSessionEvent"):
-            raise ValueError("the payload is not a Linear Issue or AgentSessionEvent")
+        if not isinstance(payload, Mapping) or payload.get("type") not in ("Issue", "AgentSessionEvent", "Comment"):
+            raise ValueError("the payload is not a Linear Issue, AgentSessionEvent, or Comment")
+        if payload["type"] == "Comment":
+            return comment_intent(
+                payload, app_user_id=app_user_id, operator_user_ids=operator_user_ids, client=client, cards=cards, history=history
+            )
         linear_client = client()
         issue = linear_client.get_issue(_issue_id(payload))
+        if _delegation_may_be_pending(payload, issue):
+            for delay in DELEGATE_REREAD_DELAYS:
+                sleep(delay)
+                issue = linear_client.get_issue(_issue_id(payload))
+                if issue["delegate"] is not None:
+                    break
         documents = linear_client.issue_documents(issue["id"])["documents"]
         app = app_user_id()
         no_reply = carries_no_reply(payload)

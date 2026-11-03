@@ -25,7 +25,7 @@ REPLY_INBOX = Path("profiles") / "claude-worker" / "scripts" / "reply_inbox.py"
 GITHUB_ROUTE = "github"
 ROUTINGS = ("default", "synced_github")
 TOOLSETS = ["terminal", "kanban", "linear_agent_session"]
-LINEAR_EVENTS = ["AgentSessionEvent", "Issue"]
+LINEAR_EVENTS = ["AgentSessionEvent", "Comment", "Issue"]
 # Hermes resolves a relative in_file path against the gateway's home.
 OWNED_REFS_FILE = "owned-refs.json"
 TRIAGE_REFS_FILE = "triage-refs.json"
@@ -33,9 +33,16 @@ READY_LABEL = "ready-for-agent"
 # Matches the role's label in any case, with any punctuation between its words, like claude-session's role_key.
 READY_LABEL_PATTERN = '(?i)"name": *"' + '[^a-z0-9"]*'.join(READY_LABEL.split("-")) + '"'
 FAILED_CONCLUSIONS = ["failure", "timed_out", "action_required", "startup_failure"]
-# A bot whose pull request comments repeat a result the route already keeps as a failed check_run or workflow_run, or
-# only announce a deploy. Triage records each of them on the card and changes nothing.
-CHECK_RUN_ECHO_BOTS = ["cloudflare-workers-and-pages[bot]", "vercel[bot]", "github-actions[bot]"]
+# A bot whose pull request comments repeat a result the route already keeps as a failed check_run or workflow_run,
+# only announce a deploy, or report merge-queue state that people own after handoff. Triage records each of them on
+# the card and changes nothing.
+NOTICE_BOTS = [
+    "cloudflare-workers-and-pages[bot]",
+    "vercel[bot]",
+    "github-actions[bot]",
+    "blacksmith-sh[bot]",
+    "mergify[bot]",
+]
 LINEAR_LINKBACK = r"\A<!-- linear-linkback -->"
 LINEAR_SECRET = "${LINEAR_WEBHOOK_SECRET}"
 GITHUB_SECRET = "${GITHUB_WEBHOOK_SECRET}"
@@ -65,6 +72,14 @@ def linear_filters(app_user_id: str) -> list:
         {
             "any": [
                 {"field": "event", "equals": "AgentSessionEvent"},
+                {
+                    "all": [
+                        {"field": "event", "equals": "Comment"},
+                        {"field": "action", "equals": "create"},
+                        {"any": [{"field": "data.parentId", "missing": True}, {"field": "data.parentId", "equals": None}]},
+                        {"any": [owned("data.issueId"), {"field": "data.issueId", "in_file": TRIAGE_REFS_FILE}]},
+                    ]
+                },
                 {"field": "updatedFrom.delegateId", "exists": True},
                 {
                     "all": [
@@ -107,7 +122,7 @@ def keeps_issue_comment(login: str) -> list:
     # An issue that is not a pull request is found by its URL only. Linear's linkback comment asks for nothing.
     return [
         {"not": {"field": "comment.body", "regex": LINEAR_LINKBACK}},
-        {"not": {"field": "comment.user.login", "in": CHECK_RUN_ECHO_BOTS}},
+        {"not": {"field": "comment.user.login", "in": NOTICE_BOTS}},
         {
             "any": [
                 {"all": [{"field": "issue.pull_request", "exists": True}, {"field": "issue.user.login", "equals": login}]},
@@ -157,7 +172,7 @@ GITHUB_EVENT_TABLE = (
         "issue_comment",
         ("created",),
         "the App opened the pull request or the issue is a card's GitHub issue, "
-        "and the comment is neither Linear's linkback nor a deploy or CI bot notice",
+        "and the comment is neither Linear's linkback nor a deploy, CI, or merge-queue bot notice",
         keeps_issue_comment,
     ),
     GithubEvent(

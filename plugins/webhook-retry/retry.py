@@ -106,14 +106,24 @@ class Run:
 
         store.mutate(self.directory, change)
 
+    def prune_skip_markers(self, moment: dt.datetime) -> None:
+        for marker in (self.directory / store.SKIPPED_DIRECTORY).glob("*"):
+            if moment - dt.datetime.fromtimestamp(marker.stat().st_mtime, dt.timezone.utc) > store.PENDING_AGE:
+                marker.unlink()
+
     def apply_caps(self) -> None:
         moment = store.now()
+        self.prune_skip_markers(moment)
         for key, entry in self.entries().items():
             if entry["state"] == "running" and self.update(key, "interrupted", last_error="a retry was interrupted"):
                 self.say(f"interrupted {entry['route']} {entry['delivery']}: not retried again, it may have run")
                 continue
             age = moment - store.parse_stamp(entry["delivered_at"])
             state = entry["state"]
+            marker = store.skip_marker(self.directory, key)
+            if state == "pending" and entry.get("admitted") is False and marker.exists() and self.update(key, "skipped"):
+                marker.unlink()
+                continue
             # An entry recorded before admission was tracked has no `admitted`, and its turn may have run.
             if state == "pending" and entry.get("admitted") is False and age >= store.UNSTARTED_AGE:
                 if self.update(key, "unadmitted", reason="unadmitted", next_try_at=entry["delivered_at"]):
@@ -188,6 +198,17 @@ class Run:
         answer = self.cli_answer(entry, "teammate-reply", TEAMMATE_REPLY_TIMEOUT_SECONDS)
         return answer is not None and answer.get("addressed") is True
 
+    def comment_skipped(self, entry: dict[str, Any]) -> bool:
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "Comment":
+            return False
+        # The hook decided an unadmitted comment already: it skipped it, or recorded its id. A replay later could
+        # release a card that parked after the comment was written.
+        if entry.get("reason") == "unadmitted":
+            return True
+        answer = self.cli_answer(entry, "comment-skip", TRIAGE_INTENT_TIMEOUT_SECONDS)
+        return answer is not None and answer.get("skip") is True
+
     def intent_block(self, entry: dict[str, Any]) -> str:
         """The block the dispatch hook adds, recomputed for the stored delivery time because a replay skips the hook.
 
@@ -261,6 +282,11 @@ class Run:
                 retried += 1
                 self.update(key, "retry_succeeded")
                 self.say(f"retried {who}: skipped a reply addressed to a teammate")
+                continue
+            if self.comment_skipped(entry):
+                retried += 1
+                self.update(key, "retry_succeeded")
+                self.say(f"retried {who}: skipped a comment that resumes no card")
                 continue
             code, stderr, usage = self.replay(hermes, entry)
             retried += 1

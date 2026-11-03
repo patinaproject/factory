@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 _spec = importlib.util.spec_from_file_location("render", Path(__file__).resolve().parent.parent / "render.py")
@@ -84,7 +85,18 @@ EVENT_FILTER = {
                 {"field": "event", "equals": "issue_comment"},
                 {"field": "action", "in": ["created"]},
                 {"not": {"field": "comment.body", "regex": r"\A<!-- linear-linkback -->"}},
-                {"not": {"field": "comment.user.login", "in": ["cloudflare-workers-and-pages[bot]", "vercel[bot]", "github-actions[bot]"]}},
+                {
+                    "not": {
+                        "field": "comment.user.login",
+                        "in": [
+                            "cloudflare-workers-and-pages[bot]",
+                            "vercel[bot]",
+                            "github-actions[bot]",
+                            "blacksmith-sh[bot]",
+                            "mergify[bot]",
+                        ],
+                    }
+                },
                 {
                     "any": [
                         {
@@ -149,6 +161,19 @@ LINEAR_FILTERS = [
     {
         "any": [
             {"field": "event", "equals": "AgentSessionEvent"},
+            {
+                "all": [
+                    {"field": "event", "equals": "Comment"},
+                    {"field": "action", "equals": "create"},
+                    {"any": [{"field": "data.parentId", "missing": True}, {"field": "data.parentId", "equals": None}]},
+                    {
+                        "any": [
+                            {"field": "data.issueId", "in_file": "owned-refs.json"},
+                            {"field": "data.issueId", "in_file": "triage-refs.json"},
+                        ]
+                    },
+                ]
+            },
             {"field": "updatedFrom.delegateId", "exists": True},
             {
                 "all": [
@@ -203,7 +228,7 @@ class RouteStructureTest(unittest.TestCase):
         self.assertEqual(
             route,
             {
-                "events": ["AgentSessionEvent", "Issue"],
+                "events": ["AgentSessionEvent", "Comment", "Issue"],
                 "secret": "${LINEAR_WEBHOOK_SECRET}",
                 "filters": LINEAR_FILTERS,
                 "toolsets": TOOLSETS,
@@ -537,6 +562,22 @@ class ReviewHandbackTest(unittest.TestCase):
         github = self.reopen_args(self.github)
         self.assertEqual((github.reason, github.comment),
                          ("changes requested on GitHub; see the card comments", None))
+
+
+class ImplementationReplyCommandTest(unittest.TestCase):
+    def setUp(self):
+        routes = render.build_routes(SETTINGS)
+        self.github = routes["github"]["prompt"]
+        self.linear = routes["linear"]["prompt"]
+
+    def test_the_linear_prompt_runs_one_implementation_reply_command_that_card_transition_accepts(self):
+        commands = re.findall(r"card_transition\.py implementation-reply (<task id>)`", self.linear)
+        self.assertEqual(len(commands), 1)
+        args = card_transition.parser().parse_args(["implementation-reply", *shlex.split(commands[0].replace("<task id>", "t_1"))])
+        self.assertEqual((args.command, args.task_id), ("implementation-reply", "t_1"))
+
+    def test_the_github_prompt_does_not_carry_it(self):
+        self.assertNotIn("implementation-reply", self.github)
 
 
 class TransitionCommandTest(unittest.TestCase):
@@ -890,6 +931,23 @@ FILTER_CASES = [
         False,
     ),
     (
+        "Blacksmith test failure notice on an App PR",
+        "issue_comment",
+        payload(
+            "created",
+            sender="blacksmith-sh[bot]",
+            issue=issue(APP),
+            comment=comment("blacksmith-sh[bot]", "Found 1 test failure on Blacksmith runners"),
+        ),
+        False,
+    ),
+    (
+        "Mergify merge-queue notice on an App PR",
+        "issue_comment",
+        payload("created", sender="mergify[bot]", issue=issue(APP), comment=comment("mergify[bot]", "Merged into `main`")),
+        False,
+    ),
+    (
         "comment that quotes the linkback marker",
         "issue_comment",
         payload("created", issue=issue(APP), comment=comment(HUMAN, "Why is `<!-- linear-linkback -->` here?")),
@@ -1124,9 +1182,60 @@ class LinearClosureReplayTest(HermesFiltersCase):
         self.assertIs(self.matches("AgentSessionEvent", session), True)
 
 
+def linear_comment(issue_id, action="create", **data):
+    body = {"id": "6c1f0a52-3a8e-4f43-9d0b-1f5c2a7d9e01", "body": "Use the blue one.", "issueId": issue_id, "userId": "u1"}
+    return {"type": "Comment", "action": action, "data": {**body, **data}}
+
+
 APP_USER = SETTINGS["app_user_id"]
 READY = [{"id": "l1", "name": "ready-for-agent", "color": "#0e8a16", "parentId": None}]
 BUG = [{"id": "l2", "name": "bug", "color": "#d73a4a", "parentId": None}]
+
+
+class LinearCommentFilterTest(HermesFiltersCase):
+    route_name = "linear"
+
+    def setUp(self):
+        super().setUp()
+        (self.home / "owned-refs.json").write_text(json.dumps([CARD_ISSUES[0]]))
+        (self.home / "triage-refs.json").write_text(json.dumps([CARD_ISSUES[1]]))
+
+    def test_a_created_top_level_comment_on_an_issue_with_a_card_is_kept(self):
+        for issue_id in CARD_ISSUES[:2]:
+            with self.subTest(issue_id):
+                self.assertIs(self.matches("Comment", linear_comment(issue_id)), True)
+
+    def test_a_null_parent_is_top_level(self):
+        self.assertIs(self.matches("Comment", linear_comment(CARD_ISSUES[0], parentId=None)), True)
+
+    def test_a_reply_in_a_thread_is_dropped(self):
+        self.assertIs(self.matches("Comment", linear_comment(CARD_ISSUES[0], parentId="c-parent")), False)
+
+    def test_an_edit_or_a_removal_is_dropped(self):
+        for action in ("update", "remove"):
+            with self.subTest(action):
+                self.assertIs(self.matches("Comment", linear_comment(CARD_ISSUES[0], action=action)), False)
+
+    def test_a_comment_on_an_issue_with_no_card_is_dropped(self):
+        self.assertIs(self.matches("Comment", linear_comment(CARDLESS_ISSUES[0])), False)
+
+    def test_a_comment_names_its_issue_in_data_issue_id_only(self):
+        without_issue = linear_comment(CARD_ISSUES[0])
+        del without_issue["data"]["issueId"]
+        self.assertIs(self.matches("Comment", without_issue), False)
+
+
+class LinearCommentAcknowledgementTest(unittest.TestCase):
+    def test_the_route_acknowledges_no_comment(self):
+        plugin_dir = Path(__file__).resolve().parents[2] / "plugins" / "linear-agent-session"
+        spec = importlib.util.spec_from_file_location(
+            "linear_agent_session", plugin_dir / "__init__.py", submodule_search_locations=[str(plugin_dir)]
+        )
+        plugin = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = plugin
+        spec.loader.exec_module(plugin)
+        event = linear_comment(CARD_ISSUES[0])
+        self.assertIsNone(plugin._ack_session_id(SimpleNamespace(raw_message=event), "linear", "linear"))
 
 
 class LinearTriageReplayTest(HermesFiltersCase):
