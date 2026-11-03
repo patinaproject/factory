@@ -134,7 +134,9 @@ TRIAGE_ENTRY = (
 )
 TAKEOVER_PR = "https://github.com/Example-Org/example-repo/pull/7"
 TAKEOVER_REVIEW = "https://linear.review/Example-Org/example-repo/pull/7"
+GITHUB_PULL_9 = f"https://github.com/{REPO}/pull/9"
 REVIEW_PULL_9 = f"https://linear.review/{REPO}/pull/9"
+GITHUB_PULL_42 = f"https://github.com/{REPO}/pull/42"
 REVIEW_PULL_42 = f"https://linear.review/{REPO}/pull/42"
 LINEAR_URL = "https://linear.app/example/issue/ABC-123"
 CARD_BODY = f"```text\nlinear_issue_identifier: ABC-123\n```\ngithub_issue_url: https://github.com/{REPO}/issues/12"
@@ -534,6 +536,8 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual((status, report["activity"]), (0, "thought"))
         self.assertEqual(self.session_creates(), [{"input": {"issueId": ISSUE_ID}}])
+        store = self.hermes_home / "plugin-data" / "linear-agent-session" / "opened-sessions"
+        self.assertFalse(store.exists())
 
     def test_a_triage_run_opens_no_session_when_it_moved_the_issue(self) -> None:
         for moved in (["triage", "unstarted"], ["backlog", "unstarted"]):
@@ -618,9 +622,9 @@ class ClaudeSessionTest(GitFixture):
     def test_a_blocker_order_copy_that_does_not_park_on_the_brief_gets_the_plain_refusal(self) -> None:
         module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
         text = module.read_text()
-        self.assertIn(", NEEDS_BRIEF: NEEDS_BRIEF_PARK}", text)
+        self.assertIn("    NEEDS_BRIEF: NEEDS_BRIEF_PARK,\n", text)
         module.unlink()
-        module.write_text(text.replace(", NEEDS_BRIEF: NEEDS_BRIEF_PARK}", "}"))
+        module.write_text(text.replace("    NEEDS_BRIEF: NEEDS_BRIEF_PARK,\n", ""))
         self.set_documents()
 
         status, report = self.run_session()
@@ -828,9 +832,8 @@ class ClaudeSessionTest(GitFixture):
     def link_updates(self) -> list:
         return [u["input"] for u in self.session_updates() if "summary" not in u["input"]]
 
-    def linked(self, label_and_url: tuple[str, str]) -> dict:
-        label, url = label_and_url
-        return {"addedExternalUrls": [{"label": label, "url": url}]}
+    def linked(self, *labelled_urls: tuple[str, str]) -> dict:
+        return {"addedExternalUrls": [{"label": label, "url": url} for label, url in labelled_urls]}
 
     def factory_pull(self) -> str:
         self.github.add_pull(9, "abc-123-fix", author=BOT_LOGIN, body="Adds the thing.")
@@ -843,15 +846,15 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session()
 
-        self.assertEqual((status, report["session_links"]), (0, {"added": [REVIEW_PULL_9], "action": "linked"}))
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+        self.assertEqual((status, report["session_links"]), (0, {"added": [GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked"}))
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", GITHUB_PULL_9), ("Pull request #9", REVIEW_PULL_9))])
         urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
-        self.assertEqual(urls, ["https://kanban.test/t_1", REVIEW_PULL_9])
+        self.assertEqual(urls, ["https://kanban.test/t_1", GITHUB_PULL_9, REVIEW_PULL_9])
 
     def test_a_pull_request_the_session_already_holds_is_not_added_again(self) -> None:
         self.set_comments(body=SESSION_BODY)
         pull = self.factory_pull()
-        self.set_linear_state(session_urls=[REVIEW_PULL_9])
+        self.set_linear_state(session_urls=[GITHUB_PULL_9, REVIEW_PULL_9])
 
         status, report = self.run_session()
 
@@ -871,10 +874,10 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
-        self.assertEqual((status, report["session_links"]), (0, {"added": [TAKEOVER_REVIEW], "action": "linked"}))
+        self.assertEqual((status, report["session_links"]), (0, {"added": [TAKEOVER_PR, TAKEOVER_REVIEW], "action": "linked"}))
         started = [json.loads(line) for line in self.claude_call()["linear_log"].splitlines()]
         before = [e["session_update"]["input"] for e in started if "session_update" in e]
-        self.assertIn(self.linked(("Taken-over pull request #7", TAKEOVER_REVIEW)), before)
+        self.assertIn(self.linked(("Taken-over pull request #7", TAKEOVER_PR), ("Taken-over pull request #7", TAKEOVER_REVIEW)), before)
 
     def test_a_takeover_and_the_replacement_pull_request_both_stay_on_the_session(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -884,13 +887,16 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session("--takeover-pr", TAKEOVER_PR)
 
         self.assertEqual(
-            (status, report["session_links"]), (0, {"added": [TAKEOVER_REVIEW, REVIEW_PULL_9], "action": "linked"})
+            (status, report["session_links"]), (0, {"added": [TAKEOVER_PR, TAKEOVER_REVIEW, GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked"})
         )
         self.assertEqual(self.link_updates(), [{"addedExternalUrls": [
-            {"label": "Taken-over pull request #7", "url": TAKEOVER_REVIEW}, {"label": "Pull request #9", "url": REVIEW_PULL_9},
+            {"label": "Taken-over pull request #7", "url": TAKEOVER_PR},
+            {"label": "Taken-over pull request #7", "url": TAKEOVER_REVIEW},
+            {"label": "Pull request #9", "url": GITHUB_PULL_9},
+            {"label": "Pull request #9", "url": REVIEW_PULL_9},
         ]}])
         urls = json.loads((self.hermes_home / "linear-fake.json").read_text())["session_urls"]
-        self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_REVIEW, REVIEW_PULL_9])
+        self.assertEqual(urls, ["https://kanban.test/t_1", TAKEOVER_PR, TAKEOVER_REVIEW, GITHUB_PULL_9, REVIEW_PULL_9])
 
     def test_a_run_that_prints_no_json_still_links_the_branchs_pull_request(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -900,8 +906,8 @@ class ClaudeSessionTest(GitFixture):
         status, report = self.run_session()
 
         self.assertEqual(status, 1)
-        self.assertEqual(report["session_links"], {"added": [REVIEW_PULL_9], "action": "linked"})
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+        self.assertEqual(report["session_links"], {"added": [GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked"})
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", GITHUB_PULL_9), ("Pull request #9", REVIEW_PULL_9))])
 
     def test_a_refused_adoption_still_links_the_branchs_existing_pull_request(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -912,7 +918,7 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(status, 2)
         self.assertFalse(self.log.exists())
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", GITHUB_PULL_9), ("Pull request #9", REVIEW_PULL_9))])
 
     def test_a_merged_pull_request_on_the_branch_is_added_unless_the_session_holds_it(self) -> None:
         self.set_comments(body=SESSION_BODY)
@@ -921,10 +927,10 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session()
 
-        self.assertEqual((status, report["session_links"]), (0, {"added": [REVIEW_PULL_9], "action": "linked"}))
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", REVIEW_PULL_9))])
+        self.assertEqual((status, report["session_links"]), (0, {"added": [GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked"}))
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #9", GITHUB_PULL_9), ("Pull request #9", REVIEW_PULL_9))])
 
-        self.set_linear_state(session_urls=[REVIEW_PULL_9])
+        self.set_linear_state(session_urls=[GITHUB_PULL_9, REVIEW_PULL_9])
         self.run_session()
 
         self.assertEqual(len(self.link_updates()), 1)
@@ -988,7 +994,7 @@ class ClaudeSessionTest(GitFixture):
         self.reply_run({"hook": "PostToolUse", "event": event})
 
         self.assertEqual(self.hook_log()[0]["codes"], [0, 0])
-        self.assertEqual(self.link_updates(), [self.linked(("Pull request #42", REVIEW_PULL_42))])
+        self.assertEqual(self.link_updates(), [self.linked(("Pull request #42", GITHUB_PULL_42), ("Pull request #42", REVIEW_PULL_42))])
 
     def test_first_run_passes_comments_written_before_it(self) -> None:
         self.set_comments(
@@ -1572,8 +1578,66 @@ class ClaudeSessionTest(GitFixture):
             status, report = self.run_session()
 
         self.assertEqual(status, 2)
-        self.assertEqual(report, {"error": f"another claude-session holds {self.worktree}; no run record names its card"})
+        self.assertEqual(report, {
+            "error": f"another claude-session holds {self.worktree}; no run record names its card",
+            "transient": True, "precondition": "worktree_held",
+        })
         self.assertFalse(self.log.exists())
+
+    def write_parks(self, *parks: tuple[float, str]) -> None:
+        """The card JSON with a `scheduled` event for each (age in seconds, park prefix)."""
+        events = [
+            {"kind": "scheduled", "created_at": int(time.time() - age), "payload": {"reason": f"{prefix} earlier"}}
+            for age, prefix in parks
+        ]
+        self.card.write_text(json.dumps({"task": {"body": CARD_BODY}, "comments": [], "events": events}))
+
+    def refuse_on_held_lock(self):
+        with open(self.worktree_git_dir() / "claude-session.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return self.run_session()
+
+    def test_a_third_park_in_an_hour_still_parks_and_the_fourth_is_a_plain_transient_refusal(self) -> None:
+        held = "Waiting for the worktree:"
+        for parks, precondition, count in (
+            ([(60, held), (600, held)], "worktree_held", None),
+            ([(60, held), (600, held), (3000, held)], None, "4th"),
+            ([(60, held), (600, held), (3601, held)], "worktree_held", None),
+            ([(60, held), (600, held), (3000, "Waiting after a server error:")], "worktree_held", None),
+        ):
+            with self.subTest(parks=parks):
+                self.write_parks(*parks)
+
+                status, report = self.refuse_on_held_lock()
+
+                self.assertEqual((status, report["transient"], report.get("precondition")), (2, True, precondition))
+                if count:
+                    self.assertRegex(report["error"], rf"{count} time in an hour, so it no longer waits on its own\)$")
+                    self.assertIn("the worktree to be free", report["error"])
+                else:
+                    self.assertNotIn("time in an hour", report["error"])
+
+    def test_a_server_error_that_came_back_three_times_in_an_hour_is_a_plain_transient_refusal(self) -> None:
+        self.publish_branch(BOT_LOGIN)
+        self.github.fail_next(*["gh: Server Error (HTTP 500)"] * 3)
+        self.write_parks(*[(age, "Waiting after a server error:") for age in (30, 900, 2000)])
+
+        status, report = self.run_session()
+
+        self.assertEqual((status, report["transient"], "precondition" in report), (2, True, False))
+        self.assertIn("a server error to clear for the 4th time in an hour", report["error"])
+
+    def test_an_installed_result_line_that_lacks_the_key_gets_a_plain_transient_refusal(self) -> None:
+        module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
+        text = module.read_text()
+        self.assertIn("    WORKTREE_HELD: WORKTREE_HELD_PARK,\n", text)
+        module.unlink()
+        module.write_text(text.replace("    WORKTREE_HELD: WORKTREE_HELD_PARK,\n", ""))
+
+        status, report = self.refuse_on_held_lock()
+
+        self.assertEqual((status, report["transient"], "precondition" in report), (2, True, False))
+        self.assertIn("another claude-session holds", report["error"])
 
     def test_refuses_while_a_process_runs_the_session(self) -> None:
         sleeper = subprocess.Popen(["python3", "-c", "import time; time.sleep(30)", "--resume", SESSION_ID])
@@ -1734,7 +1798,10 @@ class ClaudeSessionTest(GitFixture):
         by_lock = self.run_session("--task-id", "t_new", env=env)
         by_session = self.run_session("--task-id", "t_new", workspace=elsewhere, env=env)
 
-        self.assertEqual(by_lock, (2, {"error": f"another claude-session holds {self.worktree} for card t_old (running)"}))
+        self.assertEqual(by_lock, (2, {
+            "error": f"another claude-session holds {self.worktree} for card t_old (running)",
+            "transient": True, "precondition": "worktree_held",
+        }))
         self.assertEqual(by_session, (2, {
             "error": f"a process for Claude session {SESSION_ID} is already running for card t_old (running)"
         }))
@@ -1790,7 +1857,10 @@ class ClaudeSessionTest(GitFixture):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             status, report = self.run_session(env={"HERMES_KANBAN_DB": str(database)})
 
-        self.assertEqual((status, report), (2, {"error": f"another claude-session holds {self.worktree}; no run record names its card"}))
+        self.assertEqual((status, report), (2, {
+            "error": f"another claude-session holds {self.worktree}; no run record names its card",
+            "transient": True, "precondition": "worktree_held",
+        }))
         self.assertIsNone(bystander.poll())
 
     def test_refuses_without_a_kanban_workspace(self) -> None:
@@ -2659,6 +2729,14 @@ class ClaudeSessionTest(GitFixture):
         proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
         return proc.returncode, json.loads(proc.stdout)
 
+    def test_mcp_status_sends_no_precondition_when_the_broker_stays_busy(self) -> None:
+        self.broker.answers["linear_token"] = [BUSY]
+
+        status, report = self.run_probe()
+
+        self.assertEqual((status, set(report)), (2, {"error", "transient"}))
+        self.assertRegex(report["error"], r"^Linear token: the gateway's broker is busy")
+
     def test_mcp_status_reads_each_servers_status_from_a_run_that_never_reaches_the_model(self) -> None:
         self.settings = self.write_settings([self.repository], {
             "mcp_servers": MCP_SERVERS, "disabled_mcp_servers": ["figma"], "base_url": "https://proxy.example",
@@ -2933,7 +3011,7 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session()
 
-        self.assertEqual((status, report.get("transient")), (2, True))
+        self.assertEqual((status, report.get("transient"), report.get("precondition")), (2, True, "server_error"))
         self.assertRegex(report["error"], r"^Linear token: the gateway's broker is busy")
         self.assertFalse(self.log.exists())
 
@@ -2952,7 +3030,7 @@ class ClaudeSessionTest(GitFixture):
 
         status, report = self.run_session()
 
-        self.assertEqual((status, report.get("transient")), (2, True))
+        self.assertEqual((status, report.get("transient"), report.get("precondition")), (2, True, "server_error"))
         self.assertRegex(report["error"], r"^MCP tokens: the gateway's broker is busy")
         self.assertFalse(self.log.exists())
 
@@ -3311,7 +3389,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(status, 2)
         self.assertEqual(report, {
             "error": f"gh api repos/{REPO}/branches/abc-123-fix failed: gh: Server Error (HTTP 500)",
-            "transient": True,
+            "transient": True, "precondition": "server_error",
         })
         self.assertEqual(self.head(), start)
         self.assertFalse(self.log.exists())

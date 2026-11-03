@@ -172,8 +172,10 @@ def plugin_remove(homes: Homes, home: Path, name: str) -> Install:
     return Install(Step.PLUGINS, (*homes.cli(home), "plugins", "remove", name), homes.gateway_reads(home))
 
 
-def schedule(minutes: int) -> str:
-    return f"every {minutes // 60}h" if minutes % 60 == 0 else f"every {minutes}m"
+def schedule(every: int | str) -> str:
+    if isinstance(every, str):
+        return every
+    return f"every {every // 60}h" if every % 60 == 0 else f"every {every}m"
 
 
 def cron_command(homes: Homes, home: Path, *args: str) -> Install:
@@ -197,7 +199,7 @@ def route_set(homes: Homes, key: str, value) -> Install:
     return Install(Step.ROUTES, (homes.hermes, "config", "set", key, config_text(value)), True)
 
 
-def wrapper_install(homes: Homes, name: str) -> Install:
-    source = homes.repo / "skills" / "setup-factory" / "scripts" / name
+def wrapper_install(homes: Homes, name: str, source_name: str | None = None) -> Install:
+    source = homes.repo / "skills" / "setup-factory" / "scripts" / (source_name or name)
     return Install(Step.WRAPPERS, ("install", "-m", "0644", str(source), str(homes.root / "scripts" / name)), False)
 

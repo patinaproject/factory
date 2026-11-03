@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 from typing import Callable, Optional
 
-from . import github_issue, idempotency, triage_exit
+from . import github_issue, idempotency, opened_sessions, triage_exit
 from .linear import (
     ACTIVITY_TYPES,
     CLIENT_ERRORS,
@@ -16,7 +17,7 @@ from .linear import (
     approver_summary,
     authority,
     lookup_approvers,
-    review_links,
+    pull_request_urls,
 )
 
 logger = logging.getLogger(__name__)
@@ -322,7 +323,9 @@ def run_activity(client_factory: ClientFactory, args: dict) -> str:
         result = {"ok": True, "agent_activity_id": activity_id}
         if args.get("external_urls"):
             client.add_external_urls(session_id, args["external_urls"])
-            result["external_urls"] = [review_links(u["url"]) for u in args["external_urls"]]
+            result["external_urls"] = [
+                url for u in args["external_urls"] for url in pull_request_urls(u["url"]) or (u["url"],)
+            ]
         if not args.get("ephemeral"):
             try:
                 result["closed_sessions"] = client.close_older_sessions(session_id)
@@ -345,7 +348,7 @@ def run_activity_read(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(run)
 
 
-def run_session_create(client_factory: ClientFactory, args: dict) -> str:
+def run_session_create(client_factory: ClientFactory, args: dict, opened_dir: Optional[str] = None) -> str:
     def run() -> dict:
         issue = _issue_argument(args)
         purpose = args.get("purpose")
@@ -353,6 +356,10 @@ def run_session_create(client_factory: ClientFactory, args: dict) -> str:
             raise LinearError(f"pass purpose: one of {', '.join(SESSION_VERBS)}")
         client = client_factory()
         session_id = client.create_session_on_issue(issue)
+        try:
+            opened_sessions.record(opened_dir, session_id, dt.datetime.now(dt.timezone.utc))
+        except OSError as error:
+            logger.warning("linear-agent-session: recording the opened session failed: %s", type(error).__name__)
         try:
             title = {"title": client.title_session(session_id, issue, purpose)}
         except (*CLIENT_ERRORS, OSError) as error:

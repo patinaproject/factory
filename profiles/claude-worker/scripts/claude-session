@@ -325,6 +325,14 @@ GH_LOGIN = "gh_login"
 INSTALL_SKEW = "install_skew"
 # The `precondition` of a refusal that waits for triage to write the issue's Agent brief.
 NEEDS_BRIEF = "needs_brief"
+# The `precondition` of a refusal because a live claude-session holds the card's worktree.
+WORKTREE_HELD = "worktree_held"
+# The `precondition` of a refusal because GitHub or the gateway's broker answered with a server error.
+SERVER_ERROR = "server_error"
+# What each parking cause is called in the refusal that stops parking after PARK_CAP parks in PARK_WINDOW_SECONDS.
+PARK_CAUSES = {WORKTREE_HELD: "the worktree to be free", SERVER_ERROR: "a server error to clear"}
+PARK_CAP = 3
+PARK_WINDOW_SECONDS = 3600
 
 
 class Refusal(Exception):
@@ -414,7 +422,10 @@ def adopt_existing_work(
     try:
         branch_owner = card_branch.owner(card_branch.run_gh, repo, branch, login)
     except card_branch.GhFailed as failure:
-        raise Refusal(str(failure), transient=isinstance(failure, card_branch.GhServerError)) from failure
+        server_error = isinstance(failure, card_branch.GhServerError)
+        raise Refusal(
+            str(failure), transient=server_error, precondition=SERVER_ERROR if server_error else None
+        ) from failure
     source = card_branch.adoption(pull_ref is not None, branch_owner)
     if source is card_branch.Source.FRESH:
         return None
@@ -743,7 +754,7 @@ def lock_worktree(lock, worktree: Path, stops: list[tuple[str, str]]) -> None:
     freed, named = reclaim(stops, worktree=str(worktree))
     if freed and acquire():
         return
-    raise Refusal(f"another claude-session holds {worktree}{named}")
+    raise Refusal(f"another claude-session holds {worktree}{named}", transient=True, precondition=WORKTREE_HELD)
 
 
 def require_session_free(session_id: str, stops: list[tuple[str, str]]) -> None:
@@ -970,7 +981,10 @@ def linear_access() -> tuple:
         client = linear.client_from_env()
         return client, client.access_token()
     except linear.CLIENT_ERRORS as error:
-        raise Refusal(f"Linear token: {error}", transient=isinstance(error, linear.broker_client.BrokerUnavailable)) from None
+        unavailable = isinstance(error, linear.broker_client.BrokerUnavailable)
+        raise Refusal(
+            f"Linear token: {error}", transient=unavailable, precondition=SERVER_ERROR if unavailable else None
+        ) from None
 
 
 def triage_playbook() -> Path:
@@ -1136,7 +1150,10 @@ def require_mcp_tokens(servers: dict) -> None:
     try:
         status = broker_client.status(broker_client.socket_path(os.environ))
     except broker_client.BrokerError as error:
-        raise Refusal(f"MCP tokens: {error}", transient=isinstance(error, broker_client.BrokerUnavailable)) from None
+        unavailable = isinstance(error, broker_client.BrokerUnavailable)
+        raise Refusal(
+            f"MCP tokens: {error}", transient=unavailable, precondition=SERVER_ERROR if unavailable else None
+        ) from None
     missing = sorted(name for name in servers if not status.mcp_tokens_present.get(name))
     if missing:
         raise Refusal(f"MCP tokens: the gateway's broker holds no token for {', '.join(missing)}")
@@ -1793,6 +1810,41 @@ def refused(result_line, refusal: Refusal):
     return result_line.Refused(str(refusal), refusal.transient)
 
 
+def ordinal(number: int) -> str:
+    suffix = "th" if 10 <= number % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
+def capped(result_line, args: argparse.Namespace, refusal: Refusal) -> Refusal:
+    """The refusal a card run sends. `--mcp-status` has no card to park, so it sends no precondition. A card
+    parked PARK_CAP times for the same cause in the last hour gets the refusal without it, so the worker blocks
+    it as transient and a person sees that the cause keeps coming back. Parks count from the card's `scheduled`
+    events, which the card JSON that `read_card` returns holds; a card that cannot be read counts as none."""
+    cause = PARK_CAUSES.get(refusal.precondition)
+    if cause is None:
+        return refusal
+    plain = Refusal(str(refusal), transient=refusal.transient)
+    prefix = None if args.mcp_status else getattr(result_line, "PRECONDITION_PARKS", {}).get(refusal.precondition)
+    if prefix is None:
+        return plain
+    try:
+        events = read_card(args.card_json, args.task_id).get("events") or []
+    except (Refusal, OSError, ValueError):
+        return refusal
+    since = time.time() - PARK_WINDOW_SECONDS
+    parks = sum(
+        1 for event in events
+        if event.get("kind") == "scheduled" and event["created_at"] >= since
+        and str((event.get("payload") or {}).get("reason") or "").startswith(prefix)
+    )
+    if parks < PARK_CAP:
+        return refusal
+    return Refusal(
+        f"{refusal} (waited for {cause} for the {ordinal(parks + 1)} time in an hour, so it no longer waits on its own)",
+        transient=refusal.transient,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id", help="the Kanban card id; Hermes does not pass it in the environment")
@@ -1837,7 +1889,7 @@ def main() -> int:
         message = str(cause) if isinstance(cause, (Refusal, factory_settings.SettingsError)) else f"{type(cause).__name__}: {cause}"
         status, report = 1, result_line.Crashed(message, failed.session_id)
     except Refusal as refusal:
-        status, report = 2, refused(result_line, refusal)
+        status, report = 2, refused(result_line, capped(result_line, args, refusal))
     except factory_settings.SettingsError as error:
         status, report = 2, result_line.Refused(str(error))
     except Exception as error:

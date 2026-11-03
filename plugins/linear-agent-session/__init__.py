@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, idempotency, kanban_guard, linear, missing_secret, replies, tools, triage_exit, triage_intent, triage_round
+from . import blocks, idempotency, kanban_guard, linear, missing_secret, opened_sessions, replies, tools, triage_exit, triage_intent, triage_round
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def register(ctx: Any) -> None:
         name="linear_agent_session_create",
         toolset=TOOLSET,
         schema=tools.SESSION_CREATE_SCHEMA,
-        handler=lambda args, **_: tools.run_session_create(get_client, args),
+        handler=lambda args, **_: tools.run_session_create(get_client, args, opened_sessions.store_dir(os.environ)),
         description=tools.SESSION_CREATE_SCHEMA["description"],
     )
     ctx.register_tool(
@@ -186,6 +186,7 @@ def register(ctx: Any) -> None:
                 operator_user_ids=lambda: triage_exit.operator_user_ids(ctx.get_config("operator_user_ids", default=[])),
                 client=get_client,
                 cards=triage_exit.kanban_cards,
+                opened_by_factory=lambda sid: opened_sessions.recorded(opened_sessions.store_dir(os.environ), sid),
             ),
         ),
     )

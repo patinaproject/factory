@@ -17,6 +17,7 @@ ACTIVITY_TYPES = {
     "review_handoff": "response",
     "re_review": "response",
     "merge_queue": "response",
+    "queue_entry": "response",
     "merged": "response",
 }
 

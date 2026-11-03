@@ -121,7 +121,9 @@ def main(argv: Optional[list] = None) -> int:
         output = plugin.tools.run_session_read(plugin.linear.client_from_env, {"session": args.session})
     elif args.command == "session-create":
         output = plugin.tools.run_session_create(
-            plugin.linear.client_from_env, {"issue": args.issue, "purpose": args.purpose}
+            plugin.linear.client_from_env,
+            {"issue": args.issue, "purpose": args.purpose},
+            plugin.opened_sessions.store_dir(os.environ),
         )
     elif args.command == "delegated":
         output = plugin.tools.run_delegated_issues(
@@ -188,6 +190,7 @@ def _triage_intent(plugin, payload_file: str, now: Optional[str]) -> int:
             cards=triage_exit.listed_cards,
             history=triage_exit.listed_history,
             now=moment,
+            opened_by_factory=lambda sid: plugin.opened_sessions.recorded(plugin.opened_sessions.store_dir(os.environ), sid),
         )
     except Exception as failure:
         intent = triage_intent.error_intent(type(failure).__name__)
