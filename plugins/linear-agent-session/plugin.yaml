@@ -85,6 +85,14 @@ config_schema:
       The weekly dependency-update issue. repository is the <owner>/<name> to update, team_key the Linear
       team that gets the issue, theme_label its one label, and type_label the type its description names.
       file-dependency-update refuses to run without all four.
+  sentry_sync:
+    type: dict
+    default: {}
+    description: >-
+      The Sentry-to-Linear sync. organization is the Sentry organization, team_key the Linear team, repository the
+      <owner>/<name> whose checkout_path checkout holds the rules file at rules_path, sentry_label and theme_label
+      the labels each issue gets, and mcp_server the claude_session.mcp_servers entry whose token reads Sentry.
+      Empty means no sync: check-install then expects no sentry-linear-sync cron job.
   scheduled_commands:
     type: list
     default: []

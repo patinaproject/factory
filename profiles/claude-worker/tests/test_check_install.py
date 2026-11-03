@@ -127,6 +127,12 @@ SETTINGS = {
     "operator_user_ids": ["user-operator-1"], "app_user_id": "u1", "repositories": [], "triage": {"max_running": 2}, "claude_artifact": ARTIFACT_SETTINGS,
     "dependency_updates": DEPENDENCY_UPDATES,
 }
+SENTRY_SYNC = {
+    "organization": "example-org", "team_key": "ABC", "repository": "example-org/example-repo",
+    "checkout_path": "/srv/example-repo", "rules_path": "config/error-groups.json", "sentry_label": "Sentry",
+    "theme_label": "Stability", "mcp_server": "sentry",
+}
+SENTRY_SERVERS = {"sentry": {"url": "https://mcp.example/sentry", "token_env": "SENTRY_ACCESS_TOKEN"}}
 DEPENDENCY_UPDATES_KEY = "plugins.entries.linear-agent-session.settings.dependency_updates"
 MAX_RUNNING_KEY = "plugins.entries.linear-agent-session.settings.triage.max_running"
 BOARDS = [{"slug": "default", "default_workdir": None}, {"slug": "triage", "default_workdir": None}]
@@ -236,7 +242,8 @@ REMEDY_CLASSES = (
      r"|platforms\.slack\.extra\.native_task_cards|cron\.catch_up_missed|\S+\.github\.private_key_path) in ", "install"),
     ("config", "", "manual"),
     ("cron job", r"^cron job (retry-failed-webhooks|report-deploy|scheduled-\S+) in .*: (is missing|delivers to \S+, not )", "manual"),
-    ("cron job", r": (is missing|is disabled|runs .*, not |is not a script-only job|delivers to \S+, not |belongs to)", "install"),
+    ("cron job", r": (is missing|is disabled|runs .*, not |is not a script-only job|delivers to \S+, not |belongs to"
+     r"|runs without a \S+ section)", "install"),
     ("cron job", ": last run", "advisory"),
     ("cron job", ": is replaced by a launchd job", "manual"),
     ("cron job", "", "manual"),
@@ -1468,6 +1475,43 @@ class CheckInstallTest(unittest.TestCase):
             (1, f"cron job refresh-checkouts in {self.root}: belongs to the worker profile (part 12)\n"
                 f"cron job nightly-cleanup in {self.worker}: is not a job the setup runbook creates\n"),
         )
+
+    def sentry_sync(self, section: dict | None, servers: dict | None = None) -> None:
+        settings = {**SETTINGS, "claude_session": {"mcp_servers": servers or {}}}
+        if section is not None:
+            settings["sentry_sync"] = section
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
+
+    def test_the_sentry_sync_job_follows_its_settings_section(self) -> None:
+        job = cron_job("sentry-linear-sync", 30)
+        for name, section, jobs, expected in (
+            ("section and job", SENTRY_SYNC, [*WORKER_JOBS, job], (0, "")),
+            ("section and no job", SENTRY_SYNC, WORKER_JOBS, (1, f"cron job sentry-linear-sync in {self.worker}: is missing (part 12)\n")),
+            ("no section and no job", None, WORKER_JOBS, (0, "")),
+            ("empty section and no job", {}, WORKER_JOBS, (0, "")),
+            ("no section and a job", None, [*WORKER_JOBS, job], (
+                1, f"cron job sentry-linear-sync in {self.worker}: runs without a sentry_sync section in the factory "
+                   "settings; remove it (part 12)\n")),
+        ):
+            with self.subTest(name):
+                self.sentry_sync(section, SENTRY_SERVERS)
+                self.cron(self.worker, jobs)
+                self.assertEqual(self.check(), expected)
+        records = {r["where"]: r for r in json.loads(self.raw)}
+        self.assertEqual(records[f"sentry-linear-sync in {self.worker}"]["remedy"]["argv"][-2:], ["remove", "sentry-linear-sync"])
+
+    def test_each_malformed_sentry_sync_field_and_an_unknown_mcp_server_is_one_drift(self) -> None:
+        self.sentry_sync({**SENTRY_SYNC, "team_key": "abc", "checkout_path": "relative", "mcp_server": "other"}, SENTRY_SERVERS)
+        self.cron(self.worker, [*WORKER_JOBS, cron_job("sentry-linear-sync", 30)])
+
+        self.assertEqual(self.check(), (1, (
+            f"config sentry_sync in {self.worker}: sentry_sync.team_key 'abc' must be a Linear team key such as ABC (part 10)\n"
+            f"config sentry_sync in {self.worker}: sentry_sync.checkout_path 'relative' must be an absolute path to the "
+            "worker-owned checkout (part 10)\n"
+            f"config sentry_sync in {self.worker}: sentry_sync.mcp_server 'other' is not a claude_session.mcp_servers entry (part 10)\n"
+        )))
 
     def test_failed_last_run_names_its_error_until_a_run_succeeds(self) -> None:
         error = (

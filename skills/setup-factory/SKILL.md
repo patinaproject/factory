@@ -934,6 +934,7 @@ key file but does not contain the key.
   "factory_repository": {"full_name": "<owner>/<factory>", "default_branch": "<branch>"},
   "triage": {"max_running": <n>},
   "dependency_updates": {"repository": "<owner>/<name>", "team_key": "<Linear team key>", "theme_label": "<label name>", "type_label": "<label name>"},
+  "sentry_sync": {},
   "scheduled_commands": [],
   "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0, "command_timeout_seconds": 600, "idle_limit_seconds": 2700}
 }
@@ -1030,6 +1031,38 @@ asks the agent to update. `team_key` is the Linear team that gets the issue.
 Security label. `type_label` is the type the issue's description tells triage
 to use, such as the Tools label. The job refuses to run, and `check-install`
 reports the section, when it is missing.
+
+`sentry_sync` configures the optional `sentry-linear-sync` job from part 12,
+default `{}`. Leave it empty for a factory that does not sync Sentry into
+Linear. To turn the sync on, set all eight keys, and record the real values in
+the private record:
+
+```json
+"sentry_sync": {
+  "organization": "<Sentry organization slug>",
+  "team_key": "<Linear team key>",
+  "repository": "<owner>/<name>",
+  "checkout_path": "/abs/path/to/worker-owned/checkout",
+  "rules_path": "<path of the grouping rules file in that repository>",
+  "sentry_label": "<label name>",
+  "theme_label": "<label name>",
+  "mcp_server": "<claude_session.mcp_servers name>"
+}
+```
+
+`organization` is the Sentry organization to read. `team_key` is the Linear
+team that gets the issues. `checkout_path` is a checkout of `repository` that
+the worker owns. The job runs `git fetch` there and reads the rules file at
+`rules_path` from the fetched default branch, never from the working tree.
+The owning repository maintains that rules file: the Sentry projects it maps
+to packages, the exclude and merge rules, and the thresholds. `sentry_label`
+and `theme_label` are the two labels every synced issue carries. `mcp_server`
+names the `claude_session.mcp_servers` entry whose token the broker hands the
+job. That token must be able to read the organization's issues, events,
+releases, and projects. `check-install` reports each malformed key, and a
+`mcp_server` that names no `claude_session.mcp_servers` entry, but it does not
+read the rules file. The job never enters the worker's own settings checks, so
+a mistake here stops only the sync.
 
 `scheduled_commands` lists repository commands that run on a cron schedule, default `[]`. Part 12 installs
 a runner and a job for each entry. An entry has five keys:
@@ -1353,8 +1386,8 @@ belongs to the worker profile.
 exists, show the list to the operator and remove the extras with their
 approval. `hermes cron list` for the default home shows none of the worker's
 jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`,
-`finish-merged`, `dispatch-triage`, and `file-dependency-update`.
-A copy there runs without the worker's scripts and settings, so remove it the
+`finish-merged`, `dispatch-triage`, `file-dependency-update`, and
+`sentry-linear-sync` when `sentry_sync` is set. A copy there runs without the worker's scripts and settings, so remove it the
 same way. The default home holds two jobs, `retry-failed-webhooks` and
 `report-deploy`, described below. A second setup session runs this check before it
 creates anything.
@@ -1431,6 +1464,33 @@ job:
 ```sh
 hermes -p claude-worker cron create "every 168h" --name file-dependency-update --no-agent --script file-dependency-update </dev/null
 ```
+
+**Sentry sync job.** `sentry-linear-sync` runs every 30 minutes, and only when
+the factory settings have a non-empty `sentry_sync` section (part 10). It
+reads every unresolved production error issue from Sentry with the broker's
+token for `sentry_sync.mcp_server`, groups the issues into error groups with
+the rules file, and keeps one Linear issue for each error group. It reads all
+of Linear and all of Sentry before it writes, so a failed read writes nothing.
+It creates each issue in the team's Triage status with both labels, a priority
+from the rules, no assignee, and no delegate, and attaches a Sentry search
+link that identifies the error group. Later runs add new Sentry issues as
+comments, update the priority only while the issue is in Triage and no person
+has changed it, cancel an unstarted issue whose error group was quiet for the
+rules' `staleDays`, and verify or reopen as a related issue after a fix. On
+its first runs it takes over the open issues that Sentry's Linear integration
+created and marks the extra ones Duplicate, except an issue that is started or
+assigned. It changes no other issue and never writes to Sentry. Run it with
+`--dry-run` to print the plan without writing. It exits 1 when Sentry, Linear,
+git, or the broker fails, and 2 when the settings or the rules are invalid.
+Create the job when `sentry_sync` is set and `cron list` has no
+`sentry-linear-sync` job:
+
+```sh
+hermes -p claude-worker cron create "every 30m" --name sentry-linear-sync --no-agent --script sentry-linear-sync </dev/null
+```
+
+When `sentry_sync` is empty, remove any `sentry-linear-sync` job.
+`check-install` reports such a job as drift.
 
 **Conflict job.** GitHub sends no webhook when a pull request starts to
 conflict because its base branch moved, or when a required check fails after
@@ -2619,6 +2679,12 @@ Hermes process starts. The new helper also writes
      job with the part 12 `cron create` command.
    - A `cron job file-dependency-update` line: after the profile update, create
      the job with the part 12 `cron create` command.
+   - A `cron job sentry-linear-sync` line that says the job is missing: after
+     the profile update, create the job with the part 12 `cron create`
+     command. A line that says the job runs without a `sentry_sync` section:
+     remove the job, or add the section as in part 10.
+   - A `config sentry_sync` line: correct that key of the `sentry_sync`
+     section in both homes as in part 10.
    - A `config plugins.entries.linear-agent-session.settings.dependency_updates`
      line: add the `dependency_updates` section to the factory settings and set
      them in both homes as in part 10, before the profile update.
