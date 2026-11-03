@@ -189,7 +189,6 @@ class Run:
         return answer is not None and answer.get("addressed") is True
 
     def comment_skipped(self, entry: dict[str, Any]) -> bool:
-        """Run linear-agent-session's comment-skip check. Anything but a clean `skip` answer replays the turn."""
         payload = entry.get("payload")
         if not isinstance(payload, dict) or payload.get("type") != "Comment":
             return False

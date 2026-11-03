@@ -196,7 +196,6 @@ def _triage_intent(plugin, payload_file: str, now: Optional[str]) -> int:
 
 
 def _comment_skip(plugin, payload_file: str) -> int:
-    """A replay recomputes the intent without the hook's id record: the first delivery recorded the comment, and the replay is that delivery's failed turn."""
     triage_exit, triage_intent = plugin.triage_exit, plugin.triage_intent
     with open(payload_file, encoding="utf-8") as handle:
         payload = json.load(handle)

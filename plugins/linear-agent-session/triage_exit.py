@@ -23,7 +23,6 @@ ARCHIVE_TIMEOUT_SECONDS = 120.0
 HERMES_TIMEOUT_SECONDS = 60.0
 TAKEOVER_SUFFIX = "-takeover"
 CLOSED_STATE_TYPES = ("completed", "canceled", "duplicate")
-# The comment `card_transition.py` writes when a person stops a card.
 STOPPED = "stopped"
 LINEAR_ISSUE_ID = re.compile(r"^linear_issue_id:\s*(\S+)\s*$", re.MULTILINE)
 
@@ -43,8 +42,6 @@ class Park(NamedTuple):
 
 
 class History(NamedTuple):
-    """What a `scheduled` card's wait rule reads: each park, oldest first, and when each `stopped` comment was written."""
-
     parks: list[Park]
     stops: list[int]
 

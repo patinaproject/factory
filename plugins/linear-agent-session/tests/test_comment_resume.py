@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -57,7 +58,6 @@ NOBODY_WAITS = "no card of the issue waits for a person"
 
 
 def comment_event(author=OPERATOR, body="Use the blue screen.", parent=None, action="create", comment_id=COMMENT_ID):
-    """Linear's documented Comment webhook shape. Mentions use the profile URLs that real Linear comment bodies hold."""
     return {
         "action": action,
         "type": "Comment",
@@ -421,6 +421,13 @@ class MachineParksTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {spec.name: result_line}):
             spec.loader.exec_module(result_line)
         self.assertEqual(plugin.triage_intent.comment_resume.MACHINE_PARKS, result_line.MACHINE_PARKS)
+
+
+class StoppedTest(unittest.TestCase):
+    def test_the_stop_comment_is_the_one_card_transition_writes(self):
+        path = Path(__file__).resolve().parents[3] / "profiles" / "claude-worker" / "scripts" / "card_transition.py"
+        written = re.search(r'^STOPPED = "([^"]+)"$', path.read_text(), re.MULTILINE).group(1)
+        self.assertEqual(plugin.triage_exit.STOPPED, written)
 
 
 class HistoryTest(unittest.TestCase):

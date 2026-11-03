@@ -304,12 +304,8 @@ def make_dispatch_hook(
         return compute_intent(payload) if intent.action == "error" else intent
 
     def first_delivery(comment_id: str) -> bool:
-        """Record the comment id before the turn, and refuse one already recorded.
-
-        A crash between recording and the end of this hook leaves the record reserved, and `idempotency.once` refuses
-        a reserved record forever. So the comment never resumes its card, and the person answers again, which is a new
-        comment id. That costs one repeated answer, where releasing the record could resume a card twice.
-        """
+        """A crash after the record is written leaves it reserved, and `idempotency.once` refuses a reserved record
+        forever, so that comment never resumes its card and the person answers again. Releasing it could resume twice."""
         ran = []
         try:
             idempotency.once(comment_store(), "comment_resume", comment_id, {}, lambda: ran.append(True) or {"recorded": True})

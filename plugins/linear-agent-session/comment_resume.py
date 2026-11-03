@@ -1,19 +1,12 @@
-"""When a top-level Linear issue comment resumes a card that waits for a person, as `triage_intent.comment_intent` applies it.
-
-A thread reply reaches a card through the agent session. A top-level comment is often discussion, so it resumes
-a card only when its author may direct the card, the card waits for a person, and the comment is not teammate talk.
-"""
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping, NamedTuple, Optional
+from typing import Any, Callable, Mapping, NamedTuple, Optional
 
 from .triage_exit import Card, History
 
 # Linear writes a mention in comment markdown as the person's profile URL, which carries the username and no user id.
 PROFILE_URL = re.compile(r"https://linear\.app/[^/\s]+/profiles/([^\s/)>\]\"']+)", re.IGNORECASE)
-# The park reason prefix of each machine condition, from `blocker-order`'s `result_line.MACHINE_PARKS`. A test fails
-# when the two differ. No person's answer releases such a park.
 MACHINE_PARKS = (
     "Waiting for the worker's gh login:",
     "Waiting for a factory deploy:",
@@ -32,7 +25,6 @@ class TopLevelComment(NamedTuple):
 
 
 def parse(payload: Mapping[str, Any]) -> TopLevelComment | str:
-    """The comment, or why this delivery cannot resume a card."""
     data = payload.get("data")
     if payload.get("action") != "create" or not isinstance(data, Mapping):
         return "the delivery is not a created comment"
@@ -47,7 +39,6 @@ def parse(payload: Mapping[str, Any]) -> TopLevelComment | str:
 
 
 def comment_url(comment: TopLevelComment, issue_url: Optional[str]) -> Optional[str]:
-    """Linear's own link for the comment, else the issue's link with the comment's anchor."""
     if comment.url and "#comment-" in comment.url:
         return comment.url
     base = comment.url or issue_url
@@ -64,8 +55,6 @@ def profile_slug(url: str) -> Optional[str]:
 
 
 def scheduled_waits_for_person(history: History) -> bool:
-    """The newest park is not a machine park, and no person stopped the card after it."""
-    # Hermes writes a `scheduled` event with every park; without one, any stop counts as after it.
     reason, parked_at = history.parks[-1] if history.parks else (None, 0)
     if isinstance(reason, str) and reason.startswith(MACHINE_PARKS):
         return False
@@ -77,8 +66,7 @@ class Waiting(NamedTuple):
     card: Card
 
 
-def waiting_card(triage: Optional[Card], work: Optional[Card], delegated: bool, history_of: Any) -> Optional[Waiting]:
-    """The card a person's answer would release. The triage card wins when both wait, as `_session_prompted` has it."""
+def waiting_card(triage: Optional[Card], work: Optional[Card], delegated: bool, history_of: Callable[[str], History]) -> Optional[Waiting]:
     if triage is not None and (
         triage.status in WAITING_STATUSES or (triage.status == "scheduled" and scheduled_waits_for_person(history_of(triage.id)))
     ):

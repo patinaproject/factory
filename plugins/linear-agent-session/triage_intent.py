@@ -345,11 +345,6 @@ def comment_intent(
     cards: Callable[[Optional[str]], list[Card]],
     history: Callable[[Optional[str], str], History],
 ) -> Intent:
-    """The one ordered decision for a Comment delivery: the `comment_resume` intent, or the first reason to skip.
-
-    The checks run from the cheapest read to the dearest, so a comment on a card that waits for no one costs no
-    approver lookup.
-    """
     comment = comment_resume.parse(payload)
     if isinstance(comment, str):
         return skip_intent(comment)
