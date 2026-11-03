@@ -132,6 +132,7 @@ import factory_source
 import gh_login
 import install_plan
 import kanban_board
+import sentry_sync
 import stale_failure
 import xcode
 from factory_settings import SETTINGS_KEY, find_hermes
@@ -234,10 +235,16 @@ class CronJob(NamedTuple):
     deliver: Want
     home: str = WORKER
     script: str = ""
+    section: str = ""  # a factory settings section the job needs; without it the job must not exist
 
     @property
     def runs(self) -> str:
         return self.script or self.name
+
+    def wanted(self, settings) -> bool:
+        if not self.section:
+            return True
+        return isinstance(settings, dict) and settings.get(self.section) not in (None, {})
 
 
 class Service(NamedTuple):
@@ -318,6 +325,7 @@ CRON = (
     CronJob(12, "finish-merged", 5, equal("local")),
     CronJob(12, "dispatch-triage", 1, equal("local")),
     CronJob(12, "file-dependency-update", 10080, equal("local")),
+    CronJob(12, "sentry-linear-sync", 30, equal("local"), section=sentry_sync.SETTINGS_SECTION),
     CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
     CronJob(12, "report-deploy", 5, declared("the operator's chat platform", besides=("local",)), home=ROOT),
 )
@@ -807,6 +815,17 @@ def check_root_wrappers(commit: Commit, homes: Homes, entries: tuple = ()) -> li
     return drifts
 
 
+def check_sentry_sync(homes: Homes, settings) -> list:
+    """One drift for each malformed field of a present sentry_sync section. The rules file is not read here."""
+    if not sentry_sync.configured(settings):
+        return []
+    return [
+        Drift("config", f"{sentry_sync.SETTINGS_SECTION} in {homes.worker}", f"{problem} (part 10)",
+              Manual(f"correct {sentry_sync.SETTINGS_SECTION} in both homes as part 10 describes"))
+        for problem in sentry_sync.settings_problems(settings)
+    ]
+
+
 def check_cron(commit: Commit, homes: Homes, settings=None) -> list:
     hermes = homes.hermes
     paths = {ROOT: homes.root, WORKER: homes.worker}
@@ -821,8 +840,10 @@ def check_cron(commit: Commit, homes: Homes, settings=None) -> list:
             "config", f"scheduled_commands in {homes.worker}", f"is invalid: {error} (part 12)",
             Manual("correct scheduled_commands as part 12 describes"),
         ))
-    expected = (*CRON, *scheduled_jobs(entries))
+    owners = {job.name: job for job in (*CRON, *scheduled_jobs(entries))}
+    expected = tuple(job for job in owners.values() if job.wanted(settings))
     drifts.extend(check_root_wrappers(commit, homes, entries))
+    drifts.extend(check_sentry_sync(homes, settings))
     secrets = known_secrets(paths.values())
     for job in expected:
         home = paths[job.home]
@@ -853,7 +874,6 @@ def check_cron(commit: Commit, homes: Homes, settings=None) -> list:
                 for d in unresolved_deliveries(home, live, hermes)
             )
             drifts.extend(drift(d, ADVISORY) for d in last_run_failure(job, live, secrets))
-    owners = {job.name: job for job in expected}
     for name, jobs in live_jobs.items():
         for live in jobs:
             where = f"{live['name']} in {paths[name]}"
@@ -873,6 +893,11 @@ def check_cron(commit: Commit, homes: Homes, settings=None) -> list:
                 drifts.append(Drift(
                     "cron job", where, "is not a job the setup runbook creates",
                     Manual("remove it with hermes cron remove <job id> once the operator agrees"),
+                ))
+            elif not owner.wanted(settings):
+                drifts.append(Drift(
+                    "cron job", where, f"runs without a {owner.section} section in the factory settings; remove it (part {owner.part})",
+                    install_plan.cron_command(homes, paths[name], "remove", live["id"]),
                 ))
             elif owner.home != name:
                 drifts.append(Drift(
