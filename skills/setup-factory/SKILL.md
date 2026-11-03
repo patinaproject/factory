@@ -1010,10 +1010,10 @@ a runner and a job for each entry. An entry has five keys:
 
 ```json
 {
-  "name": "weekly-report",
+  "name": "example-job",
   "repository": "example-org/example-repo",
   "schedule": "0 9 * * 1",
-  "commands": [["pnpm", "install", "--frozen-lockfile"], ["pnpm", "run", "report"]],
+  "commands": [["pnpm", "install", "--frozen-lockfile"], ["pnpm", "run", "example"]],
   "timeout_minutes": 30
 }
 ```
@@ -1021,7 +1021,7 @@ a runner and a job for each entry. An entry has five keys:
 `name` is lowercase words joined by hyphens and is unique. `schedule` is a
 five-field cron expression. Hermes reads it in the root profile's `timezone`
 setting, or in the machine's local time when that is unset. `commands` are argv lists, each run in
-order, with no shell. `timeout_minutes` is the budget for the whole run. The
+order, with no shell. `timeout_minutes` is the budget for all of the entry's commands together. The
 real entries belong in the private record. A factory with no entry sets nothing.
 
 `operator_user_ids` is an optional input the operator supplies, default `[]`: the

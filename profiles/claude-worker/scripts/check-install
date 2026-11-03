@@ -813,10 +813,10 @@ def check_cron(commit: Commit, homes: Homes, settings=None) -> list:
             "config", f"scheduled_commands in {homes.worker}", f"is invalid: {error} (part 12)",
             Manual("correct scheduled_commands as part 12 describes"),
         ))
-    jobs = (*CRON, *scheduled_jobs(entries))
+    expected = (*CRON, *scheduled_jobs(entries))
     drifts.extend(check_root_wrappers(commit, homes, entries))
     secrets = known_secrets(paths.values())
-    for job in jobs:
+    for job in expected:
         home = paths[job.home]
         where = f"{job.name} in {home}"
         operator_platform = Manual(f"set {job.name}'s delivery to the operator's chat platform as part {job.part} describes")
@@ -845,7 +845,7 @@ def check_cron(commit: Commit, homes: Homes, settings=None) -> list:
                 for d in unresolved_deliveries(home, live, hermes)
             )
             drifts.extend(drift(d, ADVISORY) for d in last_run_failure(job, live, secrets))
-    owners = {job.name: job for job in jobs}
+    owners = {job.name: job for job in expected}
     for name, jobs in live_jobs.items():
         for live in jobs:
             where = f"{live['name']} in {paths[name]}"

@@ -114,10 +114,7 @@ def read_entry(name: str, home: Path, root: Path) -> ScheduledCommand | None:
         if "Config key not set" in proc.stderr:
             return None
         raise SettingsError(f"hermes config get {SETTINGS_KEY} failed: {proc.stderr.strip()}")
-    raw = json.loads(proc.stdout)
-    if not isinstance(raw, list):
-        raise SettingsError(f"scheduled_commands {raw!r} must be a list")
-    return next((parse_entry(item) for item in raw if isinstance(item, dict) and item.get("name") == name), None)
+    return next((entry for entry in parse_entries(json.loads(proc.stdout)) if entry.name == name), None)
 
 
 def run_git(clone: Path, env: dict, *args: str) -> str:
@@ -259,7 +256,7 @@ def main(script: str | None = None) -> int:
             print(f"{name}: no scheduled_commands entry has this name")
             return 1
         block = run_entry(entry, home, root)
-    except (SettingsError, Missing, ValueError) as error:
+    except (SettingsError, Missing, OSError, ValueError) as error:
         print(f"{name}: {error}")
         return 1
     if block:

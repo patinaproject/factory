@@ -204,11 +204,11 @@ ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack"), cron_job("report-deploy", 5, "
 RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
 SCHEDULED_SOURCE = "skills/setup-factory/scripts/scheduled-command"
 SCHEDULED_ENTRY = {
-    "name": "weekly-report", "repository": "example-org/example-repo", "schedule": "0 9 * * 1",
-    "commands": [["pnpm", "install", "--frozen-lockfile"], ["pnpm", "report"]], "timeout_minutes": 30,
+    "name": "example-job", "repository": "example-org/example-repo", "schedule": "0 9 * * 1",
+    "commands": [["pnpm", "install", "--frozen-lockfile"], ["pnpm", "run", "example"]], "timeout_minutes": 30,
 }
 SCHEDULED_KEY = "plugins.entries.linear-agent-session.settings.scheduled_commands"
-SCHEDULED_JOB = "scheduled-weekly-report"
+SCHEDULED_JOB = "scheduled-example-job"
 
 
 def cron_expression_job(name: str, expression: str, deliver: str = "slack", **fields) -> dict:
@@ -1405,7 +1405,7 @@ class CheckInstallTest(unittest.TestCase):
         code, out = self.check()
 
         self.assertEqual(code, 1)
-        self.assertIn(f"config scheduled_commands in {self.worker}: is invalid: scheduled_commands weekly-report: schedule 'every day'", out)
+        self.assertIn(f"config scheduled_commands in {self.worker}: is invalid: scheduled_commands example-job: schedule 'every day'", out)
 
     def test_catching_up_missed_runs_turned_off(self) -> None:
         self.config(self.root, {**ROOT_CONFIG, "cron.catch_up_missed": False})

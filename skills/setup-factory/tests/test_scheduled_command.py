@@ -32,7 +32,7 @@ print(open(path).read())
 """
 
 
-def entry(commands: list, name: str = "weekly-report", **fields) -> dict:
+def entry(commands: list, name: str = "example-job", **fields) -> dict:
     return {
         "name": name, "repository": REPOSITORY, "schedule": "0 9 * * 1", "commands": commands,
         "timeout_minutes": 5, **fields,
@@ -97,7 +97,7 @@ class ScheduledCommandTest(unittest.TestCase):
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "scheduled-commands.json").write_text(json.dumps(entries))
 
-    def run_script(self, name: str = "weekly-report") -> subprocess.CompletedProcess:
+    def run_script(self, name: str = "example-job") -> subprocess.CompletedProcess:
         installed = self.root / "scripts" / f"scheduled-{name}"
         installed.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(SCRIPT, installed)
@@ -164,7 +164,7 @@ class ScheduledCommandTest(unittest.TestCase):
 
         lines = result.stdout.splitlines()
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(lines[0], "weekly-report: sh -c 'seq 1 50; exit 3' exited 3")
+        self.assertEqual(lines[0], "example-job: sh -c 'seq 1 50; exit 3' exited 3")
         self.assertEqual(lines[1:], [str(n) for n in range(11, 51)])
         self.assertFalse(self.log.exists())
 
@@ -174,7 +174,7 @@ class ScheduledCommandTest(unittest.TestCase):
         result = self.run_script()
 
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stdout.splitlines()[0], "weekly-report: no-such-command-here --flag exited 127")
+        self.assertEqual(result.stdout.splitlines()[0], "example-job: no-such-command-here --flag exited 127")
 
     def test_a_timeout_ends_the_whole_process_tree(self) -> None:
         pidfile = self.tmp / "grandchild.pid"
@@ -184,10 +184,10 @@ class ScheduledCommandTest(unittest.TestCase):
 
         with mock.patch.dict(os.environ, self.env), mock.patch.object(scheduled_command, "SECONDS_PER_MINUTE", 1):
             with contextlib.redirect_stdout(out):
-                code = scheduled_command.main(str(self.root / "scripts" / "scheduled-weekly-report"))
+                code = scheduled_command.main(str(self.root / "scripts" / "scheduled-example-job"))
 
         self.assertEqual(code, 1)
-        self.assertEqual(out.getvalue().splitlines()[0], f"weekly-report: sh -c {scheduled_command.shlex.quote(script)} {pidfile} timeout after 1 minutes")
+        self.assertEqual(out.getvalue().splitlines()[0], f"example-job: sh -c {scheduled_command.shlex.quote(script)} {pidfile} timeout after 1 minutes")
         grandchild = int(pidfile.read_text())
         for _ in range(50):
             try:
@@ -206,7 +206,7 @@ class ScheduledCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(
             result.stdout,
-            f"weekly-report: no INFISICAL_UNIVERSAL_AUTH_CLIENT_ID in {self.home}/.config/infisical/config "
+            f"example-job: no INFISICAL_UNIVERSAL_AUTH_CLIENT_ID in {self.home}/.config/infisical/config "
             f"or {self.home}/.config/infisical/client-id\n",
         )
 
@@ -217,7 +217,7 @@ class ScheduledCommandTest(unittest.TestCase):
         result = self.run_script()
 
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stdout, f"weekly-report: no Node v24 under {self.home}/.nvm/versions/node\n")
+        self.assertEqual(result.stdout, f"example-job: no Node v24 under {self.home}/.nvm/versions/node\n")
 
     def test_missing_nvmrc_names_the_file(self) -> None:
         (self.work / ".nvmrc").unlink()
@@ -226,7 +226,7 @@ class ScheduledCommandTest(unittest.TestCase):
 
         result = self.run_script()
 
-        self.assertEqual(result.stdout, f"weekly-report: {self.root}/scheduled/example-org/example-repo/.nvmrc is missing, so the Node version is unknown\n")
+        self.assertEqual(result.stdout, f"example-job: {self.root}/scheduled/example-org/example-repo/.nvmrc is missing, so the Node version is unknown\n")
 
     def test_the_entry_name_comes_from_the_file_name(self) -> None:
         self.settings([entry([["true"]]), entry([["false"]], name="other-job")])
@@ -245,15 +245,25 @@ class ScheduledCommandTest(unittest.TestCase):
 
         result = self.run_script()
 
-        self.assertEqual((result.returncode, result.stdout), (1, "weekly-report: no scheduled_commands entry has this name\n"))
+        self.assertEqual((result.returncode, result.stdout), (1, "example-job: no scheduled_commands entry has this name\n"))
+
+    def test_a_repeated_name_in_the_settings_stops_the_run(self) -> None:
+        self.settings([entry([["touch", str(self.log)]]), entry([["true"]])])
+
+        result = self.run_script()
+
+        self.assertEqual(
+            (result.returncode, result.stdout, self.log.exists()),
+            (1, "example-job: scheduled_commands name example-job is used more than once\n", False),
+        )
 
 
 class ParseTest(unittest.TestCase):
     def test_a_valid_entry_parses_to_a_frozen_value(self) -> None:
-        parsed = scheduled_command.parse_entry(entry([["pnpm", "install", "--frozen-lockfile"], ["pnpm", "report"]]))
+        parsed = scheduled_command.parse_entry(entry([["pnpm", "install", "--frozen-lockfile"], ["pnpm", "run", "example"]]))
 
         self.assertEqual(parsed, scheduled_command.ScheduledCommand(
-            "weekly-report", REPOSITORY, "0 9 * * 1", (("pnpm", "install", "--frozen-lockfile"), ("pnpm", "report")), 5,
+            "example-job", REPOSITORY, "0 9 * * 1", (("pnpm", "install", "--frozen-lockfile"), ("pnpm", "run", "example")), 5,
         ))
 
     def test_invalid_fields_are_refused_by_name(self) -> None:
@@ -271,7 +281,7 @@ class ParseTest(unittest.TestCase):
                 scheduled_command.parse_entry(raw)
 
     def test_names_must_be_unique(self) -> None:
-        with self.assertRaisesRegex(scheduled_command.SettingsError, "weekly-report is used more than once"):
+        with self.assertRaisesRegex(scheduled_command.SettingsError, "example-job is used more than once"):
             scheduled_command.parse_entries([entry([["x"]]), entry([["y"]])])
 
     def test_an_unset_key_is_no_entries(self) -> None:
