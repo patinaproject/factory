@@ -300,8 +300,9 @@ stop.
    without text, post a `thought` on `agent_session_id` asking the human to
    send the reply again, and stop. Do not unblock the card, because the worker
    would block again on the same question.
-2. Comment on the card once with the reply, attributed to Linear, and never
-   correct it afterward. Start the comment with `Linear reply:`, because the
+2. When the card is `scheduled`, skip this step: step 4's command writes the
+   comment. Otherwise comment on the card once with the reply, attributed to
+   Linear, and never correct it afterward. Start the comment with `Linear reply:`, because the
    card's running Claude session recognizes a person's reply by that prefix.
    Replace each
    `https://github.com/<owner>/<name>/pull/<number>` URL in it with
@@ -312,7 +313,18 @@ stop.
    is `review`, run
    `<<card_transition>> reopen <task id> --comment 'Resumed for a Linear reply; see the card comments'`
    so its worker reads the reply. If the card is `triage`, resume it as
-   "Rules" says.
+   "Rules" says. If the card is `scheduled`, pipe `reply`, exactly as it
+   arrived, into `<<card_transition>> implementation-reply <task id>` with a
+   quoted heredoc, so the shell expands nothing in it:
+
+   ```sh
+   <<card_transition>> implementation-reply <task id> <<'LINEAR_REPLY'
+   <reply>
+   LINEAR_REPLY
+   ```
+
+   It writes the reply on the card itself, once, and releases the card unless
+   it waits for a machine. Never put the reply on the command line.
 5. Post one `thought` on `agent_session_id`, so the human sees that the reply
    arrived. Name the card's task id, then add what happens next:
    - You unblocked the card, reopened its review, or resumed it from `triage`:
@@ -323,6 +335,14 @@ stop.
      from the Kanban dashboard.
    - The card is `running`: the running Claude session reads the reply at its
      next step and answers in this session.
+   - The card is `scheduled` and the command printed `unblocked`: the worker
+     resumes with the reply as its newest instruction.
+   - The card is `scheduled` and the command printed `none` with `waits_for`:
+     name that wait reason and say the card continues by itself when the wait
+     ends. A card that waits for an issue also continues when the issue sweep
+     sees the reply.
+   - The card is `scheduled` and the command printed `error`: post the error
+     as the `thought`.
    - Any other status: the reply is on the card for its worker.
 
    In every case, never quote or summarize an earlier run's result, heartbeat,
