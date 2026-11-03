@@ -64,6 +64,16 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(problems.for_repository("o/bad"), (global_error, *problems.repository_errors["o/bad"]))
         self.assertEqual(problems.for_repository("o/unknown"), (global_error,))
 
+    def test_auto_merge_defaults_to_false_and_accepts_only_a_boolean(self) -> None:
+        self.assertEqual(factory_settings.auto_merge({}), False)
+        self.assertEqual(factory_settings.auto_merge({"auto_merge": True}), True)
+        for value in ("true", 1, None):
+            with self.subTest(value=value):
+                problems = factory_settings.validate(settings(auto_merge=value))
+                self.assertEqual(
+                    problems.repository_errors, {"o/r": (f"auto_merge {value!r} must be true or false",)}
+                )
+
     def test_a_claude_session_that_is_not_an_object_counts_as_empty(self) -> None:
         self.assertEqual(factory_settings.validate({"claude_session": "x", "repositories": None}).global_errors, ())
 

@@ -13,7 +13,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import MISSING, asdict, dataclass, field, fields
-from typing import Any, Optional, Union
+from pathlib import Path
+from typing import Any, NamedTuple, Optional, Union
 
 NEEDS_INPUT = "Needs input:"
 COMMENTS_SEEN = "comments_seen:"
@@ -42,6 +43,18 @@ ISSUE_PARK = "Waiting for an issue:"
 # the card already parked on that issue.
 ISSUE_NOTED = "Parked on issue"
 _ISSUE_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/issues/[0-9]+")
+# A run stopped by SIGTERM, SIGINT, or SIGHUP during a Hermes pause parks the card until the pause ends.
+STOPPED_PARK = "Waiting for hermes resume:"
+# A finished implementation run that waits for another pull request to merge ends with this first line, then the
+# pull request's URL. Every reason, comment, and thought names the pull request as `owner/name#number`, never by
+# URL, because Hermes holds a `ready` card for a day after a card comment that holds a pull request URL.
+WAITING_FOR_PULL_REQUEST = "Waiting for pull request:"
+PULL_REQUEST_PARK = "Waiting for a pull request:"
+# A card comment that starts with this and the short form records the sweep's first pass, and tells a resumed run
+# that the card already parked on that pull request.
+PULL_REQUEST_NOTED = "Parked on pull request"
+_PULL_REQUEST_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/([0-9]+)")
+_PULL_REQUEST_REF = re.compile(r"([\w.-]+/[\w.-]+)#([0-9]+)")
 # The park reason prefix of each machine condition a refusal can wait for. No reply releases such a park.
 # claude-session sends a precondition only when its key is here, so an older copy blocks no card on a new key.
 PRECONDITION_PARKS = {
@@ -51,7 +64,7 @@ PRECONDITION_PARKS = {
     WORKTREE_HELD: WORKTREE_HELD_PARK,
     SERVER_ERROR: SERVER_ERROR_PARK,
 }
-MACHINE_PARKS = (*PRECONDITION_PARKS.values(), ISSUE_PARK)
+MACHINE_PARKS = (*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK, PULL_REQUEST_PARK)
 _COMMENTS_SEEN_LINE = re.compile(r"\s*^" + COMMENTS_SEEN + r"[ \t]*(\d+)[ \t]*\Z", re.MULTILINE)
 
 
@@ -146,8 +159,19 @@ class Crashed:
     session_id: str
 
 
-Report = Union[Waiting, Done, Failed, Refused, Crashed]
-VARIANTS = (Waiting, Done, Failed, Refused, Crashed)
+@dataclass(frozen=True)
+class Stopped:
+    """A person or process stopped `claude-session` with `signal` (such as `SIGTERM`) after `elapsed` whole
+    seconds. `paused` is true when a Hermes pause was in place. `session_id` is set once Claude had started."""
+
+    signal: str
+    elapsed: int
+    paused: bool
+    session_id: Optional[str] = None
+
+
+Report = Union[Waiting, Done, Failed, Refused, Crashed, Stopped]
+VARIANTS = (Waiting, Done, Failed, Refused, Crashed, Stopped)
 
 
 def precondition_refusal(report: Optional[Report]) -> Optional[Refused]:
@@ -155,6 +179,23 @@ def precondition_refusal(report: Optional[Report]) -> Optional[Refused]:
     if isinstance(report, Refused) and report.precondition in PRECONDITION_PARKS:
         return report
     return None
+
+
+def stopped(report: Optional[Report]) -> Optional[Stopped]:
+    """The report when `claude-session` was stopped by a signal."""
+    return report if isinstance(report, Stopped) else None
+
+
+def paused(home: Path) -> bool:
+    """Hermes' `agent.estop.is_engaged` for a profile home: an `ESTOP` sentinel in the home or the fleet root,
+    and a stat error counts as engaged. `webhook-retry`'s `queue_store.paused` is the same check, but that plugin
+    is installed only in the root home, and the worker home's scripts read this one."""
+    home = Path(home)
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    try:
+        return any(sentinel.exists() for sentinel in {home / "ESTOP", root / "ESTOP"})
+    except OSError:
+        return True
 
 
 def waiting_on(report: Optional[Report]) -> Optional[list[str]]:
@@ -181,6 +222,37 @@ def issue_url(result: str) -> Optional[str]:
     first = result[len(WAITING_FOR_ISSUE):].split("\n", 1)[0].strip()
     first = first[1:-1] if first.startswith("<") and first.endswith(">") else first
     return first if _ISSUE_URL.fullmatch(first) else None
+
+
+class PullRequest(NamedTuple):
+    repo: str
+    number: int
+
+    def __str__(self) -> str:
+        return f"{self.repo}#{self.number}"
+
+
+def waiting_for_pull_request(report: Optional[Report]) -> Optional[str]:
+    """The run's `result` when a finished run starts it with `Waiting for pull request:`."""
+    text = report.outcome.result if isinstance(report, Done) else None
+    return text if isinstance(text, str) and text.startswith(WAITING_FOR_PULL_REQUEST) else None
+
+
+def pull_request(result: str) -> Optional[PullRequest]:
+    """The pull request whose URL alone follows `Waiting for pull request:` on its line, or None when the line
+    holds anything else, such as an issue URL or a pull request URL with a suffix. A URL in angle brackets counts."""
+    first = result[len(WAITING_FOR_PULL_REQUEST):].split("\n", 1)[0].strip()
+    first = first[1:-1] if first.startswith("<") and first.endswith(">") else first
+    match = _PULL_REQUEST_URL.fullmatch(first)
+    return PullRequest(match.group(1), int(match.group(2))) if match else None
+
+
+def park_pull_request(reason: str) -> Optional[PullRequest]:
+    """The pull request that a `PULL_REQUEST_PARK` reason names in the short form, or None."""
+    if not reason.startswith(PULL_REQUEST_PARK):
+        return None
+    match = _PULL_REQUEST_REF.fullmatch(reason[len(PULL_REQUEST_PARK):].strip())
+    return PullRequest(match.group(1), int(match.group(2))) if match else None
 
 
 def mark_comments_seen(result: str, count: int) -> str:

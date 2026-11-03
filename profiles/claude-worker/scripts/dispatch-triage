@@ -14,7 +14,8 @@ It then releases, on every board, each card parked for the worker's gh login onc
 `card_transition.sweep_login`), with the same line. On `triage` that card is unassigned
 and the next step assigns it; on any other board it lands `ready` and assigned.
 It releases each card parked for a factory deploy the same way once the install
-matches the commit auto-deploy recorded as deployed (`card_transition.sweep_deploy`).
+matches the commit auto-deploy recorded as deployed (`card_transition.sweep_deploy`), and each card parked for a
+Hermes pause once the pause ends (`card_transition.sweep_resume`).
 It releases each card parked for its worktree once no claude-session holds the card's lock
 (`card_transition.sweep_worktree`), and each card parked after a server error five minutes after its park
 (`card_transition.sweep_server_error`), and posts one thought on the card's agent session for each.
@@ -23,6 +24,8 @@ it releases the card with the same line, or queues the issue's triage card and p
 `queued <triage task id> for <task id>`, so the next step can assign that triage card.
 For each card parked for a GitHub issue it applies `card_transition.sweep_issue`: it releases the card with the
 same line once the issue closes or a person replies, and otherwise leaves it parked.
+For each card parked for a GitHub pull request it applies `card_transition.sweep_pull_request`: it releases
+the card with the same line once the pull request merges or closes or a person replies.
 Then it counts the board's cards that are `running`, or `ready` with an
 assignee, and assigns `claude-worker` to waiting `ready` cards, highest priority
 and then oldest first, until that count reaches `triage.max_running` in the
@@ -115,10 +118,12 @@ def main() -> int:
         released = release_waiting()
         released = release_parked(card_transition.sweep_login, "the gh login") and released
         released = release_parked(card_transition.sweep_deploy, "a factory deploy") and released
+        released = release_parked(card_transition.sweep_resume, "a Hermes resume") and released
         released = release_parked(card_transition.sweep_worktree, "a free worktree") and released
         released = release_parked(card_transition.sweep_server_error, "a server-error wait") and released
         released = release_parked(card_transition.sweep_brief, "an Agent brief") and released
         released = release_parked(card_transition.sweep_issue, "a GitHub issue") and released
+        released = release_parked(card_transition.sweep_pull_request, "a GitHub pull request") and released
         tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
         for task_id in to_assign(tasks, cap):
             hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)
