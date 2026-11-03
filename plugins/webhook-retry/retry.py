@@ -121,9 +121,8 @@ class Run:
             age = moment - store.parse_stamp(entry["delivered_at"])
             state = entry["state"]
             marker = store.skip_marker(self.directory, key)
-            if state == "pending" and marker.exists() and self.update(key, "skipped"):
+            if state == "pending" and entry.get("admitted") is False and marker.exists() and self.update(key, "skipped"):
                 marker.unlink()
-                self.say(f"skipped {entry['route']} {entry['delivery']}: the live hook found no action needed")
                 continue
             # An entry recorded before admission was tracked has no `admitted`, and its turn may have run.
             if state == "pending" and entry.get("admitted") is False and age >= store.UNSTARTED_AGE:

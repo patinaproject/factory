@@ -333,8 +333,6 @@ def make_dispatch_hook(
 
 def write_skip_record(home: Path, chat_id: str) -> None:
     """The path is a contract with `webhook-retry`'s `queue_store.skip_marker`, which reads it to drop the pending entry."""
-    if not isinstance(chat_id, str):
-        raise TypeError("the delivery has no chat_id to record")
     directory = home / "webhook-retry" / "skipped"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(directory / hashlib.sha256(chat_id.encode()).hexdigest(), os.O_CREAT | os.O_WRONLY, 0o600)

@@ -441,11 +441,16 @@ class RetryTest(unittest.TestCase):
 
                 self.assertEqual(self.chats(), [])
                 self.assertEqual(self.intent_checks(), [])
-                self.assertEqual(
-                    result.stdout,
-                    "skipped linear skipped: the live hook found no action needed\n",
-                )
+                self.assertEqual(result.stdout, "")
                 self.assertEqual((self.entries(), marker.exists()), ({}, False))
+
+    def test_a_skip_marker_leaves_an_admitted_entry_alone(self):
+        self.seed(entry("admitted", state="pending", delivered=ago(minutes=11), next_try_at=None, admitted=True))
+        marker = self.skip_marker("admitted")
+
+        self.run_retry()
+
+        self.assertEqual(([e["state"] for e in self.entries().values()], marker.exists()), (["pending"], True))
 
     def test_an_orphan_skip_marker_is_pruned_after_a_day(self):
         self.seed()
