@@ -975,6 +975,26 @@ class ClaudeSessionTest(GitFixture):
             "added": [], "action": "failed", "error": "linking the agent session failed: Entity not found",
         })
 
+    def test_the_after_run_sync_links_the_session_the_card_holds_after_the_run(self) -> None:
+        self.set_comments(body=SESSION_BODY)
+        self.factory_pull()
+        newer = SESSION_BODY.replace("live-session", "newer-session")
+        self.configure_fake_claude(steps=[{"body": newer, "card": str(self.card)}])
+        self.set_linear_state(sessions={
+            "live-session": {"createdAt": "2026-10-27T09:00:00.000Z", "urls": []},
+            "newer-session": {"createdAt": "2026-10-27T11:00:00.000Z", "urls": []},
+        })
+
+        status, report = self.run_session()
+
+        held = {k: v["urls"] for k, v in json.loads((self.hermes_home / "linear-fake.json").read_text())["sessions"].items()}
+        self.assertEqual(status, 0)
+        self.assertEqual(held, {"live-session": [], "newer-session": [GITHUB_PULL_9, REVIEW_PULL_9]})
+        self.assertEqual(report["session_links"], {
+            "added": [GITHUB_PULL_9, REVIEW_PULL_9], "action": "linked",
+            "removed": {"live-session": [GITHUB_PULL_9, REVIEW_PULL_9]},
+        })
+
     def test_triage_and_a_card_without_a_session_write_no_session_link(self) -> None:
         self.push_upstream_commit("pull", "refs/pull/7/head")
         cases = {
@@ -995,7 +1015,10 @@ class ClaudeSessionTest(GitFixture):
 
         self.run_session()
 
-        command = f"HERMES_HOME={self.hermes_home} {sys.executable} {(SCRIPTS / 'link-pr-hook').resolve()} --session-id live-session"
+        command = (
+            f"HERMES_HOME={self.hermes_home} {sys.executable} {(SCRIPTS / 'link-pr-hook').resolve()}"
+            " --session-id live-session --task-id t_1 --board /nonexistent/kanban.db"
+        )
         post_tool_use = self.claude_call()["settings"]["content"]["hooks"]["PostToolUse"]
         self.assertEqual(len(post_tool_use), 2)
         self.assertNotIn("matcher", post_tool_use[0])
@@ -1022,10 +1045,11 @@ class ClaudeSessionTest(GitFixture):
 
     def test_auto_merge_adds_its_flag_to_the_hook_only_when_the_repository_sets_it(self) -> None:
         hook = f"HERMES_HOME={self.hermes_home} {sys.executable} {(SCRIPTS / 'link-pr-hook').resolve()}"
+        linking = "--session-id live-session --task-id t_1 --board /nonexistent/kanban.db"
         for auto_merge, body, env, expected in (
-            (True, SESSION_BODY, None, [f"{hook} --session-id live-session --auto-merge-repo {REPO}"]),
+            (True, SESSION_BODY, None, [f"{hook} {linking} --auto-merge-repo {REPO}"]),
             (True, CARD_BODY, None, [f"{hook} --auto-merge-repo {REPO}"]),
-            (False, SESSION_BODY, None, [f"{hook} --session-id live-session"]),
+            (False, SESSION_BODY, None, [f"{hook} {linking}"]),
             (True, SESSION_BODY, TRIAGE_ENV, []),
         ):
             with self.subTest(auto_merge=auto_merge, session=body is SESSION_BODY, triage=bool(env)):

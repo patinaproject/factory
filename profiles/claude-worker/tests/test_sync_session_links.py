@@ -95,3 +95,69 @@ class SyncSessionLinksTest(GitFixture):
                 {"label": "Pull request #9", "url": REVIEW_PULL_9},
             ]}},
         ])
+
+    CARD_URL = "https://kanban.test/t_lacks"
+
+    def hold_sessions(self, older: list, current: list, **state) -> None:
+        sessions = {
+            "s-old": {"createdAt": "2026-10-27T09:00:00.000Z", "urls": older},
+            "s-lacks": {"createdAt": "2026-10-27T11:00:00.000Z", "urls": current},
+        }
+        (self.home / "linear-fake.json").write_text(json.dumps({"accepted": ["cached-token"], "sessions": sessions, **state}))
+
+    def held(self) -> dict:
+        return {k: v["urls"] for k, v in json.loads((self.home / "linear-fake.json").read_text())["sessions"].items()}
+
+    def test_check_prints_the_older_session_that_still_holds_the_current_sessions_pull_request(self) -> None:
+        self.hold_sessions([GITHUB_PULL_9, REVIEW_PULL_9, self.CARD_URL], [GITHUB_PULL_9, REVIEW_PULL_9])
+
+        proc = self.run_script("--check")
+
+        self.assertEqual(
+            (proc.returncode, proc.stdout, proc.stderr),
+            (1, f"t_lacks s-lacks misplaced {GITHUB_PULL_9} {REVIEW_PULL_9} in s-old\n", ""),
+        )
+        self.assertEqual(self.session_updates(), [])
+
+    def test_check_prints_both_lines_for_a_card_that_lacks_one_link_and_has_another_misplaced(self) -> None:
+        self.hold_sessions([REVIEW_PULL_9], [REVIEW_PULL_9])
+
+        proc = self.run_script("--check")
+
+        self.assertEqual(
+            (proc.returncode, proc.stdout),
+            (1, f"t_lacks s-lacks lacks {GITHUB_PULL_9}\nt_lacks s-lacks misplaced {REVIEW_PULL_9} in s-old\n"),
+        )
+
+    def test_sync_removes_the_pull_request_from_the_older_session_and_a_second_run_prints_nothing(self) -> None:
+        self.hold_sessions([GITHUB_PULL_9, REVIEW_PULL_9, self.CARD_URL], [GITHUB_PULL_9, REVIEW_PULL_9])
+
+        first = self.run_script()
+        second = self.run_script()
+
+        self.assertEqual(
+            (first.returncode, first.stdout, first.stderr),
+            (0, f"t_lacks s-lacks unlinked {GITHUB_PULL_9} {REVIEW_PULL_9} from s-old\n", ""),
+        )
+        self.assertEqual(self.held(), {"s-old": [self.CARD_URL], "s-lacks": [GITHUB_PULL_9, REVIEW_PULL_9]})
+        self.assertEqual((second.returncode, second.stdout, second.stderr), (0, "", ""))
+        self.assertEqual(len(self.session_updates()), 1)
+
+    def test_sync_adds_what_the_current_session_lacks_then_removes_it_from_the_older_one(self) -> None:
+        self.hold_sessions([REVIEW_PULL_9], [REVIEW_PULL_9])
+
+        proc = self.run_script()
+
+        self.assertEqual(
+            (proc.returncode, proc.stdout),
+            (0, f"t_lacks s-lacks linked {GITHUB_PULL_9}\nt_lacks s-lacks unlinked {REVIEW_PULL_9} from s-old\n"),
+        )
+        self.assertEqual(self.held(), {"s-old": [], "s-lacks": [REVIEW_PULL_9, GITHUB_PULL_9]})
+
+    def test_a_failed_removal_is_reported_for_the_card_and_fails_the_run(self) -> None:
+        self.hold_sessions([GITHUB_PULL_9, REVIEW_PULL_9], [GITHUB_PULL_9, REVIEW_PULL_9], session_remove_error="boom")
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stdout), (1, ""))
+        self.assertIn("t_lacks: unlinking the older agent sessions failed:", proc.stderr)

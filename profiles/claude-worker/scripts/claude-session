@@ -1217,6 +1217,7 @@ def artifact_denials(settings: dict) -> list[str]:
 def claude_settings(
     transport: dict, api_key: str, path: Path, triage: bool = False, inbox: Path | None = None,
     session_id: str | None = None, denials: tuple = (), auto_merge_repo: str | None = None,
+    task_id: str = "", board: str = "",
 ) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
@@ -1249,8 +1250,10 @@ def claude_settings(
             command = f"{shlex.quote(sys.executable)} {shlex.quote(str(REPLY_HOOK))} {mode} --inbox {shlex.quote(str(inbox))}"
             settings["hooks"][event] = [{"hooks": [{"type": "command", "command": command}]}]
     # One hook acts on the pull request Claude opens: it links the Linear session and arms auto-merge, each when asked.
+    # It reads the card's session from the board, since a later session can take the card over mid-run.
     hook_arguments = [
-        *(["--session-id", shlex.quote(session_id)] if session_id else []),
+        *(["--session-id", shlex.quote(session_id), "--task-id", shlex.quote(task_id), "--board", shlex.quote(board)]
+          if session_id else []),
         *(["--auto-merge-repo", shlex.quote(auto_merge_repo)] if auto_merge_repo else []),
     ]
     if hook_arguments and not triage:
@@ -1300,6 +1303,14 @@ def handoff_text(plan: SessionPlan, branch: str, head: str, identifier: str, tri
     if triage:
         return TRIAGE_HANDOFF.format(identifier=identifier, transcript=plan.previous, result=result)
     return HANDOFF.format(branch=branch, head=head, transcript=plan.previous, result=result)
+
+
+def card_session_now(card_json: str | None, task_id: str, fallback: str | None) -> str | None:
+    """The card's session line as the board holds it now, else `fallback`."""
+    try:
+        return reply_inbox.session_id_of(read_card(card_json, task_id)["task"]["body"]) or fallback
+    except (Refusal, factory_settings.SettingsError, OSError, ValueError, KeyError):
+        return fallback
 
 
 def read_card(card_json: str | None, task_id: str) -> dict:
@@ -1684,6 +1695,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
             write_private(settings_path, claude_settings(
                 transport, api_key, settings_path, triage, inbox, card_session_id, artifact_denials(settings),
                 args.repo if factory_settings.auto_merge(repo) else None,
+                args.task_id, os.environ.get("HERMES_KANBAN_DB", ""),
             ))
             with reply_watch(inbox, client, args, comments, own):
                 try:
@@ -1714,7 +1726,10 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                     args.repo, branch, login, args.issue_identifier, args.issue_url, github_issue_url(card)
                 )
             if link_report is not None:
-                link_report = sync_pull_requests(client, card_session_id, args.repo, branch, args.takeover_pr, link_report)
+                link_report = sync_pull_requests(
+                    client, card_session_now(args.card_json, args.task_id, card_session_id),
+                    args.repo, branch, args.takeover_pr, link_report,
+                )
             documents = title_triage_documents(client, args.issue_id) if output is not None and triage else None
             first = first_context(find_transcript(session_id, worktree), offset) if output is not None else None
         except Exception as error:

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Link every pull request on a card's branch to the card's Linear agent session.
 
-With `--check` it changes nothing and prints `<task id> <session id> lacks <url> ...` for each session that
-lacks a pull request on its branch. Without it, it prints `<task id> <session id> <action> <url> ...` for each
-session that gained one. A failure for one card goes to stderr and the others still run. Exits 1 when any card
-failed, or in `--check` when any session lacks a link, or 2 when HERMES_HOME is not set or Hermes cannot be found.
+With `--check` it changes nothing. It prints `<task id> <session id> lacks <url> ...` for each session that
+lacks a pull request on its branch, and `<task id> <session id> misplaced <url> ... in <older session id> ...`
+for each session whose pull request an older session of the same issue still holds. Without it, it prints
+`<task id> <session id> <action> <url> ...` for each session that gained one, and
+`<task id> <session id> unlinked <url> ... from <older session id> ...` when it removed that session's pull
+requests from older sessions. It removes only pull request links, and never from the card's current session.
+A failure for one card goes to stderr and the others still run. Exits 1 when any card failed, or in `--check`
+when any line printed, or 2 when HERMES_HOME is not set or Hermes cannot be found.
 """
 from __future__ import annotations
 
@@ -45,21 +49,34 @@ def linear_module():
     return importlib.import_module("linear")
 
 
-def sync_card(linear, client, card: dict, check: bool) -> str | None:
+def urls_of(by_session: dict) -> str:
+    return " ".join(dict.fromkeys(url for urls in by_session.values() for url in urls))
+
+
+def sync_card(linear, client, card: dict, check: bool) -> list[str]:
     session_id = reply_inbox.session_id_of(card.get("body"))
     repo = card_repository(card)
     branch = card.get("branch_name")
     if not (session_id and repo and branch):
-        return None
+        return []
+    prefix = f"{card['id']} {session_id}"
     if check:
         held = client.external_urls(session_id)
         wanted = [url for link in session_links.branch_pull_links(repo, branch) for url in linear.pull_request_urls(link["url"])]
         lacking = [url for url in wanted if url not in held]
-        return f"{card['id']} {session_id} lacks {' '.join(lacking)}" if lacking else None
+        misplaced = client.misplaced_pull_requests(session_id)
+        return [
+            *([f"{prefix} lacks {' '.join(lacking)}"] if lacking else []),
+            *([f"{prefix} misplaced {urls_of(misplaced)} in {' '.join(misplaced)}"] if misplaced else []),
+        ]
     report = session_links.sync_session_pull_requests(linear, client, session_id, repo, branch)
     if report["action"] == "failed":
         raise Failed(report["error"])
-    return f"{card['id']} {session_id} {report['action']} {' '.join(report['added'])}" if report["added"] else None
+    removed = report.get("removed", {})
+    return [
+        *([f"{prefix} {report['action']} {' '.join(report['added'])}"] if report["added"] else []),
+        *([f"{prefix} unlinked {urls_of(removed)} from {' '.join(removed)}"] if removed else []),
+    ]
 
 
 def main() -> int:
@@ -93,14 +110,14 @@ def main() -> int:
             continue
         for card in cards:
             try:
-                line = sync_card(linear, client, card, args.check)
+                lines = sync_card(linear, client, card, args.check)
             except (Failed, card_branch.GhFailed, *linear.CLIENT_ERRORS, OSError, KeyError, ValueError, TypeError) as failure:
                 print(f"sync-session-links: {card['id']}: {failure}", file=sys.stderr)
                 unclean = True
                 continue
-            if line:
+            for line in lines:
                 print(line)
-                unclean = unclean or args.check
+            unclean = unclean or (args.check and bool(lines))
     return 1 if unclean else 0
 
 

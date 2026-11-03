@@ -340,6 +340,29 @@ def session_links(session: dict) -> list:
     return json.loads(session["externalUrls"])
 
 
+def _older_sessions(agent_session_id: str, session: dict) -> list:
+    """The issue's sessions of the same app user created before this one, open or not."""
+    return [
+        other
+        for other in session["issue"]["agentSessions"]["nodes"]
+        if other["id"] != agent_session_id
+        and other["appUser"] is not None
+        and other["appUser"]["id"] == session["appUser"]["id"]
+        and other["createdAt"] < session["createdAt"]
+    ]
+
+
+def _misplaced(held: set, older: list) -> dict:
+    """Per older session, the pull request URLs among `held` that it holds too. Other links stay."""
+    held = {form for url in held for form in pull_request_urls(url) or ()}
+    found = {}
+    for other in older:
+        urls = [u["url"] for u in session_links(other) if u["url"] in held]
+        if urls:
+            found[other["id"]] = urls
+    return found
+
+
 class LinearError(Exception):
     pass
 
@@ -457,14 +480,7 @@ class LinearClient:
         session = self._graphql(ISSUE_SESSIONS_QUERY, {"id": agent_session_id})["agentSession"]
         if session is None or session["issue"] is None:
             return []
-        older = [
-            other
-            for other in session["issue"]["agentSessions"]["nodes"]
-            if other["id"] != agent_session_id
-            and other["appUser"] is not None
-            and other["appUser"]["id"] == session["appUser"]["id"]
-            and other["createdAt"] < session["createdAt"]
-        ]
+        older = _older_sessions(agent_session_id, session)
         closed = []
         for other in older:
             if other["status"] in OPEN_SESSION_STATUSES:
@@ -483,12 +499,27 @@ class LinearClient:
                 for url in pull_request_urls(u["url"]) or ():
                     if url not in held:
                         missing.setdefault(url, {"label": u["label"], "url": url})
-        if not missing:
-            return
         try:
-            self._update_session(agent_session_id, {"addedExternalUrls": list(missing.values())})
+            if missing:
+                self._update_session(agent_session_id, {"addedExternalUrls": list(missing.values())})
+            for other_id, urls in _misplaced(held | set(missing), older).items():
+                self._update_session(other_id, {"removedExternalUrls": urls})
         except (*CLIENT_ERRORS, OSError) as error:
-            logger.warning("linear-agent-session: copying pull request links failed: %s", type(error).__name__)
+            logger.warning("linear-agent-session: moving pull request links failed: %s", type(error).__name__)
+
+    def misplaced_pull_requests(self, agent_session_id: str) -> dict:
+        """The pull request URLs that this session holds and that its older sessions of the same app still hold, by older session id."""
+        session = self._graphql(ISSUE_SESSIONS_QUERY, {"id": agent_session_id})["agentSession"]
+        if session is None or session["issue"] is None:
+            return {}
+        return _misplaced({u["url"] for u in session_links(session)}, _older_sessions(agent_session_id, session))
+
+    def remove_misplaced_pull_requests(self, agent_session_id: str) -> dict:
+        """Remove what `misplaced_pull_requests` reports from the older sessions and return it. Never touches this session."""
+        misplaced = self.misplaced_pull_requests(agent_session_id)
+        for other_id, urls in misplaced.items():
+            self._update_session(other_id, {"removedExternalUrls": urls})
+        return misplaced
 
     def external_urls(self, agent_session_id: str) -> set:
         session = self._graphql(SESSION_URLS_QUERY, {"id": agent_session_id})["agentSession"]
