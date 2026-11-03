@@ -60,8 +60,9 @@ MERGE_STATE_REMEDIES = {
     "BLOCKED": (
         "a branch rule is not satisfied: required checks, reviews, or verified commit signatures; "
         "wait for required checks, address reviews, and make sure every commit is signed. "
-        "kanban_request_review passes a pull request that waits only for a reviewer or for the merge queue, "
-        "but it refuses a BLOCKED pull request with no review decision to wait for and no open thread that a person started"
+        "kanban_request_review passes a pull request that waits only for a reviewer, for the merge queue, "
+        "or for a person to add an approved pull request to the merge queue (the base branch has an update rule and "
+        "the repository declares a merge queue), but it refuses a BLOCKED pull request with none of those to wait for"
     ),
     "DIRTY": "merge the base branch, resolve the conflicts, and publish the merge with push-signed",
     "UNSTABLE": "a check is pending or failing; wait for checks to finish and fix any failures",
@@ -83,6 +84,7 @@ class Blockers(NamedTuple):
     required_checks: frozenset[str]
     reviewer_threads: int
     stale_approval: bool = False
+    update_rule: bool = False
     in_merge_queue: Callable[[], bool] = lambda: False
 
 
@@ -98,8 +100,10 @@ def evaluate(
     kanban_request_review also passes an UNSTABLE pull request, and a BLOCKED one that waits for a reviewer: its review
     decision is REVIEW_REQUIRED or CHANGES_REQUESTED, or a person started a review thread that is still open.
     A BLOCKED pull request that is approved and in the merge queue passes too: GitHub reports BLOCKED until the queue merges it.
+    So does an approved one that is not queued yet when the base branch has an update rule and merge_queue declares the repository's
+    queue.
     It does so only when other_blockers finds no unmet branch rule. A check that no rule requires does not stop it.
-    merge_queue maps "<owner>/<repo>" to the queue's "labels" and "checks".
+    merge_queue maps "<owner>/<repo>" to the queue's "labels" and "checks"; an entry, even {}, declares the queue.
     """
     failures = []
     state = pr.get("state")
@@ -122,7 +126,9 @@ def evaluate(
         required = blockers.required_checks
         if not hidden and _awaiting_review(pr, blockers.reviewer_threads):
             merge_state = "CLEAN"
-        elif not hidden and merge_state == "BLOCKED" and _approved_and_queued(pr, blockers, merge_queue):
+        elif not hidden and merge_state == "BLOCKED" and (
+            _approved_and_queued(pr, blockers, merge_queue) or _awaiting_queue_entry(pr, blockers, merge_queue)
+        ):
             merge_state = "CLEAN"
     if merge_state != "CLEAN":
         remedy = MERGE_STATE_REMEDIES.get(merge_state, "wait until GitHub reports CLEAN")
@@ -153,11 +159,34 @@ def _approved_and_queued(pr: dict, blockers: Blockers, merge_queue: Optional[dic
     )
 
 
-def _queue_signal(pr: dict, merge_queue: Optional[dict]) -> bool:
-    """True when a configured label is on the pull request or the newest run of a configured check is still pending."""
+def _queue_config(pr: dict, merge_queue: Optional[dict]) -> Optional[dict]:
     match = PR_URL.match(str(pr.get("url")))
     entry = (merge_queue or {}).get(match.group(1)) if match else None
-    config = entry if isinstance(entry, dict) else {}
+    return entry if isinstance(entry, dict) else None
+
+
+def _queue_entry_candidate(pr: dict, merge_queue: Optional[dict]) -> bool:
+    return (
+        pr.get("reviewDecision") == "APPROVED"
+        and pr.get("mergeStateStatus") == "BLOCKED"
+        and bool(_latest_runs(pr.get("statusCheckRollup")))
+        and _queue_config(pr, merge_queue) is not None
+    )
+
+
+def _awaiting_queue_entry(pr: dict, blockers: Blockers, merge_queue: Optional[dict]) -> bool:
+    # The App cannot read an update rule's bypass actors, so the operator's declared queue stands for them.
+    return (
+        _queue_entry_candidate(pr, merge_queue)
+        and blockers.update_rule
+        and not blockers.problems
+        and not blockers.stale_approval
+    )
+
+
+def _queue_signal(pr: dict, merge_queue: Optional[dict]) -> bool:
+    """True when a configured label is on the pull request or the newest run of a configured check is still pending."""
+    config = _queue_config(pr, merge_queue) or {}
     labels = {str(label).lower() for label in config.get("labels") or []}
     checks = set(config.get("checks") or [])
     if any(isinstance(label, dict) and str(label.get("name")).lower() in labels for label in pr.get("labels") or []):
@@ -273,7 +302,7 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
                 problems.append("more than 100 commits, so the gate cannot confirm each is signed")
             elif state["unsigned_commits"]:
                 problems.append(f"{state['unsigned_commits']} commit(s) lack a verified signature: publish with push-signed")
-    return Blockers(problems, frozenset(required_checks), reviewer_threads, stale_approval)
+    return Blockers(problems, frozenset(required_checks), reviewer_threads, stale_approval, "update" in types)
 
 
 def _pull_request_wants(rules: list, parameter: str) -> bool:
@@ -507,16 +536,15 @@ def _blockers(pr: dict, workspace: str, deadline: float) -> Optional[Callable[[]
     base = pr.get("baseRefName")
     if not match or not isinstance(base, str) or not base:
         return None
-    repo = match.group(1)
+    return lambda: _read_blockers(pr, match.group(1), base, workspace, deadline, lambda: _pr_state(pr, match.group(1), workspace, deadline))
 
-    def blockers() -> Blockers:
-        rules = _gh_json(["api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100"], workspace, deadline)
-        if not isinstance(rules, list):
-            raise GateError(f"the branch rules of {repo}:{base} could not be read")
-        unmet = _unmet_rules(pr, rules, lambda: _pr_state(pr, repo, workspace, deadline))
-        return unmet._replace(in_merge_queue=lambda: _in_merge_queue(pr, repo, workspace, deadline))
 
-    return blockers
+def _read_blockers(pr: dict, repo: str, base: str, workspace: str, deadline: float, pr_state: Callable[[], dict]) -> Blockers:
+    rules = _gh_json(["api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100"], workspace, deadline)
+    if not isinstance(rules, list):
+        raise GateError(f"the branch rules of {repo}:{base} could not be read")
+    unmet = _unmet_rules(pr, rules, pr_state)
+    return unmet._replace(in_merge_queue=lambda: _in_merge_queue(pr, repo, workspace, deadline))
 
 
 def _gated(ctx: Any) -> bool:
@@ -566,6 +594,7 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
     It also asks the Linear issue's owner to review. It names each failed or pending check that no branch rule requires,
     and counts the open review threads that a person started, which the gate let through.
     It sets waiting_for_merge_queue when the pull request is approved and queued, with no such thread, so only the queue is left.
+    It sets waiting_for_queue_entry instead when the gate would pass the approved pull request for a person to queue.
     Hermes keeps only the first transform_tool_result string, so one hook does all of it.
 
     transform_tool_result is the one hook that can change what the worker reads, and Hermes bounds it at 30s and fails open.
@@ -584,6 +613,7 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
         pending: list[str] = []
         reviewer_threads = 0
         waiting = False
+        entry = False
         owner: dict = {}
         try:
             deadline = time.monotonic() + HOOK_BUDGET_SECONDS
@@ -594,7 +624,8 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
             match = PR_URL.match(str(pr.get("url")))
             if pr.get("state") == "OPEN" and match:
                 try:
-                    reviewer_threads = _pr_state(pr, match.group(1), workspace, deadline)["reviewer_threads"]
+                    state = _pr_state(pr, match.group(1), workspace, deadline)
+                    reviewer_threads = state["reviewer_threads"]
                     merge_queue = ctx.get_config("merge_queue", default={})
                     waiting = (
                         pr.get("reviewDecision") == "APPROVED"
@@ -602,12 +633,16 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
                         and not reviewer_threads
                         and (_queue_signal(pr, merge_queue) or _in_merge_queue(pr, match.group(1), workspace, deadline))
                     )
+                    base = pr.get("baseRefName")
+                    if not waiting and not reviewer_threads and _queue_entry_candidate(pr, merge_queue) and isinstance(base, str) and base:
+                        blockers = _read_blockers(pr, match.group(1), base, workspace, deadline, lambda: state)
+                        entry = _awaiting_queue_entry(pr, blockers, merge_queue)
                 except GateError as exc:
                     failed.append(str(exc))
             owner = request_owner_review(pr, workspace, deadline, owner_lookup, asked)
         except GateError as exc:
             asked, failed = [], [str(exc)]
-        if not (asked or failed or unrequired or pending or reviewer_threads or waiting or owner):
+        if not (asked or failed or unrequired or pending or reviewer_threads or waiting or entry or owner):
             return None
         landed.update(owner)
         if asked:
@@ -622,6 +657,8 @@ def make_review_hook(ctx: Any, owner_lookup: Callable[[str, str, float], Optiona
             landed["reviewer_owned_threads"] = reviewer_threads
         if waiting:
             landed["waiting_for_merge_queue"] = True
+        if entry:
+            landed["waiting_for_queue_entry"] = True
         return json.dumps(landed)
 
     return on_tool_result
