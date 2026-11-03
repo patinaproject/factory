@@ -67,6 +67,7 @@ import kanban_board
 import reply_inbox
 import run_owner
 import session_links
+import xcode
 
 DEFAULT_WORKER_ENTRY = (
     "Work Linear issue {issue_identifier} ({issue_url}) in {repo} on branch {branch}. "
@@ -829,6 +830,15 @@ def child_env(worktree: Path, extra: dict | None = None) -> dict:
     return {**env, **(extra or {})}
 
 
+def check_first_launch(repo: dict, worktree: Path) -> None:
+    """Refuse a run whose repository checks xcrun while the active Xcode has a first launch pending."""
+    checks = repo.get("toolchain_checks")
+    if not isinstance(checks, list) or not any(isinstance(check, str) and "xcrun" in check for check in checks):
+        return
+    if xcode.first_launch_pending(os.environ.get("XCODEBUILD_BIN", "xcodebuild"), child_env(worktree)):
+        raise Refusal(f"the active Xcode has a first launch pending; run {xcode.FIRST_LAUNCH_FIX}")
+
+
 def group_commands(pgid: int) -> list[str]:
     listing = subprocess.run(["ps", "-axww", "-o", "pid=,pgid=,command="], capture_output=True, text=True, check=True).stdout
     members = (line.split(None, 2) for line in listing.splitlines())
@@ -1540,6 +1550,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     threshold = factory_settings.fresh_after_tokens(transport)
     prefix = factory_settings.worker_entry(repo)
     worktree = resolve_worktree(workspace, repo["path"])
+    check_first_launch(repo, worktree)
     check_toolchain(repo, worktree)
     lock_path = Path(git(worktree, "rev-parse", "--absolute-git-dir")) / LOCK_NAME
     stops: list[tuple[str, str]] = []

@@ -84,7 +84,18 @@ EVENT_FILTER = {
                 {"field": "event", "equals": "issue_comment"},
                 {"field": "action", "in": ["created"]},
                 {"not": {"field": "comment.body", "regex": r"\A<!-- linear-linkback -->"}},
-                {"not": {"field": "comment.user.login", "in": ["cloudflare-workers-and-pages[bot]", "vercel[bot]", "github-actions[bot]"]}},
+                {
+                    "not": {
+                        "field": "comment.user.login",
+                        "in": [
+                            "cloudflare-workers-and-pages[bot]",
+                            "vercel[bot]",
+                            "github-actions[bot]",
+                            "blacksmith-sh[bot]",
+                            "mergify[bot]",
+                        ],
+                    }
+                },
                 {
                     "any": [
                         {
@@ -539,6 +550,22 @@ class ReviewHandbackTest(unittest.TestCase):
                          ("changes requested on GitHub; see the card comments", None))
 
 
+class ImplementationReplyCommandTest(unittest.TestCase):
+    def setUp(self):
+        routes = render.build_routes(SETTINGS)
+        self.github = routes["github"]["prompt"]
+        self.linear = routes["linear"]["prompt"]
+
+    def test_the_linear_prompt_runs_one_implementation_reply_command_that_card_transition_accepts(self):
+        commands = re.findall(r"card_transition\.py implementation-reply (<task id>)`", self.linear)
+        self.assertEqual(len(commands), 1)
+        args = card_transition.parser().parse_args(["implementation-reply", *shlex.split(commands[0].replace("<task id>", "t_1"))])
+        self.assertEqual((args.command, args.task_id), ("implementation-reply", "t_1"))
+
+    def test_the_github_prompt_does_not_carry_it(self):
+        self.assertNotIn("implementation-reply", self.github)
+
+
 class TransitionCommandTest(unittest.TestCase):
     """A card's status and assignee change only through card_transition.py, whose tests pin each sequence."""
 
@@ -887,6 +914,23 @@ FILTER_CASES = [
             issue=issue(APP),
             comment=comment("cloudflare-workers-and-pages[bot]", "## Deploying with Cloudflare Workers"),
         ),
+        False,
+    ),
+    (
+        "Blacksmith test failure notice on an App PR",
+        "issue_comment",
+        payload(
+            "created",
+            sender="blacksmith-sh[bot]",
+            issue=issue(APP),
+            comment=comment("blacksmith-sh[bot]", "Found 1 test failure on Blacksmith runners"),
+        ),
+        False,
+    ),
+    (
+        "Mergify merge-queue notice on an App PR",
+        "issue_comment",
+        payload("created", sender="mergify[bot]", issue=issue(APP), comment=comment("mergify[bot]", "Merged into `main`")),
         False,
     ),
     (

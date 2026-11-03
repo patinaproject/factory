@@ -1481,7 +1481,11 @@ Linear `Issue` update, it runs the `triage-exit` command of the
 that command archived the triage card or left a running one to its worker, the
 delivery is done without a turn. Before it reruns an agent session reply, it
 runs the `teammate-reply` command, and a reply addressed to a teammate is
-dropped without a turn. It prints a line only when something happened,
+dropped without a turn. When the dispatch hook skipped a delivery because
+its computed intent needs no action, it left a skip marker under
+`<root>/webhook-retry/skipped/`, and the job drops the pending delivery
+without a turn and without an `unadmitted` replay. It prunes markers older
+than a day. It prints a line only when something happened,
 so Hermes delivers nothing on a quiet run. It belongs to the root profile,
 unlike the other jobs in this part, because only that profile runs the chat
 platform from part 13 and has its home channel. Hermes drops the output of a
@@ -2119,6 +2123,19 @@ the rule for privileged steps:
 macOS starts sshd for each connection, so new connections use the change
 without a restart. Run the check again. It must print only `PASS` lines.
 
+An unattended Xcode or macOS update changes the toolchain under running cards.
+Turn off the App Store's and macOS's automatic installs. The script needs
+root, so follow the rule for privileged steps. Name the terminal and ask the
+operator to run it there with `sudo`, then wait:
+
+```sh
+sudo python3 <factory checkout>/skills/setup-factory/scripts/disable-auto-updates
+```
+
+It prints one line for each setting it changed, or `no change`, and a second
+run changes nothing. `check-install` reports an `app auto-update` or
+`macos auto-update` line while a setting is on or unset.
+
 ## 17. Agent instructions
 
 Follow [`references/agent-instructions.md`](references/agent-instructions.md).
@@ -2564,6 +2581,33 @@ Hermes process starts. The new helper also writes
    operator's pause is engaged, so resume before the next step.
 9. Remove the lock and start `auto-deploy` once with the `launchctl kickstart`
    command above. Record the deployed commit in the private configuration record.
+
+## Update Xcode or macOS
+
+Update them only on purpose. A new Xcode blocks `xcrun` until its first
+launch runs, and a macOS update can restart the host under running cards.
+
+1. Pause the board and let running cards finish, as step 1 of
+   [Deploy a merged factory change](#deploy-a-merged-factory-change) does:
+
+   ```sh
+   hermes pause --reason "xcode or macos update"
+   python3 <repo>/skills/setup-factory/scripts/restart-gateway --wait-only
+   ```
+
+   Run the second command again until it exits `0`.
+2. Install the update.
+3. In the operator's terminal, finish the Xcode first launch:
+
+   ```sh
+   sudo xcodebuild -runFirstLaunch
+   ```
+
+4. Check that `xcrun` answers: `xcrun simctl help`.
+5. Run `HERMES_HOME=<worker> python3 <source checkout>/profiles/claude-worker/scripts/check-install`.
+   It must print no `xcode first launch`, `app auto-update`, or `macos auto-update` line. Run
+   `disable-auto-updates` again when an update turned an automatic install back on.
+6. Run `hermes resume`.
 
 ## Report
 
