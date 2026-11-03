@@ -359,8 +359,8 @@ Then act on the result:
   `MERGED` pull request sent to review. It names each check whose latest
   run is failing, or is pending and required by a branch rule. A pull
   request that waits only for a reviewer, for the merge queue, or for a person
-  to add it to the merge queue passes `kanban_request_review`, so never wait for `CLEAN` before you hand it to
-  review. A pending check that no rule requires does not stop the handoff.
+  to add it to the merge queue passes `kanban_request_review`, so never wait
+  for `CLEAN` before you hand it to review. A pending check that no rule requires does not stop the handoff.
   An open review thread that a person started does not stop it either.
   Before the handoff, answer in the thread each such thread that asks you
   something.
