@@ -636,10 +636,10 @@ class ClaudeSessionTest(GitFixture):
         module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
         text = module.read_text()
         self.assertIn('ISSUE_PARK = "Waiting for an issue:"\n', text)
-        self.assertIn("(*PRECONDITION_PARKS.values(), ISSUE_PARK)", text)
+        self.assertIn("(*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK)", text)
         module.unlink()
         module.write_text(text.replace('ISSUE_PARK = "Waiting for an issue:"\n', "").replace(
-            "(*PRECONDITION_PARKS.values(), ISSUE_PARK)", "tuple(PRECONDITION_PARKS.values())"))
+            "(*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK)", "(*PRECONDITION_PARKS.values(), STOPPED_PARK)"))
         self.set_documents(("d1", "ABC-123 Agent brief", "someone-else"))
 
         status, _ = self.run_session()
@@ -2922,6 +2922,27 @@ class ClaudeSessionTest(GitFixture):
         session.wait(timeout=30)
         self.assertEqual(session.returncode, -signal.SIGTERM)
         self.assertFalse(self.settings_path().exists())
+
+    def test_a_run_that_prints_its_final_line_is_no_longer_stopped_by_a_late_signal(self) -> None:
+        module = self.session_module()
+        saved = {each: signal.getsignal(each) for each in module.STOP_SIGNALS}
+        for each, handler in saved.items():
+            self.addCleanup(signal.signal, each, handler)
+        module.remove_on_stop(self.tmp / "settings.json")
+        handlers = []
+
+        def printed(*_args, **_kwargs):
+            handlers.append([signal.getsignal(each) for each in module.STOP_SIGNALS])
+
+        argv = ["claude-session", "--task-id", TASK_ID, "--issue-id", ISSUE_ID, "--issue-identifier", "ABC-123",
+                "--issue-url", LINEAR_URL, "--repo", REPO]
+        with mock.patch.dict(os.environ, {"HERMES_HOME": str(self.hermes_home)}), mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(module, "install_skew", return_value=None), \
+                mock.patch.object(module, "run", return_value=(0, {"done": True})), \
+                mock.patch("builtins.print", printed):
+            self.assertEqual(module.main(), 0)
+
+        self.assertEqual(handlers, [[signal.SIG_DFL] * 3])
 
     def test_a_stop_signal_to_the_mcp_status_probe_prints_no_report(self) -> None:
         command, env = self.session_command()
