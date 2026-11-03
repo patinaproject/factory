@@ -15,6 +15,15 @@ Usage: card_transition.py [--board <board>] <command> [<task id>] [options]
   card's newest reply comment holds the same text, so a replayed turn writes it once. Then a `scheduled` card
   is released when the release rule says so, a `blocked` card is unassigned and unblocked, a `triage` card is
   resumed without the assignment, and any other status is `none`: the next run reads the comment.
+- `implementation-reply`: record a person's reply on an implementation card, from standard input and with the same
+  one `Linear reply:` comment as `triage-reply`, and release the card when it waits in `scheduled` for a reply. A
+  card in any other status is `none`. A card whose newest park reason starts with one of
+  `result_line.MACHINE_PARKS` waits for a machine, so it stays parked and the output is `none` with
+  `waits_for` set to the park reason. Otherwise the release rule decides. A released card reads its `repo` and
+  `branch` from its body, and `gh` is asked whether the branch has a pull request before any further write, so a
+  `gh` failure leaves the card parked. Then it gets one `Released from scheduled for a Linear reply.` comment with
+  the park reason, unless one written since the park is there, is assigned to `claude-worker` when a person's
+  `stop` unassigned it, and is unblocked, sent to review, and reopened when the branch has a pull request.
 - `park-waiting`: park every card on the board that waits for input the old way in `scheduled`, posting
   nothing. A card blocked with kind `needs_input` is scheduled, and a card in Hermes' `triage` status with
   that kind leaves it through `specify` first. Run it while dispatch is paused, so no worker claims a card
@@ -131,6 +140,7 @@ from archive_card import Failed, archive, kanban_command, last_line, run, run_ka
 WORKER = "claude-worker"
 TRIAGE_BOARD = "triage"
 STOPPED = "stopped"
+RELEASED = "Released from scheduled for a Linear reply."
 READY_LABEL = "ready-for-agent"
 # The comment that records the triage card a brief wait queued, so a later sweep queues no second one.
 TRIAGE_QUEUED = "Queued for triage as"
@@ -267,15 +277,19 @@ def release(card: Card) -> None:
             return
 
 
-def triage_reply(card: Card, text: str) -> dict:
-    if not text.strip():
-        raise Failed("triage-reply needs the reply's text on standard input")
-    show = card.show()
+def write_reply(card: Card, show: dict, text: str) -> None:
     body = f"{reply_inbox.REPLY_PREFIX} {pull_ref(text.strip())}"
     replies = [comment["body"] for comment in show["comments"] if reply_inbox.is_reply(comment["body"])]
     if not replies or replies[-1].strip() != body:
         card.call("comment", body)
         show["comments"].append({"author": None, "body": body, "created_at": int(time.time())})
+
+
+def triage_reply(card: Card, text: str) -> dict:
+    if not text.strip():
+        raise Failed("triage-reply needs the reply's text on standard input")
+    show = card.show()
+    write_reply(card, show, text)
     status = show["task"]["status"]
     if status == "scheduled":
         if not replied(show):
@@ -289,6 +303,42 @@ def triage_reply(card: Card, text: str) -> dict:
     if status == "triage":
         return resume(card, assign=False)
     return result("none", status=status)
+
+
+def newest_park(show: dict) -> tuple[str, int]:
+    """The newest park's reason without its `comments_seen` marker, and when it was written."""
+    parks = [event for event in show["events"] if event["kind"] == "scheduled"]
+    park = parks[-1] if parks else {"payload": None, "created_at": 0}
+    reason, _ = plugin_module("blocker-order", "result_line").read_comments_seen((park["payload"] or {}).get("reason"))
+    return reason.strip(), park["created_at"]
+
+
+def implementation_reply(card: Card, text: str) -> dict:
+    if not text.strip():
+        raise Failed("implementation-reply needs the reply's text on standard input")
+    show = card.show()
+    write_reply(card, show, text)
+    status = show["task"]["status"]
+    if status != "scheduled":
+        return result("none", status=status)
+    result_line = plugin_module("blocker-order", "result_line")
+    reason, parked_at = newest_park(show)
+    if parked_for(show, *getattr(result_line, "MACHINE_PARKS", (result_line.GH_LOGIN_PARK,))):
+        return result("none", waits_for=reason)
+    if not replied(show):
+        return result("none", status=status)
+    repo, branch = (card_field(show["task"]["body"], name) for name in ("repo", "branch"))
+    pull_request = has_pull_request(repo, branch)
+    if not any(comment["created_at"] >= parked_at and comment["body"].startswith(RELEASED)
+               for comment in show["comments"]):
+        card.comment(f"{RELEASED} The card waited for: {reason}")
+    if show["task"]["assignee"] is None:
+        card.call("assign", WORKER)
+    card.call("unblock")
+    if pull_request:
+        card.call("request-review")
+        card.call("reopen-review")
+    return result("unblocked", pull_request=pull_request)
 
 
 def boards() -> list[dict]:
@@ -811,6 +861,7 @@ def parser() -> argparse.ArgumentParser:
 
     command("resume")
     command("triage-reply")
+    command("implementation-reply")
     command("stop")
 
     def handback(name: str) -> argparse.ArgumentParser:
@@ -835,6 +886,7 @@ def main(argv: list[str] | None = None) -> int:
         "park-waiting": lambda: park_waiting(args.board),
         "resume": lambda: resume(card),
         "triage-reply": lambda: triage_reply(card, sys.stdin.read()),
+        "implementation-reply": lambda: implementation_reply(card, sys.stdin.read()),
         "unblock": lambda: unblock(card, args.repo, args.branch, args.reason, args.comment),
         "reopen": lambda: reopen(card, args.reason, args.comment),
         "stop": lambda: stop(card),

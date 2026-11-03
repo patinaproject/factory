@@ -539,6 +539,22 @@ class ReviewHandbackTest(unittest.TestCase):
                          ("changes requested on GitHub; see the card comments", None))
 
 
+class ImplementationReplyCommandTest(unittest.TestCase):
+    def setUp(self):
+        routes = render.build_routes(SETTINGS)
+        self.github = routes["github"]["prompt"]
+        self.linear = routes["linear"]["prompt"]
+
+    def test_the_linear_prompt_runs_one_implementation_reply_command_that_card_transition_accepts(self):
+        commands = re.findall(r"card_transition\.py implementation-reply (<task id>)`", self.linear)
+        self.assertEqual(len(commands), 1)
+        args = card_transition.parser().parse_args(["implementation-reply", *shlex.split(commands[0].replace("<task id>", "t_1"))])
+        self.assertEqual((args.command, args.task_id), ("implementation-reply", "t_1"))
+
+    def test_the_github_prompt_does_not_carry_it(self):
+        self.assertNotIn("implementation-reply", self.github)
+
+
 class TransitionCommandTest(unittest.TestCase):
     """A card's status and assignee change only through card_transition.py, whose tests pin each sequence."""
 
