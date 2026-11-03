@@ -2869,25 +2869,75 @@ class ClaudeSessionTest(GitFixture):
         self.assertIn("`Part of #<n>`", system)
         self.assertIn("`fix` is a closing keyword", system)
 
-    def test_signal_mid_run_removes_the_settings_file_and_ends_claude(self) -> None:
-        # Without the start hook, as when hooks are disabled, the file stays until claude-session removes it.
+    def hold_a_run(self) -> subprocess.Popen:
+        """A run whose fake claude is up and holding, with the settings file written."""
         self.configure_fake_claude(skip_start_hooks=True, hold_seconds=600)
+        self.log.unlink(missing_ok=True)
+        session = self.start_session()
+        while not self.log.exists():
+            if session.poll() is not None:
+                self.fail(session.communicate())
+            time.sleep(0.05)
+        self.assertTrue(self.settings_path().exists())
+        return session
+
+    def test_signal_mid_run_removes_the_settings_file_and_ends_claude(self) -> None:
+        sentinels = {False: None, True: self.hermes_home / "ESTOP"}
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            with self.subTest(signal=signum.name):
-                self.log.unlink(missing_ok=True)
-                session = self.start_session()
-                while not self.log.exists():
-                    if session.poll() is not None:
-                        self.fail(session.communicate())
-                    time.sleep(0.05)
-                self.assertTrue(self.settings_path().exists())
+            for paused, sentinel in sentinels.items():
+                with self.subTest(signal=signum.name, paused=paused):
+                    session = self.hold_a_run()
+                    if sentinel:
+                        sentinel.touch()
 
-                session.send_signal(signum)
+                    session.send_signal(signum)
 
-                session.communicate(timeout=30)
-                self.assertEqual(session.returncode, -signum)
-                self.assertFalse(self.settings_path().exists())
-                self.assert_process_gone(self.claude_call()["pid"])
+                    stdout, _ = session.communicate(timeout=30)
+                    if sentinel:
+                        sentinel.unlink()
+                    self.assertEqual(session.returncode, -signum)
+                    self.assertFalse(self.settings_path().exists())
+                    self.assert_process_gone(self.claude_call()["pid"])
+                    report = RESULT_LINE.last(stdout)
+                    self.assertIsInstance(report, RESULT_LINE.Stopped)
+                    self.assertEqual((report.signal, report.paused, report.session_id), (signum.name, paused, SESSION_ID))
+                    self.assertIsInstance(report.elapsed, int)
+
+    def test_a_pause_in_the_fleet_root_counts_as_paused(self) -> None:
+        session = self.hold_a_run()
+        fleet_sentinel = self.hermes_home.parent.parent / "ESTOP"
+        fleet_sentinel.touch()
+
+        session.send_signal(signal.SIGTERM)
+
+        stdout, _ = session.communicate(timeout=30)
+        self.assertTrue(RESULT_LINE.last(stdout).paused)
+
+    def test_a_stop_signal_with_no_reader_still_ends_the_process_by_the_signal(self) -> None:
+        session = self.hold_a_run()
+        session.stdout.close()
+
+        session.send_signal(signal.SIGTERM)
+
+        session.wait(timeout=30)
+        self.assertEqual(session.returncode, -signal.SIGTERM)
+        self.assertFalse(self.settings_path().exists())
+
+    def test_a_stop_signal_to_the_mcp_status_probe_prints_no_report(self) -> None:
+        command, env = self.session_command()
+        command = [command[0], "--mcp-status", "--repo", REPO, "--settings-json", str(self.settings), "--timeout", "600"]
+        env.pop("HERMES_KANBAN_WORKSPACE")
+        self.configure_fake_claude(skip_start_hooks=True, hold_seconds=600)
+        probe = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        while not self.log.exists():
+            if probe.poll() is not None:
+                self.fail(probe.communicate())
+            time.sleep(0.05)
+
+        probe.send_signal(signal.SIGTERM)
+
+        stdout, _ = probe.communicate(timeout=30)
+        self.assertEqual((probe.returncode, stdout), (-signal.SIGTERM, ""))
 
     def test_next_run_replaces_a_settings_file_left_by_a_killed_run(self) -> None:
         self.settings_path().write_text('{"env": {"LINEAR_API_KEY": "stale-token"}}')
