@@ -6,6 +6,8 @@ whose values are what `hermes config set` installs at them:
 
 - `platforms.webhook.extra.routes.<name>`: the `linear` and `github` route
   configs. The Linear route takes its name from the `webhook_route` setting.
+  A route's `skills` names its skill, and its `prompt` is only the event
+  section, so Hermes caches the rest.
 - `platforms.webhook.extra.rate_limit`: the deliveries each route accepts per
   minute. Hermes counts every signed delivery before it applies the route's
   events and filters, and answers `429` past the limit. GitHub does not
@@ -47,6 +49,16 @@ other than the issue's assignee. The renderer reads it from
 `profiles/claude-worker/scripts/reply_inbox.py`, the worker script that acts on
 it, so `check-install` renders from a copy of `templates/` and that file.
 
+Each triage prompt holds an `<<event>>` marker where its event section sits.
+`triage-linear-event.md` and `triage-github-event.md` are those sections: the
+event fields, the prompt context, and the raw payload. The route's `prompt` is
+the section. The route's skill is the rest of the template with the marker
+removed, written as `<home>/skills/<name>/SKILL.md`. `ROUTE_TABLE` in `render.py` lists each route with its
+templates and skill name. A skill holds the factory's real values, so install
+it with `render.py --install-skills` and never commit it. Hermes lists skills
+once, so restart the gateway after a new or changed skill. The Linear
+dispatch hook adds the computed intent block after the event section.
+
 `GITHUB_EVENT_TABLE` in `render.py` lists each GitHub event and action triage
 acts on, and when the event belongs to the App's own work. The `github` route's
 filter and the prompt's "events that matter" list are both rendered from it,
@@ -75,6 +87,7 @@ Each route reads its secret from `.env` through a `${LINEAR_WEBHOOK_SECRET}` or
 ## Install the webhook config
 
 ```sh
+python3 templates/render.py --install-skills
 python3 templates/render.py > webhook-config.json
 for key in $(python3 -c 'import json, sys; print(*json.load(sys.stdin))' < webhook-config.json); do
   hermes config set "$key" \
@@ -93,9 +106,11 @@ python3 templates/render.py --check
 
 It prints one line per route that says whether the installed route matches
 the rendered one, and whether its secret is the `${...}` reference. A last
-line says whether the installed rate limit matches. It never prints a secret
-value. It exits `1` when a route or the rate limit differs or is missing, or a
-route holds a literal secret.
+line says whether the installed rate limit matches, and a line per skill says
+whether `<home>/skills/<name>/SKILL.md` matches, differs, or is not installed.
+It never prints a secret
+value. It exits `1` when a route, a skill, or the rate limit differs or is
+missing, or a route holds a literal secret.
 
 ## Hermes agent memory
 

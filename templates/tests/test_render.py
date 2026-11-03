@@ -204,6 +204,14 @@ TOOLSETS = ["terminal", "kanban", "linear_agent_session"]
 PLACEHOLDER = re.compile(r"\{[a-zA-Z0-9_.]+\}")
 
 
+def full_prompt(route, value=None):
+    """The prompt as one text: the route's static template with its event section in place."""
+    config = render.validate(SETTINGS if value is None else value)
+    spec = next(row for row in render.ROUTE_TABLE if row.route_name(config) == route)
+    values = {**spec.values(config), "event": render.event_section(spec)}
+    return render.render_prompt(render._read_template(spec.template), values)
+
+
 def settings(**changes):
     value = copy.deepcopy(SETTINGS)
     value.update(changes)
@@ -228,6 +236,7 @@ class RouteStructureTest(unittest.TestCase):
         self.assertEqual(
             route,
             {
+                "skills": ["factory-linear-triage"],
                 "events": ["AgentSessionEvent", "Comment", "Issue"],
                 "secret": "${LINEAR_WEBHOOK_SECRET}",
                 "filters": LINEAR_FILTERS,
@@ -240,6 +249,7 @@ class RouteStructureTest(unittest.TestCase):
         self.assertEqual(
             route,
             {
+                "skills": ["factory-github-triage"],
                 "events": [*GITHUB_EVENTS, "push"],
                 "secret": "${GITHUB_WEBHOOK_SECRET}",
                 "filters": [{"any": [PUSH_FILTER, {"all": [REPO_FILTER, EVENT_FILTER, SELF_FILTER]}]}],
@@ -251,7 +261,7 @@ class RouteStructureTest(unittest.TestCase):
         self.assertEqual(self.routes["github"]["events"], [*(row.name for row in render.GITHUB_EVENT_TABLE), "push"])
 
     def test_prompt_list_and_filter_cover_the_same_event_actions(self):
-        prompt = self.routes["github"]["prompt"]
+        prompt = full_prompt("github")
         listed = set()
         for match in re.finditer(r"^- `([a-z_]+)` with action ((?:`[a-z_]+`(?:, |, or | or )?)+), only when ", prompt, re.M):
             listed.update((match.group(1), action) for action in re.findall(r"`([a-z_]+)`", match.group(2)))
@@ -324,12 +334,12 @@ class TriageIntentContractTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = plugin
         spec.loader.exec_module(plugin)
-        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        prompt = full_prompt("linear")
 
         missing = [action for action in plugin.triage_intent.ACTIONS if f"`{action}`" not in prompt]
 
         self.assertEqual(missing, [])
-        self.assertNotIn("<triage_intent>", render.build_routes(SETTINGS)["github"]["prompt"])
+        self.assertNotIn("<triage_intent>", full_prompt("github"))
 
     def test_the_linear_prompt_names_every_intent_field_and_author_kind(self):
         plugin_dir = Path(__file__).resolve().parents[2] / "plugins" / "linear-agent-session"
@@ -339,7 +349,7 @@ class TriageIntentContractTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = plugin
         spec.loader.exec_module(plugin)
-        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        prompt = full_prompt("linear")
         triage_intent = plugin.triage_intent
 
         fields = asdict(triage_intent.Intent(action=""))
@@ -358,7 +368,7 @@ class IssueWriteToolContractTest(unittest.TestCase):
         sys.modules[spec.name] = plugin
         spec.loader.exec_module(plugin)
         schemas = [plugin.tools.COMMENT_SCHEMA, plugin.tools.GITHUB_CREATE_SCHEMA]
-        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        prompt = full_prompt("linear")
 
         missing = [schema["name"] for schema in schemas if f"`{schema['name']}`" not in prompt]
         keyless = [schema["name"] for schema in schemas if "idempotency_key" not in schema["parameters"]["required"]]
@@ -371,7 +381,7 @@ class ReplyPrefixContractTest(unittest.TestCase):
     """The running worker recognizes a person's reply by `reply_inbox.REPLY_PREFIX`, so triage must write it."""
 
     def test_the_linear_prompt_has_triage_start_a_card_reply_with_the_prefix(self):
-        prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+        prompt = full_prompt("linear")
 
         self.assertIn(f"`{reply_inbox.REPLY_PREFIX}`", prompt)
 
@@ -380,17 +390,17 @@ class ReplyPrefixContractTest(unittest.TestCase):
 
         for name in ("linear", "github"):
             with self.subTest(name):
-                self.assertIn(f"`{reply_inbox.NOT_ASSIGNEE_MARKER}`", routes[name]["prompt"])
+                self.assertIn(f"`{reply_inbox.NOT_ASSIGNEE_MARKER}`", full_prompt(name))
                 self.assertFalse(reply_inbox.NOT_ASSIGNEE_MARKER.startswith(reply_inbox.REPLY_PREFIX))
 
     def test_the_github_prompt_runs_pr_authority_from_the_gateways_plugin(self):
         with mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
-            prompt = render.build_routes(SETTINGS)["github"]["prompt"]
+            prompt = full_prompt("github")
 
         self.assertIn("python3 /srv/hermes/plugins/linear-agent-session/cli.py pr-authority --task", prompt)
 
     def test_the_linear_prompt_forbids_reporting_an_earlier_run_as_the_cards_current_status(self):
-        prompt = " ".join(render.build_routes(SETTINGS)["linear"]["prompt"].split())
+        prompt = " ".join(full_prompt("linear").split())
 
         self.assertIn(
             "never quote or summarize an earlier run's result, heartbeat, or card comment as the card's current status.",
@@ -401,7 +411,7 @@ class ReplyPrefixContractTest(unittest.TestCase):
 class PromptSubstitutionTest(unittest.TestCase):
     def setUp(self):
         routes = render.build_routes(SETTINGS)
-        self.prompts = {name: routes[name]["prompt"] for name in routes}
+        self.prompts = {name: full_prompt(name) for name in routes}
 
     def test_prompts_list_every_repository(self):
         for name, prompt in self.prompts.items():
@@ -421,18 +431,18 @@ class PromptSubstitutionTest(unittest.TestCase):
         routes = render.build_routes(settings(kanban_url="https://factory.example.com/kanban"))
         self.assertIn(
             "labeled `Kanban card <task id>` whose URL is `https://factory.example.com/kanban`.",
-            routes["linear"]["prompt"],
+            full_prompt("linear", settings(kanban_url="https://factory.example.com/kanban")),
         )
         self.assertIn("Leave `external_urls` unset.", self.prompts["linear"])
 
     def test_the_linear_prompt_runs_card_branch_from_the_worker_profile_as_the_app(self):
         with mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
-            prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+            prompt = full_prompt("linear")
         self.assertIn("python3 /srv/hermes/profiles/claude-worker/scripts/card_branch.py --app 'example-app[bot]'", prompt)
 
     def test_the_linear_prompt_archives_cards_through_the_worker_profile_script(self):
         with mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
-            prompt = render.build_routes(SETTINGS)["linear"]["prompt"]
+            prompt = full_prompt("linear")
         self.assertIn("`python3 /srv/hermes/profiles/claude-worker/scripts/archive_card.py <task id>`", prompt)
 
     def test_linear_prompt_names_the_app_user(self):
@@ -526,8 +536,8 @@ class MergedCardTest(unittest.TestCase):
     def setUp(self):
         routes = render.build_routes(SETTINGS)
         self.section = render.triage_merged_section()
-        self.github = routes["github"]["prompt"]
-        self.linear = routes["linear"]["prompt"]
+        self.github = full_prompt("github")
+        self.linear = full_prompt("linear")
 
     def test_only_the_github_prompt_carries_the_section_once(self):
         self.assertEqual(self.github.count(self.section), 1)
@@ -547,8 +557,8 @@ class ReviewHandbackTest(unittest.TestCase):
 
     def setUp(self):
         routes = render.build_routes(SETTINGS)
-        self.github = routes["github"]["prompt"]
-        self.linear = routes["linear"]["prompt"]
+        self.github = full_prompt("github")
+        self.linear = full_prompt("linear")
 
     def reopen_args(self, prompt: str):
         commands = re.findall(r"card_transition\.py reopen ([^`]+)`", prompt)
@@ -567,8 +577,8 @@ class ReviewHandbackTest(unittest.TestCase):
 class ImplementationReplyCommandTest(unittest.TestCase):
     def setUp(self):
         routes = render.build_routes(SETTINGS)
-        self.github = routes["github"]["prompt"]
-        self.linear = routes["linear"]["prompt"]
+        self.github = full_prompt("github")
+        self.linear = full_prompt("linear")
 
     def test_the_linear_prompt_runs_one_implementation_reply_command_that_card_transition_accepts(self):
         commands = re.findall(r"card_transition\.py implementation-reply (<task id>)`", self.linear)
@@ -590,8 +600,7 @@ class TransitionCommandTest(unittest.TestCase):
 
     def setUp(self):
         with mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
-            routes = render.build_routes(SETTINGS)
-        self.prompts = {name: routes[name]["prompt"] for name in routes}
+            self.prompts = {name: full_prompt(name) for name in render.build_routes(SETTINGS)}
 
     def test_no_prompt_runs_a_transition_command_itself(self):
         for name, prompt in self.prompts.items():
@@ -762,6 +771,11 @@ class RouteCheckTest(unittest.TestCase):
             self.install(name, route)
         self.write_config("secret: ${LINEAR_WEBHOOK_SECRET}\nsecret: ${GITHUB_WEBHOOK_SECRET}\n")
         self.install_rate_limit(1200)
+        with mock.patch.dict(os.environ, {"HERMES_HOME": str(self.tmp)}):
+            self.skills = render.build_skills(SETTINGS)
+        for name, text in self.skills.items():
+            (self.tmp / "skills" / name).mkdir(parents=True)
+            (self.tmp / "skills" / name / "SKILL.md").write_text(text)
 
     def install_rate_limit(self, value):
         (self.tmp / "rate_limit.json").write_text(json.dumps(value))
@@ -773,7 +787,19 @@ class RouteCheckTest(unittest.TestCase):
             "route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference",
             "route github: matches; secret is the ${GITHUB_WEBHOOK_SECRET} reference",
             "rate_limit: matches 1200",
+            "skill factory-linear-triage: matches",
+            "skill factory-github-triage: matches",
         ]))
+
+    def test_a_missing_or_changed_skill_is_reported(self):
+        self.install_rendered()
+        (self.tmp / "skills" / "factory-linear-triage" / "SKILL.md").unlink()
+        (self.tmp / "skills" / "factory-github-triage" / "SKILL.md").write_text("old skill\n")
+
+        code, lines = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(lines[3:], ["skill factory-linear-triage: not installed", "skill factory-github-triage: differs"])
 
     def test_a_missing_rate_limit_is_reported(self):
         self.install_rendered()
@@ -829,7 +855,62 @@ class RouteCheckTest(unittest.TestCase):
             "route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference",
             "route github: not installed",
             "rate_limit: matches 1200",
+            "skill factory-linear-triage: matches",
+            "skill factory-github-triage: matches",
         ]))
+
+
+class RouteSkillTest(unittest.TestCase):
+    """Each route's static instructions are a skill Hermes caches; its prompt is the event alone."""
+
+    SKILLS = {"linear": "factory-linear-triage", "github": "factory-github-triage"}
+
+    def setUp(self):
+        self.enterContext(mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}))
+        self.routes = render.build_routes(SETTINGS)
+        self.skills = render.build_skills(SETTINGS)
+
+    def test_each_route_names_its_skill_and_carries_only_the_event_section(self):
+        for route, skill in self.SKILLS.items():
+            with self.subTest(route=route):
+                self.assertEqual(self.routes[route]["skills"], [skill])
+                self.assertTrue(self.routes[route]["prompt"].startswith("## This event\n\n"))
+                self.assertTrue(self.routes[route]["prompt"].endswith("\n\n{__raw__}"))
+                self.assertNotIn("<<", self.routes[route]["prompt"])
+        self.assertEqual(list(self.skills), list(self.SKILLS.values()))
+
+    def test_the_skill_and_the_event_section_rebuild_the_whole_prompt(self):
+        for route, skill in self.SKILLS.items():
+            with self.subTest(route=route):
+                body = self.skills[skill].split("---\n", 2)[2].strip("\n")
+                head, tail = full_prompt(route).split(self.routes[route]["prompt"] + "\n\n", 1)
+                self.assertEqual((head + tail).rstrip("\n"), body)
+
+    def test_a_skill_is_byte_stable_with_its_frontmatter_and_no_session_token(self):
+        self.assertEqual(render.build_skills(SETTINGS), self.skills)
+        for skill, text in self.skills.items():
+            with self.subTest(skill=skill):
+                self.assertNotIn("${HERMES_", text)
+                self.assertTrue(text.endswith("\n") and not text.endswith("\n\n"))
+                kind = "Linear" if "linear" in skill else "GitHub"
+                self.assertEqual(
+                    text.split("---\n", 2)[1],
+                    f"name: {skill}\ndescription: Triage a {kind} webhook for the factory's Kanban cards\n"
+                    "metadata:\n  hermes:\n    session_platforms: [webhook]\n",
+                )
+
+    def test_the_skill_carries_the_factory_values_and_the_prompt_carries_none(self):
+        self.assertIn("example-org/app", self.skills["factory-github-triage"])
+        self.assertNotIn("example-org/app", self.routes["github"]["prompt"])
+
+    def test_install_skills_writes_each_skill_once(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HERMES_HOME": tmp}):
+            first = render.install_skills(self.skills)
+            second = render.install_skills(self.skills)
+            written = {name: (Path(tmp) / "skills" / name / "SKILL.md").read_text() for name in self.skills}
+        self.assertEqual(first, [f"skill {name}: installed at {tmp}/skills/{name}/SKILL.md" for name in self.skills])
+        self.assertEqual(second, [f"skill {name}: already installed" for name in self.skills])
+        self.assertEqual(written, self.skills)
 
 
 HERMES_AGENT_DIR = Path(os.environ.get("HERMES_AGENT_DIR") or Path.home() / ".hermes" / "hermes-agent")

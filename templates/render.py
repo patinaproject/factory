@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the factory's Hermes webhook config, the `linear` and `github` routes and the rate limit, from the settings."""
+"""Render the factory's Hermes webhook config, the `linear` and `github` routes, their skills, and the rate limit, from the settings."""
 from __future__ import annotations
 
 import argparse
@@ -440,14 +440,19 @@ def event_filter(event: GithubEvent, login: str) -> dict:
     }
 
 
-def build_routes(settings: Any) -> dict:
-    config = validate(settings)
-    marker = not_assignee_marker()
-    repos = repository_lines(config["repositories"])
-    full_names = [repo["full_name"] for repo in config["repositories"]]
-    login = config["github_login"]
+def linear_shape(config: dict) -> dict:
+    return {
+        "events": LINEAR_EVENTS,
+        "secret": LINEAR_SECRET,
+        "filters": linear_filters(config["app_user_id"]),
+        "toolsets": TOOLSETS,
+    }
 
-    github_filters = [
+
+def github_shape(config: dict) -> dict:
+    login = config["github_login"]
+    full_names = [repo["full_name"] for repo in config["repositories"]]
+    filters = [
         {
             "any": [
                 factory_push_filter(config["factory_repository"], config["factory_ref"]),
@@ -461,50 +466,133 @@ def build_routes(settings: Any) -> dict:
             ]
         }
     ]
+    return {"events": [*GITHUB_EVENTS, PUSH_EVENT], "secret": GITHUB_SECRET, "filters": filters, "toolsets": TOOLSETS}
 
+
+def linear_values(config: dict) -> dict:
     return {
-        config["webhook_route"]: {
-            "events": LINEAR_EVENTS,
-            "secret": LINEAR_SECRET,
-            "filters": linear_filters(config["app_user_id"]),
-            "toolsets": TOOLSETS,
-            "prompt": render_prompt(
-                _read_template("triage-linear.md"),
-                {
-                    "app_user_id": config["app_user_id"],
-                    "repositories": repos,
-                    "queued_link": queued_link_sentence(config["kanban_url"]),
-                    "card_branch": card_branch_command(hermes_home(), config["github_login"]),
-                    "triage_unblock": triage_unblock_section(),
-                    "archive_card": archive_card_command(hermes_home()),
-                    "card_transition": card_transition_command(hermes_home()),
-                    "triage_resume": triage_resume_section(),
-                    "triage_inbox": triage_inbox_section(config),
-                    "delegation_gate": delegation_gate_section(),
-                    "not_assignee_marker": marker,
-                },
-            ),
-        },
-        GITHUB_ROUTE: {
-            "events": [*GITHUB_EVENTS, PUSH_EVENT],
-            "secret": GITHUB_SECRET,
-            "filters": github_filters,
-            "toolsets": TOOLSETS,
-            "prompt": render_prompt(
-                _read_template("triage-github.md"),
-                {
-                    "repositories": repos,
-                    "events_that_matter": events_that_matter(GITHUB_EVENT_TABLE),
-                    "card_transition": card_transition_command(hermes_home()),
-                    "triage_unblock": triage_unblock_section(),
-                    "triage_resume": triage_resume_section(),
-                    "triage_merged": triage_merged_section(),
-                    "linear_cli": linear_cli_command(hermes_home()),
-                    "not_assignee_marker": marker,
-                },
-            ),
-        },
+        "app_user_id": config["app_user_id"],
+        "repositories": repository_lines(config["repositories"]),
+        "queued_link": queued_link_sentence(config["kanban_url"]),
+        "card_branch": card_branch_command(hermes_home(), config["github_login"]),
+        "triage_unblock": triage_unblock_section(),
+        "archive_card": archive_card_command(hermes_home()),
+        "card_transition": card_transition_command(hermes_home()),
+        "triage_resume": triage_resume_section(),
+        "triage_inbox": triage_inbox_section(config),
+        "delegation_gate": delegation_gate_section(),
+        "not_assignee_marker": not_assignee_marker(),
     }
+
+
+def github_values(config: dict) -> dict:
+    return {
+        "repositories": repository_lines(config["repositories"]),
+        "events_that_matter": events_that_matter(GITHUB_EVENT_TABLE),
+        "card_transition": card_transition_command(hermes_home()),
+        "triage_unblock": triage_unblock_section(),
+        "triage_resume": triage_resume_section(),
+        "triage_merged": triage_merged_section(),
+        "linear_cli": linear_cli_command(hermes_home()),
+        "not_assignee_marker": not_assignee_marker(),
+    }
+
+
+class RouteSpec(NamedTuple):
+    """One webhook route. The static `template` becomes the route's skill, which Hermes keeps in the prompt cache,
+    and the `event_template` becomes the route's `prompt`, the only text that changes from event to event."""
+
+    route_name: Callable[[dict], str]
+    shape: Callable[[dict], dict]
+    values: Callable[[dict], dict]
+    template: str
+    event_template: str
+    skill: str
+    description: str
+
+
+# Skill names must not collide with a Hermes slash command.
+ROUTE_TABLE = (
+    RouteSpec(
+        lambda config: config["webhook_route"],
+        linear_shape,
+        linear_values,
+        "triage-linear.md",
+        "triage-linear-event.md",
+        "factory-linear-triage",
+        "Triage a Linear webhook for the factory's Kanban cards",
+    ),
+    RouteSpec(
+        lambda config: GITHUB_ROUTE,
+        github_shape,
+        github_values,
+        "triage-github.md",
+        "triage-github-event.md",
+        "factory-github-triage",
+        "Triage a GitHub webhook for the factory's Kanban cards",
+    ),
+)
+# Where a route template holds its event section. The skill leaves it out.
+EVENT_MARKER = "<<event>>\n\n"
+
+
+def event_section(spec: RouteSpec) -> str:
+    return _read_template(spec.event_template).rstrip("\n")
+
+
+def skill_text(spec: RouteSpec, config: dict) -> str:
+    template = _read_template(spec.template)
+    if EVENT_MARKER not in template:
+        raise SettingsError(f"{spec.template} has no {EVENT_MARKER.strip()} marker")
+    body = render_prompt(template.replace(EVENT_MARKER, "", 1), spec.values(config)).rstrip("\n")
+    return (
+        f"---\nname: {spec.skill}\ndescription: {spec.description}\n"
+        f"metadata:\n  hermes:\n    session_platforms: [webhook]\n---\n\n{body}\n"
+    )
+
+
+def build_routes(settings: Any) -> dict:
+    config = validate(settings)
+    return {
+        spec.route_name(config): {**spec.shape(config), "skills": [spec.skill], "prompt": event_section(spec)}
+        for spec in ROUTE_TABLE
+    }
+
+
+def build_skills(settings: Any) -> dict:
+    """Map each skill name to the SKILL.md text that belongs in `$HERMES_HOME/skills/<name>/SKILL.md`."""
+    config = validate(settings)
+    return {spec.skill: skill_text(spec, config) for spec in ROUTE_TABLE}
+
+
+def skill_path(name: str) -> Path:
+    return hermes_home() / "skills" / name / "SKILL.md"
+
+
+def install_skills(skills: dict) -> list:
+    report = []
+    for name, text in skills.items():
+        path = skill_path(name)
+        if path.is_file() and path.read_text(encoding="utf-8") == text:
+            report.append(f"skill {name}: already installed")
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        report.append(f"skill {name}: installed at {path}")
+    return report
+
+
+def check_skills(skills: dict) -> list:
+    report = []
+    for name, text in skills.items():
+        path = skill_path(name)
+        if not path.is_file():
+            report.append((False, f"skill {name}: not installed"))
+        elif path.read_text(encoding="utf-8") != text:
+            report.append((False, f"skill {name}: differs"))
+        else:
+            report.append((True, f"skill {name}: matches"))
+    return report
 
 
 def build_config(routes: dict) -> dict:
@@ -568,16 +656,30 @@ def main(argv: Optional[list] = None) -> int:
         action="store_true",
         help="compare the rendered config with the installed one; prints no secret value",
     )
+    parser.add_argument("--skills-json", action="store_true", help="print each route skill's SKILL.md text as JSON")
+    parser.add_argument(
+        "--install-skills",
+        action="store_true",
+        help="write each route skill to $HERMES_HOME/skills/<name>/SKILL.md; restart the gateway to load a new one",
+    )
     args = parser.parse_args(argv)
     try:
-        routes = build_routes(load_settings(args.settings_json))
+        settings = load_settings(args.settings_json)
+        routes = build_routes(settings)
+        skills = build_skills(settings)
     except SettingsError as exc:
         print(f"render.py: invalid settings: {exc}", file=sys.stderr)
         return 1
+    if args.skills_json:
+        print(json.dumps(skills, indent=2))
+        return 0
+    if args.install_skills:
+        print("\n".join(install_skills(skills)))
+        return 0
     if not args.check:
         print(json.dumps(build_config(routes), indent=2))
         return 0
-    report = [*check_routes(routes, hermes_home() / "config.yaml"), check_rate_limit()]
+    report = [*check_routes(routes, hermes_home() / "config.yaml"), check_rate_limit(), *check_skills(skills)]
     for _, line in report:
         print(line)
     return 0 if all(ok for ok, _ in report) else 1
