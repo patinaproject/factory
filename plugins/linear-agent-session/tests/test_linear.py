@@ -181,7 +181,7 @@ class ActivityTest(unittest.TestCase):
         )
 
     def carried(self, others, live_urls=(), responses=None):
-        fake = FakeLinear([sessions_ok(others, live_urls), activity_ok(), *(responses or [session_update_ok()])])
+        fake = FakeLinear([sessions_ok(others, live_urls), activity_ok(), *(responses or [session_update_ok(), session_update_ok()])])
         make_client(fake).close_older_sessions("live")
         return [r["variables"]["input"] for r in fake.graphql_requests[2:]]
 
@@ -200,7 +200,7 @@ class ActivityTest(unittest.TestCase):
                 {"label": "Pull request #7", "url": "https://linear.review/o/r/pull/7"},
                 {"label": "Pull request #8", "url": "https://github.com/o/r/pull/8"},
                 {"label": "Pull request #8", "url": "https://linear.review/o/r/pull/8"},
-            ]}],
+            ]}, {"removedExternalUrls": ["https://github.com/o/r/pull/7", "https://linear.review/o/r/pull/8"]}],
         )
 
     def test_an_awaiting_input_sessions_pull_request_is_copied_when_another_sibling_closes(self):
@@ -212,7 +212,7 @@ class ActivityTest(unittest.TestCase):
             [{"addedExternalUrls": [
                 {"label": "Pull request #7", "url": "https://github.com/o/r/pull/7"},
                 {"label": "Pull request #7", "url": "https://linear.review/o/r/pull/7"},
-            ]}],
+            ]}, {"removedExternalUrls": ["https://github.com/o/r/pull/7"]}],
         )
 
     def test_no_pull_request_is_copied_when_no_sibling_closes(self):
@@ -224,13 +224,18 @@ class ActivityTest(unittest.TestCase):
         others = [("old", "active", "2026-10-27T09:00:00.000Z", "app-1", link)]
         self.assertEqual(
             self.carried(others, live_urls=["https://linear.review/o/r/pull/7"]),
-            [{"addedExternalUrls": [{"label": "Pull request #7", "url": "https://github.com/o/r/pull/7"}]}],
+            [{"addedExternalUrls": [{"label": "Pull request #7", "url": "https://github.com/o/r/pull/7"}]},
+             {"removedExternalUrls": ["https://linear.review/o/r/pull/7"]}],
         )
 
     def test_a_pull_request_the_live_session_holds_is_not_copied_again(self):
         link = [("Pull request #7", "https://github.com/o/r/pull/7")]
         others = [("old", "active", "2026-10-27T09:00:00.000Z", "app-1", link)]
-        self.assertEqual(self.carried(others, live_urls=["https://github.com/o/r/pull/7", "https://linear.review/o/r/pull/7"], responses=[]), [])
+        held = ["https://github.com/o/r/pull/7", "https://linear.review/o/r/pull/7"]
+        self.assertEqual(
+            self.carried(others, live_urls=held, responses=[session_update_ok()]),
+            [{"removedExternalUrls": ["https://github.com/o/r/pull/7"]}],
+        )
 
     def test_a_failed_copy_never_stops_the_close(self):
         link = [("Pull request #7", "https://github.com/o/r/pull/7")]
@@ -240,6 +245,15 @@ class ActivityTest(unittest.TestCase):
             activity_ok(), activity_ok(), (200, {"errors": [{"message": "boom"}], "data": None}),
         ])
         self.assertEqual(make_client(fake).close_older_sessions("live"), ["a", "b"])
+
+    def test_a_failed_removal_never_stops_the_close(self):
+        link = [("Pull request #7", "https://github.com/o/r/pull/7")]
+        old = "2026-10-27T09:00:00.000Z"
+        fake = FakeLinear([
+            sessions_ok([("a", "active", old, "app-1", link)]),
+            activity_ok(), session_update_ok(), (200, {"errors": [{"message": "boom"}], "data": None}),
+        ])
+        self.assertEqual(make_client(fake).close_older_sessions("live"), ["a"])
 
     def test_a_session_with_no_older_siblings_posts_nothing(self):
         fake = FakeLinear([sessions_ok()])
@@ -577,6 +591,53 @@ class BrokerClientTest(unittest.TestCase):
 
         self.assertEqual(broker.requests, [])
         self.assertEqual(len(fake.token_requests), 1)
+
+
+class MisplacedPullRequestsTest(unittest.TestCase):
+    OLD = "2026-10-27T09:00:00.000Z"
+    NEW = "2026-10-27T11:00:00.000Z"
+    GITHUB = "https://github.com/o/r/pull/7"
+    REVIEW = "https://linear.review/o/r/pull/7"
+    HELD = [GITHUB, REVIEW, "https://github.com/o/r/pull/8"]
+
+    def others(self):
+        both = [("Pull request #7", self.GITHUB), ("Pull request #7", self.REVIEW), ("Card", "https://kanban.test/t_1"),
+                ("Pull request #9", "https://github.com/o/r/pull/9")]
+        return [
+            ("old-complete", "complete", self.OLD, "app-1", both),
+            ("old-active", "active", self.OLD, "app-1", [("Pull request #8", "https://github.com/o/r/pull/8")]),
+            ("old-lacks", "complete", self.OLD, "app-1", [("Pull request #9", "https://github.com/o/r/pull/9")]),
+            ("old-other-app", "complete", self.OLD, "app-2", both),
+            ("newer", "complete", self.NEW, "app-1", both),
+        ]
+
+    def test_the_older_sessions_of_the_app_are_reported_with_only_the_pull_requests_the_live_session_holds(self):
+        fake = FakeLinear([sessions_ok(self.others(), self.HELD)])
+
+        misplaced = make_client(fake).misplaced_pull_requests("live")
+
+        self.assertEqual(misplaced, {
+            "old-complete": [self.GITHUB, self.REVIEW],
+            "old-active": ["https://github.com/o/r/pull/8"],
+        })
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_removing_updates_each_older_session_and_never_the_live_one(self):
+        fake = FakeLinear([sessions_ok(self.others(), self.HELD), session_update_ok(), session_update_ok()])
+
+        removed = make_client(fake).remove_misplaced_pull_requests("live")
+
+        self.assertEqual(removed, {"old-complete": [self.GITHUB, self.REVIEW], "old-active": ["https://github.com/o/r/pull/8"]})
+        self.assertEqual([r["variables"] for r in fake.graphql_requests[1:]], [
+            {"id": "old-complete", "input": {"removedExternalUrls": [self.GITHUB, self.REVIEW]}},
+            {"id": "old-active", "input": {"removedExternalUrls": ["https://github.com/o/r/pull/8"]}},
+        ])
+
+    def test_nothing_is_removed_when_no_older_session_holds_the_live_sessions_pull_requests(self):
+        fake = FakeLinear([sessions_ok(self.others()[2:3], self.HELD)])
+
+        self.assertEqual(make_client(fake).remove_misplaced_pull_requests("live"), {})
+        self.assertEqual(len(fake.graphql_requests), 1)
 
 
 class TokenClientTest(unittest.TestCase):

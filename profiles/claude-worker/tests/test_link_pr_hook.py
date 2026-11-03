@@ -4,10 +4,12 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from tests.support import SCRIPTS, GitFixture
@@ -39,15 +41,23 @@ ALREADY_EXISTS = {
 
 
 class FakeClient:
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(self, error: Exception | None = None, remove_error: Exception | None = None) -> None:
         self.calls = []
+        self.removals = []
         self.error = error
+        self.remove_error = remove_error
 
     def add_external_urls(self, session_id, urls):
         if self.error:
             raise self.error
         self.calls.append((session_id, urls))
         return [u["url"] for u in urls]
+
+    def remove_misplaced_pull_requests(self, session_id):
+        if self.remove_error:
+            raise self.remove_error
+        self.removals.append(session_id)
+        return {"older": [URL]}
 
 
 class FakeLinear:
@@ -63,7 +73,8 @@ class LinkCreatedPullTest(unittest.TestCase):
         client, report = self.link(CREATED)
 
         self.assertEqual(client.calls, [("live-session", [{"label": "Pull request #42", "url": URL}])])
-        self.assertEqual(report, {"added": [URL], "action": "linked"})
+        self.assertEqual(report, {"added": [URL], "action": "linked", "removed": {"older": [URL]}})
+        self.assertEqual(client.removals, ["live-session"])
 
     def test_a_failed_create_sends_nothing(self) -> None:
         client, report = self.link(ALREADY_EXISTS)
@@ -100,21 +111,44 @@ class LinkCreatedPullTest(unittest.TestCase):
         )
 
 
-class LinkPrHookProcessTest(unittest.TestCase):
+    def test_a_failed_removal_from_the_older_sessions_is_reported_not_raised(self) -> None:
+        client, report = self.link(CREATED, FakeClient(remove_error=RuntimeError("Entity not found")))
+
+        self.assertEqual(
+            report,
+            {"added": [URL], "action": "failed", "error": "unlinking the older agent sessions failed: Entity not found"},
+        )
+
+
+class HookHome(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.home = Path(tmp.name).resolve() / "home"
         self.home.mkdir()
         GitFixture.install_linear_plugin(GitFixture, self.home, cached_token=None, accepted=("run-token",))
+        self.board = Path(tmp.name).resolve() / "kanban.db"
+        self.put_card("linear_agent_session_id: live-session\nrepo: example-org/app")
 
-    def run_hook(self, stdin: str, token: str | None = "run-token"):
+    def put_card(self, body: str) -> None:
+        self.board.unlink(missing_ok=True)
+        with closing(sqlite3.connect(self.board)) as board:
+            board.execute("CREATE TABLE tasks (id TEXT, title TEXT, body TEXT, branch_name TEXT, status TEXT, "
+                          "block_kind TEXT, completion_contract TEXT)")
+            board.execute("INSERT INTO tasks VALUES ('t_1', 'title', ?, NULL, 'running', NULL, NULL)", (body,))
+            board.commit()
+
+    def sessions(self) -> dict:
+        return {k: v["urls"] for k, v in json.loads((self.home / "linear-fake.json").read_text())["sessions"].items()}
+
+    def run_hook(self, stdin: str, token: str | None = "run-token", board: Path | None = None):
         env = {k: v for k, v in os.environ.items() if k not in ("LINEAR_API_KEY", "HERMES_HOME")}
         env["HERMES_HOME"] = str(self.home)
         if token:
             env["LINEAR_API_KEY"] = token
         return subprocess.run(
-            [sys.executable, str(SCRIPTS / "link-pr-hook"), "--session-id", "live-session"],
+            [sys.executable, str(SCRIPTS / "link-pr-hook"), "--session-id", "live-session", "--task-id", "t_1",
+             "--board", str(board or self.board)],
             input=stdin, capture_output=True, text=True, env=env, timeout=60,
         )
 
@@ -125,6 +159,7 @@ class LinkPrHookProcessTest(unittest.TestCase):
         path = self.home / "linear-fake.json"
         path.write_text(json.dumps({**json.loads(path.read_text()), **fields}))
 
+class LinkPrHookProcessTest(HookHome):
     def test_a_created_pull_request_is_added_to_the_session_and_the_hook_prints_nothing(self) -> None:
         self.set_state(session_urls=["https://example.test/t_1"])
 
@@ -172,3 +207,50 @@ class LinkPrHookProcessTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual([u["url"] for u in self.updates()[0]["input"]["addedExternalUrls"]], [URL, REVIEW_URL])
+
+
+class LinkPrHookCurrentSessionTest(HookHome):
+    CARD = "https://kanban.test/t_1"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.set_state(sessions={
+            "live-session": {"createdAt": "2026-10-27T09:00:00.000Z", "urls": [URL, REVIEW_URL, self.CARD]},
+            "newer-session": {"createdAt": "2026-10-27T11:00:00.000Z", "urls": []},
+        })
+
+    def test_a_pull_request_goes_to_the_session_the_card_holds_now_and_leaves_the_run_start_session(self) -> None:
+        self.put_card("linear_agent_session_id: newer-session\nrepo: example-org/app")
+
+        result = self.run_hook(json.dumps(CREATED))
+
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertEqual(self.sessions(), {"live-session": [self.CARD], "newer-session": [URL, REVIEW_URL]})
+
+    def test_an_unreadable_board_adds_the_pull_request_to_the_run_start_session(self) -> None:
+        self.set_state(sessions={
+            "live-session": {"createdAt": "2026-10-27T09:00:00.000Z", "urls": []},
+            "newer-session": {"createdAt": "2026-10-27T11:00:00.000Z", "urls": []},
+        })
+
+        result = self.run_hook(json.dumps(CREATED), board=self.board.with_name("missing.db"))
+
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertEqual(self.sessions(), {"live-session": [URL, REVIEW_URL], "newer-session": []})
+
+    def test_a_card_without_a_session_line_adds_the_pull_request_to_the_run_start_session(self) -> None:
+        self.put_card("repo: example-org/app")
+
+        self.run_hook(json.dumps(CREATED))
+
+        self.assertEqual(self.sessions()["newer-session"], [])
+        self.assertEqual(self.sessions()["live-session"], [URL, REVIEW_URL, self.CARD])
+
+    def test_a_failed_removal_still_exits_zero(self) -> None:
+        self.put_card("linear_agent_session_id: newer-session")
+        self.set_state(session_remove_error="Entity not found")
+
+        result = self.run_hook(json.dumps(CREATED))
+
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+        self.assertEqual(self.sessions()["live-session"], [URL, REVIEW_URL, self.CARD])

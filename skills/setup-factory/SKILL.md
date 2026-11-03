@@ -1467,17 +1467,23 @@ its `local-only` contract, so its next completion skips Hermes' acceptance.
 This is an accepted limit. Archived cards stay archived and are never swept.
 
 **Session link backfill.** The worker links each pull request on a card's
-branch to the card's Linear agent session, and a new session keeps the links
-of the older one it replaces. Sessions from before that change lack them. Once
-after the install, run the backfill as the worker profile, outside any card:
+branch to the card's current Linear agent session, and a new session takes the
+links of the older ones it replaces. Sessions from before that change lack
+them, and a pull request opened after a newer session took over the card can
+still sit on the older one. Once after the install, run the backfill as the
+worker profile, outside any card:
 
 ```sh
 HERMES_HOME=<worker home> python3 <worker home>/scripts/sync-session-links
 ```
 
-It adds each missing pull request link and removes none. To see which sessions
-lack a link without changing anything, run it with `--check`. It exits 1 and
-prints one line per session that lacks a link.
+It adds each missing pull request link to the card's current session and
+removes that link from the card's older sessions of the same app. It removes
+only pull request links, and never from the current session. To see what it
+would change without changing anything, run it with `--check`. It exits 1 and
+prints one `lacks` line per session that lacks a link and one `misplaced` line
+per session whose pull request an older session still holds. A second run
+prints nothing.
 
 **Install drift check.** `check-install` compares the live worker profile, the
 factory plugins in both homes, and the installed webhook routes with

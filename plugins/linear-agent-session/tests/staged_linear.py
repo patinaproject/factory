@@ -21,7 +21,12 @@ Its blockers come from its `blocked_by` list of {id, identifier, gitBranchName, 
 when unset, and `blockers_error` fails the read. `activity_error` fails a posted activity.
 Its title comes from `issue_title`, "Fix checkout" when unset, and its priority from `priority`, 0 when unset. An AgentSessionUpdate is logged as
 `session_update` with its variables, and `session_update_error` makes it fail. The session's
-links are its `session_urls` list, which an update's `addedExternalUrls` extends, and `session_urls_error` fails the read.
+links are its `session_urls` list, which an update's `addedExternalUrls` extends and `removedExternalUrls` shrinks,
+and `session_urls_error` fails the read.
+`sessions` maps the issue's agent session ids to {createdAt, urls, appUser, status}, `app-user` and `complete` when
+unset. A session named there holds its own `urls`, which reads and updates of that id use instead of `session_urls`,
+and an AgentSessionSiblings read of any id answers with all of them, the asked one as the current session.
+`session_remove_error` fails an update that carries `removedExternalUrls`.
 The app's own user id is app-user.
 An OpenTitledIssues read is logged as `open_titled` with its variables and answers with the `open_issues` list of
 {identifier, title, url}, none when unset; `open_titled_http_status` makes it fail with that HTTP status.
@@ -87,15 +92,25 @@ def _fake_urlopen(request, timeout=None):
             response = _Response(200, {"data": {"agentSessionCreateOnIssue": {"success": True, "agentSession": {"id": "new-session"}}}})
         elif "AgentSessionUpdate" in query and state.get("session_update_error"):
             response = _Response(200, {"errors": [{"message": state["session_update_error"]}]})
+        elif "AgentSessionUpdate" in query and state.get("session_remove_error") and "removedExternalUrls" in body["variables"]["input"]:
+            response = _Response(200, {"errors": [{"message": state["session_remove_error"]}]})
         elif "AgentSessionUrls" in query and state.get("session_urls_error"):
             response = _Response(200, {"errors": [{"message": state["session_urls_error"]}]})
         elif "AgentSessionUrls" in query:
-            urls = json.dumps([{"label": "Held", "url": url} for url in state.get("session_urls", [])])
+            held = state.get("sessions", {}).get(body["variables"]["id"], {}).get("urls", state.get("session_urls", []))
+            urls = json.dumps([{"label": "Held", "url": url} for url in held])
             response = _Response(200, {"data": {"agentSession": {"externalUrls": urls}}})
         elif "AgentSessionUpdate" in query:
             entry["session_update"] = body["variables"]
-            added = body["variables"]["input"].get("addedExternalUrls", [])
-            state["session_urls"] = [*state.get("session_urls", []), *(u["url"] for u in added)]
+            update = body["variables"]["input"]
+            added = [u["url"] for u in update.get("addedExternalUrls", [])]
+            removed = update.get("removedExternalUrls", [])
+            sessions = state.get("sessions", {})
+            if body["variables"]["id"] in sessions:
+                held = sessions[body["variables"]["id"]]
+                held["urls"] = [url for url in [*held["urls"], *added] if url not in removed]
+            else:
+                state["session_urls"] = [url for url in [*state.get("session_urls", []), *added] if url not in removed]
             state_path.write_text(json.dumps(state))
             response = _Response(200, {"data": {"agentSessionUpdate": {"success": True}}})
         elif "OpenTitledIssues" in query and state.get("open_titled_http_status"):
@@ -146,9 +161,17 @@ def _fake_urlopen(request, timeout=None):
             entry["activity"] = body["variables"]["input"]
             response = _Response(200, {"data": {"agentActivityCreate": {"success": True, "agentActivity": {"id": "activity-1"}}}})
         elif "AgentSessionSiblings" in query:
+            def node(session_id, held):
+                urls = json.dumps([{"label": "Held", "url": url} for url in held["urls"]])
+                return {"id": session_id, "status": held.get("status", "complete"), "createdAt": held["createdAt"],
+                        "appUser": {"id": held.get("appUser", "app-user")}, "externalUrls": urls}
+            sessions = state.get("sessions", {})
+            asked = body["variables"]["id"]
             session = {"url": "https://linear.app/example/agent-session/live", "createdAt": "2026-10-27T10:00:00.000Z",
                        "appUser": {"id": "app-user"}, "externalUrls": "[]",
-                       "issue": {"agentSessions": {"nodes": []}}}
+                       "issue": {"agentSessions": {"nodes": [node(i, held) for i, held in sessions.items()]}}}
+            if asked in sessions:
+                session = {**node(asked, sessions[asked]), "url": session["url"], "issue": session["issue"]}
             response = _Response(200, {"data": {"agentSession": session}})
         elif "TriagePeople" in query and state.get("people_timeout"):
             raise TimeoutError("The read operation timed out")

@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """Claude Code PostToolUse hook for a worker run: add the pull request Claude opens to the card's Linear session.
 
-`HERMES_HOME=<worker home> python3 link-pr-hook --session-id <id>` reads the hook event on stdin. When a Bash
-call ran `gh pr create` and printed a pull request URL, it adds `Pull request #<number>` with that URL to the
-agent session, with the run's LINEAR_API_KEY, keeping the links the session holds. A hook that exits 2 would
-block the run, so any error prints nothing and exits 0.
+`HERMES_HOME=<worker home> python3 link-pr-hook --session-id <id> --task-id <card> --board <kanban db>` reads the
+hook event on stdin. When a Bash call ran `gh pr create` and printed a pull request URL, it adds
+`Pull request #<number>` with that URL to the card's current agent session, with the run's LINEAR_API_KEY,
+keeping the links the session holds, and removes it from the card's older sessions. The current session is the
+`linear_agent_session_id` line the board holds for the card now, since a later session can take the card over
+mid-run; `--session-id`, the session at the run's start, is the fallback when the board cannot be read. A hook
+that exits 2 would block the run, so any error prints nothing and exits 0.
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
+import kanban_board
+import reply_inbox
 import session_links
 
 
@@ -31,15 +38,26 @@ def link_created_pull(linear, client, session_id: str, event: dict) -> dict | No
     return session_links.add(linear, client, session_id, [session_links.pull_link(url)])
 
 
+def current_session_id(board: str, task_id: str, fallback: str) -> str:
+    try:
+        card = next(card for card in kanban_board.cards(board) if card["id"] == task_id)
+    except (sqlite3.Error, OSError, StopIteration):
+        return fallback
+    return reply_inbox.session_id_of(card["body"]) or fallback
+
+
 def main() -> int:
     try:
-        flag, session_id = sys.argv[1:3]
-        if flag != "--session-id":
-            return 0
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--session-id", required=True)
+        parser.add_argument("--task-id", required=True)
+        parser.add_argument("--board", required=True)
+        args = parser.parse_args()
         linear = linear_module()
         client = linear.TokenLinearClient(os.environ["LINEAR_API_KEY"])
+        session_id = current_session_id(args.board, args.task_id, args.session_id)
         link_created_pull(linear, client, session_id, json.load(sys.stdin))
-    except Exception:
+    except (Exception, SystemExit):
         return 0
     return 0
 
