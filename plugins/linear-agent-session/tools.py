@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 from typing import Callable, Optional
 
-from . import github_issue, idempotency, triage_exit
+from . import github_issue, idempotency, opened_sessions, triage_exit
 from .linear import (
     ACTIVITY_TYPES,
     CLIENT_ERRORS,
@@ -345,7 +346,7 @@ def run_activity_read(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(run)
 
 
-def run_session_create(client_factory: ClientFactory, args: dict) -> str:
+def run_session_create(client_factory: ClientFactory, args: dict, opened_dir: Optional[str] = None) -> str:
     def run() -> dict:
         issue = _issue_argument(args)
         purpose = args.get("purpose")
@@ -353,6 +354,10 @@ def run_session_create(client_factory: ClientFactory, args: dict) -> str:
             raise LinearError(f"pass purpose: one of {', '.join(SESSION_VERBS)}")
         client = client_factory()
         session_id = client.create_session_on_issue(issue)
+        try:
+            opened_sessions.record(opened_dir, session_id, dt.datetime.now(dt.timezone.utc))
+        except OSError as error:
+            logger.warning("linear-agent-session: recording the opened session failed: %s", type(error).__name__)
         try:
             title = {"title": client.title_session(session_id, issue, purpose)}
         except (*CLIENT_ERRORS, OSError) as error:
