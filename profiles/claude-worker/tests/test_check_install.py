@@ -34,7 +34,10 @@ ROUTE = {
     "secret": "${LINEAR_WEBHOOK_SECRET}",
     "prompt": "triage",
     "filters": [{"field": "data.id", "in_file": "owned-refs.json"}],
+    "coalesce": {"key": "factoryRoute.issue", "window_seconds": 30},
 }
+# What `hermes config get` prints for ROUTE: Hermes masks every value under a credential-shaped name.
+INSTALLED_ROUTE = {**ROUTE, "secret": "abc...1234", "coalesce": {"key": "fact...ssue", "window_seconds": 30}}
 
 SKILL_NAME = "factory-linear-triage"
 SKILL_TEXT = "---\nname: factory-linear-triage\n---\n\nrules\n"
@@ -381,7 +384,7 @@ class CheckInstallTest(unittest.TestCase):
         self.install(
             self.worker, "distribution.yaml", f"name: claude-worker\nsource: {self.repo}/profiles/claude-worker\n"
         )
-        self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps({**ROUTE, "secret": "abc...1234"}))
+        self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps(INSTALLED_ROUTE))
         self.install(self.root, f"installed-config/{RATE_LIMIT_KEY}.json", "600")
         self.install(self.root, f"skills/{SKILL_NAME}/SKILL.md", SKILL_TEXT)
         self.install(self.root, "logs/agent.log", "")
@@ -901,7 +904,15 @@ class CheckInstallTest(unittest.TestCase):
         )
 
     def test_route_differences(self) -> None:
-        stale = {**ROUTE, "prompt": "old triage", "secret": "abc...1234"}
+        stale = {**INSTALLED_ROUTE, "prompt": "old triage"}
+        self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps(stale))
+
+        self.assertEqual(
+            self.check(), (1, f"webhook config {ROUTE_KEY}: differs from the value rendered at {self.sha}\n")
+        )
+
+    def test_a_masked_route_field_with_another_value_differs(self) -> None:
+        stale = {**INSTALLED_ROUTE, "coalesce": {"key": "fact...ther", "window_seconds": 30}}
         self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps(stale))
 
         self.assertEqual(
@@ -910,7 +921,7 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_a_missing_route_skill_is_installed_before_the_routes(self) -> None:
         (self.root / "skills" / SKILL_NAME / "SKILL.md").unlink()
-        stale = {**ROUTE, "prompt": "old triage", "secret": "abc...1234"}
+        stale = {**INSTALLED_ROUTE, "prompt": "old triage"}
         self.install(self.root, f"installed-config/{ROUTE_KEY}.json", json.dumps(stale))
 
         code, out = self.check()
