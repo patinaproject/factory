@@ -85,6 +85,14 @@ config_schema:
       The weekly dependency-update issue. repository is the <owner>/<name> to update, team_key the Linear
       team that gets the issue, theme_label its one label, and type_label the type its description names.
       file-dependency-update refuses to run without all four.
+  scheduled_commands:
+    type: list
+    default: []
+    description: >-
+      Repository commands that run on a Hermes cron schedule. Each entry has name (lowercase words joined by
+      hyphens, unique), repository (<owner>/<name>), schedule (a five-field cron expression in the root profile's timezone), commands
+      (a list of argv lists, run in order in a clean clone), and timeout_minutes (the budget for all of the commands together).
+      The scheduled-command script reads it. Leave it empty to schedule nothing.
   claude_session:
     type: dict
     default: {}

@@ -123,6 +123,7 @@ class CommandTest(unittest.TestCase):
             Install(Step.CRON, ("/bin/hermes", "-p", "claude-worker", "cron", "create", "every 1h", "--name", "x"), False),
         )
         self.assertEqual(install_plan.schedule(5), "every 5m")
+        self.assertEqual(install_plan.schedule("0 9 * * 1"), "0 9 * * 1")
 
     def test_a_board_without_a_default_repository_gets_no_workdir(self) -> None:
         self.assertEqual(
