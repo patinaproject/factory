@@ -855,6 +855,129 @@ class IssueParkTest(Hooked):
         self.assertNotIn("Waiting for an issue:", result_line.PRECONDITION_PARKS.values())
 
 
+class StoppedTest(Hooked):
+    def setUp(self) -> None:
+        super().setUp()
+        self.board.add("t_1", "todo")
+        self.board.start("t_1")
+
+    def stopped(self, paused: bool) -> str:
+        return process_result(result_line.line(result_line.Stopped("SIGTERM", 42, paused, "s-1")))
+
+    def test_a_stop_during_a_pause_parks_the_card_and_leaves_its_block_history_alone(self):
+        self.board.block_kind["t_1"], self.board.recurrences["t_1"] = "needs_input", 1
+
+        outcome = json.loads(self.call(self.stopped(True)))["stopped_park"]
+
+        self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule"])
+        self.assertTrue(self.board.reasons["t_1"].startswith("Waiting for hermes resume: "))
+        self.assertIn("SIGTERM", self.board.reasons["t_1"])
+        self.assertTrue(outcome["parked"])
+        self.assertEqual(os.environ[order.STOP_NUDGE], "off")
+        self.board.unblock("t_1")
+        self.assertEqual((self.board.block_kind["t_1"], self.board.recurrences["t_1"]), ("needs_input", 1))
+
+    def test_a_stop_outside_a_pause_blocks_the_card_as_transient_and_names_the_signal(self):
+        outcome = json.loads(self.call(self.stopped(False)))["stopped_block"]
+
+        (name, args), = self.board.calls
+        self.assertEqual((name, args["kind"]), ("kanban_block", "transient"))
+        self.assertIn("SIGTERM", args["reason"])
+        self.assertIn("stopped, not crashed", args["reason"])
+        self.assertTrue(outcome["blocked"])
+
+    def test_a_refused_schedule_falls_back_to_the_transient_block(self):
+        self.board.goal_mode.add("t_1")
+
+        outcome = json.loads(self.call(self.stopped(True)))
+
+        self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule", "kanban_block"])
+        self.assertEqual(self.board.calls[1][1]["kind"], "transient")
+        self.assertTrue(outcome["stopped_block"]["blocked"])
+
+    def test_the_same_report_read_twice_acts_once(self):
+        first = self.call(self.stopped(False))
+
+        self.assertEqual(self.call(self.stopped(False)), first)
+        self.assertEqual(len(self.board.calls), 1)
+
+    def test_the_park_is_a_machine_park_and_not_a_precondition(self):
+        self.assertIn(result_line.STOPPED_PARK, result_line.MACHINE_PARKS)
+        self.assertNotIn(result_line.STOPPED_PARK, result_line.PRECONDITION_PARKS.values())
+
+    def test_the_line_round_trips(self):
+        for session_id in (None, "s-1"):
+            report = result_line.Stopped("SIGHUP", 0, False, session_id)
+            self.assertEqual(result_line.last(result_line.line(report)), report)
+
+
+class PullRequestParkTest(Hooked):
+    URL = "https://github.com/o/r/pull/7"
+    REASON = "Waiting for a pull request: o/r#7"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.board.add("t_1", "todo")
+        self.board.start("t_1")
+
+    def test_a_finished_run_that_waits_for_a_pull_request_parks_the_card_with_the_short_form(self):
+        result = f"Waiting for pull request: {self.URL}\n\nThen rebase and open the pull request."
+
+        outcome = json.loads(self.call(process_result(report(result))))["pull_request_park"]
+
+        self.assertEqual(self.board.calls, [("kanban_schedule", {"reason": self.REASON})])
+        self.assertEqual(self.board.status["t_1"], "scheduled")
+        self.assertNotIn("t_1", self.board.block_kind)
+        self.assertEqual(outcome["parked"], True)
+        self.assertEqual(os.environ[order.STOP_NUDGE], "off")
+
+    def test_the_same_report_read_twice_parks_once(self):
+        first = self.call(process_result(report(f"Waiting for pull request: {self.URL}")))
+
+        self.assertEqual(self.call(process_result(report(f"Waiting for pull request: {self.URL}"))), first)
+        self.assertEqual(len(self.board.calls), 1)
+
+    def test_a_url_in_angle_brackets_parks(self):
+        self.call(process_result(report(f"Waiting for pull request: <{self.URL}>")))
+
+        self.assertEqual(self.board.reasons["t_1"], self.REASON)
+
+    def test_any_other_line_blocks_with_the_whole_result(self):
+        for url in ("https://github.com/o/r/issues/7", f"{self.URL}/files", f"{self.URL}#issuecomment-1",
+                    "https://example.com/o/r/pull/7", "see the pull request", "", "http://github.com/o/r/pull/7"):
+            with self.subTest(url):
+                self.board.calls.clear()
+                result = f"Waiting for pull request: {url}"
+                order._handled.clear()
+                self.board.status["t_1"] = "running"
+
+                outcome = json.loads(self.call(process_result(report(result))))
+
+                self.assertEqual(self.board.calls, [("kanban_block", {"reason": result, "kind": "needs_input"})])
+                self.assertNotIn("pull_request_park", outcome)
+                self.assertTrue(outcome["needs_input_block"]["blocked"])
+
+    def test_a_refused_schedule_blocks_with_the_whole_result(self):
+        self.board.goal_mode.add("t_1")
+        result = f"Waiting for pull request: {self.URL}"
+
+        outcome = json.loads(self.call(process_result(report(result))))
+
+        self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule", "kanban_block"])
+        self.assertEqual(self.board.calls[1][1], {"reason": result, "kind": "needs_input"})
+        self.assertNotIn("pull_request_park", outcome)
+
+    def test_the_workers_own_schedule_of_the_park_is_recognised_as_a_machine_park(self):
+        self.assertIsNone(order.worker_park("t_1", "r1", {"reason": self.REASON}, json.dumps({"ok": True}), self.board.dispatch_tool))
+        self.assertEqual(os.environ[order.STOP_NUDGE], "off")
+        self.assertIn("Waiting for a pull request:", result_line.MACHINE_PARKS)
+
+    def test_the_parser_reads_the_short_form_back(self):
+        self.assertEqual(result_line.park_pull_request(self.REASON), result_line.PullRequest("o/r", 7))
+        self.assertIsNone(result_line.park_pull_request("Waiting for a pull request: o/r"))
+        self.assertIsNone(result_line.park_pull_request("Waiting for an issue: o/r#7"))
+
+
 class Factory(Hooked):
     """Triage creates one card per delegated issue, the dispatcher runs ready cards, and each run first asks
     claude-session's blocker check, then the hook, the way a worker does. A card's run ends with its merge."""

@@ -17,8 +17,9 @@ class Step(IntEnum):
     OWNED_REFS = 6
     # A route names its skill, so the skill files land before the route that uses them.
     SKILLS = 7
-    ROUTES = 8
-    WRAPPERS = 9
+    ROUTE_SCRIPTS = 8
+    ROUTES = 9
+    WRAPPERS = 10
 
 
 class Install(NamedTuple):
@@ -199,7 +200,12 @@ def route_set(homes: Homes, key: str, value) -> Install:
     return Install(Step.ROUTES, (homes.hermes, "config", "set", key, config_text(value)), True)
 
 
+# Hermes fails closed on a route whose script is missing, so these install before the routes.
+ROUTE_SCRIPTS = ("linear-route",)
+
+
 def wrapper_install(homes: Homes, name: str, source_name: str | None = None) -> Install:
     source = homes.repo / "skills" / "setup-factory" / "scripts" / (source_name or name)
-    return Install(Step.WRAPPERS, ("install", "-m", "0644", str(source), str(homes.root / "scripts" / name)), False)
+    step = Step.ROUTE_SCRIPTS if name in ROUTE_SCRIPTS else Step.WRAPPERS
+    return Install(step, ("install", "-m", "0644", str(source), str(homes.root / "scripts" / name)), False)
 

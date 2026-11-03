@@ -523,6 +523,77 @@ class SessionPromptedTest(unittest.TestCase):
         self.assertEqual(self.prompted(reply=intent_module.NO_REPLY, **stop).action, "nothing_to_stop")
 
 
+def triage_round_item(activity_id="r1"):
+    return thread_item(activity_id, "elicitation", f"{plugin.triage_round.TRIAGE_DISCLAIMER}\n\nNeeds input: which inbox?\n\nReply here to answer.")
+
+
+class StartTriageWithReplyTest(unittest.TestCase):
+    def prompted(self, triage=(), work=(), thread=None, kind="person", live=None):
+        thread = Thread([triage_round_item()], "linear") if thread is None else thread
+        return decide(
+            session_event("prompted"),
+            live or issue(delegate=None),
+            triage,
+            work,
+            Reply("yes", "payload", ASSIGNEE, kind),
+            thread,
+        )
+
+    def test_an_answer_to_an_open_round_with_no_live_triage_card_starts_triage(self):
+        cases = {
+            "no triage card": [],
+            "archived triage card": [card("t_old", status="archived", body=id_line())],
+            "done triage card": [card("t_old", status="done", body=id_line())],
+        }
+        for name, triage in cases.items():
+            with self.subTest(name):
+                result = self.prompted(triage=triage)
+                self.assertEqual((result.action, result.agent_session_id), ("start_triage_with_reply", "session-1"))
+
+    def test_a_reply_that_answers_no_open_round_is_answered(self):
+        closed = [triage_round_item(), thread_item("o1", "response", "Triage outcome: ready-for-agent\nDone.")]
+        cases = {
+            "no round": Thread([thread_item("a1", "response", "1, 2 or 3?")], "linear"),
+            "empty thread": Thread([], "linear"),
+            "round with an outcome after it": Thread(closed, "linear"),
+            "outcome as a thought": Thread([triage_round_item(), thread_item("o1", "thought", "Triage outcome: ready-for-agent")], "linear"),
+            "elicitation without the disclaimer": Thread([thread_item("e1", "elicitation", "Pick one")], "linear"),
+            "thread missing": Thread(None, "missing"),
+        }
+        for name, thread in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.prompted(thread=thread).action, "answer_reply")
+
+    def test_a_new_round_after_an_outcome_is_open_again(self):
+        thread = Thread([triage_round_item("r1"), thread_item("o1", "response", "Triage outcome: ready-for-human"), triage_round_item("r2")], "linear")
+        self.assertEqual(self.prompted(thread=thread).action, "start_triage_with_reply")
+
+    def test_only_a_persons_reply_starts_triage(self):
+        for kind in ("app", "unknown"):
+            with self.subTest(kind):
+                self.assertEqual(self.prompted(kind=kind).action, "answer_reply")
+
+    def test_a_closed_issue_keeps_answer_reply(self):
+        for state in ("completed", "canceled", "duplicate"):
+            with self.subTest(state):
+                self.assertEqual(self.prompted(live=issue(delegate=None, stateType=state)).action, "answer_reply")
+
+    def test_an_answer_while_a_triage_card_is_live_reaches_that_card(self):
+        for status in ("todo", "ready", "running", "scheduled", "blocked", "triage"):
+            with self.subTest(status):
+                result = self.prompted(triage=[card("t_new", status=status, body=id_line())])
+                self.assertEqual((result.action, result.triage_card), ("triage_card_reply", {"id": "t_new", "status": status}))
+
+    def test_an_issue_with_a_card_or_a_delegate_keeps_its_route(self):
+        work = [card("t_work", branch=BRANCH)]
+        self.assertEqual(self.prompted(work=work).action, "card_reply")
+        self.assertEqual(self.prompted(live=issue()).action, "create_card")
+
+    def test_the_hook_runs_the_turn(self):
+        result = self.prompted()
+        self.assertFalse(intent_module.needs_no_turn(result, session_event("prompted")))
+
+
 class IssueUpdateTest(unittest.TestCase):
     def update(self, live=None, previous=None, work=()):
         return decide(issue_event(previous), live, work=work)
@@ -1250,6 +1321,22 @@ TRIAGE_CARD = {"id": "t_triage", "status": "todo"}
 NO_MOVE = {"type": "Issue", "action": "update", "updatedFrom": {"labelIds": []}, "data": {"id": ISSUE_ID}}
 CREATE = {"type": "Issue", "action": "create", "data": {"id": ISSUE_ID}}
 NO_UPDATED_FROM = {"type": "Issue", "action": "update", "data": {"id": ISSUE_ID}}
+
+
+class StartTriageWithReplyComputeTest(unittest.TestCase):
+    compute = ComputeTest.compute
+
+    def test_compute_starts_triage_from_an_answer_when_the_triage_card_is_archived(self):
+        class Client(FakeLinearClient):
+            def session_thread(self, _agent_session_id):
+                return [triage_round_item(), thread_item("activity-1", "prompt", "yes")]
+
+        boards = {"triage": [card("t_old", status="archived", body=id_line())], None: []}
+        result = self.compute(session_event("prompted", body="yes"), Client(issue(delegate=None), users={ASSIGNEE: person(ASSIGNEE, "Ann Assignee")}), boards=boards)
+        self.assertEqual(
+            (result.action, result.agent_session_id, result.triage_card, result.reply),
+            ("start_triage_with_reply", "session-1", None, "yes"),
+        )
 
 
 class NeedsNoTurnTest(unittest.TestCase):

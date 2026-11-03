@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, idempotency, kanban_guard, linear, missing_secret, opened_sessions, replies, tools, triage_exit, triage_intent, triage_round
+from . import blocks, bursts, idempotency, kanban_guard, linear, missing_secret, opened_sessions, replies, tools, triage_exit, triage_intent, triage_round
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +238,11 @@ def make_dispatch_hook(
     intent_pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-intent")
 
     async def guard_then_acknowledge(event: Any, **_: Any) -> Optional[dict[str, str]]:
+        # Cleared on entry, before any exit or slow step, so an update that lands mid-turn is not swept into this burst.
+        try:
+            bursts.clear(skip_home(), event.raw_message)
+        except Exception as failure:
+            logger.warning("linear-agent-session: the Issue burst was not cleared: %s: %s", type(failure).__name__, failure)
         if paused():
             return None
         route = _delivery_route(event)

@@ -157,7 +157,7 @@ HEALTHY_RUNS = (None, "ok", "delivery_queued")
 RUN_ERROR_LIMIT = 200
 SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE)
 TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
-ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway", "auto-deploy", "report-deploy")
+ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway", "auto-deploy", "report-deploy", *install_plan.ROUTE_SCRIPTS)
 SCHEDULED_RUNNER = "skills/setup-factory/scripts/scheduled-command"
 SCHEDULED_PREFIX = "scheduled-"
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.

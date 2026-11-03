@@ -26,6 +26,10 @@ GITHUB_ROUTE = "github"
 ROUTINGS = ("default", "synced_github")
 TOOLSETS = ["terminal", "kanban", "linear_agent_session"]
 LINEAR_EVENTS = ["AgentSessionEvent", "Comment", "Issue"]
+# Relative, so the value is the same on every machine; Hermes resolves it under its home's scripts directory.
+LINEAR_ROUTE_SCRIPT = "linear-route"
+# The script stamps `factoryRoute` on Issue updates only. Keying on `data.id` would also hold every Comment for the window.
+LINEAR_COALESCE = {"key": "factoryRoute.issue", "window_seconds": 30, "max_wait_seconds": 300}
 # Hermes resolves a relative in_file path against the gateway's home.
 OWNED_REFS_FILE = "owned-refs.json"
 TRIAGE_REFS_FILE = "triage-refs.json"
@@ -445,6 +449,8 @@ def linear_shape(config: dict) -> dict:
         "events": LINEAR_EVENTS,
         "secret": LINEAR_SECRET,
         "filters": linear_filters(config["app_user_id"]),
+        "script": LINEAR_ROUTE_SCRIPT,
+        "coalesce": dict(LINEAR_COALESCE),
         "toolsets": TOOLSETS,
     }
 

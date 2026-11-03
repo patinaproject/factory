@@ -15,6 +15,22 @@ whose values are what `hermes config set` installs at them:
   `github` route also gets a `push` for every ref update in every installed
   repository, so the factory sets 1200.
 
+The `linear` route runs the `linear-route` script from `<home>/scripts` on each
+delivery that passes its filters, and coalesces `Issue` updates per issue. The
+script drops a delivery Linear sent again, which it recognises for 7 hours by
+the event's type, action, `createdAt`, and object id (and the activity id of a
+`prompted` event). It also records each `Issue` update's `updatedFrom` keys and
+stamps the payload with `factoryRoute`, `{"issue": <issue id>, "seq": <n>}`. The
+route's `coalesce` block keys on `factoryRoute.issue`, so Hermes holds an `Issue`
+update for 30 seconds (300 at most) and dispatches only the newest one, whose
+`updatedFrom` is now the union of the burst's keys with the earliest value of
+each. A `Comment` or `AgentSessionEvent` has no stamp and dispatches at once.
+The script fails open: on any error it passes the payload on unchanged. The
+`linear-agent-session` dispatch hook clears the issue's recorded keys once the
+settled event is handled. Hermes fails closed when the route's script is
+missing, so deploy installs the script before the route, and `check-install`
+reports a missing or out-of-date copy.
+
 The `linear` route keeps every `AgentSessionEvent` and every `Issue` update that
 changes `delegateId`. It keeps a completed, canceled, or duplicate `Issue` update only when
 the issue's id is listed in `<home>/owned-refs.json`, which holds each card's

@@ -207,6 +207,8 @@ WORKER_JOBS = [
 RETRY_SCRIPT = "retry-failed-webhooks"
 ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack"), cron_job("report-deploy", 5, "slack")]
 RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
+ROUTE_SCRIPT = "linear-route"
+ROUTE_SCRIPT_SOURCE = f"skills/setup-factory/scripts/{ROUTE_SCRIPT}"
 SCHEDULED_SOURCE = "skills/setup-factory/scripts/scheduled-command"
 SCHEDULED_ENTRY = {
     "name": "example-job", "repository": "example-org/example-repo", "schedule": "0 9 * * 1",
@@ -321,6 +323,7 @@ REPO_FILES = {
     "plugins/webhook-retry/__init__.py": "# retry\n",
     "templates/render.py": RENDER,
     RETRY_SOURCE: "#!/usr/bin/env python3\nretry\n",
+    ROUTE_SCRIPT_SOURCE: "#!/usr/bin/env python3\nroute\n",
     SCHEDULED_SOURCE: (REPO / SCHEDULED_SOURCE).read_text(),
 }
 
@@ -375,6 +378,7 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, f"skills/{SKILL_NAME}/SKILL.md", SKILL_TEXT)
         self.install(self.root, "logs/agent.log", "")
         self.install(self.root, f"scripts/{RETRY_SCRIPT}", REPO_FILES[RETRY_SOURCE])
+        self.install(self.root, f"scripts/{ROUTE_SCRIPT}", REPO_FILES[ROUTE_SCRIPT_SOURCE])
         self.install(self.root, ".env", "SLACK_HOME_CHANNEL=C0123\n")
         self.owned_refs = self.root / "owned-refs.json"
         self.install(self.root, "owned-refs.json", f'["goodyear/abc-1-fix", "{LINEAR_ID}"]\n')
@@ -1611,6 +1615,21 @@ class CheckInstallTest(unittest.TestCase):
             (changed, missing),
             ((1, f"script {script}: differs from main at {self.sha} (part 12)\n"),
              (1, f"script {script}: is missing; install it from {RETRY_SOURCE} (part 12)\n")),
+        )
+
+    def test_the_linear_route_script_missing_or_changed_is_reported_and_installs_before_the_routes(self) -> None:
+        script = self.root / "scripts" / ROUTE_SCRIPT
+        script.write_text("old\n")
+        changed = self.check()
+        script.unlink()
+        missing = self.check()
+        step = json.loads(self.raw)[0]["remedy"]["step"]
+
+        self.assertEqual(
+            (changed, missing, step),
+            ((1, f"script {script}: differs from main at {self.sha} (part 12)\n"),
+             (1, f"script {script}: is missing; install it from {ROUTE_SCRIPT_SOURCE} (part 12)\n"),
+             "ROUTE_SCRIPTS"),
         )
 
     def test_webhook_retry_installed_in_the_worker_home_is_reported(self) -> None:

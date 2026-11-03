@@ -276,14 +276,29 @@ TRIAGE_RULE = (
 SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{CLOSING_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
 TRIAGE_SYSTEM_PROMPT = f"{TRIAGE_RULE}\n\n{LINEAR_RULE}\n\n{STOP_RULE}"
 
+# Used only when the installed blocker-order parks a card on `Waiting for pull request:`. The steps to take after
+# the merge stay in the Claude session, which the next run resumes, so the park reason holds only the pull request.
+PULL_REQUEST_WAIT = (
+    "When a person decided that this card's work must wait for another pull request to merge, and nothing "
+    "else can be done until then, make the first line of your final message `{waiting} <url>` and put the steps "
+    "to take after the merge in the rest of the message. The worker reads that line and parks the card until "
+    "that pull request merges or closes. Make the first line `Needs input:` instead when a card comment starts "
+    "`{noted} <owner>/<name>#<number>` for the same pull request, because this card already waited for it once."
+)
+
 
 def implementation_prompt(result_line) -> str:
     """SYSTEM_PROMPT, with the checks rule that files an issue when the installed `blocker-order` parks a card on
-    one. A deploy can install these scripts before the plugin, so an older `result_line` keeps `Needs input:`."""
-    if not hasattr(result_line, "ISSUE_PARK"):
-        return SYSTEM_PROMPT
-    ending = CHECKS_ISSUE_ENDING.format(waiting=result_line.WAITING_FOR_ISSUE, noted=result_line.ISSUE_NOTED)
-    return SYSTEM_PROMPT.replace(CHECKS_RULE, CHECKS_START + ending)
+    one, and the pull request wait when it parks a card on that. A deploy can install these scripts before the
+    plugin, so an older `result_line` keeps `Needs input:` and gets neither."""
+    prompt = SYSTEM_PROMPT
+    if hasattr(result_line, "ISSUE_PARK"):
+        ending = CHECKS_ISSUE_ENDING.format(waiting=result_line.WAITING_FOR_ISSUE, noted=result_line.ISSUE_NOTED)
+        prompt = prompt.replace(CHECKS_RULE, CHECKS_START + ending)
+    if hasattr(result_line, "PULL_REQUEST_PARK"):
+        prompt += "\n\n" + PULL_REQUEST_WAIT.format(
+            waiting=result_line.WAITING_FOR_PULL_REQUEST, noted=result_line.PULL_REQUEST_NOTED)
+    return prompt
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
 LINEAR_MCP_SERVER = {
@@ -378,6 +393,7 @@ class Stopped(BaseException):
     def __init__(self, signum: int) -> None:
         super().__init__(signum)
         self.signum = signum
+        self.session_id: str | None = None
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -1200,7 +1216,7 @@ def artifact_denials(settings: dict) -> list[str]:
 
 def claude_settings(
     transport: dict, api_key: str, path: Path, triage: bool = False, inbox: Path | None = None,
-    session_id: str | None = None, denials: tuple = (),
+    session_id: str | None = None, denials: tuple = (), auto_merge_repo: str | None = None,
 ) -> dict:
     # Passed with --settings because Claude Code lets a user-level
     # ~/.claude/settings.json env block override the process environment.
@@ -1232,8 +1248,13 @@ def claude_settings(
         for event, mode in (("PostToolUse", "post-tool-use"), ("Stop", "stop")):
             command = f"{shlex.quote(sys.executable)} {shlex.quote(str(REPLY_HOOK))} {mode} --inbox {shlex.quote(str(inbox))}"
             settings["hooks"][event] = [{"hooks": [{"type": "command", "command": command}]}]
-    if session_id and not triage:
-        link = {"type": "command", "command": f"{helper_command(LINK_PR_HOOK)} --session-id {shlex.quote(session_id)}"}
+    # One hook acts on the pull request Claude opens: it links the Linear session and arms auto-merge, each when asked.
+    hook_arguments = [
+        *(["--session-id", shlex.quote(session_id)] if session_id else []),
+        *(["--auto-merge-repo", shlex.quote(auto_merge_repo)] if auto_merge_repo else []),
+    ]
+    if hook_arguments and not triage:
+        link = {"type": "command", "command": " ".join([helper_command(LINK_PR_HOOK), *hook_arguments])}
         settings["hooks"].setdefault("PostToolUse", []).append({"matcher": "Bash", "hooks": [link]})
     if transport.get("auth_token_env"):
         settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)
@@ -1662,6 +1683,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         try:
             write_private(settings_path, claude_settings(
                 transport, api_key, settings_path, triage, inbox, card_session_id, artifact_denials(settings),
+                args.repo if factory_settings.auto_merge(repo) else None,
             ))
             with reply_watch(inbox, client, args, comments, own):
                 try:
@@ -1671,6 +1693,9 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                     )
                 except CardEnded as ended:
                     output, exit_code, detail, idle, card_ended = None, None, "", None, ended
+                except Stopped as stopped:
+                    stopped.session_id = session_id
+                    raise
         finally:
             capability.revoke()
             settings_path.unlink(missing_ok=True)
@@ -1845,7 +1870,24 @@ def capped(result_line, args: argparse.Namespace, refusal: Refusal) -> Refusal:
     )
 
 
+def print_stopped(result_line, stopped: Stopped, started: float) -> None:
+    """The run's last line when a signal ends it. The reader may be gone, and the signal still ends the process."""
+    if not hasattr(result_line, "Stopped"):
+        return
+    report = result_line.Stopped(
+        signal.Signals(stopped.signum).name,
+        int(time.monotonic() - started),
+        result_line.paused(Path(os.environ["HERMES_HOME"])),
+        stopped.session_id,
+    )
+    try:
+        print(result_line.line(report), flush=True)
+    except OSError:
+        pass
+
+
 def main() -> int:
+    started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id", help="the Kanban card id; Hermes does not pass it in the environment")
     parser.add_argument("--issue-id")
@@ -1881,6 +1923,8 @@ def main() -> int:
     try:
         status, report = mcp_status(args) if args.mcp_status else run(args)
     except Stopped as stopped:
+        if not args.mcp_status:
+            print_stopped(result_line, stopped, started)
         signal.signal(stopped.signum, signal.SIG_DFL)
         os.kill(os.getpid(), stopped.signum)
         raise
@@ -1894,6 +1938,8 @@ def main() -> int:
         status, report = 2, result_line.Refused(str(error))
     except Exception as error:
         status, report = 1, result_line.Refused(f"{type(error).__name__}: {error}")
+    for each in STOP_SIGNALS:
+        signal.signal(each, signal.SIG_DFL)
     print(json.dumps(report) if isinstance(report, dict) else result_line.line(report))
     return status
 

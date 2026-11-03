@@ -15,7 +15,8 @@ version, session ID, and worktree lock.
 
 - Start Claude Code only with `"$HERMES_HOME/scripts/claude-session"`. Never
   run `claude` directly, and never in tmux.
-- Never merge a pull request. Never force-push over commits you did not make.
+- Never merge a pull request, and never arm or turn off auto-merge by hand. `claude-session` arms auto-merge on
+  the pull request you open where the repository's settings turn it on. Never force-push over commits you did not make.
   Never push to another person's branch. Publish only to the card's branch.
 - Never close a pull request yourself. `claude-session` closes the card's `takeover_pr` once the factory's own
   pull request is open, and reports it as `superseded` in its result line.
@@ -144,6 +145,17 @@ message, because the `blocker-order` hook sees tool results and not that message
   `needs_input_block`. Follow its `instruction`: stop, and do not run
   `claude-session` again. The sweep returns the card once the issue closes or a
   person replies. Skip steps 4 and 5.
+- When the `result` starts with `Waiting for pull request:`, a person decided
+  that the card's work must wait for another pull request to merge. The
+  `blocker-order` hook parks the card in `scheduled` and adds
+  `pull_request_park` to the tool result, or, when the line holds no GitHub pull
+  request URL or Hermes refuses the park, blocks the card and adds
+  `needs_input_block`. Follow its `instruction`: stop, and do not run
+  `claude-session` again. The sweep returns the card once the pull request
+  merges or closes, or a person replies. Skip steps 4 and 5. Never call
+  `kanban_schedule` on an implementation card except with exactly the reason a
+  hook instruction gives. A wait for a pull request that Claude did not report
+  with that first line has no sweep, so nothing would release the card.
 - A line of only `waiting_on`, a list of card ids, means that cards of the
   issue's blockers are still open, so Claude did not start. The
   `blocker-order` hook adds `blocker_order` to the tool result. Follow its
@@ -158,6 +170,14 @@ message, because the `blocker-order` hook sees tool results and not that message
   activity that says Claude ran and `claude-session` failed after it, with the
   message, and never that Claude did not start. Call `kanban_block` with kind
   `capability` and stop.
+- A line of `signal`, `elapsed`, and `paused`, with `session_id` once Claude
+  started, means a person or process stopped `claude-session` with that signal.
+  It is not a crash. The `blocker-order` hook adds `stopped_park` when `paused`
+  is true, and the sweep returns the card once the Hermes pause ends: stop, post
+  no activity, and never call `kanban_block`. Otherwise it adds `stopped_block`,
+  having blocked the card with kind `transient`: post an `error` activity with
+  the instruction's text, then stop and do not block again. When `parked` or
+  `blocked` is false, follow the instruction's fallback call, then stop.
 - A line that holds `"precondition": "gh_login"` means the worker's gh login is
   missing or stale. The `blocker-order` hook parks the card in `scheduled` and
   adds `gh_login_park` to the result, and a sweep returns the card to the queue

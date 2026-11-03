@@ -240,9 +240,14 @@ class RouteStructureTest(unittest.TestCase):
                 "events": ["AgentSessionEvent", "Comment", "Issue"],
                 "secret": "${LINEAR_WEBHOOK_SECRET}",
                 "filters": LINEAR_FILTERS,
+                "script": "linear-route",
+                "coalesce": {"key": "factoryRoute.issue", "window_seconds": 30, "max_wait_seconds": 300},
                 "toolsets": TOOLSETS,
             },
         )
+
+    def test_the_github_route_has_no_script_or_coalesce_block(self):
+        self.assertTrue({"script", "coalesce"}.isdisjoint(self.routes["github"]))
 
     def test_github_route(self):
         route = {k: v for k, v in self.routes["github"].items() if k != "prompt"}
@@ -821,6 +826,16 @@ class RouteCheckTest(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertEqual(lines[1], "route github: differs in events, prompt; secret is the ${GITHUB_WEBHOOK_SECRET} reference")
+
+    def test_a_linear_route_without_the_coalesce_block_or_script_is_reported(self):
+        self.install_rendered()
+        installed = {k: v for k, v in self.routes["linear"].items() if k not in ("coalesce", "script")}
+        self.install("linear", installed)
+
+        code, lines = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(lines[0], "route linear: differs in coalesce, script; secret is the ${LINEAR_WEBHOOK_SECRET} reference")
 
     def test_a_literal_secret_in_config_is_reported_without_its_value(self):
         self.install_rendered()

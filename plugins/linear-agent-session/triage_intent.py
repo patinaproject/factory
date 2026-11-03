@@ -12,10 +12,11 @@ import time
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Mapping, NamedTuple, Optional
 
-from . import blocks, comment_resume, linear, triage_exit
+from . import blocks, comment_resume, linear, triage_exit, triage_round
 from .triage_exit import Card, History
 
 TRIAGE_BOARD = triage_exit.TRIAGE_BOARD
+TRIAGE_OUTCOME = "Triage outcome:"
 DUPLICATE_WINDOW = dt.timedelta(minutes=5)
 # Linear stamps a session and its webhook within moments of each other, in either order.
 CLOCK_SKEW = dt.timedelta(minutes=1)
@@ -36,6 +37,7 @@ ACTIONS = {
     "skip_comment": "a Comment that resumes no card; the hook skips it and no turn runs",
     "card_reply_not_assignee": "someone who is none of the issue's assignee, delegator, or configured operators replied on an issue with a card; wake no card",
     "triage_card_reply": "a reply on an issue whose triage card is live",
+    "start_triage_with_reply": "a person answered the session's open triage questions on an undelegated issue with no card and no live triage card; start triage with the reply",
     "answer_reply": "a reply on an undelegated issue with no card; answer once",
     "stop_triage_card": "stop the live triage card",
     "stop_card": "stop the issue's card",
@@ -180,6 +182,27 @@ def _session_created(facts: Intent, creator_id: Optional[str], factory_session: 
     return "answer_mention" if creator_id else "ignore_factory_session"
 
 
+def _open_triage_round(thread: Optional[list]) -> bool:
+    """True when the thread's newest triage round has no `Triage outcome:` after it."""
+    open_round = False
+    for item in thread or []:
+        body = item["body"] or ""
+        if item["type"] == "elicitation" and body.startswith(triage_round.TRIAGE_DISCLAIMER):
+            open_round = True
+        elif item["type"] in ("response", "thought") and body.startswith(TRIAGE_OUTCOME):
+            open_round = False
+    return open_round
+
+
+def _answers_triage(facts: Intent) -> bool:
+    return (
+        facts.issue["state_type"] not in triage_exit.CLOSED_STATE_TYPES
+        and facts.reply_author_kind == "person"
+        and facts.thread_source == "linear"
+        and _open_triage_round(facts.thread)
+    )
+
+
 def _session_prompted(facts: Intent, stop: bool) -> str:
     if stop:
         if facts.triage_card and facts.triage_card["status"] != "done":
@@ -189,7 +212,9 @@ def _session_prompted(facts: Intent, stop: bool) -> str:
         return "triage_card_reply"
     if facts.card:
         return "card_reply" if facts.from_assignee else "card_reply_not_assignee"
-    return _delegated(facts, delegation=True) if facts.delegated else "answer_reply"
+    if facts.delegated:
+        return _delegated(facts, delegation=True)
+    return "start_triage_with_reply" if _answers_triage(facts) else "answer_reply"
 
 
 def _issue_update(facts: Intent, updated_from: Mapping[str, Any]) -> str:
