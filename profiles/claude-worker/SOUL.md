@@ -181,9 +181,21 @@ message, because the `blocker-order` hook sees tool results and not that message
   exactly as `gh_login_park` above: stop, post no activity, never call
   `kanban_block`, and treat a result without it as the `"transient": true`
   case below.
+- A line that holds `"precondition": "worktree_held"` means another
+  claude-session holds this card's worktree. A line that holds
+  `"precondition": "server_error"` means GitHub or the gateway's broker
+  answered with a server error. The `blocker-order` hook parks the card the
+  same way and adds `worktree_held_park` or `server_error_park` to the result,
+  and a sweep returns the card to the queue once the lock is free, or five
+  minutes after the park. Follow the park key exactly as `gh_login_park`
+  above: stop, post no activity, never call `kanban_block`, and treat a
+  result without it as the `"transient": true` case below. A line with
+  `"transient": true` and no precondition is a cause that keeps coming back,
+  and its error names the count.
 - On failure the line holds `error`. A refusal that another process holds the
-  worktree means a second worker is running this card: post an `error`
-  activity saying so, call `kanban_block` with kind `transient`, and stop.
+  worktree and has no precondition means a second worker is running this card:
+  post an `error` activity saying so, call `kanban_block` with kind
+  `transient`, and stop.
   When the line also holds `"transient": true`, GitHub kept answering with a
   server error, or the gateway's broker stayed busy or unreachable: post an
   `error` activity with the message, call

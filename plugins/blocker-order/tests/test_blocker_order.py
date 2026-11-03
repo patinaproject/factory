@@ -358,13 +358,13 @@ class ResultLineTest(unittest.TestCase):
             {"error": "stale", "transient": True, "precondition": "gh_login"},
         )
         self.assertIsNone(result_line.precondition_refusal(written))
-        for precondition in ("gh_login", "install_skew", "needs_brief"):
+        for precondition in ("gh_login", "install_skew", "needs_brief", "worktree_held", "server_error"):
             refusal = result_line.Refused("stale", True, precondition)
             self.assertEqual(result_line.precondition_refusal(refusal), refusal)
         self.assertIsNone(result_line.precondition_refusal(result_line.Refused("stale", True, "unknown")))
 
     def test_a_machine_park_never_starts_with_needs_input(self):
-        for park in (result_line.GH_LOGIN_PARK, result_line.INSTALL_SKEW_PARK, result_line.NEEDS_BRIEF_PARK):
+        for park in result_line.MACHINE_PARKS:
             self.assertFalse(park.startswith(result_line.NEEDS_INPUT))
 
     def test_a_crashed_line_is_neither_refused_nor_failed(self):
@@ -760,6 +760,26 @@ class NeedsBriefTest(GhLoginTest):
             self.board.unblock("t_1")
         self.assertEqual([name for name, _ in self.board.calls], ["kanban_schedule"] * 3)
         self.assertNotIn("t_1", self.board.block_kind)
+
+
+class WorktreeHeldTest(GhLoginTest):
+    STOPPED = (
+        "Another claude-session holds this card's worktree, so this card waits in scheduled and goes back to the "
+        "queue once the worktree is free. Stop now: call no other tool, do not call kanban_block, do not post an "
+        "activity, and do not run claude-session again."
+    )
+    PRECONDITION, PARK, KEY = "worktree_held", "Waiting for the worktree:", "worktree_held_park"
+    ERROR = "another claude-session holds /w/.worktrees/abc for card t_old (running)"
+
+
+class ServerErrorTest(GhLoginTest):
+    STOPPED = (
+        "GitHub or the gateway's broker answered with a server error, so this card waits in scheduled and goes "
+        "back to the queue after a short wait. Stop now: call no other tool, do not call kanban_block, do not post "
+        "an activity, and do not run claude-session again."
+    )
+    PRECONDITION, PARK, KEY = "server_error", "Waiting after a server error:", "server_error_park"
+    ERROR = "Linear token: the gateway's broker is busy"
 
 
 class IssueParkTest(Hooked):
