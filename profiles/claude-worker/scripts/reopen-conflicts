@@ -70,6 +70,7 @@ import re
 import subprocess
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
@@ -79,6 +80,7 @@ import factory_settings
 import merged_checks
 import stale_failure
 import stale_reviews
+import stuck_reasons
 from card_transition import Failed as BoardFailed, board_database, plugin_module, pull_ref
 
 REPO_LINE = re.compile(r"^repo:\s*(\S+)\s*$", re.MULTILINE)
@@ -92,6 +94,14 @@ REVIEW_REASON = "changes-requested review still needs work; see the card comment
 COMPARE_LIMIT = 300
 PARKED_LINE = "parked: notice only"
 PR_FIELDS = "number,url,headRefName,headRefOid,baseRefName,author,mergeable,reviewDecision"
+VIEW_FIELDS = "statusCheckRollup,isDraft,mergeStateStatus,labels"
+QUEUE_KEY = "plugins.entries.pr-ready-gate.settings.merge_queue"
+# The same query as MERGE_QUEUE_QUERY in plugins/pr-ready-gate, which a worker script cannot import.
+MERGE_QUEUE_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){isInMergeQueue}}}"
+)
+RUN_ID = re.compile(r"/actions/runs/(\d+)")
+REFUSED = re.compile(r"\(HTTP (403|422)\)")
 
 
 class Refusal(Exception):
@@ -102,6 +112,10 @@ class Refusal(Exception):
 
 class Failed(Exception):
     pass
+
+
+class RateLimited(Failed):
+    """GitHub refused for rate; the rest of that repository waits for a later run."""
 
 
 class Handback(NamedTuple):
@@ -125,18 +139,50 @@ def run(*command: str) -> str:
         raise Failed(f"{command[0]} could not run: {failure.strerror or failure}") from failure
     if proc.returncode != 0:
         detail = proc.stderr.strip().splitlines()[0] if proc.stderr.strip() else "no error output"
-        raise Failed(f"{Path(command[0]).name} {' '.join(command[1:3])} failed: {detail}")
+        failure = f"{Path(command[0]).name} {' '.join(command[1:3])} failed: {detail}"
+        if "HTTP 429" in proc.stderr or ("HTTP 403" in proc.stderr and "rate limit" in proc.stderr.lower()):
+            raise RateLimited(failure)
+        raise Failed(failure)
     return proc.stdout
 
 
-def app_login() -> str:
+def read_settings() -> dict:
     try:
-        login = factory_settings.read(raw=True)["github"]["login"]
-    except (ValueError, KeyError, TypeError):
+        settings = factory_settings.read(raw=True)
+    except ValueError:
+        settings = None
+    if not isinstance(settings, dict):
+        raise Refusal("the factory settings are not readable")
+    return settings
+
+
+def app_login(settings: dict) -> str:
+    try:
+        login = settings["github"]["login"]
+    except (KeyError, TypeError):
         login = None
     if not isinstance(login, str) or not login:
         raise Refusal("github.login is not set in the factory settings")
     return login
+
+
+def stuck_limits(settings: dict) -> dict:
+    given = settings.get("stuck_limits") or {}
+    limits = {**stuck_reasons.DEFAULT_LIMITS, **given} if isinstance(given, dict) else None
+    if limits is None or set(limits) != set(stuck_reasons.DEFAULT_LIMITS) or not all(map(factory_settings.is_count, limits.values())):
+        raise Refusal(f"stuck_limits {given!r} must give a positive integer for each of {', '.join(stuck_reasons.DEFAULT_LIMITS)}")
+    return limits
+
+
+class Sweep:
+    """What one run reads from GitHub and Hermes once and shares across pull requests."""
+
+    def __init__(self, hermes: str, login: str, limits: dict) -> None:
+        self.hermes, self.login, self.limits = hermes, login, limits
+        self.rules: dict = {}
+        self.views: dict = {}
+        self.base_runs: dict = {}
+        self.queue: dict | None = None
 
 
 def candidates(tasks: list) -> dict:
@@ -154,29 +200,59 @@ def open_pulls(repo: str) -> list:
     return json.loads(out)
 
 
-def required_contexts(repo: str, base: str, cache: dict) -> set:
-    if (repo, base) not in cache:
-        out = run(os.environ.get("GH_BIN", "gh"), "api", f"repos/{repo}/rules/branches/{quote(base, safe='')}?per_page=100")
-        cache[(repo, base)] = {
-            required["context"]
-            for rule in json.loads(out)
-            if rule.get("type") == "required_status_checks"
-            for required in (rule.get("parameters") or {}).get("required_status_checks") or []
-        }
-    return cache[(repo, base)]
+def gh_bin() -> str:
+    return os.environ.get("GH_BIN", "gh")
 
 
-def newest_checks(pull: dict) -> dict:
-    view = run(os.environ.get("GH_BIN", "gh"), "pr", "view", pull["url"], "--json", "statusCheckRollup")
-    return merged_checks.newest_runs(json.loads(view).get("statusCheckRollup") or [])
+def branch_rules(repo: str, base: str, sweep: Sweep) -> list:
+    if (repo, base) not in sweep.rules:
+        out = run(gh_bin(), "api", f"repos/{repo}/rules/branches/{quote(base, safe='')}?per_page=100")
+        sweep.rules[(repo, base)] = json.loads(out)
+    return sweep.rules[(repo, base)]
 
 
-def failed_required_checks(pull: dict, newest: dict, repo: str, cache: dict) -> dict:
-    """Maps each required check whose newest run failed to its details URL; empty while any required check is unsettled."""
+def required_contexts(repo: str, base: str, sweep: Sweep) -> set:
+    return {
+        required["context"]
+        for rule in branch_rules(repo, base, sweep)
+        if rule.get("type") == "required_status_checks"
+        for required in (rule.get("parameters") or {}).get("required_status_checks") or []
+    }
+
+
+def queue_entry(repo: str, sweep: Sweep) -> dict | None:
+    """The repository's `merge_queue` entry, read once per run and only when a pull request needs it."""
+    if sweep.queue is None:
+        try:
+            data = json.loads(run(sweep.hermes, "config", "get", QUEUE_KEY, "--json"))
+        except Failed:
+            # Hermes has no value for a key that was never set, which means no repository has a queue.
+            data = None
+        sweep.queue = data if isinstance(data, dict) else {}
+    entry = sweep.queue.get(repo)
+    return entry if isinstance(entry, dict) else None
+
+
+def read_view(pull: dict, sweep: Sweep) -> dict:
+    if pull["url"] not in sweep.views:
+        sweep.views[pull["url"]] = json.loads(run(gh_bin(), "pr", "view", pull["url"], "--json", VIEW_FIELDS))
+    return sweep.views[pull["url"]]
+
+
+def newest_checks(pull: dict, sweep: Sweep) -> dict:
+    return merged_checks.newest_runs(read_view(pull, sweep).get("statusCheckRollup") or [])
+
+
+def failed_required_checks(pull: dict, newest: dict, repo: str, sweep: Sweep) -> dict:
+    """Maps each required check whose newest run failed to its details URL; empty while any required check is unsettled.
+
+    A failed queue check is not the pull request's own check, so the dequeue reasons judge it.
+    """
     if not any(merged_checks.failed(check) for runs in newest.values() for check in runs):
         return {}
     failures = {}
-    for context in required_contexts(repo, pull["baseRefName"], cache):
+    queue = stuck_reasons.queue_checks(queue_entry(repo, sweep))
+    for context in required_contexts(repo, pull["baseRefName"], sweep) - queue:
         runs = newest.get(context)
         if not runs or any(not merged_checks.passed(r) and not merged_checks.failed(r) for r in runs):
             return {}
@@ -184,6 +260,13 @@ def failed_required_checks(pull: dict, newest: dict, repo: str, cache: dict) -> 
         if bad:
             failures[context] = bad[0].get("detailsUrl") or bad[0].get("targetUrl")
     return failures
+
+
+def flaky_run(failures: dict, repo: str, sweep: Sweep) -> str | None:
+    """The one workflow run to re-run when every failed check is a declared flake signal, else None."""
+    signals = stuck_reasons.flake_signals(queue_entry(repo, sweep))
+    ids = {match.group(1) for url in failures.values() if (match := RUN_ID.search(url or "")) is not None}
+    return ids.pop() if failures and set(failures) <= signals and len(ids) == 1 and all(failures.values()) else None
 
 
 def already_sent(hermes: str, task_id: str, marker: str, parked: bool = False) -> bool:
@@ -255,25 +338,324 @@ def re_request(repo: str, task: dict, pull: dict, logins: tuple[str, ...]) -> No
     )
 
 
-def handback_for(pull: dict, task: dict, repo: str, cache: dict) -> Handback | None:
+def handback_for(pull: dict, task: dict, repo: str, sweep: Sweep) -> Handback | None:
     """Re-requests stale reviewers as a side effect when the review sweep decides so."""
     if pull["mergeable"] == "CONFLICTING":
         return conflict_handback(pull)
     review = pull.get("reviewDecision") == "CHANGES_REQUESTED"
     if pull["mergeable"] != "MERGEABLE" or (task["status"] != "review" and not review):
         return None
-    newest = newest_checks(pull)
+    newest = newest_checks(pull, sweep)
     if task["status"] == "review":
-        failures = failed_required_checks(pull, newest, repo, cache)
-        if failures:
+        failures = failed_required_checks(pull, newest, repo, sweep)
+        if failures and flaky_run(failures, repo, sweep) is None:
             return failed_check_handback(pull, failures)
     if not review:
         return None
     reviews, requested, authors = stale_reviews.read_reviews(run, os.environ.get("GH_BIN", "gh"), repo, pull["number"])
-    outcome = stale_reviews.decide(pull, reviews, requested, authors, newest, required_contexts(repo, pull["baseRefName"], cache))
+    outcome = stale_reviews.decide(pull, reviews, requested, authors, newest, required_contexts(repo, pull["baseRefName"], sweep))
     if isinstance(outcome, stale_reviews.Request):
         re_request(repo, task, pull, outcome.logins)
     return review_handback(pull, outcome.reason) if isinstance(outcome, stale_reviews.Handback) else None
+
+
+def card_comments(hermes: str, task_id: str) -> list[list[str]]:
+    """Each card comment as its stripped lines, oldest first."""
+    shown = json.loads(run(hermes, "kanban", "show", task_id, "--json"))
+    return [[line.strip() for line in (comment.get("body") or "").splitlines()] for comment in shown.get("comments") or []]
+
+
+def session_activity(task: dict, pull: dict, body: str) -> bool:
+    """Posts one activity on the card's Linear agent session; False when the card has no session line."""
+    session = SESSION_LINE.search(task.get("body") or "")
+    if session is None:
+        return False
+    cli = Path(os.environ["HERMES_HOME"]) / "plugins" / "linear-agent-session" / "cli.py"
+    outcomes = plugin_module("linear-agent-session", "outcomes")
+    run(
+        sys.executable, str(cli), "activity", "--agent-session-id", session.group(1), "--type", outcomes.activity_type("needs_input"),
+        "--body", body, "--external-url", f"Pull request={pull['url']}",
+    )
+    return True
+
+
+def escalate(sweep: Sweep, task: dict, pull: dict, marker: str, body: str) -> bool:
+    """Tells the session and the card one human step, once per head and marker. Never moves the card."""
+    line = f"{marker}: {pull['headRefOid']}"
+    if line in stuck_reasons.marker_lines(card_comments(sweep.hermes, task["id"])):
+        return False
+    told = session_activity(task, pull, body)
+    run(sweep.hermes, "kanban", "comment", task["id"], pull_ref(f"{body}\n\n{line}"))
+    if not told:
+        raise Failed("the card has no linear_agent_session_id line")
+    return True
+
+
+def record_attempt(sweep: Sweep, task: dict, summary: str, line: str) -> None:
+    """Written before the GitHub call, so a crash loses an attempt and never repeats one."""
+    run(sweep.hermes, "kanban", "comment", task["id"], pull_ref(f"{summary}\n\n{line}"))
+
+
+def base_state(repo: str, base: str, contexts: set, sweep: Sweep) -> str | None:
+    """`failed`, `passed`, or `missing` for the newest runs of the required contexts on the base head; None while unsettled."""
+    if (repo, base) not in sweep.base_runs:
+        out = json.loads(run(gh_bin(), "api", f"repos/{repo}/commits/{quote(base, safe='')}/check-runs?per_page=100"))
+        sweep.base_runs[(repo, base)] = merged_checks.newest_runs([
+            {
+                "__typename": "CheckRun", "name": item["name"], "workflowName": (item.get("app") or {}).get("slug"),
+                "status": str(item.get("status")).upper(), "conclusion": str(item.get("conclusion") or "").upper(),
+                "startedAt": item.get("started_at"),
+            }
+            for item in out.get("check_runs") or []
+        ])
+    runs = {context: sweep.base_runs[(repo, base)].get(context) for context in contexts}
+    seen = [r for found in runs.values() for r in found or []]
+    if any(merged_checks.failed(r) for r in seen):
+        return "failed"
+    if not all(merged_checks.passed(r) for r in seen):
+        return None
+    return "passed" if seen and all(runs.values()) else "missing"
+
+
+def in_merge_queue(repo: str, pull: dict) -> bool:
+    owner, name = repo.split("/", 1)
+    out = run(
+        gh_bin(), "api", "graphql", "-f", f"query={MERGE_QUEUE_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}",
+        "-F", f"number={pull['number']}",
+    )
+    try:
+        return bool(json.loads(out)["data"]["repository"]["pullRequest"]["isInMergeQueue"])
+    except (KeyError, TypeError) as failure:
+        raise ValueError(f"whether {repo}#{pull['number']} is in the merge queue could not be read: {failure!r}") from failure
+
+
+def timeline(repo: str, number: int) -> list:
+    """The issue timeline; `--paginate` prints one JSON array per page."""
+    text = run(gh_bin(), "api", f"repos/{repo}/issues/{number}/timeline", "--paginate")
+    events, decoder, at = [], json.JSONDecoder(), 0
+    while text[at:].strip():
+        at = len(text) - len(text[at:].lstrip())
+        page, at = decoder.raw_decode(text, at)
+        events.extend(page)
+    return events
+
+
+def requeued_since(sweep: Sweep, task: dict, head: str, failed_runs: list) -> bool:
+    """True when the sweep requeued this head after the newest failed queue run, so the queue has not judged it yet."""
+    shown = json.loads(run(sweep.hermes, "kanban", "show", task["id"], "--json"))
+    times = [
+        comment.get("created_at") or 0 for comment in shown.get("comments") or []
+        if any(line.strip().startswith(f"{stuck_reasons.REQUEUE_ATTEMPT}: {head} ") for line in (comment.get("body") or "").splitlines())
+    ]
+    if not times:
+        return False
+    finished = [run_time(r) for r in failed_runs]
+    return not any(at is not None and at > max(times) for at in finished)
+
+
+def run_time(check: dict) -> float | None:
+    stamp = check.get("completedAt") or check.get("startedAt") or check.get("createdAt")
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def has_current_approval(pull: dict, repo: str) -> bool:
+    reviews, _, _ = stale_reviews.read_reviews(run, gh_bin(), repo, pull["number"])
+    return any(
+        r["state"] == "APPROVED" and (r.get("commit") or {}).get("oid") == pull["headRefOid"]
+        for r in stale_reviews.latest_reviews(reviews).values()
+    )
+
+
+def stuck_facts(task: dict, pull: dict, repo: str, sweep: Sweep) -> tuple[stuck_reasons.Facts, dict] | None:
+    """Reads GitHub only as far as the cheaper signals point, and returns the facts with what a repair needs."""
+    view = read_view(pull, sweep)
+    newest = merged_checks.newest_runs(view.get("statusCheckRollup") or [])
+    approved = pull.get("reviewDecision") == "APPROVED"
+    behind = view.get("mergeStateStatus") == "BEHIND"
+    if not (approved or behind or any(merged_checks.failed(c) for runs in newest.values() for c in runs)):
+        return None
+    base, head = pull["baseRefName"], pull["headRefOid"]
+    entry = queue_entry(repo, sweep)
+    rules = branch_rules(repo, base, sweep)
+    wants_last_push = any(
+        rule.get("type") == "pull_request" and (rule.get("parameters") or {}).get("require_last_push_approval") for rule in rules
+    )
+    types = {rule.get("type") for rule in rules}
+    current_approval = approved and wants_last_push and has_current_approval(pull, repo)
+    stale = approved and wants_last_push and not current_approval
+    queue_runs = {name: newest.get(name, []) for name in stuck_reasons.queue_checks(entry)}
+    pending = any(not merged_checks.passed(r) and not merged_checks.failed(r) for runs in queue_runs.values() for r in runs)
+    failed_queue = sorted(name for name, runs in queue_runs.items() if any(merged_checks.failed(r) for r in runs))
+    own_contexts = required_contexts(repo, base, sweep) - set(queue_runs)
+    dequeued = bool(failed_queue) and not pending and not in_merge_queue(repo, pull)
+    base_result = base_state(repo, base, own_contexts, sweep) if dequeued else None
+    failures = failed_required_checks(pull, newest, repo, sweep)
+    run_id = flaky_run(failures, repo, sweep)
+    managed = stuck_reasons.updates_branch(entry) if entry is not None else "merge_queue" in types
+    labels = {item["name"].lower() for item in view.get("labels") or []}
+    awaiting = (
+        entry is not None and approved and view.get("mergeStateStatus") == "BLOCKED" and "update" in types and not stale
+        and not any(queue_runs.values()) and not labels & stuck_reasons.queue_labels(entry)
+        and all(newest.get(c) and all(merged_checks.passed(r) for r in newest[c]) for c in own_contexts)
+        and not in_merge_queue(repo, pull)
+    )
+    comments = card_comments(sweep.hermes, task["id"]) if dequeued else []
+    failed_runs = [r for name in failed_queue for r in queue_runs[name] if merged_checks.failed(r)]
+    in_flight = dequeued and requeued_since(sweep, task, head, failed_runs)
+    facts = stuck_reasons.Facts(
+        status=task["status"],
+        unsettled=pending or in_flight or (dequeued and base_result is None),
+        draft=bool(view.get("isDraft")),
+        approval_stale=stale,
+        dequeued=dequeued,
+        base=base_result,
+        base_escalated=f"dequeued_base_failure_head: {head}" in stuck_reasons.marker_lines(comments),
+        flaky_failed=run_id is not None,
+        behind=behind,
+        branch_updatable=not managed and not current_approval,
+        update_voids_approval=not managed and current_approval,
+        awaiting_queue=awaiting,
+    )
+    return facts, {"entry": entry, "labels": labels, "failed_queue": failed_queue, "run_id": run_id, "failures": failures}
+
+
+def requeue_blocker(sweep: Sweep, pull: dict, repo: str, detail: dict, base_note: str) -> str | None:
+    """The human step when the declared mechanism cannot queue the pull request again, else None."""
+    ref = f"{repo}#{pull['number']}"
+    mechanism = stuck_reasons.requeue_mechanism(detail["entry"])
+    if mechanism.kind == "none":
+        return (
+            f"The sweep cannot queue {ref} again, because `merge_queue.{repo}.requeue` is not set to a label or a command. "
+            f"{base_note} A person queues {ref} again. To let the sweep do it, grant the App the queue tool's command "
+            "(for Mergify, PAT-6029) and set `requeue`."
+        )
+    if mechanism.kind == "label" and mechanism.value.lower() in detail["labels"]:
+        return (
+            f"The label `{mechanism.value}` is still on {ref}, and removing and adding it again does not queue it. "
+            f"{base_note} A person queues {ref} again with the queue tool."
+        )
+    command = mechanism.value if mechanism.kind == "command" else None
+    events = timeline(repo, pull["number"])
+    if not stuck_reasons.queued_by_person(
+        events, stuck_reasons.queue_labels(detail["entry"]), command, lambda login: card_branch.is_app(login, sweep.login),
+    ):
+        return f"No person has {ref} in the queue, so the sweep does not queue it. {base_note} A person queues {ref}."
+    return None
+
+
+def act_dequeued_base_failure(sweep: Sweep, task: dict, pull: dict, repo: str, facts: stuck_reasons.Facts, detail: dict, comments: list) -> str | None:
+    reason = stuck_reasons.BY_NAME["dequeued_base_failure"]
+    ref, head, base = f"{repo}#{pull['number']}", pull["headRefOid"], pull["baseRefName"]
+    if facts.base == "failed":
+        queues_again = stuck_reasons.requeue_mechanism(detail["entry"]).kind != "none"
+        note = f"If a person had queued it, the sweep queues it again once the required checks on the head of {base} pass." if queues_again else f"A person queues it again once {base} passes."
+        return "escalated" if escalate(sweep, task, pull, reason.marker, reason.step.format(pr=ref, base=base, requeue_note=note)) else None
+    made = [n for n in stuck_reasons.attempts(comments, stuck_reasons.REQUEUE_ATTEMPT) if n.startswith(f"{head} ")]
+    if len(made) >= sweep.limits["requeues"]:
+        listed = "\n".join(f"- attempt {number.split()[-1]} on head {head}" for number in made)
+        text = reason.limit_step.format(pr=ref, attempts=len(made), head=head) + f"\n{listed}"
+        return "escalated" if escalate(sweep, task, pull, reason.limit_marker, text) else None
+    blocker = requeue_blocker(sweep, pull, repo, detail, f"The required checks on the head of {base} pass.")
+    if blocker is not None:
+        return "escalated" if escalate(sweep, task, pull, stuck_reasons.REQUEUE_BLOCKED, blocker) else None
+    record_attempt(
+        sweep, task, f"The required checks on the head of {base} pass again, so the sweep queues {ref} again.",
+        f"{stuck_reasons.REQUEUE_ATTEMPT}: {head} {len(made) + 1}",
+    )
+    mechanism = stuck_reasons.requeue_mechanism(detail["entry"])
+    if mechanism.kind == "label":
+        run(gh_bin(), "api", "-X", "POST", f"repos/{repo}/issues/{pull['number']}/labels", "-f", f"labels[]={mechanism.value}")
+    else:
+        run(gh_bin(), "api", "-X", "POST", f"repos/{repo}/issues/{pull['number']}/comments", "-f", f"body={mechanism.value}")
+    return "requeued"
+
+
+def act_flaky_check(sweep: Sweep, task: dict, pull: dict, repo: str, detail: dict, comments: list) -> str | None:
+    reason = stuck_reasons.BY_NAME["flaky_check"]
+    ref, head = f"{repo}#{pull['number']}", pull["headRefOid"]
+    names = ", ".join(f"`{name}`" for name in sorted(detail["failures"]))
+    made = [n for n in stuck_reasons.attempts(comments, stuck_reasons.RERUN_ATTEMPT) if n.startswith(f"{head} ")]
+    if len(made) >= sweep.limits["reruns"]:
+        listed = "\n".join(f"- re-ran run {number.split()[-1]}" for number in made)
+        text = reason.limit_step.format(pr=ref, head=head, attempts=len(made), checks=names) + f"\n{listed}"
+        return "escalated" if escalate(sweep, task, pull, reason.limit_marker, text) else None
+    record_attempt(
+        sweep, task, f"{names} failed on {ref} and is a declared flake signal, so the sweep re-runs the failed jobs.",
+        f"{stuck_reasons.RERUN_ATTEMPT}: {head} {detail['run_id']}",
+    )
+    run(gh_bin(), "run", "rerun", detail["run_id"], "--failed", "-R", repo)
+    return "re-ran"
+
+
+def act_behind_base(sweep: Sweep, task: dict, pull: dict, repo: str, facts: stuck_reasons.Facts, comments: list) -> str | None:
+    reason = stuck_reasons.BY_NAME["behind_base"]
+    ref, head, base = f"{repo}#{pull['number']}", pull["headRefOid"], pull["baseRefName"]
+    if f"{reason.marker}: {head}" in stuck_reasons.marker_lines(comments):
+        return None
+    if not facts.branch_updatable:
+        text = reason.approval_step.format(pr=ref, base=base, head=head)
+        return "escalated" if escalate(sweep, task, pull, reason.marker, text) else None
+    made = stuck_reasons.branch_update_attempts(comments, pull["number"])
+    if len(made) >= sweep.limits["branch_updates"]:
+        listed = "\n".join(f"- updated from head {sha}" for sha in made)
+        text = reason.limit_step.format(pr=ref, base=base, attempts=len(made)) + f"\n{listed}"
+        return "escalated" if escalate(sweep, task, pull, reason.limit_marker, text) else None
+    record_attempt(
+        sweep, task, f"{ref} is behind {base}, so the sweep updates the branch.",
+        f"{stuck_reasons.BRANCH_UPDATE_ATTEMPT}: {pull['number']} {head}",
+    )
+    try:
+        run(gh_bin(), "api", "-X", "PUT", f"repos/{repo}/pulls/{pull['number']}/update-branch", "-f", f"expected_head_sha={head}")
+    except RateLimited:
+        raise
+    except Failed as refusal:
+        if REFUSED.search(str(refusal)) is None:
+            raise
+        detail = str(refusal).split(": ", 1)[-1]
+        escalate(sweep, task, pull, reason.marker, reason.step.format(pr=ref, base=base, detail=detail))
+        return "escalated"
+    return "updated the branch of"
+
+
+def own_failure_handback(reason: stuck_reasons.Reason, pull: dict, repo: str, facts: stuck_reasons.Facts, detail: dict) -> Handback:
+    base, head = pull["baseRefName"], pull["headRefOid"]
+    if facts.base == "missing":
+        note = f"The base branch {base} has no run of its required checks at its head, so the base run was missing and the sweep cannot tell whether {base} is healthy."
+    else:
+        note = f"The required checks on the head of {base} pass, so the failure was in the queue's own run of the pull request."
+    checks = ", ".join(f"`{name}`" for name in detail["failed_queue"])
+    marker = f"{reason.marker}: {head}"
+    text = reason.step.format(pr=f"{repo}#{pull['number']}", head=head, base_note=note, checks=checks)
+    return Handback(marker, f"{text}\n\n{marker}", "the merge queue dropped the pull request; see the card comments")
+
+
+def stuck_action(task: dict, pull: dict, repo: str, sweep: Sweep) -> Handback | None:
+    """Acts on reasons 5 to 10 for a `review` card. Returns the handback of a dequeue that is the pull request's own fault."""
+    if task["status"] != "review" or pull["mergeable"] != "MERGEABLE":
+        return None
+    found = stuck_facts(task, pull, repo, sweep)
+    reason = stuck_reasons.classify(found[0]) if found else None
+    if reason is None or reason.kind == stuck_reasons.NONE:
+        return None
+    facts, detail = found
+    if reason.name == "dequeued_own_failure":
+        return own_failure_handback(reason, pull, repo, facts, detail)
+    comments = card_comments(sweep.hermes, task["id"])
+    ref, head = f"{repo}#{pull['number']}", pull["headRefOid"]
+    if reason.kind == stuck_reasons.ESCALATE:
+        done = "escalated" if escalate(sweep, task, pull, reason.marker, reason.step.format(pr=ref, head=head)) else None
+    elif reason.name == "dequeued_base_failure":
+        done = act_dequeued_base_failure(sweep, task, pull, repo, facts, detail, comments)
+    elif reason.name == "flaky_check":
+        done = act_flaky_check(sweep, task, pull, repo, detail, comments)
+    else:
+        done = act_behind_base(sweep, task, pull, repo, facts, comments)
+    if done is not None:
+        print(f"{task['id']} {pull['url']} {done} {reason.name}")
+    return None
 
 
 def send_back(hermes: str, task: dict, handback: Handback, sent: bool) -> None:
@@ -344,7 +726,9 @@ def main() -> int:
     try:
         check_profile_home()
         hermes = factory_settings.find_hermes()
-        login = app_login()
+        settings = read_settings()
+        login = app_login(settings)
+        sweep = Sweep(hermes, login, stuck_limits(settings))
         try:
             by_repo = candidates(json.loads(run(hermes, "kanban", "list", "--json")))
         except (Failed, ValueError) as failure:
@@ -355,7 +739,6 @@ def main() -> int:
     except factory_settings.SettingsError as exc:
         print(f"reopen-conflicts: {exc}", file=sys.stderr)
         return 2
-    rules: dict = {}
     for repo, tasks in sorted(by_repo.items()):
         try:
             pulls = open_pulls(repo)
@@ -375,13 +758,17 @@ def main() -> int:
                     if notify_triage(hermes, repo, task, pull):
                         print(f"{task['id']} {pull['url']} notified")
                     continue
-                handback = handback_for(pull, task, repo, rules)
+                handback = handback_for(pull, task, repo, sweep) or stuck_action(task, pull, repo, sweep)
                 if handback is None:
                     continue
                 sent = already_sent(hermes, task["id"], handback.marker)
                 if sent and task["status"] == "blocked":
                     continue
                 send_back(hermes, task, handback, sent)
+            except RateLimited as failure:
+                print(f"reopen-conflicts: {repo}: {task['id']}: {failure}", file=sys.stderr)
+                failed = True
+                break
             except (Failed, BoardFailed, ValueError, sqlite3.Error) as failure:
                 print(f"reopen-conflicts: {task['id']}: {failure}", file=sys.stderr)
                 failed = True

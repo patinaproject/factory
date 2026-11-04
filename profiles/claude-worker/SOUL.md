@@ -381,7 +381,12 @@ Then act on the result:
   - When the tool result has `waiting_for_merge_queue`, the pull request is
     approved and waits for the merge queue. End the `body` with that instead
     of asking the operator to review and merge. Never add or remove a merge
-    queue label yourself.
+    queue label yourself. The reopen-conflicts sweep requeues a pull request
+    that a person queued and the queue dropped, and only that one. It may
+    also update the branch from its base with GitHub's update-branch, which
+    makes a new head on GitHub. When you resume a card, run `git pull` in the
+    worktree before you complete it, so the gate sees the worktree at the
+    remote head.
   - When the tool result has `waiting_for_queue_entry`, the pull request is
     approved and waits for a person to add it to the merge queue. End the
     `body` with that, and name the person from `owner_review_requested` when

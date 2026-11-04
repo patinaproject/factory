@@ -1168,6 +1168,31 @@ an entry, an approved, unqueued pull request on a base branch with an `update`
 rule hands off to review for a person to add it to the queue. Without an entry,
 that pull request stays refused.
 
+An entry may also set three keys that only the `reopen-conflicts` sweep reads.
+The gate ignores them.
+
+```json
+{"<owner>/<repo>": {"labels": [], "checks": [], "requeue": {"command": "<comment text>"}, "updates_branch": false, "flake_signals": ["<check>"]}}
+```
+
+`requeue` is `{"command": "<comment text>"}`, `{"label": "<label>"}`, or
+`"none"`. A missing or malformed value means `"none"`. The sweep queues a pull
+request again only when a person queued it and the queue dropped it, after the
+base branch's required checks pass. It never queues a pull request for the
+first time. A label needs the App's Issues write permission, and a command
+needs Pull requests write. Whether the queue tool accepts the App's command is
+the queue tool's setting, not GitHub's, so grant it there (for Mergify, set
+`commands_restrictions`, PAT-6029). `check-github-access` prints one line per
+repository whose installation lacks the permission. `updates_branch` is `true`
+when the queue updates branches itself, and the sweep then never calls
+update-branch. `flake_signals` names checks that the sweep may re-run once per
+head with `gh run rerun --failed`.
+
+The sweep's limits per pull request head are
+`plugins.entries.linear-agent-session.settings.stuck_limits`, which defaults to
+`{"requeues": 2, "reruns": 1, "branch_updates": 2}`. Each value is a positive
+integer.
+
 **GitHub login.** Return to [`references/github.md`](references/github.md)
 and run its "Sign the worker's `gh` in" section now. It needs only the
 settings above. The clones below use that login.
@@ -1565,7 +1590,19 @@ request on the current head, or the reviewer's unresolved review thread, sends
 the card back once per head instead. A `triage` card that Hermes parked is
 never moved. When its pull request conflicts, the job tells the card's Linear
 agent session once per head, lists the conflicting files, and comments on the
-card. Create the job when `cron list` has no `reopen-conflicts` job:
+card. For a `review` card, the same job also repairs a pull request that is
+stuck without a conflict. It reads the `merge_queue` setting above. A pull
+request the merge queue dropped goes back to its worker when its own queue run
+failed, and otherwise the sweep tells the card and its session that the base
+branch is failing. It queues a pull request again that a person queued, once
+the base branch passes, up to `stuck_limits.requeues` per head. It updates a
+behind branch with `update-branch` up to `stuck_limits.branch_updates` times
+per pull request, only where the queue does not update branches itself and no
+current approval would be voided. It re-runs a failed check named in
+`flake_signals` once per head. It tells the card and its session the exact
+human step, once per head, for a stale approval, a repair past its limit, a
+refused update, and an approved pull request that nobody queued. Those
+escalations never move the card, which stays in `review`. Create the job when `cron list` has no `reopen-conflicts` job:
 
 ```sh
 hermes -p claude-worker cron create "every 5m" --name reopen-conflicts --no-agent --script reopen-conflicts </dev/null

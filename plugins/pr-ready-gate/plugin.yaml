@@ -20,4 +20,10 @@ config_schema:
       GitHub reports in the merge queue, passes kanban_request_review. An entry for a repository,
       even {}, also declares that an update rule on the base branch means the merge queue, so an
       approved pull request that is not queued yet passes kanban_request_review for a person to
-      queue. The default names no repository.
+      queue. The default names no repository. The gate ignores three optional keys that the
+      reopen-conflicts sweep reads. `requeue` is {"command": "<comment text>"},
+      {"label": "<label>"}, or "none", and a missing or malformed value means "none". The sweep
+      uses it only to queue again a pull request that a person queued and the queue dropped.
+      `updates_branch` is true when the queue updates branches itself, so the sweep never calls
+      update-branch, and defaults to false. `flake_signals` lists check names that the sweep
+      may re-run once per head, and defaults to [].
