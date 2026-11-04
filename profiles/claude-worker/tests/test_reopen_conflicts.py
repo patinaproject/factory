@@ -1140,7 +1140,14 @@ class ReopenConflictsTest(unittest.TestCase):
 
         self.run_script()
 
-        self.assertEqual((self.writes(), self.gh_writes(), self.cli_calls()), ([], [], []))
+        body = (
+            f"{self.PR} is behind main, and updating it would void the approval of its current head {HEAD}, because "
+            "the base branch rules require approval of the most recent push. A person updates the branch on GitHub, "
+            "and a reviewer approves the new head."
+        )
+        comment, activity = self.escalation(body, "behind_base_head")
+        self.assertEqual((self.writes(), self.cli_calls(), self.gh_writes()), ([comment], [activity], []))
+        self.assert_quiet()
 
     def test_a_behind_branch_is_updated_once_with_the_expected_head_until_the_limit(self) -> None:
         self.stuck_case(entry=None, mergeStateStatus="BEHIND")

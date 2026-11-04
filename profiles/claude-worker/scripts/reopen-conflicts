@@ -493,6 +493,7 @@ def stuck_facts(task: dict, pull: dict, repo: str, sweep: Sweep) -> tuple[stuck_
         flaky_failed=run_id is not None,
         behind=behind,
         branch_updatable=not managed and not current_approval,
+        update_voids_approval=not managed and current_approval,
         awaiting_queue=awaiting,
     )
     return facts, {"entry": entry, "labels": labels, "failed_queue": failed_queue, "run_id": run_id, "failures": failures}
@@ -566,11 +567,14 @@ def act_flaky_check(sweep: Sweep, task: dict, pull: dict, repo: str, detail: dic
     return "re-ran"
 
 
-def act_behind_base(sweep: Sweep, task: dict, pull: dict, repo: str, comments: list) -> str | None:
+def act_behind_base(sweep: Sweep, task: dict, pull: dict, repo: str, facts: stuck_reasons.Facts, comments: list) -> str | None:
     reason = stuck_reasons.BY_NAME["behind_base"]
     ref, head, base = f"{repo}#{pull['number']}", pull["headRefOid"], pull["baseRefName"]
     if f"{reason.marker}: {head}" in stuck_reasons.marker_lines(comments):
         return None
+    if not facts.branch_updatable:
+        text = reason.approval_step.format(pr=ref, base=base, head=head)
+        return "escalated" if escalate(sweep, task, pull, reason.marker, text) else None
     made = stuck_reasons.branch_update_attempts(comments, pull["number"])
     if len(made) >= sweep.limits["branch_updates"]:
         listed = "\n".join(f"- updated from head {sha}" for sha in made)
@@ -623,7 +627,7 @@ def stuck_action(task: dict, pull: dict, repo: str, sweep: Sweep) -> Handback | 
     elif reason.name == "flaky_check":
         done = act_flaky_check(sweep, task, pull, repo, detail, comments)
     else:
-        done = act_behind_base(sweep, task, pull, repo, comments)
+        done = act_behind_base(sweep, task, pull, repo, facts, comments)
     if done is not None:
         print(f"{task['id']} {pull['url']} {done} {reason.name}")
     return None

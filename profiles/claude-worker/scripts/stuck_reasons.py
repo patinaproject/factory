@@ -48,6 +48,7 @@ class Facts:
     flaky_failed: bool = False
     behind: bool = False
     branch_updatable: bool = False
+    update_voids_approval: bool = False
     awaiting_queue: bool = False
 
 
@@ -60,6 +61,7 @@ class Reason:
     repair: str | None = None
     step: str = ""
     limit_step: str = ""
+    approval_step: str = ""
 
     @property
     def marker(self) -> str:
@@ -111,7 +113,13 @@ REASONS = (
         ),
     ),
     Reason(
-        "behind_base", REPAIR, REVIEW, lambda f: f.behind and f.branch_updatable, repair="update_branch",
+        "behind_base", REPAIR, REVIEW, lambda f: f.behind and (f.branch_updatable or f.update_voids_approval),
+        repair="update_branch",
+        approval_step=(
+            "{pr} is behind {base}, and updating it would void the approval of its current head {head}, because "
+            "the base branch rules require approval of the most recent push. A person updates the branch on GitHub, "
+            "and a reviewer approves the new head."
+        ),
         step=(
             "GitHub refused to update {pr} from {base}: {detail}. A person updates the branch on GitHub or "
             "grants the App what the refusal names."
