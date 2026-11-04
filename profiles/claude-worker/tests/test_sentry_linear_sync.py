@@ -364,23 +364,82 @@ class TextSafetyTest(SyncTest):
         self.assertEqual(self.writes("IssueCreate")[0]["title"], "web: Failed for <email> at <url> id <n> <uuid> <str>")
 
 
+def record(change: str) -> str:
+    return f"This job changed the priority.\n\n<!-- sentry-linear-sync:priority:{change} -->"
+
+
 class PriorityTest(SyncTest):
-    def test_the_job_writes_a_changed_priority_while_only_the_app_changed_it_in_triage(self) -> None:
-        issue = tracked("ABC-1", RELEASES_KEY, priority=3, history=[(0, 3, APP_USER), (3, 4, APP_USER), (4, 3, APP_USER)])
+    def test_a_priority_the_job_writes_is_recorded_and_the_job_keeps_owning_it(self) -> None:
+        self.serve([tracked("ABC-1", RELEASES_KEY, priority=3)], FakeSentry(issues=[releases_issue(users=30)]))
+        dry = self.run_sync("--dry-run")
+        self.assertEqual(self.lines(dry), ["priority    ABC-1 Medium -> High"])
+        self.assertEqual(self.linear.writes, [])
+
+        proc = self.run_sync()
+        self.assertEqual(self.lines(proc), ["priority    ABC-1 Medium -> High"])
+        self.assertEqual(self.writes("IssueUpdate"), [{"id": "id-ABC-1", "priority": 2}])
+        comments = self.writes("CommentOnIssue")
+        self.assertEqual(len(comments), 1)
+        self.assertTrue(comments[0]["body"].endswith("<!-- sentry-linear-sync:priority:3-2 -->"))
+
+        self.sentry.issues[0]["userCount"] = 300
+        again = self.run_sync()
+        self.assertEqual(self.lines(again), ["priority    ABC-1 High -> Urgent"])
+        self.assertEqual(self.writes("IssueUpdate"), [{"id": "id-ABC-1", "priority": 2}, {"id": "id-ABC-1", "priority": 1}])
+
+    def test_app_changes_that_all_match_a_record_leave_the_issue_owned(self) -> None:
+        issue = tracked("ABC-1", RELEASES_KEY, priority=3, history=[(4, 3, APP_USER)], comments=[record("4-3")])
         self.serve([issue], FakeSentry(issues=[releases_issue(users=30)]))
         proc = self.run_sync()
         self.assertEqual(self.lines(proc), ["priority    ABC-1 Medium -> High"])
-        self.assertEqual(self.writes(), [{"id": "id-ABC-1", "priority": 2}])
+        self.assertEqual(self.writes("IssueUpdate"), [{"id": "id-ABC-1", "priority": 2}])
+        bodies = [w["body"] for w in self.writes("CommentOnIssue")]
+        self.assertEqual(len(bodies), 1)
+        self.assertTrue(bodies[0].endswith("<!-- sentry-linear-sync:priority:3-2 -->"))
+
+    def test_no_write_of_any_kind_for_an_app_change_with_no_matching_record(self) -> None:
+        for name, history, comments in (
+            ("unrecorded", [(3, 4, APP_USER), (4, 3, APP_USER)], []),
+            ("before records existed", [(3, 2, APP_USER)], []),
+            ("repeated value", [(4, 3, APP_USER), (3, 4, APP_USER), (4, 3, APP_USER)], [record("4-3")]),
+        ):
+            with self.subTest(name):
+                issue = tracked("ABC-1", RELEASES_KEY, priority=3, history=history, comments=comments)
+                self.serve([issue], FakeSentry(issues=[releases_issue(users=30)]))
+                proc = self.run_sync()
+                self.assertEqual((proc.returncode, self.lines(proc), self.linear.writes), (0, [], []))
+                dry = self.run_sync("--dry-run")
+                self.assertEqual(self.lines(dry), [])
 
     def test_no_priority_write_after_a_person_changed_it_or_the_issue_left_triage(self) -> None:
         for name, issue in (
-            ("person", tracked("ABC-1", RELEASES_KEY, priority=3, history=[(0, 3, APP_USER), (3, 4, PERSON), (4, 3, APP_USER)])),
-            ("todo", tracked("ABC-1", RELEASES_KEY, priority=3, state="unstarted", history=[(0, 3, APP_USER)])),
+            ("person", tracked("ABC-1", RELEASES_KEY, priority=3, history=[(3, 4, PERSON), (4, 3, APP_USER)], comments=[record("4-3")])),
+            ("todo", tracked("ABC-1", RELEASES_KEY, priority=3, state="unstarted")),
         ):
             with self.subTest(name):
                 self.serve([issue], FakeSentry(issues=[releases_issue(users=30)]))
                 proc = self.run_sync()
                 self.assertEqual((proc.returncode, self.lines(proc), self.linear.writes), (0, [], []))
+
+
+class PriorityOwnershipTest(unittest.TestCase):
+    def test_ownership_needs_every_change_by_the_app_and_one_record_per_change(self) -> None:
+        def change(f, t, by_me=True):
+            return {"from": f, "to": t, "byMe": by_me}
+
+        def rec(value):
+            return f"text\n\n<!-- sentry-linear-sync:priority:{value} -->"
+
+        for name, bodies, changes, expected in (
+            ("empty", [], [], True),
+            ("match", [rec("4-3"), "plain comment"], [change(4, 3)], True),
+            ("extra app change", [rec("4-3")], [change(4, 3), change(3, 2)], False),
+            ("person change", [rec("4-3")], [change(4, 3, False)], False),
+            ("repeated value", [rec("4-3")], [change(4, 3), change(3, 4), change(4, 3)], False),
+            ("extra record", [rec("4-3"), rec("3-2")], [change(4, 3)], False),
+        ):
+            with self.subTest(name):
+                self.assertIs(sentry_sync.priority_is_recorded(bodies, changes), expected)
 
 
 class LifecycleTest(SyncTest):
