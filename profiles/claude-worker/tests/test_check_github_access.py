@@ -87,7 +87,7 @@ class CheckGithubAccessTest(unittest.TestCase):
         plugin.mkdir(parents=True)
         (plugin / "broker_client.py").symlink_to(CHECKOUT / "plugins" / "linear-agent-session" / "broker_client.py")
         (self.worker / "scripts").mkdir()
-        for name in ("check-github-access", "factory_settings.py", "app_events.py"):
+        for name in ("check-github-access", "factory_settings.py", "app_events.py", "stuck_reasons.py"):
             shutil.copy(SCRIPTS / name, self.worker / "scripts" / name)
         self.broker_path = root / "factory-uploads.sock"
         self.installation = dict(ALL_PERMISSIONS)
@@ -105,7 +105,7 @@ class CheckGithubAccessTest(unittest.TestCase):
             "deny": [],
         }
 
-    def check(self, env: dict | None = None, broker: list | None = None) -> tuple:
+    def check(self, env: dict | None = None, broker: list | None = None, merge_queue: dict | None = None) -> tuple:
         if broker is None:
             broker = [minted(self.installation)]
         self.broker = FakeBroker(self.broker_path, github_token=broker) if broker else None
@@ -117,8 +117,12 @@ class CheckGithubAccessTest(unittest.TestCase):
         base.update(GH_BIN=str(self.gh), GH_CONFIG_DIR=str(self.tmp / "gh"), FAKE_GH_STATE=str(state),
                     FAKE_GH_LOG=str(self.log))
         base.update(env or {})
+        queue_args = []
+        if merge_queue is not None:
+            (self.tmp / "queue.json").write_text(json.dumps(merge_queue))
+            queue_args = ["--merge-queue-json", str(self.tmp / "queue.json")]
         proc = subprocess.run(
-            [sys.executable, str(self.worker / "scripts" / "check-github-access"), "--settings-json", str(self.settings)],
+            [sys.executable, str(self.worker / "scripts" / "check-github-access"), "--settings-json", str(self.settings), *queue_args],
             env=base, capture_output=True, text=True,
         )
         self.assertNotIn(TOKEN, proc.stdout + proc.stderr)
@@ -328,6 +332,37 @@ class CheckGithubAccessTest(unittest.TestCase):
         self.assertIn("GH_TOKEN is set", stderr)
         self.assertFalse(self.log.exists())
         self.assertEqual(self.broker.requests, [])
+
+    def test_a_label_requeue_without_issues_write_names_the_grant(self) -> None:
+        self.installation["issues"] = "read"
+
+        status, lines, _ = self.check(merge_queue={REPO: {"requeue": {"label": "queue"}}})
+
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, [
+            'Installation of example-app: accept "Issues: Read and write" on the installation, it has read',
+            f'{REPO}: requeue by label needs "Issues: Read and write" on the installation, it has read',
+        ])
+
+    def test_a_command_requeue_without_pull_requests_write_names_the_grant(self) -> None:
+        self.state["app_permissions"] = {**ALL_PERMISSIONS, "pull_requests": "read"}
+        self.installation["pull_requests"] = "read"
+
+        status, lines, _ = self.check(merge_queue={REPO: {"requeue": {"command": "@queue"}}})
+
+        self.assertEqual(status, 1)
+        self.assertEqual(lines, [
+            'App example-app: grant "Pull requests: Read and write", it has read',
+            f'{REPO}: requeue by command needs "Pull requests: Read and write" on the App, it has read',
+            f'{REPO}: requeue by command needs "Pull requests: Read and write" on the installation, it has read',
+        ])
+
+    def test_a_repository_without_a_requeue_gets_no_requeue_line(self) -> None:
+        self.installation["issues"] = "read"
+
+        status, lines, _ = self.check(merge_queue={REPO: {"requeue": "none"}, "other/repo": {"requeue": {"label": "queue"}}})
+
+        self.assertEqual(lines, ['Installation of example-app: accept "Issues: Read and write" on the installation, it has read'])
 
 
 if __name__ == "__main__":

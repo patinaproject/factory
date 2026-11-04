@@ -7,6 +7,10 @@ the reads that pr-ready-gate and Hermes' Kanban completion contract make: a
 pull request, its base branch rules, its check runs, its commit statuses, and its
 workflow runs, and the repository activity that card_branch reads to tell the App's
 branches from a person's. Actions needs write so a worker can re-run failed jobs.
+For each repository whose `merge_queue` entry sets `requeue` to a label or a command,
+it also prints one line when the App or its installation lacks what the sweep needs
+to requeue: Issues write for a label, Pull requests write for a command. Whether the
+queue tool accepts the App's command cannot be read from GitHub.
 The App's settings name the permissions it asks for, but an installation keeps
 the old ones until an org owner accepts the new, so the check also compares the
 permissions of the installation token that the gateway's broker mints. It also
@@ -30,6 +34,7 @@ from urllib.parse import quote
 
 import factory_settings
 from app_events import missing_events
+from stuck_reasons import requeue_mechanism
 
 HOME = Path(__file__).resolve().parents[1]
 GH_TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN")
@@ -53,6 +58,8 @@ CHECKS = Permission("checks", "Checks", "read")
 STATUSES = Permission("statuses", "Commit statuses", "read")
 ACTIONS = Permission("actions", "Actions", "write")
 METADATA = Permission("metadata", "Metadata", "read")
+QUEUE_KEY = "plugins.entries.pr-ready-gate.settings.merge_queue"
+REQUEUE_PERMISSION = {"label": ISSUES, "command": PULL_REQUESTS}
 REQUIRED = (CONTENTS, PULL_REQUESTS, ISSUES, CHECKS, STATUSES, ACTIONS, METADATA)
 
 PULL_REQUEST_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
@@ -106,15 +113,15 @@ def shortfalls(granted: dict) -> list[tuple[Permission, str]]:
     ]
 
 
-def check_app(slug: str) -> tuple[list[str], set]:
+def check_app(slug: str) -> tuple[list[str], set, dict | None]:
     try:
         app = gh(METADATA, slug, "the App", f"apps/{slug}")
     except Refused as refused:
-        return [str(refused)], set()
+        return [str(refused)], set(), None
     missing = shortfalls(app.get("permissions") or {})
     problems = [f"App {slug}: grant {permission.grant()}, it has {has}" for permission, has in missing]
     problems.extend(f'App {slug}: subscribe to the "{label}" event, which starts auto-deploy' for label in missing_events(app))
-    return problems, {permission.key for permission, _ in missing}
+    return problems, {permission.key for permission, _ in missing}, app.get("permissions") or {}
 
 
 def installation_permissions(slug: str) -> dict:
@@ -138,17 +145,49 @@ def installation_permissions(slug: str) -> dict:
     return permissions
 
 
-def check_installation(slug: str, app_missing: set) -> list[str]:
+def check_installation(slug: str, app_missing: set) -> tuple[list[str], dict | None]:
     """Report each permission the App asks for that the installation has not accepted."""
     try:
         granted = installation_permissions(slug)
     except Refused as refused:
-        return [str(refused)]
+        return [str(refused)], None
     return [
         f"Installation of {slug}: accept {permission.grant()} on the installation, it has {has}"
         for permission, has in shortfalls(granted)
         if permission.key not in app_missing
-    ]
+    ], granted
+
+
+def load_merge_queue(merge_queue_file: str | None, settings_file: str | None) -> dict:
+    """The gate's `merge_queue` map. A settings file given for a test has no queue unless a queue file is given too."""
+    if merge_queue_file:
+        data = json.loads(Path(merge_queue_file).read_text())
+    elif settings_file:
+        return {}
+    else:
+        proc = subprocess.run(
+            [factory_settings.find_hermes(), "config", "get", QUEUE_KEY, "--json"], capture_output=True, text=True,
+        )
+        # Hermes has no value for a key that was never set, which means no repository has a queue.
+        data = json.loads(proc.stdout) if proc.returncode == 0 else {}
+    return data if isinstance(data, dict) else {}
+
+
+def requeue_problems(merge_queue: dict, repositories: list, held: dict[str, dict]) -> list[str]:
+    """One line per repository whose requeue mechanism needs a permission that the App or its installation lacks."""
+    problems = []
+    for repo in repositories:
+        mechanism = requeue_mechanism(merge_queue.get(repo))
+        if mechanism.kind == "none":
+            continue
+        permission = REQUEUE_PERMISSION[mechanism.kind]
+        for owner, granted in held.items():
+            if LEVELS.get(granted.get(permission.key), 0) < LEVELS[permission.level]:
+                problems.append(
+                    f"{repo}: requeue by {mechanism.kind} needs {permission.grant()} on the {owner}, "
+                    f"it has {granted.get(permission.key) or 'no access'}"
+                )
+    return problems
 
 
 def head_to_check(repo: str, problems: list) -> tuple[str, str]:
@@ -194,7 +233,7 @@ def check_repository(repo: str) -> list[str]:
     return problems
 
 
-def run(settings_file: str | None) -> list[str]:
+def run(settings_file: str | None, merge_queue_file: str | None = None) -> list[str]:
     if not os.environ.get("GH_CONFIG_DIR"):
         raise Refusal("GH_CONFIG_DIR is not set; point it at the worker's gh directory")
     overriding = [name for name in GH_TOKEN_VARIABLES if os.environ.get(name)]
@@ -208,19 +247,25 @@ def run(settings_file: str | None) -> list[str]:
     if not repositories:
         raise Refusal("no repositories are configured")
     slug = login.removesuffix("[bot]")
-    problems, app_missing = check_app(slug)
-    problems.extend(check_installation(slug, app_missing))
+    problems, app_missing, app_granted = check_app(slug)
+    installation_problems, installation_granted = check_installation(slug, app_missing)
+    problems.extend(installation_problems)
     for repo in repositories:
         problems.extend(check_repository(repo))
+    held = {"App": app_granted, "installation": installation_granted}
+    problems.extend(requeue_problems(
+        load_merge_queue(merge_queue_file, settings_file), repositories, {name: g for name, g in held.items() if g is not None},
+    ))
     return problems
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--settings-json", help="read the settings from this JSON file instead of hermes config")
+    parser.add_argument("--merge-queue-json", help="read the gate's merge_queue map from this JSON file instead of hermes config")
     args = parser.parse_args()
     try:
-        problems = run(args.settings_json)
+        problems = run(args.settings_json, args.merge_queue_json)
     except (Refusal, factory_settings.SettingsError, OSError, ValueError) as exc:
         print(f"check-github-access: {exc}", file=sys.stderr)
         return 2
