@@ -2144,7 +2144,8 @@ each check. Report each result.
     still the pinned tag.
 14. `git -C <repo> status --porcelain` prints nothing. This repository holds no
     factory value.
-15. Publish an issue's `gitBranchName` to GitHub with one commit as the App,
+15. Publish an issue's `gitBranchName`, as the factory's Linear CLI prints it
+    and not as Linear's UI shows it, to GitHub with one commit as the App,
     with `push-signed` from a clone outside the checkout, then delegate the
     issue. The first `claude-session` line reports `adopted` with `source`
     `remote_branch`, the branch starts at that commit, and the first

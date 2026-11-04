@@ -172,8 +172,10 @@ Use native `parentId`, `blockedBy`, `blocks`, and `relatedTo` relationships.
 Set a project and project milestone together when planning requires them.
 Linear Releases and release notes describe what shipped.
 
-The canonical private branch is the fetched issue's `gitBranchName`, used
-verbatim.
+The canonical private branch is the fetched issue's `gitBranchName`, as the
+factory's Linear CLI or the `linear_issue` tool returns it. The factory maps
+Linear's branch name to lowercase `[a-z0-9-]` segments, so it can differ from
+the name Linear's UI shows.
 
 ## When an issue becomes ready
 

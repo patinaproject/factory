@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -771,7 +772,7 @@ class LinearClient:
         return {
             "stateType": issue["state"]["type"],
             "delegate": issue["delegate"]["id"] if issue["delegate"] else None,
-            "branch": issue["branchName"],
+            "branch": slugify_branch(issue["branchName"]),
         }
 
     def blockers(self, id_or_identifier: str) -> list:
@@ -1375,13 +1376,25 @@ def _bounded(text: str) -> str:
     return text if len(text) <= THREAD_BODY_LIMIT else text[:THREAD_BODY_LIMIT] + THREAD_TRUNCATED
 
 
+def slugify_branch(name: str) -> str:
+    """Maps Linear's `branchName` to the name the product repositories' branch check accepts."""
+    segments = []
+    for segment in name.split("/"):
+        decomposed = unicodedata.normalize("NFKD", segment.lower())
+        ascii_only = "".join(c for c in decomposed if not unicodedata.combining(c))
+        slug = re.sub(r"[^a-z0-9-]+", "-", ascii_only).strip("-")
+        if slug:
+            segments.append(slug)
+    return "/".join(segments)
+
+
 def _issue_summary(issue: dict) -> dict:
     return {
         "id": issue["id"],
         "identifier": issue["identifier"],
         "title": issue["title"],
         "url": issue["url"],
-        "gitBranchName": issue["branchName"],
+        "gitBranchName": slugify_branch(issue["branchName"]),
         "state": issue["state"]["name"],
         "stateType": issue["state"]["type"],
         "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in issue["attachments"]["nodes"]],
@@ -1443,7 +1456,7 @@ def _blocking_issues(relations: dict) -> list:
         {
             "id": n["issue"]["id"],
             "identifier": n["issue"]["identifier"],
-            "gitBranchName": n["issue"]["branchName"],
+            "gitBranchName": slugify_branch(n["issue"]["branchName"]),
             "stateType": n["issue"]["state"]["type"],
             "delegate": n["issue"]["delegate"]["id"] if n["issue"]["delegate"] else None,
         }

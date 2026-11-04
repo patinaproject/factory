@@ -1040,6 +1040,7 @@ class IssueTest(unittest.TestCase):
         issue = make_client(FakeLinear([(200, self.RESPONSE)])).get_issue("ABC-123")
         self.assertEqual((issue["delegate"], issue["delegateName"]), ("app-user-1", "Factory App"))
 
+
 RAW_BRANCH = "goodyear/pat-6026-make-the-preview-build-gate-refuse-a-vercel_git_commit_sha"
 MAPPED_BRANCH = "goodyear/pat-6026-make-the-preview-build-gate-refuse-a-vercel-git-commit-sha"
 
