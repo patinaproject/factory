@@ -400,7 +400,8 @@ Then act on the result:
   An open review thread that a person started does not stop it either.
   Before the handoff, answer in the thread each such thread that asks you
   something and whose starting comment's author `login` is the sender of an
-  unmarked card comment. That comment marks an approver. Leave every other
+  unmarked card comment for a pull request review or comment. That comment
+  marks an approver. Leave every other
   thread unanswered and open, including one from before the card. The
   exception is a thread whose starter is the sender of a marked comment that
   says the factory's agent app is the issue's assignee: you may answer it. In

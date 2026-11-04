@@ -88,8 +88,8 @@ event keep the steps below unchanged.
    For a pull request review or comment, name the sender by GitHub login.
    Quote the review or comment body, or name the failed check and its
    conclusion. When `from_assignee` is not true, start the comment with
-   `<<not_assignee_marker>>`. When `assignee_is_agent` is true, say in that
-   comment that the factory's agent app is the issue's assignee. Name each
+   `<<not_assignee_marker>>`. When `assignee_is_agent` is true, say in the
+   marked comment that the factory's agent app is the issue's assignee. Name each
    person in `approvers` and their role,
    or, when `reason` is set, say why the event woke nothing, for example that
    the issue has no assignee or that the assignee has not connected GitHub to
