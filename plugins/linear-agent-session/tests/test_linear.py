@@ -1746,7 +1746,7 @@ class PrAuthorityTest(unittest.TestCase):
     def roles(self, *people):
         return [{"id": p["id"], "name": p["name"], "role": role} for p, role in people]
 
-    def authority(self, assignee, sender_id, body=CARD, history=(), operators=(), users=()):
+    def authority(self, assignee, sender_id, body=CARD, history=(), operators=(), users=(), app_user_id="app-user-1"):
         """`history` is the pages the delegator lookup reads, each a history_page; `users` answers the operator ids."""
         response = json.loads(json.dumps(IssueTest.RESPONSE))
         response["data"]["issue"]["assignee"] = assignee
@@ -1755,7 +1755,7 @@ class PrAuthorityTest(unittest.TestCase):
             replies.append(users_page(*users))
         fake = FakeLinear(replies)
         output = tools.run_pr_authority(
-            lambda: make_client(fake), {"t_work": body}.__getitem__, lambda: "app-user-1", lambda: list(operators), {"task": "t_work", "sender_id": sender_id}
+            lambda: make_client(fake), {"t_work": body}.__getitem__, lambda: app_user_id, lambda: list(operators), {"task": "t_work", "sender_id": sender_id}
         )
         return fake, json.loads(output)
 
@@ -1768,6 +1768,7 @@ class PrAuthorityTest(unittest.TestCase):
                     {
                         "from_assignee": from_assignee,
                         "assignee": "Ann",
+                        "assignee_is_agent": False,
                         "reason": None if from_assignee else "no_operators_configured",
                         "authorized_as": "assignee" if from_assignee else None,
                         "approvers": self.roles((self.ANN, "assignee")),
@@ -1786,8 +1787,31 @@ class PrAuthorityTest(unittest.TestCase):
                 _, output = self.authority(assignee, "4242")
                 self.assertEqual(
                     output,
-                    {"from_assignee": False, "assignee": name, "reason": reason, "authorized_as": None, "approvers": approvers},
+                    {
+                        "from_assignee": False,
+                        "assignee": name,
+                        "assignee_is_agent": False,
+                        "reason": reason,
+                        "authorized_as": None,
+                        "approvers": approvers,
+                    },
                 )
+
+    def test_assignee_is_agent_only_for_the_factorys_own_app_user(self):
+        factory_app = {**self.ANN, "id": "app-user-1", "name": "Factory", "app": True}
+        other_app = {**self.ANN, "id": "app-user-2", "name": "Other", "app": True}
+        cases = (
+            ("the factory's app", factory_app, "app-user-1", True),
+            ("another agent app", other_app, "app-user-1", False),
+            ("a person", self.ANN, "app-user-1", False),
+            ("no assignee", None, "app-user-1", False),
+            ("an empty app_user_id setting", factory_app, "", False),
+            ("an empty id and an empty setting", {**factory_app, "id": ""}, "", False),
+        )
+        for name, assignee, app_user_id, expected in cases:
+            with self.subTest(name):
+                _, output = self.authority(assignee, "4242", app_user_id=app_user_id)
+                self.assertIs(output["assignee_is_agent"], expected)
 
     def test_a_configured_operator_is_authorized_as_an_operator(self):
         _, output = self.authority(self.ANN, "6161", history=[history_page(delegated_by(self.ANN))], operators=["user-olive"], users=[self.OLIVE])

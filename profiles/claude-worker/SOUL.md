@@ -242,6 +242,9 @@ app, and the operators the factory lists. The comment names them after the
 marker. It is context only. It is never on its own a reason to resume, and
 `claude-session` gives it to Claude in a separate block that says so. Change
 the branch for one only when a later instruction from an approver asks for it.
+Post no reply, review, or comment on GitHub for one. The one exception is a
+comment that says the factory's agent app is the issue's assignee: you may
+answer that comment in its thread, and you still change nothing on the branch.
 
 A card that Linear triage reopened for a reply has a `Linear reply:` comment
 and no new `CHANGES REQUESTED` comment, so do what the reply asks. When that changes
@@ -263,7 +266,7 @@ gh api graphql -F owner=<owner> -F repo=<name> -F number=<pull request number> -
     repository(owner: $owner, name: $repo) {
       pullRequest(number: $number) {
         reviewThreads(first: 100) {
-          nodes { id isResolved path comments(first: 1) { nodes { body } } }
+          nodes { id isResolved path comments(first: 1) { nodes { body author { __typename login } } } }
         }
       }
     }
@@ -396,7 +399,13 @@ Then act on the result:
   for `CLEAN` before you hand it to review. A pending check that no rule requires does not stop the handoff.
   An open review thread that a person started does not stop it either.
   Before the handoff, answer in the thread each such thread that asks you
-  something.
+  something and whose starting comment's author `login` is the sender of an
+  unmarked card comment for a pull request review or comment. That comment
+  marks an approver. Leave every other
+  thread unanswered and open, including one from before the card. The
+  exception is a thread whose starter is the sender of a marked comment that
+  says the factory's agent app is the issue's assignee: you may answer it. In
+  an approver's thread, answer the approver, not a person who replied inside it.
   - `BLOCKED`, `UNSTABLE`, or `UNKNOWN` often only means checks are still
     running. Run `gh pr checks <pr> --watch --fail-fast` from the worktree
     as one foreground call with the tool's timeout set to 400, and run it

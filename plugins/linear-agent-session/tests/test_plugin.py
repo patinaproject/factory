@@ -667,6 +667,7 @@ class CliTest(unittest.TestCase):
                     expected = {
                         "from_assignee": from_assignee,
                         "assignee": "Ann",
+                        "assignee_is_agent": False,
                         "reason": None,
                         "authorized_as": role,
                         "approvers": approvers,
@@ -707,6 +708,7 @@ class CliTest(unittest.TestCase):
                 expected = {
                     "from_assignee": from_assignee,
                     "assignee": "Ann",
+                    "assignee_is_agent": False,
                     "reason": None if from_assignee else "no_operators_configured",
                     "authorized_as": role,
                     "approvers": approvers,
@@ -724,6 +726,7 @@ class CliTest(unittest.TestCase):
                 expected = {
                     "from_assignee": from_assignee,
                     "assignee": "Ann",
+                    "assignee_is_agent": False,
                     "reason": "operator_lookup_failed",
                     "authorized_as": role,
                     "approvers": approvers,

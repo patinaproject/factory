@@ -74,6 +74,8 @@ assignee first. Otherwise `assignee` names the assignee or is null, and
 matched, `no_operators_configured` when the sender is someone else and the
 `operator_user_ids` setting is empty, or null when the sender is simply someone else. When it prints
 `error`, treat the sender as not an approver, with that error as the reason.
+`assignee_is_agent` is true only when the issue's assignee is the factory's own
+agent app.
 
 The sender is not an approver when the command ran and `from_assignee` is not
 true. Such an event wakes no card: in steps 3, 4, and 5, the comment from step 1
@@ -83,9 +85,12 @@ event keep the steps below unchanged.
 ## Record the event
 
 1. Comment on the card. Name the event, its action, the sender, and the page.
+   For a pull request review or comment, name the sender by GitHub login.
    Quote the review or comment body, or name the failed check and its
    conclusion. When `from_assignee` is not true, start the comment with
-   `<<not_assignee_marker>>`. Name each person in `approvers` and their role,
+   `<<not_assignee_marker>>`. When `assignee_is_agent` is true, say in the
+   marked comment that the factory's agent app is the issue's assignee. Name each
+   person in `approvers` and their role,
    or, when `reason` is set, say why the event woke nothing, for example that
    the issue has no assignee or that the assignee has not connected GitHub to
    Linear. For `no_operators_configured`, say that no operators are configured,
