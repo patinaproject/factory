@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Mapping, NewType, Optional, Union
@@ -538,6 +539,14 @@ class TrackedRead:
 
 def parse_time(value: Optional[str]) -> Optional[datetime]:
     return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+
+
+def priority_is_recorded(comment_bodies: list, changes: list) -> bool:
+    """True when the agent app made every priority change in `changes` and the job's `priority` markers record exactly those changes, one record each."""
+    if not all(change["byMe"] for change in changes):
+        return False
+    recorded = Counter(m[2] for body in comment_bodies for m in MARKER.finditer(body) if m[1] == "priority")
+    return recorded == Counter(f"{change['from']}-{change['to']}" for change in changes)
 
 
 def read_tracked(issues: list, organization: str, priority_owned: frozenset) -> TrackedRead:
