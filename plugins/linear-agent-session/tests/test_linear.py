@@ -1040,6 +1040,56 @@ class IssueTest(unittest.TestCase):
         issue = make_client(FakeLinear([(200, self.RESPONSE)])).get_issue("ABC-123")
         self.assertEqual((issue["delegate"], issue["delegateName"]), ("app-user-1", "Factory App"))
 
+RAW_BRANCH = "goodyear/pat-6026-make-the-preview-build-gate-refuse-a-vercel_git_commit_sha"
+MAPPED_BRANCH = "goodyear/pat-6026-make-the-preview-build-gate-refuse-a-vercel-git-commit-sha"
+
+
+class BranchNameTest(unittest.TestCase):
+    def fixture(self):
+        response = json.loads(json.dumps(IssueTest.RESPONSE))
+        issue = response["data"]["issue"]
+        issue["branchName"] = RAW_BRANCH
+        issue["inverseRelations"]["nodes"][0]["issue"]["branchName"] = RAW_BRANCH
+        return response
+
+    def test_get_issue_returns_the_mapped_branch_for_the_issue_and_its_blockers(self):
+        issue = make_client(FakeLinear([(200, self.fixture())])).get_issue("ABC-123")
+        self.assertEqual(issue["gitBranchName"], MAPPED_BRANCH)
+        self.assertEqual(issue["blockedBy"][0]["gitBranchName"], MAPPED_BRANCH)
+
+    def test_blocking_issues_return_the_mapped_branch(self):
+        relations = self.fixture()["data"]["issue"]["inverseRelations"]
+        self.assertEqual(linear._blocking_issues(relations)[0]["gitBranchName"], MAPPED_BRANCH)
+
+    def test_issue_status_returns_the_mapped_branch(self):
+        issue = {"state": {"type": "started"}, "delegate": None, "branchName": RAW_BRANCH}
+        status = make_client(FakeLinear([(200, {"data": {"issue": issue}})])).issue_status("ABC-123")
+        self.assertEqual(status["branch"], MAPPED_BRANCH)
+
+    def test_the_mapped_branch_passes_the_product_repository_branch_check(self):
+        pattern = r"^goodyear/pat-6026-[a-z0-9][a-z0-9-]*$"
+        self.assertRegex(MAPPED_BRANCH, pattern)
+        self.assertRegex(MAPPED_BRANCH + "-takeover", pattern)
+
+    def test_slugify_branch_rows(self):
+        rows = [
+            ("goodyear/pat-1-make-it", "goodyear/pat-1-make-it"),
+            ("goodyear/pat-1-a--b", "goodyear/pat-1-a--b"),
+            ("a_b", "a-b"),
+            ("a.b", "a-b"),
+            ("a b", "a-b"),
+            ("a__b", "a-b"),
+            ("AB", "ab"),
+            ("\u00e9", "e"),
+            ("stra\u00dfe", "stra-e"),
+            ("a\u4e2db", "a-b"),
+            ("ted.smith/pat-1-x", "ted-smith/pat-1-x"),
+            ("goodyear/___/pat-1-x", "goodyear/pat-1-x"),
+        ]
+        for raw, expected in rows:
+            with self.subTest(raw=raw):
+                self.assertEqual(linear.slugify_branch(raw), expected)
+
 
 class BlockersTest(unittest.TestCase):
     def test_returns_each_blocking_issue_and_whether_the_app_is_its_delegate(self):
