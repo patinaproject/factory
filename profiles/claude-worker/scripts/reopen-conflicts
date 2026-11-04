@@ -70,6 +70,7 @@ import re
 import subprocess
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
@@ -100,6 +101,7 @@ MERGE_QUEUE_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){isInMergeQueue}}}"
 )
 RUN_ID = re.compile(r"/actions/runs/(\d+)")
+REFUSED = re.compile(r"\(HTTP (403|422)\)")
 
 
 class Refusal(Exception):
@@ -410,11 +412,9 @@ def base_state(repo: str, base: str, contexts: set, sweep: Sweep) -> str | None:
     seen = [r for found in runs.values() for r in found or []]
     if any(merged_checks.failed(r) for r in seen):
         return "failed"
-    if not seen:
-        return "missing"
-    if any(not found or not all(merged_checks.passed(r) for r in found) for found in runs.values()):
+    if not all(merged_checks.passed(r) for r in seen):
         return None
-    return "passed"
+    return "passed" if seen and all(runs.values()) else "missing"
 
 
 def in_merge_queue(repo: str, pull: dict) -> bool:
@@ -438,6 +438,27 @@ def timeline(repo: str, number: int) -> list:
         page, at = decoder.raw_decode(text, at)
         events.extend(page)
     return events
+
+
+def requeued_since(sweep: Sweep, task: dict, head: str, failed_runs: list) -> bool:
+    """True when the sweep requeued this head after the newest failed queue run, so the queue has not judged it yet."""
+    shown = json.loads(run(sweep.hermes, "kanban", "show", task["id"], "--json"))
+    times = [
+        comment.get("created_at") or 0 for comment in shown.get("comments") or []
+        if any(line.strip().startswith(f"{stuck_reasons.REQUEUE_ATTEMPT}: {head} ") for line in (comment.get("body") or "").splitlines())
+    ]
+    if not times:
+        return False
+    finished = [run_time(r) for r in failed_runs]
+    return not any(at is not None and at > max(times) for at in finished)
+
+
+def run_time(check: dict) -> float | None:
+    stamp = check.get("completedAt") or check.get("startedAt") or check.get("createdAt")
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 def has_current_approval(pull: dict, repo: str) -> bool:
@@ -482,9 +503,11 @@ def stuck_facts(task: dict, pull: dict, repo: str, sweep: Sweep) -> tuple[stuck_
         and not in_merge_queue(repo, pull)
     )
     comments = card_comments(sweep.hermes, task["id"]) if dequeued else []
+    failed_runs = [r for name in failed_queue for r in queue_runs[name] if merged_checks.failed(r)]
+    in_flight = dequeued and requeued_since(sweep, task, head, failed_runs)
     facts = stuck_reasons.Facts(
         status=task["status"],
-        unsettled=pending or (dequeued and base_result is None),
+        unsettled=pending or in_flight or (dequeued and base_result is None),
         draft=bool(view.get("isDraft")),
         approval_stale=stale,
         dequeued=dequeued,
@@ -589,6 +612,8 @@ def act_behind_base(sweep: Sweep, task: dict, pull: dict, repo: str, facts: stuc
     except RateLimited:
         raise
     except Failed as refusal:
+        if REFUSED.search(str(refusal)) is None:
+            raise
         detail = str(refusal).split(": ", 1)[-1]
         escalate(sweep, task, pull, reason.marker, reason.step.format(pr=ref, base=base, detail=detail))
         return "escalated"

@@ -82,6 +82,8 @@ if argv[:2] == ["api", "-X"] and argv[2] == "PUT":
         sys.exit("gh: API rate limit exceeded (HTTP 429)")
     if argv[3] in state.get("update_fails", []):
         sys.exit("gh: Head branch was modified. Review and try the merge again. (HTTP 422)")
+    if argv[3] in state.get("update_errors", []):
+        sys.exit("gh: Server Error (HTTP 502)")
     print("{}")
     sys.exit(0)
 if argv[:3] == ["api", "-X", "POST"]:
@@ -1062,6 +1064,25 @@ class ReopenConflictsTest(unittest.TestCase):
         self.assertTrue(text.endswith(f"dequeued_own_failure_head: {HEAD}"))
         self.assertEqual(self.gh_writes(), [])
 
+    def test_a_dequeue_with_one_required_base_run_missing_says_the_base_run_was_missing(self) -> None:
+        self.stuck_case(checks=[check("ci"), check("lint"), check_run("Queue", "FAILURE")], rules=required("ci", "lint", "Queue"), base=self.base_run("success"))
+
+        self.run_script()
+
+        self.assertIn("so the base run was missing", self.writes()[0][3])
+        self.assertTrue(self.writes()[0][3].endswith(f"dequeued_own_failure_head: {HEAD}"))
+        self.assertEqual(self.gh_writes(), [])
+
+    def test_a_requeue_the_queue_has_not_run_yet_is_not_made_again(self) -> None:
+        attempt = {"body": f"queued again\n\nrequeue_attempt: {HEAD} 1", "created_at": 1893456000}
+        self.stuck_case(checks=self.dropped(), base=self.base_run("success"), timeline=self.by_person(), comments=[self.ESCALATED])
+        self.state["comments"]["t_1"].append(attempt)
+
+        proc = self.run_script()
+
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertEqual((self.writes(), self.gh_writes(), self.cli_calls()), ([], [], []))
+
     def test_a_pull_request_only_the_app_queued_is_not_queued_again(self) -> None:
         app_only = [{"event": "commented", "actor": {"login": BOT_LOGIN}, "body": "@queue"}]
         self.stuck_case(checks=self.dropped(), base=self.base_run("success"), timeline=app_only, comments=[self.ESCALATED])
@@ -1180,6 +1201,17 @@ class ReopenConflictsTest(unittest.TestCase):
         self.run_script()
 
         self.assertEqual(len(self.gh_writes()), 1)
+
+    def test_a_server_error_on_a_branch_update_fails_the_run_without_an_escalation(self) -> None:
+        self.stuck_case(entry=None, mergeStateStatus="BEHIND")
+        self.state["update_errors"] = [f"repos/{REPO}/pulls/7/update-branch"]
+
+        proc = self.run_script()
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("HTTP 502", proc.stderr)
+        self.assertEqual(self.writes(), [["kanban", "comment", "t_1", f"{self.PR} is behind main, so the sweep updates the branch.\n\nbranch_update_attempt: 7 {HEAD}"]])
+        self.assertEqual(self.cli_calls(), [])
 
     def test_a_refused_branch_update_escalates_and_is_not_retried_on_that_head(self) -> None:
         self.stuck_case(entry=None, mergeStateStatus="BEHIND")
