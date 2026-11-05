@@ -992,7 +992,7 @@ class LinearClient:
             after = issue["comments"]["pageInfo"]["endCursor"]
 
     def priority_changes(self, id_or_identifier: str) -> list:
-        """Every priority change in the issue's history, oldest first, as {from, to, byMe}. Raises rather than return a partial list."""
+        """Every priority change in the issue's history, as {from, to, byMe}. Raises rather than return a partial list."""
         changes: list = []
         after: Optional[str] = None
         while True:

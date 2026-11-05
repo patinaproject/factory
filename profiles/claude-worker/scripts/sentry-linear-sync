@@ -64,7 +64,7 @@ def read_linear(client, settings: sentry_sync.Settings) -> sentry_sync.TrackedRe
     owned = frozenset(
         issue["id"] for issue in issues
         if issue["createdByMe"] and issue["stateType"] == "triage" and sentry_sync.ORIGIN_LINE.search(issue["description"])
-        and all(change["byMe"] for change in client.priority_changes(issue["id"]))
+        and sentry_sync.priority_is_recorded(issue["comments"], client.priority_changes(issue["id"]))
     )
     return sentry_sync.read_tracked(issues, settings.organization, owned)
 
@@ -147,6 +147,12 @@ def apply(action, client, settings: sentry_sync.Settings, rules: sentry_sync.Rul
                 comment(action.issue.issue_id, f"Sentry issue {link} joined this error group.", "member", member.short_id)
         case SetPriority():
             client.set_priority(action.issue.issue_id, action.to)
+            name = sentry_sync.PRIORITY_NAMES
+            comment(
+                action.issue.issue_id,
+                f"This job changed the priority from {name[action.issue.priority]} to {name[action.to]} to match its Sentry error group.",
+                "priority", f"{action.issue.priority}-{action.to}",
+            )
         case LinkKey():
             attach(action.canonical.issue_id, action.key, action.url)
         case CloseInactive():

@@ -167,6 +167,8 @@ class FakeLinear(_Server):
         if "stateId" in v["input"]:
             issue["state"] = next(s for s in self.states if s["id"] == v["input"]["stateId"])
         if "priority" in v["input"]:
+            if v["input"]["priority"] != issue["priority"]:
+                issue["history"].append((issue["priority"], v["input"]["priority"], APP_USER))
             issue["priority"] = v["input"]["priority"]
         return {"issueUpdate": {"success": True}}
 
