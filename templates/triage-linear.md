@@ -530,11 +530,12 @@ a person to send a fixed phrase.
    with the error, and stop. When the visibility is `PUBLIC`, GitHub is the
    tracker: follow steps 4 and 5, and make no Linear write to the target,
    except the comment that "Post a comment" below allows and the priority.
-   Priority has no GitHub field. Set it with one `linear_issue_edit` call that
-   passes `priority`, chosen as step 6 says, and no other field. Every other field changes only on
-   GitHub. A reply that asks for labels and priority makes one
-   `github_issue_edit` call and one `linear_issue_edit` call, and one
-   `response` names both results.
+   Priority has no GitHub field. Set it with one `linear_issue_edit` call
+   that passes `priority`, chosen as step 6 says, and no other field. Every
+   other field changes only on GitHub, so a reply that asks only for a
+   priority skips steps 4 and 5. A reply that asks for labels and priority
+   makes one `github_issue_edit` call and one `linear_issue_edit` call, and
+   one `response` names both results.
    Otherwise Linear is the tracker: follow steps 4 and 6.
 4. Write the new text. A title or description edit keeps what the person did
    not ask to change: start from the current text and write the full new
