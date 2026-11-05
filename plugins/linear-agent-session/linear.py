@@ -249,7 +249,7 @@ ISSUE_STATES_QUERY = """query IssueStates($id: String!) {
 
 ISSUE_EDIT_QUERY = """query IssueEdit($id: String!) {
   issue(id: $id) {
-    id identifier title description
+    id identifier title description priority
     state { name }
     labels { nodes { id name parent { id } } }
     team { states { nodes { id name } } labels(first: 250) { nodes { id name isGroup parent { id } } } }
@@ -867,6 +867,7 @@ class LinearClient:
         state: Optional[str] = None,
         title: Optional[str] = None,
         description: Optional[str] = None,
+        priority: Optional[int] = None,
     ) -> dict:
         """An added label replaces the issue's other labels in its group, because Linear allows one per group."""
         data = self._graphql(ISSUE_EDIT_QUERY, {"id": id_or_identifier})
@@ -895,6 +896,9 @@ class LinearClient:
         target = _by_name(issue["team"]["states"]["nodes"], state, "status") if state else None
         if target and target["name"] != issue["state"]["name"]:
             update["stateId"] = target["id"]
+        current_priority = int(issue["priority"])  # Linear returns a Float
+        if priority is not None and priority != current_priority:
+            update["priority"] = priority
         if update:
             payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": update})
             if not payload["issueUpdate"]["success"]:
@@ -905,6 +909,7 @@ class LinearClient:
             "title": update.get("title", issue["title"]),
             "labels": sorted(n["name"] for n in labels.values()),
             "state": target["name"] if target else issue["state"]["name"],
+            "priority": update.get("priority", current_priority),
         }
 
     def create_issue(

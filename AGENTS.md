@@ -30,7 +30,8 @@ receives issues through one-way GitHub-to-Linear intake for team visibility
 and is not authoritative. Synced property updates are bidirectional, so do not
 edit or close public-repository issues in Linear. There are three exceptions.
 Delegating the Linear copy to the factory's agent starts a card, triage sets
-the Linear copy's priority from the adapter's Priority rubric, and the agent
+the Linear copy's priority from the adapter's Priority rubric (a teammate's
+agent-session reply can ask for a priority too), and the agent
 posts a top-level comment on the Linear copy when a teammate's reply asks for
 one (see `docs/agents/issue-tracker.md`). Do not add committed design
 or plan artifacts for routine issue work; put durable context on the GitHub
