@@ -1063,14 +1063,14 @@ class BranchNameTest(unittest.TestCase):
         self.assertEqual(linear._blocking_issues(relations)[0]["gitBranchName"], MAPPED_BRANCH)
 
     def test_issue_status_returns_the_mapped_branch(self):
-        issue = {"state": {"type": "started"}, "delegate": None, "branchName": RAW_BRANCH}
-        status = make_client(FakeLinear([(200, {"data": {"issue": issue}})])).issue_status("ABC-123")
+        status = make_client(FakeLinear([(200, self.fixture())])).issue_status("ABC-123")
         self.assertEqual(status["branch"], MAPPED_BRANCH)
 
     def test_the_mapped_branch_passes_the_product_repository_branch_check(self):
         pattern = r"^goodyear/pat-6026-[a-z0-9][a-z0-9-]*$"
-        self.assertRegex(MAPPED_BRANCH, pattern)
-        self.assertRegex(MAPPED_BRANCH + "-takeover", pattern)
+        mapped = linear.slugify_branch(RAW_BRANCH)
+        self.assertRegex(mapped, pattern)
+        self.assertRegex(mapped + "-takeover", pattern)
 
     def test_slugify_branch_rows(self):
         rows = [
