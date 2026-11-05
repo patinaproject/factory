@@ -265,6 +265,14 @@ class TriageExitTest(Harness):
         self.assertEqual(self.dispatch(issue_update("canceled"))["action"], "skip")
         self.assertEqual(self.archived(), [["--board", "triage", "t_triage"]])
 
+    def test_a_card_on_the_mapped_branch_of_an_issue_whose_linear_branch_has_an_underscore_reaches_triage(self):
+        self.boards["triage"] = [card("t_triage", "todo")]
+        self.boards[None] = [rewritten_card("t_work", "review", "goodyear/pat-1-fix-it")]
+        self.linear.graphql_responses = [live_issue("canceled", branch="goodyear/pat-1-fix_it")]
+
+        self.assertIsNone(self.dispatch(issue_update("canceled")))
+        self.assertEqual(self.archived(), [])
+
     def test_a_card_found_by_title_on_the_default_board_also_reaches_triage(self):
         self.boards["triage"] = [card("t_triage", "todo")]
         self.boards[None] = [SimpleNamespace(id="t_work", status="ready", title="PAT-1: Fix it", body="no id line", branch_name=None)]

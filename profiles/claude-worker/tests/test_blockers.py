@@ -8,6 +8,10 @@ from tests.support import SCRIPTS
 sys.path.insert(0, str(SCRIPTS))
 import blockers  # noqa: E402
 
+PLUGIN = SCRIPTS.parents[2] / "plugins" / "linear-agent-session"
+sys.path.insert(0, str(PLUGIN))
+import linear  # noqa: E402
+
 
 def issue(identifier: str, *, state: str = "started", delegated: bool = True) -> dict:
     number = identifier.split("-")[1]
@@ -117,6 +121,15 @@ class WaitingOnTest(unittest.TestCase):
         for board, expected in boards:
             with self.subTest(expected=expected):
                 self.assertEqual(self.wait([blocker], [board])[0], [expected])
+
+    def test_a_blocker_whose_linear_branch_has_an_underscore_is_found_by_its_mapped_branch(self):
+        relations = {"nodes": [{"type": "blocks", "issue": {
+            "id": "uuid-1", "identifier": "ABC-1", "branchName": "goodyear/abc-1-fix_it",
+            "state": {"type": "started"}, "delegate": None}}]}
+        blocker = {**linear._blocking_issues(relations)[0], "delegatedToSelf": False}
+        board = [{**card("t_1", "ABC-1", status="todo", branch="goodyear/abc-1-fix-it"), "title": "renamed", "body": ""}]
+
+        self.assertEqual(self.wait([blocker], [board])[0], ["t_1"])
 
 
 if __name__ == "__main__":

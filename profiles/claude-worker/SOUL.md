@@ -75,8 +75,9 @@ fields Hermes keeps:
 - `takeover_pr` is the one triage chose. Run
   `python3 "$HERMES_HOME/scripts/card_branch.py" --app <login> --repo <repo> --git-branch <gitBranchName>`
   with `--pull <url>` for each pull request URL in the issue's `attachments`
-  that is in `repo`. `<login>` is the login `gh auth status` prints. Use the
-  `takeover_pr` it prints, which can be null. When it prints `blocked` or
+  that is in `repo`. Take `<gitBranchName>` from the `linear_issue` tool or the
+  factory's Linear CLI, never from Linear's UI. `<login>` is the login
+  `gh auth status` prints. Use the `takeover_pr` it prints, which can be null. When it prints `blocked` or
   `error`, call `kanban_block` with kind `capability` and its reason.
 
 If a key still cannot be found, call `kanban_block` with kind `capability` and

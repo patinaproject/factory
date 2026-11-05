@@ -102,7 +102,8 @@ It was computed when the webhook arrived, so it can be seconds old.
   `ready-for-agent`.
 - Read Linear issues only with the `linear_issue` tool, and find one by its
   words with `linear_issue_search`. Both read as the agent app, which is the
-  reader the worker uses, so `gitBranchName` matches.
+  reader the worker uses, so `gitBranchName` matches. It is the factory's mapped
+  branch name, not Linear's value copied from its UI.
 - Stay read-only on GitHub, except the `github_issue_edit` and
   `github_issue_create` calls that "Requested issue change" makes. Read pull requests only with `gh pr view`
   or the `card_branch` command in "Implementation card". Do not run git, edit

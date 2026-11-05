@@ -86,7 +86,8 @@ token cache under `<home>/plugin-data/linear-agent-session/`.
   HERMES_HOME=<home> python3 <repo>/plugins/linear-agent-session/cli.py issue <ABC-123> )
 ```
 
-The command exits `0` and prints the issue's `gitBranchName`. The JSON
+The command exits `0` and prints the issue's `gitBranchName`. That is the
+factory's mapped branch name, not Linear's value verbatim. The JSON
 output's `delegate.id` is the app user ID. Use it as `app_user_id` in part 10.
 
 ## Verify
