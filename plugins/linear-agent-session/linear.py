@@ -948,7 +948,8 @@ class LinearClient:
         return {"identifier": payload["issue"]["identifier"], "url": payload["issue"]["url"]}
 
     def list_issues_by_label(self, team_key: str, label: str) -> list:
-        """Every issue of the team that carries the label, in any state, with who created it, its attachments, comments, and duplicate-of target.
+        """Every issue of the team that carries the label, in any state, with who created it, its attachments, comments,
+        duplicate-of target, and the issues it relates to.
 
         `createdByMe` is true for an issue the agent app created. `creator` is None for an issue an integration created.
         Raises rather than return a partial list.
@@ -975,6 +976,7 @@ class LinearClient:
                     "createdByMe": n["creator"] is not None and n["creator"]["id"] == data["viewer"]["id"],
                     "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in n["attachments"]["nodes"]],
                     "duplicateOf": next((r["relatedIssue"]["identifier"] for r in n["relations"]["nodes"] if r["type"] == "duplicate"), None),
+                    "related": sorted(r["relatedIssue"]["identifier"] for r in n["relations"]["nodes"] if r["type"] == "related"),
                     "comments": (
                         self.issue_comment_bodies(n["id"]) if n["comments"]["pageInfo"]["hasNextPage"]
                         else [c["body"] for c in n["comments"]["nodes"]]

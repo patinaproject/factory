@@ -1983,6 +1983,25 @@ class IssuesByAttachmentUrlTest(unittest.TestCase):
         self.assertEqual(make_client(fake).issues_by_attachment_url(self.URL), [])
 
 
+class LabeledIssuesTest(unittest.TestCase):
+    def test_lists_the_issues_each_one_relates_to_apart_from_its_duplicate_target(self):
+        node = {
+            "id": "issue-uuid", "identifier": "ABC-2", "createdAt": "2026-11-01T00:00:00.000Z", "completedAt": None,
+            "canceledAt": None, "description": None, "priority": 2, "state": {"name": "Triage", "type": "triage"},
+            "assignee": None, "creator": {"id": "app-user-1"}, "attachments": {"nodes": []},
+            "relations": {"nodes": [
+                {"type": "related", "relatedIssue": {"identifier": "ABC-1"}},
+                {"type": "duplicate", "relatedIssue": {"identifier": "ABC-0"}},
+            ]},
+            "comments": {"nodes": [{"body": "c"}], "pageInfo": {"hasNextPage": False}},
+        }
+        page = {"viewer": {"id": "app-user-1"}, "issues": {"nodes": [node], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+        [issue] = make_client(FakeLinear([(200, {"data": page})])).list_issues_by_label("ABC", "Theme")
+        self.assertEqual(
+            (issue["related"], issue["duplicateOf"], issue["createdByMe"], issue["description"]), (["ABC-1"], "ABC-0", True, ""),
+        )
+
+
 class CardTitleTest(unittest.TestCase):
     def test_unsafe_characters_are_removed_and_spaces_collapsed(self):
         self.assertEqual(
