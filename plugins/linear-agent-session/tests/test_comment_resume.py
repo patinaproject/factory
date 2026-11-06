@@ -209,7 +209,8 @@ class SkipTest(unittest.TestCase):
                 self.assertEqual(result, skipped(NOBODY_WAITS))
 
     def test_a_card_parked_for_the_worktree_or_a_server_error_does_not_wait_for_a_person(self):
-        for reason in ("Waiting for the worktree: t_other holds it", "Waiting after a server error: 502"):
+        for reason in ("Waiting for the worktree: t_other holds it", "Waiting after a server error: 502",
+                       "Waiting for the Xcode check: timed out"):
             with self.subTest(reason):
                 history = History([Park("Needs input: earlier", 50), Park(reason, 100)], [])
                 self.assertFalse(plugin.triage_intent.comment_resume.scheduled_waits_for_person(history))
