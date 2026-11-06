@@ -43,6 +43,16 @@ class Board(NamedTuple):
     comment: Callable[[str, str], None]
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would carry the signed headers to a host or key that the ledger never named."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect).open
+
+
 def signature(secret: str, timestamp: str, path: str) -> str:
     return hmac.new(secret.encode(), f"GET.{timestamp}.{path}".encode(), hashlib.sha256).hexdigest()
 
@@ -51,7 +61,7 @@ def object_url(host: str, key: str) -> str:
     return f"https://{host}/{urllib.parse.quote(key)}"
 
 
-def signed_get(url: str, secret: str, opener=urllib.request.urlopen):
+def signed_get(url: str, secret: str, opener=OPENER):
     path = urllib.parse.urlsplit(url).path
     timestamp = str(int(time.time()))
     request = urllib.request.Request(
@@ -138,8 +148,9 @@ class Intake:
         self.board = board
         self.host = host
         self.secret = secret
-        self.opener = opener or urllib.request.urlopen
+        self.opener = opener or OPENER
         self._lock = threading.Lock()
+        self._fetch_lock = threading.Lock()
 
     def deliver(self, message_id: str) -> dict:
         """Create the card for a claimed row, then fetch its objects. Idempotent: a later call resumes or does nothing."""
@@ -158,6 +169,10 @@ class Intake:
         return {"ok": True, "state": ledger_module.FETCHING, "card_id": row.card_id}
 
     def fetch(self, message_id: str) -> str:
+        with self._fetch_lock:
+            return self._fetch(message_id)
+
+    def _fetch(self, message_id: str) -> str:
         row = self.ledger.get(message_id)
         if row is None or row.state != ledger_module.FETCHING:
             raise FetchError("the message is not waiting for a fetch")

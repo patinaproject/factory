@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 
 UNTRUSTED_HEADING = "**Untrusted email content**"
@@ -51,6 +52,7 @@ class Context(NamedTuple):
     client: Callable[[], Any]
     card_id: Callable[[], Optional[str]]
     complete: Callable[[str, str], None]
+    attachments_dir: Callable[[str], Path]
     secret_refusal: Callable[[str, str], Optional[str]]
     team_key: str
 
@@ -68,8 +70,10 @@ def compose(prose: str, excerpt: Optional[str]) -> str:
     return f"{prose}\n\n{untrusted_block(excerpt.strip())}"
 
 
-def email_text(delivery) -> str:
-    return "\n".join([*(str(value) for value in delivery.headers.values()), delivery.text])
+def email_text(delivery, raw: Path) -> str:
+    """Everything the run could copy from: the headers, the text, and the full MIME message on disk."""
+    message = raw.read_text(encoding="utf-8", errors="replace") if raw.is_file() else ""
+    return "\n".join([*(str(value) for value in delivery.headers.values()), delivery.text, message])
 
 
 def _text(args: dict, name: str) -> str:
@@ -96,6 +100,7 @@ def plan(args: dict) -> tuple:
 
 
 def record(context: Context, args: dict) -> dict:
+    lm = context.ledger_module
     card_id = context.card_id()
     if not card_id:
         raise Refused("a mail run must run as a Kanban card")
@@ -103,33 +108,43 @@ def record(context: Context, args: dict) -> dict:
     if row is None:
         raise Refused(f"card {card_id} has no email in the ledger")
     if row.outcome is not None:
+        if not row.outcome.startswith(lm.PENDING):
+            # The outcome landed but the card did not finish; finishing it again writes nothing to Linear.
+            context.complete(card_id, row.outcome)
         raise Refused(f"this email's outcome is already recorded: {row.outcome}")
-    if row.state != context.ledger_module.READY:
+    if row.state != lm.READY:
         raise Refused(f"this email's files are not ready; its fetch state is {row.state}")
     kind, write, texts = plan(args if isinstance(args, dict) else {})
-    source = email_text(row.delivery)
+    if kind == lm.NEW_ISSUE and not context.team_key:
+        raise Refused("plugins.entries.email-outcome.settings.team_key is not set, so no issue can be filed")
+    try:
+        final = lm.format_outcome(kind, texts[0]) if kind == lm.NO_ACTION else None
+    except ValueError as error:
+        raise Refused(str(error)) from None
+    source = email_text(row.delivery, Path(context.attachments_dir(card_id)) / lm.RAW_FILE)
     for text in texts:
         reason = context.secret_refusal(text, source)
         if reason is not None:
             raise Refused(f"the write was refused because {reason}. Leave that value out and call again.")
-    pending = context.ledger_module.PENDING + kind
+    if kind == lm.DUPLICATE:
+        _, body, issue = write
+        issue = context.client().get_issue(issue)["identifier"]
+    pending = lm.PENDING + kind
     if not context.ledger.set_outcome(card_id, None, pending):
         raise Refused("this email's outcome is already recorded")
     try:
-        if kind == "new-issue":
+        if kind == lm.NEW_ISSUE:
             title, body, _ = write
-            created = context.client().create_issue(context.team_key, title, body, state_type="triage")
-            value = created["identifier"]
-        elif kind == "duplicate":
-            _, body, issue = write
-            value = context.client().get_issue(issue)["identifier"]
-            context.client().comment_on_issue(value, body)
-        else:
-            value = texts[0]
-        final = context.ledger_module.format_outcome(kind, value)
-    except Exception:
-        context.ledger.set_outcome(card_id, pending, None)
-        raise
+            final = lm.format_outcome(kind, context.client().create_issue(context.team_key, title, body, state_type="triage")["identifier"])
+        elif kind == lm.DUPLICATE:
+            context.client().comment_on_issue(issue, body)
+            final = lm.format_outcome(kind, issue)
+    except Exception as error:
+        # Linear may have taken the write before the error, so a retry could write twice. A person checks instead.
+        raise Refused(
+            f"the Linear write failed ({type(error).__name__}: {error}) and may have landed. The outcome stays "
+            f"{pending} for a person to check; block the card with kanban_block and say so."
+        ) from None
     context.ledger.set_outcome(card_id, pending, final)
     context.complete(card_id, final)
     return {"ok": True, "outcome": final}

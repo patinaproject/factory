@@ -82,6 +82,16 @@ class IntakeTest(unittest.TestCase):
         self.assertEqual(intake.fetch(MESSAGE_ID), "failed")
         self.assertIn("message.eml (raw/invoice-1.eml) is larger than the listed 10 bytes", self.board.comments[0][1])
 
+    def test_a_redirect_is_not_followed(self):
+        self.host.objects["raw/invoice-1.eml"] = "/attachments/invoice-1/invoice.pdf"
+        self.claim()
+        intake = self.intake()
+        intake.deliver(MESSAGE_ID)
+
+        self.assertEqual(intake.fetch(MESSAGE_ID), "failed")
+        self.assertEqual(self.host.requests, [("/raw/invoice-1.eml", True)])
+        self.assertIn("message.eml (raw/invoice-1.eml) could not be fetched: HTTPError", self.board.comments[0][1])
+
     def test_an_unknown_message_id_makes_no_request_and_no_card(self):
         intake = self.intake()
 

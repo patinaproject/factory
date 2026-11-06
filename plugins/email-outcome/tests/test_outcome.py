@@ -56,15 +56,25 @@ class RecordOutcomeTest(unittest.TestCase):
         self.store.move("<m-1@vendor.example>", ledger.FETCHING, ledger.READY)
         self.linear = FakeLinear()
         self.completed = []
+        self.complete_fails = False
+        self.raw = Path(self.directory.name) / "t_1" / "message.eml"
+        self.raw.parent.mkdir()
+        self.raw.write_text("Content-Type: text/html\n\n<p>Sign in with code <b>773311</b></p>")
 
     def tearDown(self):
         self.directory.cleanup()
 
-    def call(self, args, linear=None):
+    def complete(self, card, final):
+        if self.complete_fails:
+            raise RuntimeError("the card is locked")
+        if (card, final) not in self.completed:
+            self.completed.append((card, final))
+
+    def call(self, args, linear=None, team_key="PAT"):
         context = outcome.Context(
-            self.store, ledger, lambda: linear or self.linear, lambda: "t_1",
-            lambda card, final: self.completed.append((card, final)),
-            lambda text, source: secrets_in_mail.refusal(text, source, lambda value: value), "PAT",
+            self.store, ledger, lambda: linear or self.linear, lambda: "t_1", self.complete,
+            lambda card: Path(self.directory.name) / card,
+            lambda text, source: secrets_in_mail.refusal(text, source, lambda value: value), team_key,
         )
         return json.loads(outcome.handler(context)(args))
 
@@ -105,12 +115,36 @@ class RecordOutcomeTest(unittest.TestCase):
         self.assertEqual([write[0] for write in self.linear.writes], ["create_issue"])
         self.assertNotIn("482913", json.dumps([self.linear.writes, self.store.by_card("t_1").outcome]))
 
-    def test_a_failed_linear_write_releases_the_outcome_for_a_retry(self):
+    def test_a_failed_linear_write_stays_pending_so_a_retry_never_writes_twice(self):
         failed = self.call({"outcome": "new-issue", "title": "x", "description": "y"}, linear=FakeLinear(fail=True))
+        retried = self.call({"outcome": "new-issue", "title": "x", "description": "y"})
 
-        self.assertEqual(failed, {"ok": False, "error": "RuntimeError: Linear is down"})
+        self.assertFalse(failed["ok"])
+        self.assertIn("may have landed. The outcome stays pending new-issue for a person to check", failed["error"])
+        self.assertEqual(retried, {"ok": False, "error": "this email's outcome is already recorded: pending new-issue"})
+        self.assertEqual((self.linear.writes, self.completed), ([], []))
+
+    def test_a_card_that_did_not_finish_is_finished_by_the_next_call_without_a_linear_write(self):
+        self.complete_fails = True
+        self.assertFalse(self.call({"outcome": "no-action", "reason": "A newsletter."})["ok"])
+        self.complete_fails = False
+
+        again = self.call({"outcome": "no-action", "reason": "A newsletter."})
+
+        self.assertEqual(again, {"ok": False, "error": "this email's outcome is already recorded: no-action A newsletter."})
+        self.assertEqual(self.completed, [("t_1", "no-action A newsletter.")])
+
+    def test_a_code_found_only_in_the_raw_message_is_refused(self):
+        refused = self.call({"outcome": "new-issue", "title": "Sign-in notice", "description": "It sent 773311."})
+
+        self.assertIn("code word", refused["error"])
+        self.assertEqual(self.linear.writes, [])
+
+    def test_new_issue_without_a_team_key_is_refused_before_any_write(self):
+        result = self.call({"outcome": "new-issue", "title": "x", "description": "y"}, team_key="")
+
+        self.assertEqual(result, {"ok": False, "error": "plugins.entries.email-outcome.settings.team_key is not set, so no issue can be filed"})
         self.assertIsNone(self.store.by_card("t_1").outcome)
-        self.assertEqual(self.call({"outcome": "no-action", "reason": "A newsletter."})["ok"], True)
 
     def test_a_duplicate_of_an_unknown_issue_records_nothing(self):
         result = self.call({"outcome": "duplicate", "issue": "PAT-404", "comment": "x"})

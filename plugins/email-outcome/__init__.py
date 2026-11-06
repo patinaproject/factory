@@ -65,7 +65,8 @@ def register(ctx: Any) -> None:
         run_id = os.environ.get("HERMES_KANBAN_RUN_ID")
         conn = kbc.connect()
         try:
-            kb.complete_task(conn, task_id, result=final, summary=final, expected_run_id=int(run_id) if run_id else None)
+            if kb.get_task(conn, task_id).status != "done":
+                kb.complete_task(conn, task_id, result=final, summary=final, expected_run_id=int(run_id) if run_id else None)
         finally:
             conn.close()
 
@@ -75,6 +76,7 @@ def register(ctx: Any) -> None:
         client=get_client,
         card_id=card_id,
         complete=complete,
+        attachments_dir=kb.task_attachments_dir,
         secret_refusal=lambda text, source: secrets_in_mail.refusal(
             text, source, lambda value: redact_sensitive_text(value, force=True)
         ),

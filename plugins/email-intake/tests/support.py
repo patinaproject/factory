@@ -57,6 +57,11 @@ class ObjectHost:
                 signed = self.headers.get("X-Webhook-Signature-V2") == expected
                 host.requests.append((self.path, signed))
                 data = host.objects.get(self.path.lstrip("/"))
+                if signed and isinstance(data, str):
+                    self.send_response(302)
+                    self.send_header("Location", data)
+                    self.end_headers()
+                    return
                 if not signed or data is None:
                     self.send_response(401 if not signed else 404)
                     self.end_headers()
@@ -76,7 +81,7 @@ class ObjectHost:
     def opener(self, request, timeout):
         """Send the https request the service builds to this plain-HTTP server, keeping its path and headers."""
         url = request.full_url.replace(f"https://{HOST}", f"http://127.0.0.1:{self.server.server_address[1]}")
-        return urllib.request.urlopen(urllib.request.Request(url, headers=dict(request.header_items())), timeout=timeout)
+        return fetch.OPENER(urllib.request.Request(url, headers=dict(request.header_items())), timeout=timeout)
 
     def close(self):
         self.server.shutdown()

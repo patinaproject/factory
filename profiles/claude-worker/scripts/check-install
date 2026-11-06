@@ -2463,6 +2463,7 @@ EMAIL_LEDGER = Path("email-intake") / "ledger.db"
 HERMES_HAS_MODULE = Path(__file__).resolve().parent / "hermes-has-module"
 PDF_MODULE = "anydoc"
 EMAIL_STALE_MINUTES = 30
+EMAIL_NO_OUTCOME_HOURS = 24
 EMAIL_FIX = Manual("read the card and the gateway log, then redeliver or close the email by hand (templates/README.md)")
 
 
@@ -2513,6 +2514,8 @@ def check_email_ledger(root: Path, now: float) -> list:
             drifts.append(Drift("email", where, f"has been {state} for {int(minutes)} minutes; the gateway's email-intake never finished it", EMAIL_FIX))
         elif outcome is not None and outcome.startswith("pending "):
             drifts.append(Drift("email", where, f"stopped while it recorded its outcome ({outcome}); check Linear before a retry", EMAIL_FIX))
+        elif outcome is None and state == "ready" and minutes > EMAIL_NO_OUTCOME_HOURS * 60:
+            drifts.append(Drift("email", where, f"has had its files for {int(minutes // 60)} hours and no outcome", EMAIL_FIX))
     return drifts
 
 

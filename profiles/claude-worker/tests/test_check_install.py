@@ -1417,6 +1417,8 @@ class CheckInstallTest(unittest.TestCase):
             ("<c@x>", now, "fetching", "t_c", None),
             ("<d@x>", now, "ready", "t_d", "pending new-issue"),
             ("<e@x>", now, "ready", "t_e", "no-action A newsletter."),
+            ("<f@x>", now - 25 * 3600, "ready", "t_f", None),
+            ("<g@x>", now - 3600, "ready", "t_g", None),
         ])
         conn.commit()
         conn.close()
@@ -1425,6 +1427,7 @@ class CheckInstallTest(unittest.TestCase):
             "email email card t_a: failed its attachment fetch; the card stays blocked with the reason\n",
             "email email card t_b: has been fetching for 60 minutes; the gateway's email-intake never finished it\n",
             "email email card t_d: stopped while it recorded its outcome (pending new-issue); check Linear before a retry\n",
+            "email email card t_f: has had its files for 25 hours and no outcome\n",
         ])))
 
     def test_an_mcp_token_in_the_worker_env_is_reported_by_name_only(self) -> None:
