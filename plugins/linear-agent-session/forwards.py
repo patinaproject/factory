@@ -10,10 +10,10 @@ This store alone decides whether a reply was applied. The webhook-retry queue an
 
 The recovery rule: an attempt is counted before `card_transition.py` runs, so a crash leaves the record `received`
 with that attempt spent, and the next call for the key, from a redelivery, a replay, or a re-ask, runs it again until
-FORWARD_ATTEMPTS are spent. A second run after a partial one is safe, because `card_transition.py` converges: it writes
-a reply it already wrote once, and a release of a released card is a no-op. Once a run succeeds the record is
-`applied`, and every later call returns that run's result without running the `blocked` and `triage` branches again,
-which would move the card a second time.
+FORWARD_ATTEMPTS are spent. A second run after a partial one moves the card at most once, because `card_transition.py`
+writes a reply it already wrote once and leaves a card that left `scheduled`, `blocked`, or `triage` alone, answering
+`none`. Once a run succeeds the record is `applied`, and every later call returns that run's result without running
+`card_transition.py` again, so a newer reply on the card cannot make a replay write this one a second time.
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional, Union
@@ -181,7 +182,7 @@ def receive(directory: Optional[str], intent: Any) -> Optional[Forward]:
         raise linear.LinearError("HERMES_HOME is not set, so there is no reply store")
     os.makedirs(directory, mode=0o700, exist_ok=True)
     path = _path(directory, forward.key, ".json")
-    staged = f"{path}.{os.getpid()}.new"
+    staged = f"{path}.{uuid.uuid4().hex}.new"
     fd = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:

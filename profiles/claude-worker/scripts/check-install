@@ -458,12 +458,9 @@ def check_skills(commit: Commit, homes: Homes) -> list:
     A render failure is check_routes' to report. An installed route names the skills this commit renders whenever
     it matches the rendered route, so a route that names a skill nobody installed is a skill that is missing here.
     """
-    render = render_at(commit, homes, "--skills-json")
-    if render.returncode != 0:
-        return []
     fix = install_plan.skills_install(homes)
     drifts = []
-    for name, text in json.loads(render.stdout).items():
+    for name, text in rendered_skills(commit, homes).items():
         path = homes.root / "skills" / name / "SKILL.md"
         if not path.is_file():
             drifts.append(Drift("route skill", str(path), f"is missing; a route at {commit.short} names it", fix))

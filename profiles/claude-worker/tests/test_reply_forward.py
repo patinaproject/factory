@@ -259,12 +259,20 @@ class TriageCardReplyTest(ReplyForwardHarness):
         self.deliver_through_gateway(prompted(HOSTILE_REPLY))
         store = plugin.forwards.store_dir(os.environ)
 
+        self.state["fail"]["unblock"] = 1
+        self.save()
+
         def crash(forward):
-            raise KeyboardInterrupt("the gateway died mid-forward")
+            try:
+                plugin.forwards.card_transition(str(self.home))(forward)
+            except plugin.forwards.TransitionFailed:
+                raise KeyboardInterrupt("the gateway died after the reply was written") from None
 
         with self.assertRaises(KeyboardInterrupt):
             plugin.forwards.apply(store, "activity-reply-1", "t_1", crash)
+        self.load()
         self.assertEqual(plugin.forwards.read(store, "activity-reply-1").attempts, 1)
+        self.assertEqual((self.reply_comments(), self.state["task"]["status"]), ([f"Linear reply: {HOSTILE_REPLY}"], "scheduled"))
 
         self.deliver_through_gateway(prompted(HOSTILE_REPLY))
         out = self.forward({"reply_key": "activity-reply-1", "task_id": "t_1"})
