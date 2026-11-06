@@ -574,19 +574,42 @@ class ReviewHandbackTest(unittest.TestCase):
                          ("changes requested on GitHub; see the card comments", None))
 
 
-class ImplementationReplyCommandTest(unittest.TestCase):
+class ReplyForwardStepTest(unittest.TestCase):
+    """A reply reaches its card through the plugin's forwarding tool, never through a shell command."""
+
+    FORWARDING_ACTIONS = ("start_triage_with_reply", "card_reply", "comment_resume", "triage_card_reply")
+
     def setUp(self):
+        plugin_dir = Path(__file__).resolve().parents[2] / "plugins" / "linear-agent-session"
+        spec = importlib.util.spec_from_file_location(
+            "linear_agent_session", plugin_dir / "__init__.py", submodule_search_locations=[str(plugin_dir)]
+        )
+        plugin = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = plugin
+        spec.loader.exec_module(plugin)
+        self.tool = plugin.forwards.NAME
         self.github = full_prompt("github")
         self.linear = full_prompt("linear")
 
-    def test_the_linear_prompt_runs_one_implementation_reply_command_that_card_transition_accepts(self):
-        commands = re.findall(r"card_transition\.py implementation-reply (<task id>)`", self.linear)
-        self.assertEqual(len(commands), 1)
-        args = card_transition.parser().parse_args(["implementation-reply", *shlex.split(commands[0].replace("<task id>", "t_1"))])
-        self.assertEqual((args.command, args.task_id), ("implementation-reply", "t_1"))
+    def section(self, action: str) -> str:
+        start = self.linear.index(f"### `{action}`\n")
+        end = self.linear.find("\n### ", start + 1)
+        return self.linear[start:end]
+
+    def test_no_prompt_runs_a_reply_command(self):
+        for prompt in (self.linear, self.github):
+            self.assertEqual(re.findall(r"card_transition\.py (?:--board \S+ )?(?:triage|implementation)-reply", prompt), [])
+            self.assertNotIn("LINEAR_REPLY", prompt)
+
+    def test_each_forwarding_step_calls_the_tool_with_the_reply_key(self):
+        for action in self.FORWARDING_ACTIONS:
+            with self.subTest(action=action):
+                section = self.section(action)
+                self.assertIn(f"`{self.tool}`", section)
+                self.assertIn("`reply_key`", section)
 
     def test_the_github_prompt_does_not_carry_it(self):
-        self.assertNotIn("implementation-reply", self.github)
+        self.assertNotIn(self.tool, self.github)
 
 
 class TransitionCommandTest(unittest.TestCase):

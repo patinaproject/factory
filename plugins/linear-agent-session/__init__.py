@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, bursts, idempotency, kanban_guard, linear, missing_secret, opened_sessions, replies, tools, triage_exit, triage_intent, triage_round
+from . import blocks, bursts, forwards, idempotency, kanban_guard, linear, missing_secret, opened_sessions, replies, tools, triage_exit, triage_intent, triage_round
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,13 @@ def register(ctx: Any) -> None:
         description=tools.GITHUB_CREATE_SCHEMA["description"],
     )
     ctx.register_tool(
+        name=forwards.NAME,
+        toolset=TOOLSET,
+        schema=forwards.SCHEMA,
+        handler=forwards.make_handler(get_client, posts),
+        description=forwards.SCHEMA["description"],
+    )
+    ctx.register_tool(
         name=triage_round.NAME,
         toolset=TOOLSET,
         schema=triage_round.SCHEMA,
@@ -234,6 +241,7 @@ def make_dispatch_hook(
     compute_intent: Optional[Callable[[Any], triage_intent.Intent]] = None,
     skip_home: Callable[[], Path] = triage_exit.gateway_home,
     comment_store: Callable[[], Optional[str]] = lambda: idempotency.store_dir(os.environ),
+    forward_store: Callable[[], Optional[str]] = lambda: forwards.store_dir(os.environ),
 ) -> Callable[..., Any]:
     pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-exit")
     # A bulk move can hold every triage-exit worker for minutes, and an intent must not wait behind it.
@@ -331,7 +339,8 @@ def make_dispatch_hook(
         intent = await compute_for(event)
         if intent.action == "comment_resume":
             reason = first_delivery(intent.comment_id)
-            if reason is None:
+            # A turn that crashed before its forward left the reply pending, and this delivery finishes it.
+            if reason is None or forwards.pending(forward_store(), intent.reply_key):
                 return rewrite(intent, event)
         elif intent.action == "error":
             reason = f"the comment's intent failed: {intent.error}"
@@ -354,6 +363,14 @@ def make_dispatch_hook(
         return rewrite(intent, event)
 
     def rewrite(intent: triage_intent.Intent, event: Any) -> dict[str, str]:
+        try:
+            forwards.receive(forward_store(), intent)
+        except Exception as failure:
+            logger.warning(
+                "linear-agent-session: reply %s was not recorded, so its forward will refuse: %s",
+                intent.reply_key,
+                f"{type(failure).__name__}: {failure}",
+            )
         return {"action": "rewrite", "text": event.text + "\n\n" + triage_intent.render(intent)}
 
     async def compute_for(event: Any) -> triage_intent.Intent:

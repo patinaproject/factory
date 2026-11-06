@@ -1,0 +1,24 @@
+"""Print Hermes' approval verdict for each shell command in a JSON file, as a JSON list.
+
+Run by check-install with Hermes' own Python:
+`python3 -I -B hermes-dangerous-commands <checkout> <site-packages> <commands.json>`. The file holds a JSON list
+of command strings. Each output entry is `{"command", "dangerous", "reason"}` from Hermes'
+`tools.approval.detect_dangerous_command`, the check its terminal tool runs before it asks for approval. It never
+launches Hermes, so it never rebuilds or leases an environment, and HERMES_HOME must name a scratch directory.
+"""
+import json
+import sys
+
+sys.dont_write_bytecode = True
+checkout, site_packages, commands_file = sys.argv[1:4]
+sys.path[:0] = [checkout, site_packages]
+
+from tools.approval import detect_dangerous_command  # noqa: E402
+
+with open(commands_file, encoding="utf-8") as handle:
+    commands = json.load(handle)
+verdicts = []
+for command in commands:
+    dangerous, _, reason = detect_dangerous_command(command)
+    verdicts.append({"command": command, "dangerous": bool(dangerous), "reason": reason})
+print(json.dumps(verdicts))

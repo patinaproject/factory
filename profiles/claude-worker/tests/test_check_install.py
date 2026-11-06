@@ -300,6 +300,7 @@ REMEDY_CLASSES = (
     ("slack profile", "", "manual"),
     ("hermes tool", "cannot read", "advisory"),
     ("hermes tool", "", "manual"),
+    ("prompt command", "", "manual"),
     ("github app", "", "manual"),
     ("app auto-update", "", "manual"),
     ("macos auto-update", "", "manual"),
@@ -3551,6 +3552,60 @@ class CheckWaitingTriageTest(unittest.TestCase):
         self.path.unlink()
 
         self.assertEqual(self.check(), [])
+
+
+FAKE_APPROVAL = """
+def detect_dangerous_command(command):
+    if command.startswith("python3 ") and "<<" in command:
+        return True, "script execution via heredoc", "script execution via heredoc"
+    return False, None, None
+"""
+HEREDOC_SKILL = """1. Pipe the reply into the card:
+
+   ```sh
+   python3 /srv/hermes/card_transition.py --board triage triage-reply <task id> <<'LINEAR_REPLY'
+   <reply>
+   LINEAR_REPLY
+   ```
+
+2. Then run `python3 /srv/hermes/card_transition.py reopen <task id> --comment 'x'` and `hermes kanban show <task id>`.
+"""
+
+
+class CheckPromptCommandsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "root"
+        self.tree = install_fake_hermes(self.root)
+        (self.tree / "tools" / "approval.py").write_text(FAKE_APPROVAL)
+
+    def check(self, skills: dict) -> list:
+        return classified(self, check_install.check_prompt_commands(self.root, skills))
+
+    def test_the_commands_are_each_fenced_shell_block_and_each_inline_command(self) -> None:
+        self.assertEqual(check_install.prompt_commands(HEREDOC_SKILL), [
+            "python3 /srv/hermes/card_transition.py --board triage triage-reply <task id> <<'LINEAR_REPLY'\n<reply>\nLINEAR_REPLY",
+            "python3 /srv/hermes/card_transition.py reopen <task id> --comment 'x'",
+            "hermes kanban show <task id>",
+        ])
+
+    def test_a_flagged_heredoc_step_fails(self) -> None:
+        self.assertEqual(self.check({"factory-linear-triage": HEREDOC_SKILL, "factory-github-triage": "Run `hermes kanban show <task id>`."}), [
+            "prompt command factory-linear-triage: Hermes flags \"python3 /srv/hermes/card_transition.py --board triage "
+            "triage-reply <task id> <<'LINEAR_REPLY'\" as script execution via heredoc, so a turn with no person present "
+            "waits for an approval or refuses it",
+        ])
+
+    def test_a_prompt_whose_commands_hermes_allows_is_silent(self) -> None:
+        self.assertEqual(self.check({"factory-linear-triage": "Call `linear_card_reply`, then run `hermes kanban show <task id>`."}), [])
+
+    def test_a_hermes_that_cannot_be_imported_fails_and_says_so(self) -> None:
+        (self.tree / "tools" / "approval.py").write_text("raise ImportError('no module named fake')\n")
+
+        [row] = self.check({"factory-linear-triage": HEREDOC_SKILL})
+        self.assertTrue(row.startswith("prompt command factory-linear-triage: cannot ask Hermes which commands it flags: "), row)
+        self.assertIn("no module named fake", row)
 
 
 class CheckHermesToolsTest(unittest.TestCase):

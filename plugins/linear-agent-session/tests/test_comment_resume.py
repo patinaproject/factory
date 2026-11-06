@@ -126,6 +126,7 @@ def resumed(**overrides):
                 {"id": OPERATOR, "name": "Olive Operator", "role": "operator"},
             ],
             comment_id=COMMENT_ID,
+            reply_key=COMMENT_ID,
             comment_url=COMMENT_URL,
         ),
         **overrides,

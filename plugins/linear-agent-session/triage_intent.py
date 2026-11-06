@@ -106,6 +106,7 @@ class Intent:
     thread: Optional[list] = None
     thread_source: Optional[str] = None
     comment_id: Optional[str] = None
+    reply_key: Optional[str] = None
     comment_url: Optional[str] = None
     skip_reason: Optional[str] = None
     error: Optional[str] = None
@@ -285,6 +286,7 @@ def decide(
         action = _session_prompted(facts, stop=True)
     else:
         facts = _with_authority(facts, approvers, reply.author_id, reply.author_kind, operators_configured)
+        facts = replace(facts, reply_key=(payload.get("agentActivity") or {}).get("id"))
         action = _session_prompted(facts, stop=False)
     return replace(facts, action=action, agent_session_id=session)
 
@@ -477,6 +479,7 @@ def comment_intent(
         reply=comment.body,
         reply_source="payload",
         comment_id=comment.id,
+        reply_key=comment.id,
         comment_url=comment_resume.comment_url(comment, issue.get("url")),
     )
 

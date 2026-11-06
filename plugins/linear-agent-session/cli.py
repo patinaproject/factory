@@ -194,6 +194,10 @@ def _triage_intent(plugin, payload_file: str, now: Optional[str]) -> int:
         )
     except Exception as failure:
         intent = triage_intent.error_intent(type(failure).__name__)
+    try:
+        plugin.forwards.receive(plugin.forwards.store_dir(os.environ), intent)
+    except Exception as failure:
+        print(f"cli.py: reply {intent.reply_key} was not recorded, so its forward will refuse: {type(failure).__name__}", file=sys.stderr)
     print(triage_intent.render(intent), end="")
     return 0
 

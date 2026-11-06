@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import datetime as dt
 import importlib.util
 import json
@@ -117,17 +118,23 @@ class ReplyForwardHarness(CardTransitionTest):
             "HERMES_BIN": str(self.dir / "bin" / "hermes"),
             "FAKE_STATE": str(self.state_path),
             "PATH": f"{self.dir / 'bin'}:{os.environ['PATH']}",
-            "LINEAR_CLIENT_ID": "client-id",
-            "LINEAR_CLIENT_SECRET": "client-secret",
         }
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
         self.addCleanup(patcher.stop)
+        redact = types.ModuleType("agent.redact")
+        redact.redact_sensitive_text = lambda text, force=False: text
+        modules = mock.patch.dict(sys.modules, {"agent": types.ModuleType("agent"), "agent.redact": redact})
+        modules.start()
+        self.addCleanup(modules.stop)
         self.linear = Linear()
         self.recorder = Recorder()
         run = mock.patch("subprocess.run", self.recorder)
         run.start()
         self.addCleanup(run.stop)
+        client = mock.patch.object(plugin.linear, "client_from_env", lambda: self.linear)
+        client.start()
+        self.addCleanup(client.stop)
         self.ctx = Context()
         with hermes_config(RESOLVED_CONFIG):
             plugin.register(self.ctx)
@@ -190,3 +197,212 @@ class TriageCardReplyTest(ReplyForwardHarness):
         self.assertEqual(self.reply_comments(), [f"Linear reply: {HOSTILE_REPLY}"])
         self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("ready", None))
         self.assertFalse(any(HOSTILE_REPLY in part for argv, _ in self.recorder.runs for part in argv))
+
+    def test_the_tool_runs_on_the_gateway_and_in_a_single_query_turn_without_the_terminal(self):
+        guard = dict(self.ctx.hooks)["pre_tool_call"]
+        with mock.patch.object(plugin, "session_platform", side_effect=["webhook", "cli"]):
+            verdicts = [guard(tool_name="linear_card_reply", args={"reply_key": "k", "task_id": "t_1"}) for _ in range(2)]
+        self.assertEqual(verdicts, [None, None])
+        self.assertEqual(self.ctx.tools["linear_card_reply"]["toolset"], "linear_agent_session")
+        self.assertNotIn("check_fn", self.ctx.tools["linear_card_reply"])
+
+    def test_a_blocked_triage_card_is_unassigned_and_unblocked_once(self):
+        self.given("blocked")
+        self.deliver_through_gateway(prompted(HOSTILE_REPLY))
+
+        out = self.forward({"reply_key": "activity-reply-1", "task_id": "t_1"})
+
+        self.assertEqual(out["action"], "unblocked")
+        self.assertEqual(self.reply_comments(), [f"Linear reply: {HOSTILE_REPLY}"])
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("ready", None))
+
+    def test_a_triage_status_card_is_resumed_without_an_assignee(self):
+        self.given("triage")
+        self.deliver_through_gateway(prompted("Use the settings screen."))
+
+        out = self.forward({"reply_key": "activity-reply-1", "task_id": "t_1"})
+
+        self.assertEqual((out["action"], out["assigned"]), ("resumed", False))
+        self.assertEqual(self.reply_comments(), ["Linear reply: Use the settings screen."])
+        self.assertEqual(self.state["task"]["assignee"], None)
+
+    def test_a_repeated_delivery_and_a_replay_apply_the_reply_once(self):
+        self.given("blocked")
+        self.deliver_through_gateway(prompted(HOSTILE_REPLY))
+        first = self.forward({"reply_key": "activity-reply-1", "task_id": "t_1"})
+        self.given("blocked")
+
+        self.deliver_through_gateway(prompted(HOSTILE_REPLY))
+        again = self.forward({"reply_key": "activity-reply-1", "task_id": "t_1"})
+
+        self.assertEqual((first["repeat"], again["repeat"], again["action"]), (False, True, "unblocked"))
+        self.assertEqual(len(self.transitions()), 1)
+        self.assertEqual(self.reply_comments(), [f"Linear reply: {HOSTILE_REPLY}"])
+        self.assertEqual(self.state["task"]["status"], "blocked")
+
+    def test_a_failed_release_is_retried_and_releases_the_card_once(self):
+        self.given("scheduled", comments=["Asked a question."], events=[park(1)])
+        self.state["fail"]["unblock"] = 1
+        self.deliver_through_gateway(prompted(HOSTILE_REPLY))
+
+        with mock.patch.object(plugin.forwards.time, "sleep"):
+            out = self.forward({"reply_key": "activity-reply-1", "task_id": "t_1"})
+
+        self.assertEqual(out["action"], "unblocked")
+        self.assertEqual(len(self.transitions()), 2)
+        self.assertEqual(self.reply_comments(), [f"Linear reply: {HOSTILE_REPLY}"])
+        self.assertEqual([call[0] for call in self.state["calls"]].count("unblock"), 2)
+        self.assertEqual(self.state["task"]["status"], "ready")
+
+    def test_a_crash_after_the_reply_is_recorded_is_finished_by_the_next_delivery(self):
+        self.given("scheduled", comments=["Asked a question."], events=[park(1)])
+        self.deliver_through_gateway(prompted(HOSTILE_REPLY))
+        store = plugin.forwards.store_dir(os.environ)
+
+        def crash(forward):
+            raise KeyboardInterrupt("the gateway died mid-forward")
+
+        with self.assertRaises(KeyboardInterrupt):
+            plugin.forwards.apply(store, "activity-reply-1", "t_1", crash)
+        self.assertEqual(plugin.forwards.read(store, "activity-reply-1").attempts, 1)
+
+        self.deliver_through_gateway(prompted(HOSTILE_REPLY))
+        out = self.forward({"reply_key": "activity-reply-1", "task_id": "t_1"})
+
+        self.assertEqual(out["action"], "unblocked")
+        self.assertEqual(plugin.forwards.read(store, "activity-reply-1").attempts, 2)
+        self.assertEqual(self.reply_comments(), [f"Linear reply: {HOSTILE_REPLY}"])
+
+    def test_the_sweep_releasing_the_card_first_leaves_the_forward_writing_nothing(self):
+        self.given("scheduled", comments=["Asked a question."], events=[park(1)])
+        self.deliver_through_gateway(prompted(HOSTILE_REPLY))
+        self.state["comments"].append(f"Linear reply: {HOSTILE_REPLY}")
+        self.given("ready")
+
+        out = self.forward({"reply_key": "activity-reply-1", "task_id": "t_1"})
+
+        self.assertEqual((out["action"], out["status"]), ("none", "ready"))
+        self.assertEqual(self.reply_comments(), [f"Linear reply: {HOSTILE_REPLY}"])
+
+    def test_an_app_or_unknown_author_records_nothing_to_forward(self):
+        for kind in ("app", "unknown"):
+            with self.subTest(kind=kind):
+                self.given("scheduled", comments=[], events=[park(0)])
+                intent = dataclasses.replace(self.intent_for(prompted("ok", f"activity-{kind}")), reply_author_kind=kind)
+                self.assertIsNone(plugin.forwards.receive(plugin.forwards.store_dir(os.environ), intent))
+                out = self.forward({"reply_key": f"activity-{kind}", "task_id": "t_1"})
+                self.assertEqual(out["stage"], "record")
+        self.assertEqual(self.transitions(), [])
+        self.assertEqual(self.reply_comments(), [])
+
+    def test_a_failed_transition_posts_one_error_on_the_session_and_says_nothing_resumed(self):
+        self.given("running")
+        self.state["fail"]["show"] = plugin.forwards.FORWARD_ATTEMPTS
+        self.deliver_through_gateway(prompted(HOSTILE_REPLY))
+        acks = len(self.linear.activities)
+
+        with mock.patch.object(plugin.forwards.time, "sleep"), self.assertLogs("linear_agent_session.forwards", "WARNING") as logs:
+            out = self.forward({"reply_key": "activity-reply-1", "task_id": "t_1"})
+
+        self.assertEqual((out["stage"], out["posted"]), ("transition", f"agent session {SESSION}"))
+        [(session, content, ephemeral)] = self.linear.activities[acks:]
+        self.assertEqual((session, content["type"], ephemeral), (SESSION, "error", False))
+        self.assertIn("Stage `transition`", content["body"])
+        self.assertIn("reply forward activity-reply-1 failed at transition", logs.output[0])
+        self.assertEqual(len(self.transitions()), plugin.forwards.FORWARD_ATTEMPTS)
+
+        spent = self.forward({"reply_key": "activity-reply-1", "task_id": "t_1"})
+        self.assertEqual(spent["stage"], "attempts")
+        self.assertEqual(len(self.transitions()), plugin.forwards.FORWARD_ATTEMPTS)
+
+    def test_a_forward_to_another_card_is_refused(self):
+        self.given("blocked")
+        self.deliver_through_gateway(prompted(HOSTILE_REPLY))
+
+        with self.assertLogs("linear_agent_session.forwards", "WARNING"):
+            out = self.forward({"reply_key": "activity-reply-1", "task_id": "t_other"})
+
+        self.assertEqual(out["stage"], "task")
+        self.assertEqual((self.transitions(), self.state["task"]["status"]), ([], "blocked"))
+
+
+def intent(**fields):
+    return plugin.triage_intent.Intent(**{"issue": {"id": ISSUE_ID, "identifier": "PAT-1", "state_type": "todo"}, **fields})
+
+
+class OtherForwardingIntentsTest(ReplyForwardHarness):
+    def receive(self, value) -> None:
+        self.assertIsNotNone(plugin.forwards.receive(plugin.forwards.store_dir(os.environ), value))
+
+    def test_start_triage_with_reply_binds_the_new_card_on_its_first_forward(self):
+        self.given("scheduled", comments=[], events=[park(0)])
+        self.receive(intent(action="start_triage_with_reply", reply=HOSTILE_REPLY, reply_key="activity-start",
+                            reply_author_kind="person", agent_session_id=SESSION))
+
+        out = self.forward({"reply_key": "activity-start", "task_id": "t_1"})
+
+        self.assertEqual(out["action"], "unblocked")
+        [(argv, kwargs)] = self.transitions()
+        self.assertEqual(argv[-3:], ["triage", "triage-reply", "t_1"])
+        self.assertEqual(kwargs["input"], HOSTILE_REPLY)
+        self.assertEqual(self.forward({"reply_key": "activity-start", "task_id": "t_1"})["repeat"], True)
+        self.assertEqual(len(self.transitions()), 1)
+
+    def test_a_top_level_comment_with_no_session_resumes_the_triage_card(self):
+        self.given("blocked")
+        self.receive(intent(action="comment_resume", reply=HOSTILE_REPLY, reply_key="comment-1",
+                            triage_card={"id": "t_1", "status": "blocked"}, agent_session_id=None))
+
+        out = self.forward({"reply_key": "comment-1", "task_id": "t_1"})
+
+        self.assertEqual(out["action"], "unblocked")
+        self.assertEqual(self.reply_comments(), [f"Linear reply: {HOSTILE_REPLY}"])
+
+    def test_a_failed_comment_forward_with_no_session_comments_the_error_on_the_card(self):
+        self.given("blocked")
+        self.state["fail"]["show"] = plugin.forwards.FORWARD_ATTEMPTS
+        self.receive(intent(action="comment_resume", reply="Go ahead.", reply_key="comment-2",
+                            triage_card={"id": "t_1", "status": "blocked"}, agent_session_id=None))
+
+        with mock.patch.object(plugin.forwards.time, "sleep"), self.assertLogs("linear_agent_session.forwards", "WARNING"):
+            out = self.forward({"reply_key": "comment-2", "task_id": "t_1"})
+
+        self.assertEqual((out["stage"], out["posted"]), ("transition", "card t_1"))
+        [error] = [body for body in self.state["comments"] if body.startswith("The reply did not reach")]
+        self.assertIn("Add the comment again on the issue.", error)
+        self.assertEqual(self.reply_comments(), [])
+
+    def implementation(self, status: str) -> None:
+        self.state["task"]["body"] = "linear_issue_id: 1\nbranch: pat-1-work\nrepo: example-org/app"
+        self.given(status, events=[{"kind": "scheduled", "payload": {"reason": "WAITING_ON=the design"}, "created_at": 500, "run_id": 1}],
+                   branch_has_pr=False)
+        self.receive(intent(action="card_reply", reply=HOSTILE_REPLY, reply_key="activity-impl", from_assignee=True,
+                            reply_author_kind="person", card={"id": "t_1", "status": "scheduled"}, agent_session_id=SESSION))
+
+    def test_a_scheduled_implementation_card_is_released_with_the_reply(self):
+        self.implementation("scheduled")
+
+        out = self.forward({"reply_key": "activity-impl", "task_id": "t_1"})
+
+        self.assertEqual(out["action"], "unblocked")
+        [(argv, kwargs)] = self.transitions()
+        self.assertEqual((argv[-2:], "--board" in argv, kwargs["input"]), (["implementation-reply", "t_1"], False, HOSTILE_REPLY))
+        self.assertEqual(self.reply_comments(), [f"Linear reply: {HOSTILE_REPLY}"])
+        self.assertEqual((self.state["task"]["status"], self.state["task"]["assignee"]), ("ready", "claude-worker"))
+
+    def test_a_blocked_or_triage_implementation_card_gets_the_reply_and_stays(self):
+        for status in ("blocked", "triage"):
+            with self.subTest(status=status):
+                self.state["comments"] = []
+                self.implementation(status)
+                plugin.forwards._write(plugin.forwards.store_dir(os.environ), dataclasses.replace(
+                    plugin.forwards.read(plugin.forwards.store_dir(os.environ), "activity-impl"), state="received", attempts=0))
+
+                out = self.forward({"reply_key": "activity-impl", "task_id": "t_1"})
+
+                self.assertEqual((out["action"], out["status"]), ("none", status))
+                self.assertEqual(self.state["task"]["status"], status)
+
+    def test_a_card_reply_to_a_card_that_does_not_wait_records_nothing(self):
+        self.assertIsNone(plugin.forwards.receive(plugin.forwards.store_dir(os.environ), intent(
+            action="card_reply", reply="ok", reply_key="activity-running", card={"id": "t_1", "status": "running"})))
