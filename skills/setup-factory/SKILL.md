@@ -131,6 +131,8 @@ home, `<home>/profiles/claude-worker`. Each one has its own `config.yaml`,
 | `plugins.entries.pr-ready-gate.settings` | `config.yaml` of both homes |
 | `GITHUB_UPLOAD_TOKEN`, the operator's upload-only token | The factory's Infisical folder only, entered by the operator. The gateway loads it. Neither `.env` holds it, and the broker never hands it out |
 | `platforms.factory_uploads.enabled` and `platforms.factory_uploads.extra.repositories` | `<home>/config.yaml` only |
+| `platforms.email_intake.enabled` and `platforms.email_intake.extra.object_host`, the Email Worker's object host | `<home>/config.yaml` only |
+| `plugins.entries.email-outcome.settings.team_key`, the Linear team whose Triage gets a new email issue | `<home>/profiles/mail-worker/config.yaml` |
 | `plugins.entries.work.settings.skills_dir` and the optional `allow` | `<home>/config.yaml` of the root home only. The directory path is private, so it never enters this repository |
 | `kanban.max_in_progress`, `kanban.max_spawn`, `kanban.review_dispatch`, `platforms.webhook.*`, `dashboard.public_url`, `dashboard.oauth.self_hosted` | `<home>/config.yaml` |
 | `streaming.enabled`, `platforms.slack.extra.native_task_cards` | `<home>/config.yaml` |
@@ -807,6 +809,60 @@ home. It takes effect at the next gateway restart.
 hermes plugins install "file://<repo>#plugins/factory-deploy" --enable --yes-deps </dev/null
 ```
 
+**Email intake, root home only.** The `email-intake` plugin runs inside the
+gateway, because it holds `EMAIL_WEBHOOK_SECRET`. For each email that the
+`email` route's script claims, it creates the email's blocked card and fetches
+the email's stored objects. Install and enable it in the root home and never in
+a worker's home. Set the Email Worker's object host, the host name alone with no
+scheme or path, which goes in the private record:
+
+```sh
+hermes plugins install "file://<repo>#plugins/email-intake" --enable --yes-deps </dev/null
+hermes config set platforms.email_intake.enabled true
+hermes config set platforms.email_intake.extra.object_host <object host>
+```
+
+It takes effect at the next gateway restart. [The email
+route](../../templates/README.md#the-email-route) describes the ledger, the
+fetch, and the outcomes.
+
+**Mail worker profile.** The `mail-worker` profile reads each email card. It
+runs Hermes' own agent loop with the `file` and `email` toolsets, no terminal,
+and no Claude Code. Install it, or update it when it exists, then install the
+`email-outcome` plugin into its home only. That plugin's hook refuses every tool
+outside the mail allowlist, so it would stop any other home's tools.
+`check-install` reports it in any other home.
+
+```sh
+hermes profile install <repo>/profiles/mail-worker --name mail-worker -y </dev/null
+hermes profile update mail-worker -y </dev/null
+hermes -p mail-worker plugins install "file://<repo>#plugins/email-outcome" --enable --yes-deps </dev/null
+hermes -p mail-worker plugins install "file://<repo>#plugins/factory-secret-names" --enable --yes-deps </dev/null
+hermes -p mail-worker config set plugins.entries.email-outcome.settings.team_key <Linear team key> </dev/null
+```
+
+A distribution install sets no model, so run part 4 for `mail-worker` too. Its
+Linear writes use the broker's Linear token, the same as the worker's. When the
+proxy needs a token, set its `secrets.command` to `worker-secrets` as above,
+with `-p mail-worker`.
+
+`read_file` returns a PDF's text only when Hermes' environment has
+`firecrawl-anydoc`, which Hermes bundles on Python 3.14. `check-install`
+reports a `pdf extractor` line when it is missing. Then reinstall Hermes as part
+1 describes, with its `doc-extract` extra. Never parse an email's PDF in the
+gateway.
+
+**Verify the mail worker.**
+
+- `<root>/profiles/mail-worker/SOUL.md` matches
+  `<repo>/profiles/mail-worker/SOUL.md`.
+- `hermes -p mail-worker config get platform_toolsets.cli` lists `file` and
+  `email`, and no `terminal`.
+- `hermes -p mail-worker plugins list` lists `email-outcome`, enabled, and
+  `hermes plugins list` and `hermes -p claude-worker plugins list` do not.
+- `check-install` prints no `profile mail-worker`, `pdf extractor`, or
+  `plugin email-` line.
+
 **Worker profile.** If `<worker>` does not exist, install it. If it exists,
 update it. An update keeps the installed `config.yaml`. Pass `--force-config`
 only when the operator asks to reset it.
@@ -864,13 +920,23 @@ hermes -p claude-worker config set secrets.command "$value" </dev/null
 ```sh
 env_has <home>/.env LINEAR_WEBHOOK_SECRET   # 1
 env_has <home>/.env GITHUB_WEBHOOK_SECRET   # 1
+env_has <home>/.env EMAIL_WEBHOOK_SECRET    # 1
 hermes config get platforms.webhook.enabled       # true
 hermes config get platforms.webhook.extra.host    # 127.0.0.1
 hermes config get platforms.webhook.extra.port    # the webhook port
 ```
 
-Parts 8 and 9 create the two secrets, because each one also goes into the
-Linear app's form or the GitHub App's form. A missing secret here is expected on
+Parts 8 and 9 create the first two secrets, because each one also goes into the
+Linear app's form or the GitHub App's form. `EMAIL_WEBHOOK_SECRET` is shared
+with the Email Worker, which another repository deploys. When the operator has
+not set it, create it, and ask the operator to give the same value to the
+Email Worker's own secret store:
+
+```sh
+openssl rand -hex 32 | tee >(pbcopy) | env_set <home>/.env EMAIL_WEBHOOK_SECRET
+```
+
+Only the gateway holds it. `check-install` reports it in a worker's `.env`. A missing secret here is expected on
 a new machine. When the Infisical folder already holds the secrets, check its
 key names instead, and have parts 8 and 9 write a new secret with
 `infisical_set`.
@@ -1431,11 +1497,12 @@ python3 <repo>/templates/render.py --install-skills
 Hermes lists its skills once, so a new or changed skill takes effect after the
 gateway restarts.
 
-**Install** the `linear` route's script next, because Hermes drops every
-delivery of a route whose script is missing:
+**Install** the `linear` and `email` routes' scripts next, because Hermes
+drops every delivery of a route whose script is missing:
 
 ```sh
 install -m 0644 <repo>/skills/setup-factory/scripts/linear-route <root>/scripts/linear-route
+install -m 0644 <repo>/skills/setup-factory/scripts/email-route <root>/scripts/email-route
 ```
 
 Then install each key that `--check` reports as not installed, as differing, or
@@ -1446,8 +1513,8 @@ hermes config set "$key" \
   "$(python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)[sys.argv[1]]))' "$key" < <scratch>/webhook-config.json)"
 ```
 
-The route secrets are `${LINEAR_WEBHOOK_SECRET}` and `${GITHUB_WEBHOOK_SECRET}`
-references. Hermes expands them from `<home>/.env`, so the rendered JSON holds
+The route secrets are `${LINEAR_WEBHOOK_SECRET}`, `${GITHUB_WEBHOOK_SECRET}`,
+and `${EMAIL_WEBHOOK_SECRET}` references. Hermes expands them from `<home>/.env`, so the rendered JSON holds
 no secret.
 
 **Dynamic routes.** Run `hermes webhook list`. A static route overrides a
@@ -2154,11 +2221,14 @@ print no secret.
 ```sh
 forged_post() {
   python3 - "$@" <<'PY'
-import hashlib, hmac, sys, urllib.error, urllib.request
+import hashlib, hmac, sys, time, urllib.error, urllib.request
 route, literal, header, event = sys.argv[1:]
 body = b'{"type": "SetupCheck"}'
 digest = hmac.new(literal.encode(), body, hashlib.sha256).hexdigest()
 headers = {"Content-Type": "application/json", header: digest if header == "Linear-Signature" else "sha256=" + digest}
+if header == "X-Webhook-Signature-V2":
+    stamp = str(int(time.time()))
+    headers.update({"X-Webhook-Timestamp": stamp, header: hmac.new(literal.encode(), stamp.encode() + b"." + body, hashlib.sha256).hexdigest()})
 if event:
     headers["X-GitHub-Event"] = event
 try:
@@ -2170,6 +2240,7 @@ PY
 }
 forged_post linear '${LINEAR_WEBHOOK_SECRET}' Linear-Signature ""     # linear 401
 forged_post github '${GITHUB_WEBHOOK_SECRET}' X-Hub-Signature-256 ping # github 401
+forged_post email '${EMAIL_WEBHOOK_SECRET}' X-Webhook-Signature-V2 ""  # email 401
 ```
 
 A `401` proves something only when the same request signed with the real
