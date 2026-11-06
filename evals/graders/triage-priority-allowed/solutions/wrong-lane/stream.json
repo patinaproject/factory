@@ -1,0 +1,26 @@
+[
+  {
+    "tool": "tracker",
+    "args": [
+      "show",
+      "ISSUE-1"
+    ]
+  },
+  {
+    "tool": "tracker",
+    "args": [
+      "set-priority",
+      "ISSUE-1",
+      "1"
+    ]
+  },
+  {
+    "tool": "tracker",
+    "args": [
+      "comment",
+      "ISSUE-1",
+      "--body",
+      "Priority: Urgent, set by triage"
+    ]
+  }
+]

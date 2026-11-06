@@ -18,6 +18,10 @@
     // written against their own upstream markdownlint config and are overwritten
     // on every re-vendor, so they are never linted here.
     ".agents/skills/**",
-    ".claude/skills/**"
+    ".claude/skills/**",
+    // The eval harness's virtual environment holds third-party packages, and its
+    // fixture Markdown is task text that the cases version as data.
+    "evals/.venv/**",
+    "evals/fixtures/**"
   ]
 }

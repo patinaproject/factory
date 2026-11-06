@@ -1,0 +1,14 @@
+[project]
+name = "patina-evals"
+version = "0.1.0"
+description = "Model-free eval harness for the factory's patina-mode workflow"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "inspect_ai==0.3.287",
+  "inspect_swe==0.2.72",
+  "jsonschema==4.26.0",
+  "pyyaml==6.0.3",
+]
+
+[tool.setuptools]
+packages = ["patina_evals"]
