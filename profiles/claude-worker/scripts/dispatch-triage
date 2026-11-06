@@ -18,7 +18,8 @@ matches the commit auto-deploy recorded as deployed (`card_transition.sweep_depl
 Hermes pause once the pause ends (`card_transition.sweep_resume`).
 It releases each card parked for its worktree once no claude-session holds the card's lock
 (`card_transition.sweep_worktree`), and each card parked after a server error five minutes after its park
-(`card_transition.sweep_server_error`), and posts one thought on the card's agent session for each.
+(`card_transition.sweep_server_error`), each card parked after an Xcode first launch check timed out the same
+five minutes after its park (`card_transition.sweep_xcode_check`), and posts one thought on the card's agent session for each.
 For each card parked for its issue's Agent brief it applies `card_transition.sweep_brief`:
 it releases the card with the same line, or queues the issue's triage card and prints
 `queued <triage task id> for <task id>`, so the next step can assign that triage card.
@@ -121,6 +122,7 @@ def main() -> int:
         released = release_parked(card_transition.sweep_resume, "a Hermes resume") and released
         released = release_parked(card_transition.sweep_worktree, "a free worktree") and released
         released = release_parked(card_transition.sweep_server_error, "a server-error wait") and released
+        released = release_parked(card_transition.sweep_xcode_check, "an Xcode check wait") and released
         released = release_parked(card_transition.sweep_brief, "an Agent brief") and released
         released = release_parked(card_transition.sweep_issue, "a GitHub issue") and released
         released = release_parked(card_transition.sweep_pull_request, "a GitHub pull request") and released
