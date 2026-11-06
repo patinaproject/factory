@@ -23,7 +23,10 @@ FAKE_HERMES = textwrap.dedent(
         if "routes.unknown." in args[2]:
             sys.stderr.write("Config key not set")
             sys.exit(1)
-        print(json.dumps(["factory-linear-triage"] if args[2].endswith(".skills") else ["terminal", "linear_agent_session"]))
+        if args[2].endswith(".prompt"):
+            print(json.dumps("Reply on {agentSession.issue.identifier}: {agentActivity.content.body} ({missing.key})"))
+        else:
+            print(json.dumps(["factory-linear-triage"] if args[2].endswith(".skills") else ["terminal", "linear_agent_session"]))
         sys.exit(0)
     query = open(args[args.index("--query-file") + 1]).read()
     with open(os.environ["FAKE_LOG"], "a") as log:
@@ -49,11 +52,19 @@ FAKE_TRIAGE_EXIT = textwrap.dedent(
     """\
     import json, os, sys
     args = sys.argv[1:]
+    behavior = json.load(open(os.environ["FAKE_TRIAGE_BEHAVIOR"]))
+    if args[0] == "missed-prompts":
+        with open(os.environ["FAKE_TRIAGE_LOG"], "a") as log:
+            log.write(json.dumps({"argv": args, "home": os.environ["HERMES_HOME"]}) + "\\n")
+        if behavior.get("sweep_exit"):
+            sys.stderr.write("sweep failed with Bearer abc123")
+            sys.exit(behavior["sweep_exit"])
+        print(behavior.get("sweep_stdout") or json.dumps({"route": "linear", "prompts": behavior.get("prompts", [])}))
+        sys.exit(0)
     payload = json.load(open(args[args.index("--payload-file") + 1]))
     now = args[args.index("--now") + 1] if "--now" in args else None
     with open(os.environ["FAKE_TRIAGE_LOG"], "a") as log:
         log.write(json.dumps({"argv": args[:2], "payload": payload, "now": now, "home": os.environ["HERMES_HOME"]}) + "\\n")
-    behavior = json.load(open(os.environ["FAKE_TRIAGE_BEHAVIOR"]))
     if args[0] == "teammate-reply":
         print(json.dumps({"addressed": behavior.get("addressed", False)}))
         sys.exit(behavior.get("exit", 0))
@@ -88,6 +99,18 @@ def entry(delivery, state="queued", delivered=None, next_try=None, attempts=0, r
         "summary": {"event": "Issue", "action": "update", "subject": "PAT-1"},
         "prompt": f"prompt for {delivery}", "state": state, "attempts": attempts, "last_error": "",
         "next_try_at": next_try or ago(minutes=5), "updated_at": ago(hours=1), "reported": reported, **fields,
+    }
+
+
+MISSED_ID = "5b0e3a1c-8d41-4f6e-9a57-2c1d0e7f9b34"
+
+
+def missed_payload(created=None):
+    return {
+        "type": "AgentSessionEvent", "action": "prompted", "appUserId": "app-1", "createdAt": created or ago(minutes=15),
+        "webhookTimestamp": 1789000000000,
+        "agentSession": {"id": "session-1", "issue": {"id": "issue-1", "identifier": "ABC-1"}},
+        "agentActivity": {"id": MISSED_ID, "signal": None, "userId": "user-1", "content": {"body": "please continue"}},
     }
 
 
@@ -698,6 +721,122 @@ class RetryTest(unittest.TestCase):
 
     def test_nothing_to_do_prints_nothing(self):
         self.assertEqual((self.run_retry().returncode, self.run_retry().stdout), (0, ""))
+
+    def sweeps(self):
+        return [c for c in self.cli_calls(self.home.parent / "triage.log") if c["argv"][0] == "missed-prompts"]
+
+    def test_a_swept_prompt_is_queued_once_with_its_rendered_prompt(self):
+        payload = missed_payload()
+        self.install_triage_exit(prompts=[payload])
+        self.behave(**{"Reply on ABC-1": {"exit": 1}})
+
+        result = self.run_retry()
+
+        delivery = f"missed-{MISSED_ID}"
+        delivered = payload["createdAt"]
+        stored = self.entries()
+        self.assertEqual(list(stored), [chat_key(delivery)])
+        saved = stored[chat_key(delivery)]
+        saved.pop("updated_at")
+        self.assertEqual(
+            saved,
+            {
+                "key": chat_key(delivery), "profile": "default", "route": "linear", "delivery": delivery,
+                "delivered_at": delivered, "summary": {"event": "AgentSessionEvent", "action": "prompted", "subject": "ABC-1"},
+                "prompt": "Reply on ABC-1: please continue ({missing.key})", "payload": payload, "attempts": 0,
+                "last_error": "", "next_try_at": delivered, "reported": True, "admitted": False, "reason": "missed",
+                "state": "failed",
+            } | {"last_error": saved["last_error"]},
+        )
+        self.assertEqual(
+            result.stdout,
+            f"queued linear {delivery} AgentSessionEvent prompted ABC-1: missed (next try {delivered})\n"
+            f"retried linear {delivery}: failed (1)\nwebhook retry queue drained\n",
+        )
+
+    def test_a_swept_prompt_replays_with_the_live_checks_the_intent_block_and_the_missed_cause(self):
+        payload = missed_payload()
+        self.install_triage_exit(prompts=[payload])
+
+        result = self.run_retry()
+
+        delivered = payload["createdAt"]
+        self.assertEqual([c["payload"] for c in self.teammate_checks()], [payload])
+        self.assertEqual([(c["payload"], c["now"]) for c in self.intent_checks()], [(payload, delivered)])
+        intent = json.dumps({"action": "card_reply", "now": delivered})
+        self.assertEqual(
+            [c["query"] for c in self.chats()],
+            [
+                f"This is a replay of a webhook delivery that arrived at {delivered} and could not run then because "
+                "its webhook never reached this gateway, so the retry job found the reply in Linear.\n\n"
+                "Reply on ABC-1: please continue ({missing.key})"
+                f"\n\n## Computed triage intent\n\n<triage_intent>\n{intent}\n</triage_intent>\n\n"
+            ],
+        )
+        self.assertTrue(result.stdout.endswith(f"retried linear missed-{MISSED_ID}: succeeded\nwebhook retry queue drained\n"))
+        self.assertEqual(self.entries(), {})
+
+    def test_a_swept_prompt_addressed_to_a_teammate_is_skipped_by_the_replay_checks(self):
+        self.install_triage_exit(prompts=[missed_payload()], addressed=True)
+
+        result = self.run_retry()
+
+        self.assertEqual(self.chats(), [])
+        self.assertIn(f"retried linear missed-{MISSED_ID}: skipped a reply addressed to a teammate", result.stdout)
+
+    def test_a_failing_sweep_is_logged_without_output_and_the_queue_still_replays(self):
+        self.install_triage_exit(sweep_exit=1)
+        self.seed(entry("waiting"))
+
+        result = self.run_retry()
+
+        self.assertEqual(result.stdout, "retried linear waiting: succeeded\nwebhook retry queue drained\n")
+        log = (self.queue / "retry.log").read_text()
+        self.assertIn("missed prompts: the sweep failed (1): sweep failed with [redacted]", log)
+        self.assertEqual(len(self.chats()), 1)
+
+    def test_a_sweep_with_unreadable_output_queues_nothing(self):
+        for output in ("not json", json.dumps({"route": "linear"}), json.dumps({"route": "linear", "prompts": [{"x": 1}]})):
+            with self.subTest(output):
+                self.setUp()
+                self.install_triage_exit(sweep_stdout=output)
+
+                result = self.run_retry()
+
+                self.assertEqual((result.stdout, self.chats()), ("", []))
+                self.assertIn("missed prompts: the sweep printed output this job cannot read", (self.queue / "retry.log").read_text())
+
+    def test_no_sweep_runs_while_paused_or_without_the_cli(self):
+        self.install_triage_exit(prompts=[missed_payload()])
+        self.engage_pause()
+        self.run_retry()
+        self.assertEqual(self.sweeps(), [])
+
+        bare = RetryTest("run_retry")
+        bare.setUp()
+        self.addCleanup(bare.tmp.cleanup)
+        self.assertEqual(bare.run_retry().stdout, "")
+
+    def test_a_missed_entry_that_waits_is_listed_with_its_reason(self):
+        key, queued = entry("missed-x", reason="missed")
+        self.seed((key, queued))
+
+        listed = self.run_retry("--list")
+
+        self.assertTrue(listed.stdout.rstrip().endswith(f" {queued['next_try_at']} missed"))
+
+
+class EncodeKeyTest(unittest.TestCase):
+    def test_the_key_is_what_hermes_builds_for_a_delivery(self):
+        from tests import queue_store
+
+        self.assertEqual(queue_store.encode_key("default", "linear", "d"), "webhook:v2:WyJkZWZhdWx0IiwibGluZWFyIiwiZCJd")
+        self.assertEqual(queue_store.encode_key("default", "linear", "\u00e9"), "webhook:v2:WyJkZWZhdWx0IiwibGluZWFyIiwiw6kiXQ")
+
+    def test_a_key_decodes_to_its_parts(self):
+        from tests import queue_store
+
+        self.assertEqual(queue_store.decode_key(queue_store.encode_key("p", "r", "d\u00e9")), ("p", "r", "d\u00e9"))
 
 
 if __name__ == "__main__":
