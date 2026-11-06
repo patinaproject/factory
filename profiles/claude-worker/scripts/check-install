@@ -137,6 +137,7 @@ import dependabot_sweep
 import factory_settings
 import factory_source
 import gh_login
+import host_hold
 import install_plan
 import kanban_board
 import recurring_issues
@@ -1151,6 +1152,41 @@ def hold_engaged(root: Path) -> bool:
     return bool(state and state.get("hold"))
 
 
+def check_host_hold(root: Path, settings, now: datetime) -> list:
+    """Report the time `host_load` held dispatch in the last 24 hours, each hold entry past its `until`, and a
+    load average that cannot be read. A threshold that is not valid is reported by `check_settings`."""
+    where = str(root / host_hold.HOLDS_FILE)
+    drifts = []
+    try:
+        held = host_hold.held_seconds(root, host_hold.HOST_LOAD, now)
+        late = host_hold.overdue(root, now)
+    except host_hold.HoldError as error:
+        return [Drift("dispatch holds", where, str(error), Manual("fix or remove the file; dispatch-triage rewrites it"))]
+    if held:
+        drifts.append(Drift(
+            "dispatch holds", host_hold.LOG_FILE, f"the host load held dispatch for {round(held / 60)} minutes in the last 24 hours", ADVISORY,
+        ))
+    drifts.extend(
+        Drift("dispatch holds", where, f"{holder} is still held after {until}; dispatch-triage removes it on its next run", ADVISORY)
+        for holder, until in late
+    )
+    transport = settings.get("claude_session") if isinstance(settings, dict) else None
+    try:
+        host_hold.read_load(factory_settings.load_hold_threshold(transport if isinstance(transport, dict) else {}))
+    except factory_settings.SettingsError:
+        pass
+    except host_hold.Unreadable as error:
+        drifts.append(Drift("dispatch holds", where, f"{error}, so the load gate holds nothing", ADVISORY))
+    return drifts
+
+
+def holds_applied(root: Path) -> bool:
+    try:
+        return host_hold.read_holds(root)["applied"]
+    except host_hold.HoldError:
+        return False
+
+
 DISABLE_UPDATES = "skills/setup-factory/scripts/disable-auto-updates"
 DISABLE_UPDATES_FIX = Manual(f"run sudo python3 {DISABLE_UPDATES} in the operator's terminal")
 
@@ -1192,7 +1228,7 @@ def check_host_updates(preferences_root: Path, xcodebuild: str, env: dict) -> li
 
 def check_auto_deploy(
     root: Path, dispatch_profiles, commit: Commit | None, committed_at: float | None, now: float,
-    alive: Callable[[object], bool] = live_deploy,
+    alive: Callable[[object], bool] = live_deploy, applied: bool = False,
 ) -> list:
     state_path, run_lock, gateway_lock = root / AUTO_DEPLOY_STATE, root / AUTO_DEPLOY_LOCK, root / FACTORY_GATEWAY_LOCK
     holder = read_pid(run_lock)
@@ -1221,7 +1257,7 @@ def check_auto_deploy(
             "auto deploy", f"{HOLD_KEY} in {root}",
             f"was set by auto-deploy run {pid}, which is not running, so Hermes claims no card", START_DEPLOY,
         ))
-    elif dispatch_profiles is not None:
+    elif dispatch_profiles is not None and not applied:
         drifts.append(Drift(
             "auto deploy", f"{HOLD_KEY} in {root}",
             "is set, and no auto-deploy run set it, so Hermes claims no card for a profile outside it and auto-deploy "
@@ -2555,6 +2591,7 @@ def main() -> int:
             *check_prompt_commands(root, rendered_skills(commit, homes_)),
             *check_plugin_status(commit, homes_),
             *check_plugin_imports(commit, [root, worker], root),
+            *check_host_hold(root, settings, host_hold.utcnow()),
         ]
         if sys.platform == "darwin":
             drifts.extend(check_host_updates(
@@ -2564,7 +2601,7 @@ def main() -> int:
             drifts.extend(check_gh_login(launchd_root, worker, time.time()))
             drifts.extend(check_auto_deploy(
                 root, config_value(root, hermes, HOLD_KEY), None if args.ref else commit,
-                float(git(repo, "show", "-s", "--format=%ct", commit.sha)), time.time(),
+                float(git(repo, "show", "-s", "--format=%ct", commit.sha)), time.time(), applied=holds_applied(root),
             ))
         if broker is not None:
             drifts.extend(check_broker_user(commit, launchd_root, root, launchctl, broker, live_accounts()))

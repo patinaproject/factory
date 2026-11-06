@@ -13,16 +13,14 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, List, Optional
 
 DEPLOYED, FAILED, WAITING, BLOCKED = "DEPLOYED", "FAILED", "WAITING", "BLOCKED"
 HOLD_KEY = "kanban.dispatch_profiles"
-# Present and empty, Hermes' dispatcher claims no card on any board, ready or review, and reads the
-# change on its next tick.
-HOLD = ("config", "set", HOLD_KEY, "[]")
-RELEASE = ("config", "unset", HOLD_KEY)
+# Hold-list slack past the deploy's own timeout, so dispatch-triage never expires the entry mid-install.
+HOLD_SLACK_SECONDS = 300
 WORKER = "claude-worker"
 LABEL = "ai.patinaproject.factory.auto-deploy"
 INTERVAL_SECONDS = 300
@@ -105,7 +103,7 @@ def fresh_state() -> dict:
 
 
 def load_module(path: Path):
-    spec = importlib.util.spec_from_file_location("install_plan", path)
+    spec = importlib.util.spec_from_file_location(path.stem, path)
     if spec is None or spec.loader is None:
         raise DeployError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
@@ -143,6 +141,7 @@ class Deploy:
         self.state = fresh_state()
         self.source: Optional[Path] = None
         self.branch = ""
+        self.hold_module = None
 
     def log(self, message: str) -> None:
         print(f"auto-deploy: {self.redact(message)}", flush=True)
@@ -227,6 +226,45 @@ class Deploy:
 
     def git(self, *args: str) -> str:
         return self.checked(["git", "-C", str(self.source), *args], dict(os.environ)).strip()
+
+    def holds(self):
+        """The shared hold list. The installed copy of host_hold.py is absent until a deploy first ships it, so the
+        source checkout's copy, which the --continue run always has, stands in."""
+        if self.hold_module is None:
+            path = self.worker / "scripts" / "host_hold.py"
+            if not path.is_file():
+                if self.source is None:
+                    self.find_source()
+                path = self.source / "profiles" / "claude-worker" / "scripts" / "host_hold.py"
+            self.hold_module = load_module(path)
+        module = self.hold_module
+        return module, module.HoldList(self.root, lambda *args: self.run([self.hermes, "config", *args], self.root_env))
+
+    def hold_dispatch(self, deadline_seconds: float) -> None:
+        module, holds = self.holds()
+        try:
+            holds.add(module.AUTO_DEPLOY, "a factory deploy is installing", module.utcnow() + timedelta(seconds=deadline_seconds + HOLD_SLACK_SECONDS))
+        except module.HoldError as error:
+            raise DeployError(str(error)) from None
+
+    def release_dispatch(self) -> None:
+        module, holds = self.holds()
+        try:
+            if module.AUTO_DEPLOY not in holds.holders():
+                # A run of the code before the hold list set the key itself; the entry makes the removal unset it.
+                self.hold_dispatch(0)
+            holds.remove(module.AUTO_DEPLOY)
+        except module.HoldError as error:
+            raise DeployError(str(error)) from None
+
+    def person_holds_dispatch(self) -> bool:
+        """Whether kanban.dispatch_profiles is set and the hold list did not set it."""
+        module, _ = self.holds()
+        try:
+            applied = module.read_holds(self.root)["applied"]
+        except module.HoldError as error:
+            raise DeployError(str(error)) from None
+        return self.hold_key_present() and not applied
 
     def hold_key_present(self) -> bool:
         """Whether config.yaml sets kanban.dispatch_profiles at all. `config get` merges Hermes' default
@@ -318,9 +356,7 @@ class Deploy:
                 self.gateway_lock.unlink(missing_ok=True)
             self.set_hold(gateway_lock=False)
         if hold.get("dispatch_profiles"):
-            proc = self.run([self.hermes, *RELEASE], self.root_env)
-            if proc.returncode != 0 and "not set" not in proc.stdout + proc.stderr:
-                raise DeployError(f"hermes config unset {HOLD_KEY} exited {proc.returncode}")
+            self.release_dispatch()
             self.set_hold(dispatch_profiles=False)
         self.state["hold"] = None
         self.save()
@@ -391,7 +427,7 @@ class Deploy:
                 self.log(f"{short(target)} is blocked by a run-gating manual line; waiting for origin/{self.branch} to move or a person to deploy it")
                 return 0
             try:
-                held = self.hold_key_present()
+                held = self.person_holds_dispatch()
             except DeployError as error:
                 self.record(FAILED, None, f"cannot read {HOLD_KEY}: {error}")
                 return 0
@@ -425,7 +461,7 @@ class Deploy:
     def hold_and_install(self, target: str, continued: Optional[str]) -> str:
         self.state["hold"] = {"pid": self.pid, "commit": target, "dispatch_profiles": True, "pause": None, "gateway_lock": False}
         self.save()
-        self.hermes_cli(*HOLD)
+        self.hold_dispatch(self.args.timeout)
         self.sleep(self.args.poll)
         try:
             cards = self.running_cards()
@@ -529,7 +565,7 @@ class Deploy:
             print("failed before; a run waits for the branch to move")
         elif target == self.state["blocked"]:
             print("blocked by a run-gating manual line before; a run waits for the branch to move")
-        if self.hold_key_present():
+        if self.person_holds_dispatch():
             print(f"{HOLD_KEY} is set in the root home; a run would record BLOCKED")
         plan = self.plan()
         print(f"plan from {self.source} as it is now:")

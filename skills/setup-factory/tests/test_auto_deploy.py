@@ -21,6 +21,10 @@ SCRIPTS = REPO / "skills" / "setup-factory" / "scripts"
 AUTO_DEPLOY = SCRIPTS / "auto-deploy"
 REPORT_DEPLOY = SCRIPTS / "report-deploy"
 INSTALL_PLAN = REPO / "profiles" / "claude-worker" / "scripts" / "install_plan.py"
+HOST_HOLD = REPO / "profiles" / "claude-worker" / "scripts" / "host_hold.py"
+HOLD = ["config", "set", "kanban.dispatch_profiles", "[]"]
+RELEASE = ["config", "unset", "kanban.dispatch_profiles"]
+FAR = "2999-01-01T00:00:00Z"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "auto_deploy"
 FAKE_TOOLS = FIXTURES / "fake_tools.py"
 # launchd runs the job on the macOS system Python, so the tests do too where it exists.
@@ -62,6 +66,7 @@ class Machine:
         (self.root / "scripts").mkdir(parents=True)
         self.hermes = tool(self.tmp / "bin" / "hermes")
         tool(self.worker / "scripts" / "check-install")
+        shutil.copyfile(HOST_HOLD, self.worker / "scripts" / "host_hold.py")
         self.upstream = self.tmp / "upstream"
         self.upstream.mkdir()
         git("init", "--quiet", "-b", "main", cwd=self.upstream)
@@ -82,6 +87,7 @@ class Machine:
         scripts = self.upstream / "profiles" / "claude-worker" / "scripts"
         scripts.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(INSTALL_PLAN, scripts / "install_plan.py")
+        shutil.copyfile(HOST_HOLD, scripts / "host_hold.py")
         tool(scripts / "check-install")
         setup = self.upstream / "skills" / "setup-factory" / "scripts"
         setup.mkdir(parents=True, exist_ok=True)
@@ -169,6 +175,12 @@ class Machine:
 
     def state(self) -> dict:
         return json.loads((self.root / "auto-deploy.json").read_text())
+
+    def holds(self) -> dict:
+        return json.loads((self.root / "dispatch-holds.json").read_text())
+
+    def set_holds(self, holds: dict, applied: bool) -> None:
+        (self.root / "dispatch-holds.json").write_text(json.dumps({"holds": holds, "applied": applied}))
 
     def outcomes(self) -> list:
         return [(event["outcome"], event["commit"]) for event in self.state()["events"]]
@@ -374,8 +386,9 @@ class AutoDeployTest(unittest.TestCase):
         install = next(call for call in self.m.calls("hermes") if call["argv"][0] == "profile")
         self.assertTrue(install["held"])
         changes = self.m.changes()
-        self.assertEqual((changes[0], changes[-1]), (list(auto_deploy.HOLD), list(auto_deploy.RELEASE)))
+        self.assertEqual((changes[0], changes[-1]), (HOLD, RELEASE))
         self.assertTrue(self.m.released())
+        self.assertEqual(self.m.holds(), {"holds": {}, "applied": False})
 
     def in_process(self, sleep) -> "auto_deploy.Deploy":
         args = argparse.Namespace(root=str(self.m.root), worker=str(self.m.worker), retry=False, timeout=3600.0, poll=7.0)
@@ -399,7 +412,7 @@ class AutoDeployTest(unittest.TestCase):
         self.assertEqual(slept, [(7.0, True)])
         self.assertEqual(self.m.outcomes(), [("WAITING", self.m.head)])
         self.assertIn("default/t_9 PAT-9", self.m.state()["detail"])
-        self.assertEqual(self.m.changes(), [list(auto_deploy.HOLD), list(auto_deploy.RELEASE)])
+        self.assertEqual(self.m.changes(), [HOLD, RELEASE])
         self.assertEqual(self.m.calls("check-install"), [])
         self.assertTrue(self.m.released())
 
@@ -620,6 +633,68 @@ class AutoDeployTest(unittest.TestCase):
         self.assertEqual(self.m.changes(), [])
         self.assertTrue(self.m.hermes_state()["key"])
 
+    def test_a_key_a_person_set_blocks_when_the_list_is_empty_and_never_applied(self) -> None:
+        self.m.set_holds({}, applied=False)
+        self.m.update_hermes(key=True)
+
+        self.deploy()
+
+        self.assertEqual(self.m.state()["outcome"], "BLOCKED")
+        self.assertEqual(self.m.changes(), [])
+        self.assertTrue(self.m.hermes_state()["key"])
+
+    def test_a_host_load_hold_neither_blocks_the_deploy_nor_is_released_by_it(self) -> None:
+        commit = self.m.push("B")
+        self.m.drifts([self.m.install("profile", "update", "claude-worker", "-y", step="PROFILE")])
+        entry = {"reason": "load average 30", "until": FAR}
+        self.m.set_holds({"host_load": entry}, applied=True)
+        self.m.update_hermes(key=True)
+
+        self.deploy()
+
+        self.assertEqual(self.m.outcomes(), [("DEPLOYED", commit)])
+        self.assertEqual([argv for argv in self.m.changes() if argv[0] == "config"], [])
+        install = next(call for call in self.m.calls("hermes") if call["argv"][0] == "profile")
+        self.assertTrue(install["held"])
+        self.assertEqual(self.m.holds(), {"holds": {"host_load": entry}, "applied": True})
+        self.assertTrue(self.m.hermes_state()["key"])
+
+    def test_the_deploy_keeps_a_host_load_hold_it_finds_gone_and_releases_only_its_own_entry(self) -> None:
+        self.m.drifts([self.m.install("profile", "update", "claude-worker", "-y", step="PROFILE")])
+        self.m.set_holds({}, applied=False)
+
+        self.deploy()
+
+        self.assertEqual(self.m.changes()[0], HOLD)
+        self.assertEqual(self.m.holds(), {"holds": {}, "applied": False})
+        self.assertTrue(self.m.released())
+
+    def test_a_crashed_runs_list_entry_is_removed_and_a_host_load_entry_stays(self) -> None:
+        pid = dead_pid()
+        (self.m.root / "auto-deploy.lock").write_text(f"{pid}\n")
+        entry = {"reason": "load average 30", "until": FAR}
+        self.m.set_holds({"auto-deploy": {"reason": "deploying", "until": FAR}, "host_load": entry}, applied=True)
+        self.m.update_hermes(key=True)
+        state = auto_deploy.fresh_state()
+        state["hold"] = {"pid": pid, "commit": "abc", "dispatch_profiles": True, "pause": None, "gateway_lock": False}
+        (self.m.root / "auto-deploy.json").write_text(json.dumps(state))
+
+        self.deploy()
+
+        self.assertEqual(self.m.holds(), {"holds": {"host_load": entry}, "applied": True})
+        self.assertEqual(self.m.changes(), [])
+        self.assertTrue(self.m.hermes_state()["key"])
+
+    def test_a_run_whose_installed_profile_lacks_host_hold_uses_the_source_checkouts_copy(self) -> None:
+        (self.m.worker / "scripts" / "host_hold.py").unlink()
+        self.m.drifts([self.m.install("profile", "update", "claude-worker", "-y", step="PROFILE")])
+
+        self.deploy()
+
+        self.assertEqual(self.m.state()["outcome"], "DEPLOYED")
+        self.assertTrue(self.m.released())
+        self.assertEqual(self.m.holds(), {"holds": {}, "applied": False})
+
     def test_an_operator_pause_changes_nothing(self) -> None:
         estop = self.m.root / "ESTOP"
         estop.write_text(json.dumps({"reason": "operator maintenance", "engaged_at": "then"}))
@@ -642,7 +717,7 @@ class AutoDeployTest(unittest.TestCase):
 
         self.deploy()
 
-        self.assertEqual(self.m.changes()[:2], [["resume"], list(auto_deploy.RELEASE)])
+        self.assertEqual(self.m.changes()[:3], [["resume"], HOLD, RELEASE])
         self.assertEqual(self.m.state()["deployed"], self.m.head)
         self.assertTrue(self.m.released())
         self.assertFalse((self.m.root / "auto-deploy.lock").exists())
@@ -794,7 +869,7 @@ class HermesDispatchTickTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             proc = subprocess.run(
                 [str(python), "-I", "-B", str(FIXTURES / "dispatch_tick.py"), str(checkout), str(site),
-                 json.dumps(list(auto_deploy.HOLD)), json.dumps(list(auto_deploy.RELEASE))],
+                 json.dumps(HOLD), json.dumps(RELEASE)],
                 env={"PATH": "/usr/bin:/bin", "HERMES_HOME": os.path.join(scratch, "home"), "PYTHONDONTWRITEBYTECODE": "1"},
                 cwd=scratch, capture_output=True, text=True, timeout=300,
             )
