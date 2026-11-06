@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Keep one open issue for each package with open Dependabot alerts.
+
+Usage: dependabot-sweep [--dry-run]
+
+Reads the Dependabot alerts of every non-archived repository the factory's GitHub App is installed on, the CISA KEV
+catalog, and the issues the sweep already filed, then keeps one issue for each vulnerable package in each repository the
+factory can build. A private `default` repository gets a Linear issue in the configured team. A public `synced_github`
+repository gets a GitHub issue. Every other repository with open alerts is reported in the state file, not filed.
+Reads everything before it writes anything. Prints one line per action, then a summary. Writes nothing with --dry-run,
+or when any read that stops the run fails. Exits 0 on success, when another run holds the lock, and when the settings
+have no `dependabot_sweep` section, 1 when a read or a write fails, and 2 when the settings are invalid.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+
+import card_transition
+import dependabot_sweep as sweep
+import factory_settings
+from dependabot_sweep import Buildability, Cancel, Comment, Create, DelegateCopy, Relate, SetPriority, UpdateBody
+
+NAME = "dependabot-sweep"
+LOCK_NAME = f"{NAME}.lock"
+KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+KEV_TIMEOUT_SECONDS = 30
+PER_PAGE = 100
+HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
+
+
+class ReadFailed(Exception):
+    pass
+
+
+class GhFailed(Exception):
+    def __init__(self, status: int | None, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def gh(*args: str, stdin: str | None = None) -> str:
+    env = {**os.environ, "GH_CONFIG_DIR": str(Path(os.environ["HERMES_HOME"]) / "gh")}
+    proc = subprocess.run([os.environ.get("GH_BIN", "gh"), *args], input=stdin, capture_output=True, text=True, env=env)
+    if proc.returncode != 0:
+        message = proc.stderr.strip().splitlines()[0] if proc.stderr.strip() else "no error output"
+        found = HTTP_STATUS.search(proc.stderr)
+        raise GhFailed(int(found[1]) if found else None, f"gh {' '.join(args[:2])} failed: {message}")
+    return proc.stdout
+
+
+def gh_pages(path: str, key: str | None = None) -> list:
+    """Every row of a list endpoint. `--paginate` follows the Link header, which the Dependabot alerts API needs: it
+    pages by cursor, not by page number."""
+    pages = json.loads(gh("api", "--paginate", "--slurp", f"{path}{'&' if '?' in path else '?'}per_page={PER_PAGE}"))
+    return [row for page in pages for row in (page[key] if key else page)]
+
+
+def read_kev(url: str) -> frozenset:
+    try:
+        with urllib.request.urlopen(url, timeout=KEV_TIMEOUT_SECONDS) as response:
+            return frozenset(v["cveID"] for v in json.load(response)["vulnerabilities"])
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ReadFailed(f"the CISA KEV catalog could not be read: {error}") from None
+
+
+def priority_owned(client, raw: dict) -> bool:
+    """Whether the sweep may still write this Triage issue's priority: no one but the App has changed it."""
+    return raw["stateType"] == "triage" and all(change["byMe"] for change in client.priority_changes(raw["id"]))
+
+
+def read_linear_issues(client, settings: sweep.Settings) -> list:
+    issues = []
+    for raw in client.list_issues_by_label(settings.team_key, settings.label):
+        if issue := sweep.linear_issue(raw, priority_owned(client, raw)):
+            issues.append(issue)
+    return issues
+
+
+def read_copy(client, url: str):
+    copies = sorted(client.issues_by_attachment_url(url), key=lambda c: (c["createdAt"], c["identifier"]))
+    if not copies:
+        return None
+    return sweep.copy_from(copies[0], priority_owned(client, copies[0]))
+
+
+def read_public_issues(client, settings: sweep.Settings, repo: sweep.Repo) -> list:
+    path = f"repos/{repo.full_name}/issues?creator={settings.app_login}&state=all"
+    issues = []
+    for raw in gh_pages(path):
+        issue = sweep.github_issue(raw, settings.app_login, None)
+        if issue is not None:
+            issues.append(replace(issue, copy=read_copy(client, issue.url)) if issue.is_open else issue)
+    return issues
+
+
+def read_alerts(repo: sweep.Repo) -> tuple:
+    try:
+        return tuple(sweep.parse_alert(a) for a in gh_pages(f"repos/{repo.full_name}/dependabot/alerts")), ""
+    except GhFailed as error:
+        disabled = error.status == 403 and "dependabot alerts are disabled" in str(error).lower()
+        if error.status == 404 or disabled:
+            return (), "Dependabot alerts are disabled or the repository is not found"
+        raise ReadFailed(str(error)) from None
+
+
+def read_all(client, settings: sweep.Settings) -> tuple:
+    reads: list = []
+    issues = read_linear_issues(client, settings)
+    for raw in gh_pages("installation/repositories", "repositories"):
+        if raw["archived"]:
+            continue
+        repo = sweep.classify_repo(raw["full_name"], raw["visibility"], settings)
+        if repo.buildability is Buildability.PUBLIC_SYNCED:
+            names = {label["name"].lower() for label in gh_pages(f"repos/{repo.full_name}/labels")}
+            missing = [label for label in (settings.label, sweep.NEEDS_TRIAGE_LABEL) if label.lower() not in names]
+            if missing:
+                reads.append(sweep.RepoRead(repo, skipped=f"the label {', '.join(repr(m) for m in missing)} is missing"))
+                continue
+        alerts, skipped = read_alerts(repo)
+        reads.append(sweep.RepoRead(repo, alerts, skipped))
+        if repo.buildability is Buildability.PUBLIC_SYNCED and not skipped:
+            issues.extend(read_public_issues(client, settings, repo))
+    return reads, issues
+
+
+def describe(action) -> str:
+    where = action.repo.full_name
+    match action:
+        case Create():
+            related = f", follows {action.previous}" if action.previous else ""
+            return f"create      {where} {action.key.ecosystem} {action.key.package}  ({action.priority.title}{related})"
+        case UpdateBody():
+            return f"updated     {where} {action.issue.identifier}"
+        case SetPriority():
+            return f"priority    {where} {action.issue.identifier} -> {action.to.title}"
+        case Comment():
+            return f"commented   {where} {action.issue.identifier}"
+        case Cancel():
+            return f"canceled    {where} {action.issue.identifier}"
+        case Relate():
+            return f"related     {where} {action.issue.identifier} -> {action.previous}"
+        case DelegateCopy():
+            return f"delegated   {where} {action.issue.identifier} copy {action.copy.identifier}"
+    raise TypeError(f"no line for {action!r}")
+
+
+def apply(action, client, settings: sweep.Settings) -> str:
+    github = action.repo.tracker == "github"
+    repo = action.repo.full_name
+    match action:
+        case Create():
+            if github:
+                out = gh(
+                    "issue", "create", "-R", repo, "--title", action.title, "--body-file", "-",
+                    "--label", settings.label, "--label", sweep.NEEDS_TRIAGE_LABEL, stdin=action.body,
+                )
+                made = "#" + out.strip().rsplit("/", 1)[-1]
+            else:
+                made = client.create_issue(
+                    settings.team_key, action.title, action.body, [settings.label], state_type="triage", delegate_self=True,
+                    priority=action.priority.linear,
+                )["identifier"]
+                if action.previous:
+                    client.relate_issues(made, action.previous, "related")
+            return describe(action).replace("create      ", f"created     {made} ", 1)
+        case UpdateBody():
+            if github:
+                gh("issue", "edit", action.issue.ref, "-R", repo, "--body-file", "-", stdin=action.body)
+            else:
+                client.edit_issue(action.issue.ref, description=action.body)
+        case SetPriority():
+            client.set_priority(action.target, action.to.linear)
+        case Comment():
+            if github:
+                gh("issue", "comment", action.issue.ref, "-R", repo, "--body-file", "-", stdin=action.text)
+            else:
+                client.comment_on_issue(action.issue.ref, action.text)
+        case Cancel():
+            if github:
+                gh("issue", "close", action.issue.ref, "-R", repo, "--reason", "not planned")
+            else:
+                client.move_to_canceled(action.issue.ref)
+        case Relate():
+            client.relate_issues(action.issue.identifier, action.previous, "related")
+        case DelegateCopy():
+            if not action.copy.delegated:
+                client.delegate_self(action.copy.id)
+            if action.priority:
+                client.set_priority(action.copy.id, action.priority.linear)
+    return describe(action)
+
+
+def write_state(home: str, document: dict) -> None:
+    fd, temp = tempfile.mkstemp(dir=home, prefix=sweep.STATE_FILE + ".")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(document, handle, indent=2)
+        os.replace(temp, Path(home) / sweep.STATE_FILE)
+    except BaseException:
+        os.unlink(temp)
+        raise
+
+
+def run(
+    argv: list, *, linear_api_url: str | None = None, kev_url: str = KEV_URL, now: datetime | None = None,
+) -> int:
+    parser = argparse.ArgumentParser(prog=NAME, description=__doc__.splitlines()[0])
+    parser.add_argument("--dry-run", action="store_true", help="print the plan and write nothing")
+    args = parser.parse_args(argv)
+    home = os.environ.get("HERMES_HOME")
+    if not home:
+        print(f"{NAME}: HERMES_HOME is not set; point it at the claude-worker profile home", file=sys.stderr)
+        return 2
+    try:
+        raw_settings = factory_settings.read(raw=False)
+        if not sweep.configured(raw_settings):
+            return 0
+        settings = sweep.parse_settings(raw_settings)
+    except (factory_settings.SettingsError, sweep.SettingsError, ValueError) as error:
+        print(f"{NAME}: {error}", file=sys.stderr)
+        return 2
+    with open(Path(home) / LOCK_NAME, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("locked")
+            return 0
+        return _sweep(settings, home, args.dry_run, linear_api_url, kev_url, now or datetime.now(timezone.utc))
+
+
+def _sweep(settings, home: str, dry_run: bool, linear_api_url, kev_url: str, now: datetime) -> int:
+    linear = card_transition.plugin_module("linear-agent-session", "linear")
+    try:
+        kev = read_kev(kev_url)
+        client = linear.client_from_env(**({"api_url": linear_api_url} if linear_api_url else {}))
+        reads, issues = read_all(client, settings)
+    except (ReadFailed, GhFailed, *linear.CLIENT_ERRORS, OSError, ValueError, KeyError) as error:
+        print(f"{NAME}: read failed, so nothing was written: {error}", file=sys.stderr)
+        return 1
+    result = sweep.plan(reads, issues, kev)
+    failed: set = set()
+    for action in result.actions:
+        if dry_run:
+            print(describe(action))
+            continue
+        if action.repo.full_name in failed:
+            continue
+        try:
+            print(apply(action, client, settings), flush=True)
+        except (GhFailed, *linear.CLIENT_ERRORS, OSError) as error:
+            failed.add(action.repo.full_name)
+            print(f"{NAME}: {action.repo.full_name} failed on `{describe(action)}`, so its remaining writes were skipped: {error}", file=sys.stderr)
+    for entry in result.report:
+        print(f"{entry.kind:<11} {entry.repository}  ({entry.open_alerts} open alerts, {entry.reason})")
+    if not dry_run:
+        write_state(home, sweep.state_document(result.report, now.isoformat()))
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(run(sys.argv[1:]))

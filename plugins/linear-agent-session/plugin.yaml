@@ -100,6 +100,13 @@ config_schema:
       <owner>/<name> whose checkout_path checkout holds the rules file at rules_path, sentry_label and theme_label
       the labels each issue gets, and mcp_server the claude_session.mcp_servers entry whose token reads Sentry.
       Empty means no sync: check-install then expects no sentry-linear-sync cron job.
+  dependabot_sweep:
+    type: dict
+    default: {}
+    description: >-
+      The daily Dependabot sweep. team_key is the Linear team of a private default repository's issues, and label
+      the theme label every issue gets, in Linear and in each synced_github repository. Empty means no sweep:
+      check-install then expects no dependabot-sweep cron job, and check-github-access does not ask for Dependabot alerts.
   scheduled_commands:
     type: list
     default: []

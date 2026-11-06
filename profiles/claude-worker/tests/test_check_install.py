@@ -140,6 +140,7 @@ SENTRY_SYNC = {
     "checkout_path": "/srv/example-repo", "rules_path": "config/error-groups.json", "sentry_label": "Sentry",
     "theme_label": "Stability", "mcp_server": "sentry",
 }
+DEPENDABOT_SWEEP = {"team_key": "ABC", "label": "Security"}
 SENTRY_SERVERS = {"sentry": {"url": "https://mcp.example/sentry", "token_env": "SENTRY_ACCESS_TOKEN"}}
 DEPENDENCY_UPDATES_KEY = "plugins.entries.linear-agent-session.settings.dependency_updates"
 MAX_RUNNING_KEY = "plugins.entries.linear-agent-session.settings.triage.max_running"
@@ -277,6 +278,7 @@ REMEDY_CLASSES = (
     ("kanban board database", "", "manual"),
     ("kanban capacity", "", "manual"),
     ("stranded triage card", "", "advisory"),
+    ("dependabot sweep", "", "advisory"),
     ("stranded triage card check", "", "advisory"),
     ("gh login", "", "manual"),
     ("artifact login", "", "manual"),
@@ -1555,6 +1557,51 @@ class CheckInstallTest(unittest.TestCase):
             f"config sentry_sync in {self.worker}: sentry_sync.checkout_path 'relative' must be an absolute path to the "
             "worker-owned checkout (part 10)\n"
             f"config sentry_sync in {self.worker}: sentry_sync.mcp_server 'other' is not a claude_session.mcp_servers entry (part 10)\n"
+        )))
+
+    def dependabot_sweep(self, section: dict | None) -> None:
+        settings = dict(SETTINGS)
+        if section is not None:
+            settings["dependabot_sweep"] = section
+        self.config(self.root, {**ROOT_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+        self.config(self.worker, {**WORKER_CONFIG, "plugins.entries.linear-agent-session.settings": settings})
+
+    def test_the_dependabot_sweep_job_follows_its_settings_section(self) -> None:
+        job = cron_job("dependabot-sweep", 1440)
+        for name, section, jobs, expected in (
+            ("section and job", DEPENDABOT_SWEEP, [*WORKER_JOBS, job], (0, "")),
+            ("section and no job", DEPENDABOT_SWEEP, WORKER_JOBS, (1, f"cron job dependabot-sweep in {self.worker}: is missing (part 12)\n")),
+            ("no section and no job", None, WORKER_JOBS, (0, "")),
+            ("no section and a job", None, [*WORKER_JOBS, job], (
+                1, f"cron job dependabot-sweep in {self.worker}: runs without a dependabot_sweep section in the factory "
+                   "settings; remove it (part 12)\n")),
+        ):
+            with self.subTest(name):
+                self.dependabot_sweep(section)
+                self.cron(self.worker, jobs)
+                self.assertEqual(self.check(), expected)
+
+    def test_a_malformed_dependabot_sweep_field_is_one_drift(self) -> None:
+        self.dependabot_sweep({**DEPENDABOT_SWEEP, "team_key": "abc"})
+        self.cron(self.worker, [*WORKER_JOBS, cron_job("dependabot-sweep", 1440)])
+
+        self.assertEqual(self.check(), (1, (
+            f"config dependabot_sweep in {self.worker}: dependabot_sweep.team_key 'abc' must be a Linear team key such as ABC (part 10)\n"
+        )))
+
+    def test_each_repository_the_last_dependabot_sweep_did_not_file_is_one_advisory(self) -> None:
+        self.dependabot_sweep(DEPENDABOT_SWEEP)
+        self.cron(self.worker, [*WORKER_JOBS, cron_job("dependabot-sweep", 1440)])
+        (self.worker / "dependabot-sweep-state.json").write_text(json.dumps({"run_at": "2026-11-03T12:00:00+00:00", "repositories": [
+            {"repository": "example-org/other", "kind": "unbuildable", "open_alerts": 32, "reason": "private repository that is not the default repository"},
+            {"repository": "example-org/off", "kind": "skipped", "open_alerts": 0, "reason": "Dependabot alerts are disabled"},
+        ]}))
+
+        self.assertEqual(self.check(), (1, (
+            f"dependabot sweep {self.worker}/dependabot-sweep-state.json: example-org/other is not swept: 32 open Dependabot "
+            "alerts; private repository that is not the default repository (part 12)\n"
+            f"dependabot sweep {self.worker}/dependabot-sweep-state.json: example-org/off was skipped: no open Dependabot "
+            "alerts read; Dependabot alerts are disabled (part 12)\n"
         )))
 
     def test_failed_last_run_names_its_error_until_a_run_succeeds(self) -> None:

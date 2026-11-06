@@ -87,7 +87,7 @@ class CheckGithubAccessTest(unittest.TestCase):
         plugin.mkdir(parents=True)
         (plugin / "broker_client.py").symlink_to(CHECKOUT / "plugins" / "linear-agent-session" / "broker_client.py")
         (self.worker / "scripts").mkdir()
-        for name in ("check-github-access", "factory_settings.py", "app_events.py", "stuck_reasons.py"):
+        for name in ("check-github-access", "factory_settings.py", "app_events.py", "stuck_reasons.py", "dependabot_sweep.py"):
             shutil.copy(SCRIPTS / name, self.worker / "scripts" / name)
         self.broker_path = root / "factory-uploads.sock"
         self.installation = dict(ALL_PERMISSIONS)
@@ -221,6 +221,29 @@ class CheckGithubAccessTest(unittest.TestCase):
             'App example-app: grant "Actions: Read and write", it has read',
             'Installation of example-app: accept "Checks: Read-only" on the installation, it has no access',
         ])
+
+    def sweep(self) -> None:
+        settings = json.loads(self.settings.read_text())
+        self.settings.write_text(json.dumps({**settings, "dependabot_sweep": {"team_key": "ABC", "label": "Security"}}))
+
+    def test_the_dependabot_sweep_section_asks_the_app_for_dependabot_alerts(self) -> None:
+        self.sweep()
+        status, lines, _ = self.check()
+        self.assertEqual((status, lines), (1, ['App example-app: grant "Dependabot alerts: Read-only", it has no access']))
+
+    def test_the_dependabot_sweep_section_asks_the_installation_for_dependabot_alerts(self) -> None:
+        self.sweep()
+        self.state["app_permissions"] = {**ALL_PERMISSIONS, "vulnerability_alerts": "read"}
+        status, lines, _ = self.check()
+        self.assertEqual(
+            (status, lines), (1, ['Installation of example-app: accept "Dependabot alerts: Read-only" on the installation, it has no access']),
+        )
+
+    def test_dependabot_alerts_granted_with_the_section_is_silent(self) -> None:
+        self.sweep()
+        self.state["app_permissions"] = {**ALL_PERMISSIONS, "vulnerability_alerts": "read"}
+        self.installation["vulnerability_alerts"] = "read"
+        self.assertEqual(self.check()[:2], (0, []))
 
     def test_an_app_that_does_not_subscribe_to_push_is_reported(self) -> None:
         self.state["app_events"] = ["check_run", "issues", "pull_request"]

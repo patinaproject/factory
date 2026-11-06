@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
+import dependabot_sweep
 import factory_settings
 from app_events import missing_events
 from stuck_reasons import requeue_mechanism
@@ -58,6 +59,7 @@ CHECKS = Permission("checks", "Checks", "read")
 STATUSES = Permission("statuses", "Commit statuses", "read")
 ACTIONS = Permission("actions", "Actions", "write")
 METADATA = Permission("metadata", "Metadata", "read")
+DEPENDABOT_ALERTS = Permission("vulnerability_alerts", "Dependabot alerts", "read")
 QUEUE_KEY = "plugins.entries.pr-ready-gate.settings.merge_queue"
 REQUEUE_PERMISSION = {"label": ISSUES, "command": PULL_REQUESTS}
 REQUIRED = (CONTENTS, PULL_REQUESTS, ISSUES, CHECKS, STATUSES, ACTIONS, METADATA)
@@ -105,20 +107,24 @@ def gh(permission: Permission, repo: str, what: str, *args: str):
     return json.loads(proc.stdout)
 
 
-def shortfalls(granted: dict) -> list[tuple[Permission, str]]:
+def required(settings: dict) -> tuple[Permission, ...]:
+    return REQUIRED + ((DEPENDABOT_ALERTS,) if dependabot_sweep.configured(settings) else ())
+
+
+def shortfalls(granted: dict, needed: tuple[Permission, ...]) -> list[tuple[Permission, str]]:
     return [
         (permission, granted.get(permission.key) or "no access")
-        for permission in REQUIRED
+        for permission in needed
         if LEVELS.get(granted.get(permission.key), 0) < LEVELS[permission.level]
     ]
 
 
-def check_app(slug: str) -> tuple[list[str], set, dict | None]:
+def check_app(slug: str, needed: tuple[Permission, ...]) -> tuple[list[str], set, dict | None]:
     try:
         app = gh(METADATA, slug, "the App", f"apps/{slug}")
     except Refused as refused:
         return [str(refused)], set(), None
-    missing = shortfalls(app.get("permissions") or {})
+    missing = shortfalls(app.get("permissions") or {}, needed)
     problems = [f"App {slug}: grant {permission.grant()}, it has {has}" for permission, has in missing]
     problems.extend(f'App {slug}: subscribe to the "{label}" event, which starts auto-deploy' for label in missing_events(app))
     return problems, {permission.key for permission, _ in missing}, app.get("permissions") or {}
@@ -145,7 +151,7 @@ def installation_permissions(slug: str) -> dict:
     return permissions
 
 
-def check_installation(slug: str, app_missing: set) -> tuple[list[str], dict | None]:
+def check_installation(slug: str, app_missing: set, needed: tuple[Permission, ...]) -> tuple[list[str], dict | None]:
     """Report each permission the App asks for that the installation has not accepted."""
     try:
         granted = installation_permissions(slug)
@@ -153,7 +159,7 @@ def check_installation(slug: str, app_missing: set) -> tuple[list[str], dict | N
         return [str(refused)], None
     return [
         f"Installation of {slug}: accept {permission.grant()} on the installation, it has {has}"
-        for permission, has in shortfalls(granted)
+        for permission, has in shortfalls(granted, needed)
         if permission.key not in app_missing
     ], granted
 
@@ -247,8 +253,9 @@ def run(settings_file: str | None, merge_queue_file: str | None = None) -> list[
     if not repositories:
         raise Refusal("no repositories are configured")
     slug = login.removesuffix("[bot]")
-    problems, app_missing, app_granted = check_app(slug)
-    installation_problems, installation_granted = check_installation(slug, app_missing)
+    needed = required(settings)
+    problems, app_missing, app_granted = check_app(slug, needed)
+    installation_problems, installation_granted = check_installation(slug, app_missing, needed)
     problems.extend(installation_problems)
     for repo in repositories:
         problems.extend(check_repository(repo))

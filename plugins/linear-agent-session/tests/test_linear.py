@@ -2030,6 +2030,73 @@ class UndelegateTest(unittest.TestCase):
         self.assertEqual(output, {"error": "issueUpdate reported success: false"})
 
 
+class DelegateSelfTest(unittest.TestCase):
+    def delegate(self, responses):
+        fake = FakeLinear(responses)
+        return fake, make_client(fake)
+
+    def test_delegates_an_undelegated_issue_to_the_app(self):
+        fake, client = self.delegate([issue_delegate(None), (200, {"data": {"issueUpdate": {"success": True}}})])
+        self.assertEqual(client.delegate_self("ABC-1"), {"identifier": "ABC-1", "delegated": True})
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "issue-uuid", "input": {"delegateId": "app-user-1"}})
+
+    def test_an_issue_already_delegated_to_the_app_is_not_written(self):
+        fake, client = self.delegate([issue_delegate("app-user-1")])
+        self.assertEqual(client.delegate_self("ABC-1"), {"identifier": "ABC-1", "delegated": False})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_another_agents_delegation_is_refused_without_a_write(self):
+        fake, client = self.delegate([issue_delegate("other-agent")])
+        with self.assertRaisesRegex(linear.LinearError, "delegated to another agent"):
+            client.delegate_self("ABC-1")
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_an_unsuccessful_update_is_an_error(self):
+        _, client = self.delegate([issue_delegate(None), (200, {"data": {"issueUpdate": {"success": False}}})])
+        with self.assertRaisesRegex(linear.LinearError, "success: false"):
+            client.delegate_self("ABC-1")
+
+
+class IssuesByAttachmentUrlTest(unittest.TestCase):
+    URL = "https://github.com/example-org/example-repo/issues/7"
+
+    def test_returns_each_issue_that_carries_the_url(self):
+        node = {"issue": {
+            "id": "issue-uuid", "identifier": "ABC-9", "createdAt": "2026-11-01T00:00:00.000Z", "priority": 3,
+            "state": {"name": "Triage", "type": "triage"}, "assignee": None, "delegate": {"id": "app-user-1"},
+        }}
+        fake = FakeLinear([(200, {"data": {"attachmentsForURL": {"nodes": [node]}}})])
+        issues = make_client(fake).issues_by_attachment_url(self.URL)
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"url": self.URL})
+        self.assertEqual(issues, [{
+            "id": "issue-uuid", "identifier": "ABC-9", "createdAt": "2026-11-01T00:00:00.000Z", "priority": 3,
+            "state": "Triage", "stateType": "triage", "assigned": False, "delegated": True,
+        }])
+
+    def test_no_attachment_is_an_empty_list(self):
+        fake = FakeLinear([(200, {"data": {"attachmentsForURL": {"nodes": []}}})])
+        self.assertEqual(make_client(fake).issues_by_attachment_url(self.URL), [])
+
+
+class LabeledIssuesTest(unittest.TestCase):
+    def test_lists_the_issues_each_one_relates_to_apart_from_its_duplicate_target(self):
+        node = {
+            "id": "issue-uuid", "identifier": "ABC-2", "createdAt": "2026-11-01T00:00:00.000Z", "completedAt": None,
+            "canceledAt": None, "description": None, "priority": 2, "state": {"name": "Triage", "type": "triage"},
+            "assignee": None, "creator": {"id": "app-user-1"}, "attachments": {"nodes": []},
+            "relations": {"nodes": [
+                {"type": "related", "relatedIssue": {"identifier": "ABC-1"}},
+                {"type": "duplicate", "relatedIssue": {"identifier": "ABC-0"}},
+            ]},
+            "comments": {"nodes": [{"body": "c"}], "pageInfo": {"hasNextPage": False}},
+        }
+        page = {"viewer": {"id": "app-user-1"}, "issues": {"nodes": [node], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+        [issue] = make_client(FakeLinear([(200, {"data": page})])).list_issues_by_label("ABC", "Theme")
+        self.assertEqual(
+            (issue["related"], issue["duplicateOf"], issue["createdByMe"], issue["description"]), (["ABC-1"], "ABC-0", True, ""),
+        )
+
+
 class CardTitleTest(unittest.TestCase):
     def test_unsafe_characters_are_removed_and_spaces_collapsed(self):
         self.assertEqual(

@@ -201,6 +201,12 @@ ISSUE_DELEGATE_QUERY = """query IssueDelegate($id: String!) {
   issue(id: $id) { id identifier delegate { id } }
 }"""
 
+ATTACHMENT_ISSUES_QUERY = """query AttachmentIssues($url: String!) {
+  attachmentsForURL(url: $url, first: 50) {
+    nodes { issue { id identifier createdAt priority state { name type } assignee { id } delegate { id } } }
+  }
+}"""
+
 ISSUE_STATUS_QUERY = """query IssueStatus($id: String!) {
   issue(id: $id) { state { type } delegate { id } branchName }
 }"""
@@ -948,7 +954,8 @@ class LinearClient:
         return {"identifier": payload["issue"]["identifier"], "url": payload["issue"]["url"]}
 
     def list_issues_by_label(self, team_key: str, label: str) -> list:
-        """Every issue of the team that carries the label, in any state, with who created it, its attachments, comments, and duplicate-of target.
+        """Every issue of the team that carries the label, in any state, with who created it, its attachments, comments,
+        duplicate-of target, and the issues it relates to.
 
         `createdByMe` is true for an issue the agent app created. `creator` is None for an issue an integration created.
         Raises rather than return a partial list.
@@ -975,6 +982,7 @@ class LinearClient:
                     "createdByMe": n["creator"] is not None and n["creator"]["id"] == data["viewer"]["id"],
                     "attachments": [{"url": a["url"], "sourceType": a["sourceType"]} for a in n["attachments"]["nodes"]],
                     "duplicateOf": next((r["relatedIssue"]["identifier"] for r in n["relations"]["nodes"] if r["type"] == "duplicate"), None),
+                    "related": sorted(r["relatedIssue"]["identifier"] for r in n["relations"]["nodes"] if r["type"] == "related"),
                     "comments": (
                         self.issue_comment_bodies(n["id"]) if n["comments"]["pageInfo"]["hasNextPage"]
                         else [c["body"] for c in n["comments"]["nodes"]]
@@ -1209,6 +1217,39 @@ class LinearClient:
             raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
         delegate = data["issue"]["delegate"]
         return delegate is not None and delegate["id"] == data["viewer"]["id"]
+
+    def issues_by_attachment_url(self, url: str) -> list:
+        """The issues, in any team, that carry an attachment with exactly this URL, such as a GitHub issue's Linear copy."""
+        nodes = self._graphql(ATTACHMENT_ISSUES_QUERY, {"url": url})["attachmentsForURL"]["nodes"]
+        return [
+            {
+                "id": n["issue"]["id"],
+                "identifier": n["issue"]["identifier"],
+                "createdAt": n["issue"]["createdAt"],
+                "priority": int(n["issue"]["priority"]),
+                "state": n["issue"]["state"]["name"],
+                "stateType": n["issue"]["state"]["type"],
+                "assigned": n["issue"]["assignee"] is not None,
+                "delegated": n["issue"]["delegate"] is not None,
+            }
+            for n in nodes
+        ]
+
+    def delegate_self(self, id_or_identifier: str) -> dict:
+        """Delegate an existing issue to the agent app. Raises, and changes nothing, when another agent holds the delegation."""
+        data = self._graphql(ISSUE_DELEGATE_QUERY, {"id": id_or_identifier})
+        issue = data["issue"]
+        if issue is None:
+            raise LinearError(f"Linear has no issue {id_or_identifier} that the agent app can read")
+        delegate = issue["delegate"]["id"] if issue["delegate"] else None
+        if delegate == data["viewer"]["id"]:
+            return {"identifier": issue["identifier"], "delegated": False}
+        if delegate is not None:
+            raise LinearError(f"{issue['identifier']} is delegated to another agent, so it was not delegated to this one")
+        payload = self._graphql(ISSUE_UPDATE_MUTATION, {"id": issue["id"], "input": {"delegateId": data["viewer"]["id"]}})
+        if not payload["issueUpdate"]["success"]:
+            raise LinearError("issueUpdate reported success: false")
+        return {"identifier": issue["identifier"], "delegated": True}
 
     def undelegate_self(self, id_or_identifier: str) -> dict:
         data = self._graphql(ISSUE_DELEGATE_QUERY, {"id": id_or_identifier})
