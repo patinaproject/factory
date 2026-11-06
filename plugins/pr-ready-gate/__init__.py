@@ -45,9 +45,11 @@ REVIEW_HANDOFF_RULES = frozenset(
         "merge_queue",
     }
 )
+THREAD_COMMENTS = 20
 THREAD_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){"
-    "reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:1){nodes{author{__typename login}}}}} "
+    "reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved isOutdated resolvedBy{__typename login} "
+    f"comments(first:{THREAD_COMMENTS}){{pageInfo{{hasNextPage}} nodes{{author{{__typename login}}}}}}}}}} "
     "commits(first:100){pageInfo{hasNextPage} nodes{commit{oid signature{isValid}}}} "
     "latestOpinionatedReviews(first:100){pageInfo{hasNextPage} nodes{state author{__typename login} commit{oid}}}}}}"
 )
@@ -83,6 +85,7 @@ class Blockers(NamedTuple):
     problems: list[str]
     required_checks: frozenset[str]
     reviewer_threads: int
+    thread_problems: list[str]
     stale_approval: bool = False
     update_rule: bool = False
     in_merge_queue: Callable[[], bool] = lambda: False
@@ -92,7 +95,7 @@ def evaluate(
     pr: dict,
     local_head: str,
     tool_name: str,
-    other_blockers: Optional[Callable[[], Blockers]] = None,
+    other_blockers: Optional[Callable[[bool], Blockers]] = None,
     merge_queue: Optional[dict] = None,
 ) -> list[str]:
     """Lists what stops the pull request from being ready; an empty list lets the tool call through.
@@ -102,6 +105,8 @@ def evaluate(
     A BLOCKED pull request that is approved and in the merge queue passes too: GitHub reports BLOCKED until the queue merges it.
     So does an approved one that is not queued yet when the base branch has an update rule and merge_queue declares the repository's
     queue.
+    When a rule requires thread resolution, either tool also refuses a resolved bot thread that got neither a fix nor a reply,
+    whatever the merge state.
     It does so only when other_blockers finds no unmet branch rule. A check that no rule requires does not stop it.
     merge_queue maps "<owner>/<repo>" to the queue's "labels" and "checks"; an entry, even {}, declares the queue.
     """
@@ -120,8 +125,11 @@ def evaluate(
     blockers = None
     hidden: list[str] = []
     required = None
-    if tool_name == "kanban_request_review" and other_blockers is not None and state == "OPEN" and merge_state != "CLEAN":
-        blockers = other_blockers()
+    threads_only = tool_name != "kanban_request_review" or merge_state == "CLEAN"
+    if other_blockers is not None and state == "OPEN":
+        blockers = other_blockers(threads_only)
+        hidden = blockers.thread_problems
+    if blockers is not None and not threads_only:
         hidden = blockers.problems
         required = blockers.required_checks
         if not hidden and _awaiting_review(pr, blockers.reviewer_threads):
@@ -261,11 +269,15 @@ def _rollup_name(check) -> Optional[str]:
     return check.get("name") or check.get("context")
 
 
-def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) -> Blockers:
-    """Names every branch rule other than the approval that the pull request does not meet."""
+def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]], threads_only: bool = False) -> Blockers:
+    """Names every branch rule other than the approval that the pull request does not meet.
+
+    threads_only skips the pull request state read unless a rule requires thread resolution.
+    """
     problems = []
     required_checks: set[str] = set()
     reviewer_threads = 0
+    thread_problems: list[str] = []
     types = {rule.get("type") for rule in rules if isinstance(rule, dict)}
     for unknown in sorted(str(t) for t in types - REVIEW_HANDOFF_RULES):
         problems.append(f"branch rule {unknown!r} is one this gate cannot verify, so BLOCKED may not be only the review")
@@ -283,7 +295,8 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
     wants_threads = _pull_request_wants(rules, "required_review_thread_resolution")
     wants_head_approval = _pull_request_wants(rules, "require_last_push_approval") and pr.get("reviewDecision") == "APPROVED"
     stale_approval = False
-    if pr_state is not None and (wants_threads or "required_signatures" in types or changes_requested or wants_head_approval):
+    reads_state = wants_threads or not threads_only and ("required_signatures" in types or changes_requested or wants_head_approval)
+    if pr_state is not None and reads_state:
         state = pr_state()
         stale_approval = wants_head_approval and pr.get("headRefOid") not in state["approvals"]
         if changes_requested:
@@ -294,15 +307,27 @@ def _unmet_rules(pr: dict, rules: list, pr_state: Optional[Callable[[], dict]]) 
         if wants_threads:
             reviewer_threads = state["reviewer_threads"]
             if state["threads_truncated"]:
-                problems.append("more than 100 review threads, so the gate cannot confirm they are all resolved")
-            elif state["worker_threads"]:
-                problems.append(f"{state['worker_threads']} review thread(s) are unresolved: resolve them")
+                thread_problems.append("more than 100 review threads, so the gate cannot confirm they are all resolved")
+            else:
+                if state["worker_threads"]:
+                    thread_problems.append(f"{state['worker_threads']} review thread(s) are unresolved: resolve them")
+                if state["unaddressed_bot_threads"]:
+                    thread_problems.append(
+                        f"{state['unaddressed_bot_threads']} resolved bot review thread(s) got neither a fix nor a reply: "
+                        "fix the commented lines or reply in the thread with a reason"
+                    )
+                if state["unconfirmable_bot_threads"]:
+                    thread_problems.append(
+                        f"{state['unconfirmable_bot_threads']} resolved bot review thread(s) have more than {THREAD_COMMENTS} comments, "
+                        "so the gate cannot confirm a reply: reply in the thread with a reason"
+                    )
+            problems += thread_problems
         if "required_signatures" in types:
             if state["commits_truncated"]:
                 problems.append("more than 100 commits, so the gate cannot confirm each is signed")
             elif state["unsigned_commits"]:
                 problems.append(f"{state['unsigned_commits']} commit(s) lack a verified signature: publish with push-signed")
-    return Blockers(problems, frozenset(required_checks), reviewer_threads, stale_approval, "update" in types)
+    return Blockers(problems, frozenset(required_checks), reviewer_threads, thread_problems, stale_approval, "update" in types)
 
 
 def _pull_request_wants(rules: list, parameter: str) -> bool:
@@ -487,6 +512,25 @@ def _person_started(thread: dict) -> bool:
     return isinstance(author, dict) and author.get("__typename") == "User"
 
 
+def _bot_thread_status(thread: dict) -> Optional[str]:
+    """For a resolved bot thread with no fix and no reply, "unaddressed", or "unconfirmable" when only unread comments could hold a reply."""
+    if not thread["isResolved"] or _person_started(thread) or thread.get("isOutdated"):
+        return None
+    resolver = thread.get("resolvedBy")
+    # GitHub reports an App that resolves a thread as a User, so only its login's [bot] suffix tells it from a person.
+    resolver_login = resolver.get("login") if isinstance(resolver, dict) else None
+    if resolver_login and not resolver_login.endswith("[bot]") and resolver.get("__typename") == "User":
+        return None
+    comments = thread.get("comments") or {}
+    nodes = comments.get("nodes") or []
+    starter = ((nodes[0] or {}).get("author") or {}).get("login") if nodes else None
+    for node in nodes[1:]:
+        login = ((node or {}).get("author") or {}).get("login")
+        if login is not None and login != starter:
+            return None
+    return "unconfirmable" if (comments.get("pageInfo") or {}).get("hasNextPage") else "unaddressed"
+
+
 def _graphql(query: str, pr: dict, repo: str, workspace: str, deadline: float):
     owner, name = repo.split("/")
     return _gh_json(
@@ -509,9 +553,12 @@ def _pr_state(pr: dict, repo: str, workspace: str, deadline: float) -> dict:
     try:
         node = data["data"]["repository"]["pullRequest"]
         threads, commits, reviews = node["reviewThreads"], node["commits"], node["latestOpinionatedReviews"]
+        bot_statuses = [_bot_thread_status(t) for t in threads["nodes"]]
         return {
             "threads_truncated": threads["pageInfo"]["hasNextPage"],
             "worker_threads": sum(1 for t in threads["nodes"] if not t["isResolved"] and not _person_started(t)),
+            "unaddressed_bot_threads": bot_statuses.count("unaddressed"),
+            "unconfirmable_bot_threads": bot_statuses.count("unconfirmable"),
             "reviewer_threads": sum(1 for t in threads["nodes"] if not t["isResolved"] and _person_started(t)),
             "commits_truncated": commits["pageInfo"]["hasNextPage"],
             "unsigned_commits": sum(1 for c in commits["nodes"] if not (c["commit"].get("signature") or {}).get("isValid")),
@@ -536,14 +583,18 @@ def _blockers(pr: dict, workspace: str, deadline: float) -> Optional[Callable[[]
     base = pr.get("baseRefName")
     if not match or not isinstance(base, str) or not base:
         return None
-    return lambda: _read_blockers(pr, match.group(1), base, workspace, deadline, lambda: _pr_state(pr, match.group(1), workspace, deadline))
+    return lambda threads_only: _read_blockers(
+        pr, match.group(1), base, workspace, deadline, lambda: _pr_state(pr, match.group(1), workspace, deadline), threads_only
+    )
 
 
-def _read_blockers(pr: dict, repo: str, base: str, workspace: str, deadline: float, pr_state: Callable[[], dict]) -> Blockers:
+def _read_blockers(
+    pr: dict, repo: str, base: str, workspace: str, deadline: float, pr_state: Callable[[], dict], threads_only: bool = False
+) -> Blockers:
     rules = _gh_json(["api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100"], workspace, deadline)
     if not isinstance(rules, list):
         raise GateError(f"the branch rules of {repo}:{base} could not be read")
-    unmet = _unmet_rules(pr, rules, pr_state)
+    unmet = _unmet_rules(pr, rules, pr_state, threads_only)
     return unmet._replace(in_merge_queue=lambda: _in_merge_queue(pr, repo, workspace, deadline))
 
 

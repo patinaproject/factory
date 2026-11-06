@@ -284,6 +284,10 @@ gh api graphql -F id=<thread id> -f query='
 Leave a thread open when the fix did not address it, and say why in a
 comment on the card.
 
+Before you resolve a thread that a bot started, fix the commented lines or
+reply in the thread with a reason. `pr-ready-gate` refuses a resolved bot
+thread that has neither.
+
 Without new comments, check the pull request from the worktree:
 
 ```sh
