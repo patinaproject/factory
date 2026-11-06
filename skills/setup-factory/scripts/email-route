@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Hermes runs this script on each signed delivery to the `email` route, before any prompt or agent run.
+
+It validates the Worker's body, claims the email in the ledger, asks the gateway's email-intake service to create the
+blocked card and fetch the stored objects, and prints `[SILENT]`, so Hermes starts no model turn on untrusted mail.
+
+A rejected or failed delivery exits 1 with its reason on stderr, which Hermes logs. The Worker counts any 200 as
+delivered and Hermes answers 200 either way, so a claimed row that the service never received is resumed by the
+service when the gateway starts, and `check-install` reports a row that stays unfinished.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import socket
+import sys
+from pathlib import Path
+
+SILENT = "[SILENT]"
+LEDGER_MODULE = Path("plugins") / "email-intake" / "ledger.py"
+# Well under Hermes's 30-second script timeout. The service answers once the card exists; the fetch runs after.
+SOCKET_TIMEOUT = 15.0
+
+
+def load_ledger(root: Path):
+    spec = importlib.util.spec_from_file_location("email_intake_ledger", root / LEDGER_MODULE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def ask_service(path: Path, message_id: str) -> dict:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(SOCKET_TIMEOUT)
+        client.connect(str(path))
+        client.sendall(json.dumps({"op": "deliver", "message_id": message_id}).encode() + b"\n")
+        reply = b""
+        while not reply.endswith(b"\n"):
+            block = client.recv(4096)
+            if not block:
+                break
+            reply += block
+    return json.loads(reply)
+
+
+def route(text: str, root: Path) -> str:
+    ledger = load_ledger(root)
+    delivery = ledger.parse_delivery(json.loads(text))
+    store = ledger.Ledger(ledger.ledger_path(root))
+    if not store.claim(delivery) and store.get(delivery.message_id).state != ledger.CLAIMED:
+        return SILENT
+    reply = ask_service(ledger.socket_path(root), delivery.message_id)
+    if not reply.get("ok"):
+        raise RuntimeError(f"email-intake refused the delivery: {reply.get('error')}")
+    return SILENT
+
+
+def main() -> int:
+    try:
+        sys.stdout.write(route(sys.stdin.read(), Path(__file__).resolve().parent.parent))
+    except Exception as failure:
+        print(f"email-route: dropped the delivery: {type(failure).__name__}: {failure}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
