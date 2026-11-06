@@ -16,8 +16,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests import PLUGIN_DIR, FakeLinear, load_plugin
+from tests.router_modes import dispatch_hook_mode, load_tests_in_both_modes
 
 plugin = load_plugin()
+load_tests = load_tests_in_both_modes(dispatch_hook_mode(plugin))
 
 APP = "app-user-1"
 ISSUE = "issue-uuid-1"
