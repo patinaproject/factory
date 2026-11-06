@@ -124,10 +124,10 @@ def evaluate(
     blockers = None
     hidden: list[str] = []
     required = None
-    if other_blockers is not None and state == "OPEN" and not (tool_name == "kanban_request_review" and merge_state != "CLEAN"):
-        hidden = other_blockers().thread_problems
-    elif tool_name == "kanban_request_review" and other_blockers is not None and state == "OPEN":
+    if other_blockers is not None and state == "OPEN":
         blockers = other_blockers()
+        hidden = blockers.thread_problems
+    if blockers is not None and tool_name == "kanban_request_review" and merge_state != "CLEAN":
         hidden = blockers.problems
         required = blockers.required_checks
         if not hidden and _awaiting_review(pr, blockers.reviewer_threads):
