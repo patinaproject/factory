@@ -13,6 +13,7 @@ MACHINE_PARKS = (
     "Waiting for triage:",
     "Waiting for the worktree:",
     "Waiting after a server error:",
+    "Waiting for the host load to fall:",
     "Waiting for an issue:",
     "Waiting for hermes resume:",
     "Waiting for a pull request:",
