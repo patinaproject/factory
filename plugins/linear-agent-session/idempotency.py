@@ -23,6 +23,15 @@ def check_key(key) -> str:
     return key
 
 
+def _record_path(directory: str, key: str) -> str:
+    return os.path.join(directory, hashlib.sha256(key.encode()).hexdigest() + ".json")
+
+
+def recorded(directory: str, key: str) -> bool:
+    """True when any record exists for the key, even one a crash left reserved."""
+    return os.path.exists(_record_path(directory, key))
+
+
 def once(directory: Optional[str], tool: str, key: str, args: Mapping, send: Callable[[], dict]) -> dict:
     """A record left reserved by a crash refuses every later call, because a second send could duplicate the first."""
     check_key(key)
@@ -32,7 +41,7 @@ def once(directory: Optional[str], tool: str, key: str, args: Mapping, send: Cal
         json.dumps([tool, {k: v for k, v in args.items() if k != "idempotency_key"}], sort_keys=True).encode()
     ).hexdigest()
     os.makedirs(directory, exist_ok=True)
-    path = os.path.join(directory, hashlib.sha256(key.encode()).hexdigest() + ".json")
+    path = _record_path(directory, key)
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:

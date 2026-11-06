@@ -255,6 +255,16 @@ def configured_operator_user_ids() -> list[str]:
 KEY_NOT_SET = "Config key not set"
 
 
+def configured_setting(name: str, default: Any) -> Any:
+    """A plugin setting, or `default` when its key is not set, as `ctx.get_config(name, default=...)` has it."""
+    try:
+        return json.loads(_hermes("config", "get", f"plugins.entries.linear-agent-session.settings.{name}", "--json"))
+    except HermesFailed as failure:
+        if KEY_NOT_SET in failure.output:
+            return default
+        raise
+
+
 class HermesFailed(RuntimeError):
     def __init__(self, message: str, output: str) -> None:
         super().__init__(message)

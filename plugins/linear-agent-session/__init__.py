@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, bursts, forwards, idempotency, kanban_guard, linear, missing_secret, opened_sessions, replies, tools, triage_exit, triage_intent, triage_round
+from . import blocks, bursts, forwards, idempotency, kanban_guard, linear, missed_prompts, missing_secret, opened_sessions, replies, tools, triage_exit, triage_intent, triage_round
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +253,9 @@ def make_dispatch_hook(
             bursts.clear(skip_home(), event.raw_message)
         except Exception as failure:
             logger.warning("linear-agent-session: the Issue burst was not cleared: %s: %s", type(failure).__name__, failure)
+        redelivered = claim_session_prompt(event)
+        if redelivered is not None:
+            return redelivered
         if paused():
             return None
         route = _delivery_route(event)
@@ -276,6 +279,27 @@ def make_dispatch_hook(
         if skipped is not None or route != webhook_route() or compute_intent is None:
             return skipped
         return await prepend_intent(event)
+
+    def claim_session_prompt(event: Any) -> Optional[dict[str, str]]:
+        """Skip a prompt the sweep or an earlier delivery already claimed. A store that cannot record it fails open,
+        because the sweep could not claim it either."""
+        payload = event.raw_message
+        if not (isinstance(payload, dict) and payload.get("type") == "AgentSessionEvent" and payload.get("action") == "prompted"):
+            return None
+        activity_id = (payload.get("agentActivity") or {}).get("id")
+        if not isinstance(activity_id, str):
+            return None
+        try:
+            if missed_prompts.claim(comment_store(), activity_id):
+                return None
+        except Exception as failure:
+            logger.warning("linear-agent-session: the session prompt was not claimed: %s: %s", type(failure).__name__, failure)
+            return None
+        try:
+            write_skip_record(skip_home(), event.source.chat_id)
+        except Exception as failure:
+            logger.warning("linear-agent-session: no skip record for a claimed prompt: %s: %s", type(failure).__name__, failure)
+        return {"action": "skip", "reason": "the session prompt was already answered or queued"}
 
     async def acknowledge_best_effort(event: Any, route: str) -> None:
         try:

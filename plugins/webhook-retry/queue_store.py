@@ -36,6 +36,7 @@ TRANSITIONS: dict[tuple[Optional[str], str], str] = {
     ("pending", "dispatch"): "pending",
     (None, "paused"): "queued",
     ("pending", "paused"): "queued",
+    (None, "missed"): "queued",
     ("pending", "admitted"): "pending",
     ("pending", "unadmitted"): "queued",
     ("pending", "usage_limit"): "queued",
@@ -103,6 +104,12 @@ def queue_dir(home: Path) -> Path:
 def skip_marker(directory: Path, key: str) -> Path:
     """The path is a contract with `linear-agent-session`'s `write_skip_record`, which writes it when the live hook skips a turn."""
     return Path(directory) / SKIPPED_DIRECTORY / hashlib.sha256(key.encode()).hexdigest()
+
+
+def encode_key(profile: str, route: str, delivery: str) -> str:
+    """Hermes' `_WebhookDeliveryIdentity.session_chat_id`, which this script cannot import."""
+    body = json.dumps((profile, route, delivery), ensure_ascii=False, separators=(",", ":")).encode()
+    return KEY_PREFIX + base64.urlsafe_b64encode(body).decode().rstrip("=")
 
 
 def decode_key(key: str) -> Optional[tuple[str, str, str]]:
