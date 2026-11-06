@@ -1,0 +1,11 @@
+name: mail-worker
+version: 0.1.0
+description: "Kanban worker that reads one forwarded email and records its one outcome, with no terminal"
+hermes_requires: ">=0.21.4"
+license: "MIT"
+
+# config.yaml is listed so a fresh install gets it; `hermes profile update` still preserves the installed copy
+# unless --force-config is passed.
+distribution_owned:
+  - SOUL.md
+  - config.yaml

@@ -101,10 +101,10 @@ class LedgerTest(unittest.TestCase):
         store.move(message_id, ledger.CLAIMED, ledger.CARDED, card_id="t_1")
         store.move(message_id, ledger.CARDED, ledger.FETCHING)
 
-        self.assertFalse(store.record_outcome("t_1", "no-action early"))
+        self.assertFalse(store.set_outcome("t_1", None, "no-action early"))
         store.move(message_id, ledger.FETCHING, ledger.READY)
-        self.assertTrue(store.record_outcome("t_1", "duplicate PAT-7"))
-        self.assertFalse(store.record_outcome("t_1", "new-issue PAT-8"))
+        self.assertTrue(store.set_outcome("t_1", None, "duplicate PAT-7"))
+        self.assertFalse(store.set_outcome("t_1", None, "new-issue PAT-8"))
         self.assertEqual(store.by_card("t_1").outcome, "duplicate PAT-7")
 
 

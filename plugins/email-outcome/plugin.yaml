@@ -1,0 +1,22 @@
+manifest_version: 2
+name: email-outcome
+version: "0.1.0"
+description: >-
+  Enable it only in the mail-worker profile. A pre_tool_call hook refuses every
+  tool except read_file and search_files on an absolute path inside the card's
+  attachments directory, kanban_show, kanban_heartbeat, and kanban_block on the
+  card itself, and this plugin's email_issue_search and email_record_outcome.
+  email_record_outcome is the run's one write. It files a Triage issue,
+  comments on an existing issue, or records no action with a one-line reason,
+  records that outcome in the email ledger, and completes the card. It refuses
+  a second call, and a write that holds a one-time code, a reset or sign-in
+  link, or a credential from the email.
+provides_hooks: [pre_tool_call]
+provides_tools:
+  - email_issue_search
+  - email_record_outcome
+config_schema:
+  team_key:
+    type: string
+    default: ""
+    description: "The key of the Linear team whose Triage gets a new-issue outcome."

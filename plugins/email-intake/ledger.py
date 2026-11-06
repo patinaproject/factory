@@ -141,6 +141,9 @@ def parse_delivery(payload) -> Delivery:
     )
 
 
+PENDING = "pending "
+
+
 def format_outcome(kind: str, value: str) -> str:
     if kind not in OUTCOME_KINDS:
         raise ValueError(f"outcome must be one of {', '.join(OUTCOME_KINDS)}")
@@ -224,12 +227,12 @@ class Ledger:
             )
             return cursor.rowcount == 1
 
-    def record_outcome(self, card_id: str, outcome: str) -> bool:
-        """Write the outcome once. A second call for the same card changes nothing and returns False."""
+    def set_outcome(self, card_id: str, expected: Optional[str], outcome: Optional[str]) -> bool:
+        """Compare-and-set the outcome of a ready row. `expected=None` claims an empty outcome, so only one writer wins."""
         with self._connect() as conn:
             cursor = conn.execute(
-                "UPDATE emails SET outcome = ? WHERE card_id = ? AND state = ? AND outcome IS NULL",
-                (outcome, card_id, READY),
+                "UPDATE emails SET outcome = ? WHERE card_id = ? AND state = ? AND outcome IS ?",
+                (outcome, card_id, READY, expected),
             )
             return cursor.rowcount == 1
 
