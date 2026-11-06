@@ -40,7 +40,7 @@ TEAMMATE_REPLY_TIMEOUT_SECONDS = 120
 # `hermes chat -Q` ends its stderr with this line.
 SESSION_LINE = re.compile(r"^session_id: (\S+)$", re.MULTILINE)
 INTENT_JSON = re.compile(r"<triage_intent>\s*(\{.*?\})\s*</triage_intent>", re.DOTALL)
-ROUTER_OFF = re.compile(r"^\s*router_shadow:\s*['\"]?(?:false|no|off)['\"]?\s*(?:#.*)?$", re.IGNORECASE | re.MULTILINE)
+ROUTER_OFF = re.compile(r"^\s*router_shadow:\s*(?:false|no|off)\s*(?:#.*)?$", re.IGNORECASE | re.MULTILINE)
 ROUTER_VERSION = 1
 SECRET_PATTERNS = (
     re.compile(r"lin_(?:api|oauth)_\w+"),

@@ -133,6 +133,14 @@ class RetryRecordTest(RetryCase):
         self.assertEqual(result.stdout, "retried linear plain: succeeded\nwebhook retry queue drained\n")
         self.assertFalse((self.home / "webhook-router").exists())
 
+    def test_a_quoted_false_is_a_string_and_keeps_recording_as_the_hook_does(self):
+        (self.home / "config.yaml").write_text(ROUTER_OFF_CONFIG.replace("false", '"false"'))
+        self.seed(entry("plain"))
+
+        self.run_retry()
+
+        self.assertEqual([r["action"] for r in self.records()], ["replay_succeeded"])
+
 
 if __name__ == "__main__":
     unittest.main()
