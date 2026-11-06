@@ -44,8 +44,10 @@ already ran in this turn, do not run it again, and use the session it chose.
    such entry. Otherwise open one with
    `linear_agent_session_create` with `purpose` `triage` and use the
    `agent_session_id` it returns.
-3. Pick the repository and the priorities as "Implementation card" steps 2
-   and 3 say.
+3. Read the issue with `linear_issue`. Pick the repository and the priorities
+   as "Implementation card" steps 2 and 3 say. On a `repositoryConflict`, post
+   the `thought` on the session from step 2, create no card, and stop this
+   section.
 4. Create the card with no assignee. `dispatch-triage` assigns it to the
    worker while fewer triage cards run than the factory's cap. Use the
    repository's triage card flags:

@@ -1567,6 +1567,27 @@ class CreateTest(unittest.TestCase):
         self.assertEqual(output, {"error": "Linear has no team with the key 'ABC' that the agent app can read"})
         self.assertEqual(len(fake.graphql_requests), 1)
 
+    def test_a_repository_attaches_its_link_and_sets_no_delegate(self):
+        identity = (200, {"data": {"issue": {"id": "uuid-7"}}})
+        attached = (200, {"data": {"attachmentCreate": {"success": True}}})
+        fake, output = self.create(
+            [team_for_create(), CREATE_OK, identity, attached], title="A title", repository="example-org/api"
+        )
+        self.assertEqual(output, {"identifier": "ABC-7", "url": "https://linear.app/x/issue/ABC-7"})
+        self.assertEqual(
+            [request["variables"] for request in fake.graphql_requests[1:]],
+            [
+                {"input": {"teamId": "team-ABC", "title": "A title", "description": ""}},
+                {"id": "ABC-7"},
+                {"input": {"issueId": "uuid-7", "url": "https://github.com/example-org/api", "title": "GitHub repository example-org/api"}},
+            ],
+        )
+
+    def test_a_malformed_repository_is_an_error_with_no_request(self):
+        fake, output = self.create([], title="A title", repository="https://github.com/example-org/api")
+        self.assertEqual(output, {"error": "'https://github.com/example-org/api' is not a repository; pass owner/name"})
+        self.assertEqual(fake.graphql_requests, [])
+
     def test_an_assignee_or_delegate_argument_is_refused_before_linear_is_asked(self):
         for key in ("assignee", "delegate_id"):
             with self.subTest(key=key):
