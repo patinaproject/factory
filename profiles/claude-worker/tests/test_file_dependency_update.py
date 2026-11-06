@@ -60,6 +60,11 @@ class FileDependencyUpdateTest(unittest.TestCase):
     def requests(self, key: str) -> list:
         return [entry[key] for entry in GitFixture.linear_requests(self.home) if key in entry]
 
+    def writes(self) -> list:
+        """Each issue write in the order the script made it."""
+        names = ("issue_create", "attachment_create", "issue_update")
+        return [(name, entry[name]) for entry in GitFixture.linear_requests(self.home) for name in names if name in entry]
+
     def test_files_one_triage_issue_with_the_theme_label_delegated_to_the_app(self) -> None:
         self.linear(team_labels=["Security", "Tools"])
         before = datetime.now(timezone.utc).date()
@@ -78,8 +83,13 @@ class FileDependencyUpdateTest(unittest.TestCase):
         issue = created[0]["input"]
         self.assertEqual(
             {key: value for key, value in issue.items() if key not in ("title", "description")},
-            {"teamId": "team-ABC", "stateId": "state-triage", "labelIds": ["label-Security"], "delegateId": "app-user"},
+            {"teamId": "team-ABC", "stateId": "state-triage", "labelIds": ["label-Security"]},
         )
+        self.assertEqual(self.writes(), [
+            ("issue_create", {"input": issue}),
+            ("attachment_create", {"issueId": "issue-uuid", "url": "https://github.com/example-org/example-app", "title": "GitHub repository example-org/example-app"}),
+            ("issue_update", {"id": "issue-uuid", "input": {"delegateId": "app-user"}}),
+        ])
         week = date.fromisoformat(issue["title"].removeprefix(dependency_update.TITLE_PREFIX).removesuffix(")"))
         self.assertEqual(week.weekday(), 0)
         self.assertIn((before - week).days, range(0, 8))
@@ -96,7 +106,7 @@ class FileDependencyUpdateTest(unittest.TestCase):
         proc = self.run_script()
 
         self.assertEqual((proc.returncode, proc.stdout), (0, "open ABC-41 https://linear.app/example/issue/ABC-41\n"))
-        self.assertEqual(self.requests("issue_create"), [])
+        self.assertEqual(self.writes(), [("attachment_create", {"issueId": "issue-uuid", "url": "https://github.com/example-org/example-app", "title": "GitHub repository example-org/example-app"})])
 
     def test_a_failed_find_reports_the_failure_and_files_nothing(self) -> None:
         self.linear(team_labels=["Security"], open_titled_http_status=500)

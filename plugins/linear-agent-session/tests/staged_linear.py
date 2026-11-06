@@ -36,6 +36,8 @@ An OpenTitledIssues read is logged as `open_titled` with its variables and answe
 A TeamForCreate read answers the team whose key it asks for, with id team-<KEY>, whose workflow states come from `team_states` (a triage and an unstarted state
 when unset) and whose labels come from `team_labels` and `workspace_labels`, each name's id being label-<name>.
 An IssueCreate is logged as `issue_create` with its variables and answers <KEY>-900 for the team id team-<KEY>.
+An AttachmentCreate is logged as `attachment_create` with its input, and an IssueUpdate as `issue_update` with its
+variables; both succeed.
 """
 from __future__ import annotations
 
@@ -154,6 +156,14 @@ def _fake_urlopen(request, timeout=None):
             team_key = body["variables"]["input"]["teamId"].removeprefix("team-")
             created = {"identifier": f"{team_key}-900", "url": f"https://linear.app/example/issue/{team_key}-900"}
             response = _Response(200, {"data": {"issueCreate": {"success": True, "issue": created}}})
+        elif "mutation AttachmentCreate" in query:
+            entry["attachment_create"] = body["variables"]["input"]
+            response = _Response(200, {"data": {"attachmentCreate": {"success": True}}})
+        elif "mutation IssueUpdate" in query:
+            entry["issue_update"] = body["variables"]
+            response = _Response(200, {"data": {"issueUpdate": {"success": True}}})
+        elif "query IssueIdentity" in query:
+            response = _Response(200, {"data": {"issue": {"id": "issue-uuid"}}})
         elif "IssueRoleLabels" in query:
             def nodes(names):
                 return [{"name": n, "isGroup": False, "retiredAt": None, "archivedAt": None} for n in names]

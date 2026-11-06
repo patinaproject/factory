@@ -59,14 +59,21 @@ def load_rules(settings: sentry_sync.Settings) -> tuple:
     return sentry_sync.parse_rules(document), sentry_sync.repo_path_index(paths)
 
 
-def read_linear(client, settings: sentry_sync.Settings) -> sentry_sync.TrackedRead:
+def read_linear(client, settings: sentry_sync.Settings, repository_url: str) -> tuple:
+    """The tracked read, and the identifiers of the job's open issues that lack the repository link."""
     issues = client.list_issues_by_label(settings.team_key, settings.sentry_label)
+    unlinked = tuple(
+        issue["identifier"] for issue in issues
+        if issue["createdByMe"] and issue["stateType"] in sentry_sync.OPEN
+        and sentry_sync.ORIGIN_LINE.search(issue["description"])
+        and all(a["url"] != repository_url for a in issue["attachments"])
+    )
     owned = frozenset(
         issue["id"] for issue in issues
         if issue["createdByMe"] and issue["stateType"] == "triage" and sentry_sync.ORIGIN_LINE.search(issue["description"])
         and sentry_sync.priority_is_recorded(issue["comments"], client.priority_changes(issue["id"]))
     )
-    return sentry_sync.read_tracked(issues, settings.organization, owned)
+    return sentry_sync.read_tracked(issues, settings.organization, owned), unlinked
 
 
 def describe(action, identifier: str = "new") -> str:
@@ -122,10 +129,10 @@ def apply(action, client, settings: sentry_sync.Settings, rules: sentry_sync.Rul
         client.comment_on_issue(issue, f"{text}\n\n{sentry_sync.marker(kind, value)}")
 
     def create(group, delegate: bool, previous) -> str:
-        issue = client.create_issue(
+        issue = client.create_issue_for_repository(
             settings.team_key, group.title, sentry_sync.description(group, rules, settings.organization),
-            [settings.sentry_label, settings.theme_label], state_type="triage", delegate_self=delegate,
-            priority=group.priority,
+            [settings.sentry_label, settings.theme_label], settings.repository, state_type="triage",
+            delegate_self=delegate, priority=group.priority,
         )
         attach(issue["identifier"], group.key, group.url)
         if previous:
@@ -198,7 +205,8 @@ def _sync(settings, dry_run: bool, linear_api_url, sentry_base_url: str, now: da
     try:
         rules, index = load_rules(settings)
         client = linear.client_from_env(**({"api_url": linear_api_url} if linear_api_url else {}))
-        read = read_linear(client, settings)
+        repository_url, repository_title = linear.repository_link(settings.repository)
+        read, unlinked = read_linear(client, settings, repository_url)
         token = broker_client.request(broker_client.socket_path(os.environ), "mcp_token", server=settings.mcp_server)["token"]
         reader = sentry_source.SentryReader(settings.organization, token, base_url=sentry_base_url)
         observed = sentry_source.observe(reader, rules, read, index, now)
@@ -209,6 +217,16 @@ def _sync(settings, dry_run: bool, linear_api_url, sentry_base_url: str, now: da
         print(f"{NAME}: read failed, so nothing was written: {error}", file=sys.stderr)
         return 1
     plan = sentry_sync.plan_sync(observed, read, rules, settings.organization, now)
+    for identifier in unlinked:
+        if dry_run:
+            print(f"linking     {identifier} {settings.repository}")
+            continue
+        try:
+            client.attach_url(identifier, repository_url, repository_title)
+            print(f"linking     {identifier} {settings.repository}", flush=True)
+        except (*linear.CLIENT_ERRORS, OSError) as error:
+            print(f"{NAME}: Linear failed on `linking     {identifier} {settings.repository}`: {error}", file=sys.stderr)
+            return 1
     for action in plan.actions:
         if dry_run:
             print(describe(action))

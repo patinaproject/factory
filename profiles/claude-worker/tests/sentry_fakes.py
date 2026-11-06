@@ -140,6 +140,10 @@ class FakeLinear(_Server):
         issue = self.find(v["id"])
         return {"issue": {"id": issue["id"]} if issue else None}
 
+    def op_IssueDelegate(self, v: dict) -> dict:
+        issue = self.find(v["id"])
+        return {"viewer": {"id": APP_USER}, "issue": {"id": issue["id"], "identifier": issue["identifier"], "delegate": None} if issue else None}
+
     def op_AttachmentCreate(self, v: dict) -> dict:
         self.write("AttachmentCreate", v["input"])
         issue = self.find(v["input"]["issueId"])

@@ -30,13 +30,15 @@ def main() -> int:
         client = linear.client_from_env()
         open_issues = client.open_issues_titled(settings.team_key, dependency_update.TITLE_PREFIX)
         if open_issues:
+            client.attach_url(open_issues[0]["identifier"], *linear.repository_link(settings.repository))
             print(f"open {open_issues[0]['identifier']} {open_issues[0]['url']}")
             return 0
-        issue = client.create_issue(
+        issue = client.create_issue_for_repository(
             settings.team_key,
             dependency_update.title(datetime.now(timezone.utc).date()),
             dependency_update.description(settings),
             [settings.theme_label],
+            settings.repository,
             state_type="triage",
             delegate_self=True,
         )
