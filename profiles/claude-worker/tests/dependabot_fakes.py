@@ -37,7 +37,7 @@ def raw_alert(number: int, *, package: str = "lodash", ecosystem: str = "npm", s
             "ghsa_id": ghsa or f"GHSA-aaaa-bbbb-{number:04d}", "cve_id": cves[0] if cves else None,
             "identifiers": [{"type": "GHSA", "value": "x"}, *({"type": "CVE", "value": c} for c in cves)],
             "summary": summary, "severity": severity, "references": [{"url": u} for u in references],
-            "epss": [{"percentage": 0.001, "percentile": epss}] if epss is not None else [],
+            "epss": {"percentage": 0.001, "percentile": epss} if epss is not None else None,
         },
         "security_vulnerability": {
             "vulnerable_version_range": "< 1.2.3", "first_patched_version": {"identifier": patched} if patched else None,

@@ -66,6 +66,14 @@ class PriorityTest(unittest.TestCase):
     def test_a_medium_runtime_alert_with_a_high_epss_percentile_is_high(self) -> None:
         self.assertEqual(level(severity="medium", epss="0.95e0"), Priority.HIGH)
 
+    def test_epss_is_read_as_an_object_with_a_number_or_as_a_list_with_a_string(self) -> None:
+        for epss in ({"percentile": 0.95}, [{"percentile": "0.95e0"}]):
+            raw = raw_alert(1)
+            raw["security_advisory"]["epss"] = epss
+            self.assertEqual(sweep.parse_alert(raw).epss, 0.95)
+        raw["security_advisory"]["epss"] = []
+        self.assertIsNone(sweep.parse_alert(raw).epss)
+
     def test_a_medium_alert_without_epss_is_medium(self) -> None:
         self.assertEqual(level(severity="medium", epss=None), Priority.MEDIUM)
 

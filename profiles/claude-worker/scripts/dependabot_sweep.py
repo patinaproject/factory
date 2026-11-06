@@ -233,7 +233,9 @@ def parse_alert(raw: dict) -> Alert:
         cves = {i["value"] for i in advisory.get("identifiers") or [] if i.get("type") == "CVE"}
         if advisory.get("cve_id"):
             cves.add(advisory["cve_id"])
-        epss = advisory.get("epss") or []
+        epss = advisory.get("epss")
+        if isinstance(epss, list):
+            epss = epss[0] if epss else None
         patched = vulnerability.get("first_patched_version")
         return Alert(
             number=int(raw["number"]), state=raw["state"], ecosystem=dependency["package"]["ecosystem"],
@@ -242,7 +244,7 @@ def parse_alert(raw: dict) -> Alert:
             scope=dependency.get("scope"), relationship=dependency.get("relationship") or "unknown",
             manifest_path=dependency.get("manifest_path") or "", vulnerable_range=vulnerability.get("vulnerable_version_range") or "",
             first_patched=patched["identifier"] if patched else None,
-            epss=float(epss[0]["percentile"]) if epss and epss[0].get("percentile") is not None else None,
+            epss=float(epss["percentile"]) if epss and epss.get("percentile") is not None else None,
             url=raw["html_url"],
         )
     except (KeyError, TypeError, IndexError) as error:
