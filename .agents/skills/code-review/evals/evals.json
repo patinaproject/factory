@@ -1,0 +1,35 @@
+{
+  "skill_name": "code-review",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Run `bash plugins/code/skills/code-review/evals/make-fixture.sh /tmp/cr-eval-1`, then in /tmp/cr-eval-1 run code-review with fixed point `base`, reviewed head `r1`, earlier findings `/tmp/cr-eval-1-earlier-findings.json`, and spec `spec.md`. There is no pull request.",
+      "expected_output": "The report opens with the reviewed range in delta mode: F is `git rev-parse --short=12 base`, R is `git rev-parse --short=12 r1`, and HEAD is `git rev-parse --short=12 HEAD`, all three as 12-character SHAs. Standards, Bugs, and Security review only `r1..HEAD`, the commit `fix: greet a missing user and add formatCents`."
+    },
+    {
+      "id": 2,
+      "prompt": "Run `bash plugins/code/skills/code-review/evals/make-fixture.sh /tmp/cr-eval-2`, then in /tmp/cr-eval-2 run code-review with fixed point `base`, reviewed head `stale`, and spec `spec.md`. There is no pull request.",
+      "expected_output": "The report header says the run is full-range, not delta, and gives the reason that `stale` is not an ancestor of HEAD. The axes review `base...HEAD`, and the Bugs axis reports the `i <= rows.length` loop bound."
+    },
+    {
+      "id": 3,
+      "prompt": "Run `bash plugins/code/skills/code-review/evals/make-fixture.sh /tmp/cr-eval-3`, then in /tmp/cr-eval-3 run code-review with fixed point `base`, reviewed head `r1`, earlier findings `/tmp/cr-eval-3-earlier-findings.json`, and spec `spec.md`. There is no pull request.",
+      "expected_output": "No new finding on any axis repeats E1 (the `code = \"HALF\"` assignment) or E3 (the answered `i <= rows.length` loop bound): zero repeats. `## Earlier findings` lists E1 as still open and E2 as fixed, and does not list E3 because it is answered."
+    },
+    {
+      "id": 4,
+      "prompt": "Run `bash plugins/code/skills/code-review/evals/make-fixture.sh /tmp/cr-eval-4`, then in /tmp/cr-eval-4 run code-review with fixed point `base` and spec `spec.md`. Pass no reviewed head and no earlier findings. There is no pull request.",
+      "expected_output": "The Bugs axis reports the `i <= rows.length` loop bound as exactly one `Important` finding that lists three locations: `src/orders.js:3`, `src/invoices.js:3`, and `src/refunds.js:3`."
+    },
+    {
+      "id": 5,
+      "prompt": "Run `bash plugins/code/skills/code-review/evals/make-fixture.sh /tmp/cr-eval-5`, then in /tmp/cr-eval-5 run code-review with fixed point `base`, reviewed head `r1`, earlier findings `/tmp/cr-eval-5-earlier-findings.json`, and spec `spec.md`. There is no pull request.",
+      "expected_output": "E1 at `src/discount.js:3`, added before `r1` and unfixed at HEAD, is still open with severity `Important`, is not tagged `Pre-existing`, and counts toward the blocking findings."
+    },
+    {
+      "id": 6,
+      "prompt": "Run `bash plugins/code/skills/code-review/evals/make-fixture.sh /tmp/cr-eval-6`, then in /tmp/cr-eval-6 run code-review with fixed point `base` and spec `spec.md`. Pass no reviewed head and no earlier findings. There is no pull request.",
+      "expected_output": "The `items[items.length]` bug in `last()` at `src/list.js:2`, a line the branch did not change, is tagged `Pre-existing`, does not count as blocking, and appears in the `Follow-up candidates` list."
+    }
+  ]
+}

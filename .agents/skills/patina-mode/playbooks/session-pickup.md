@@ -17,9 +17,10 @@
    [`../references/issue-handoff.md`](../references/issue-handoff.md) with the
    `scripts/issue-routes/session-pickup.ts` entry. Run **working-on-issues**
    when the recovered state resolves one issue. Record `no-issue` when it
-   resolves none. The entry must return `continue` before the next playbook
+   resolves none. Choose the playbook that step 5 routes the remaining work to,
+   and send it. The entry must return `continue` before the next playbook
    changes state.
-5. Route the remaining work to the matching playbook and pick the verdict: continue the execution, ship a finished recommendation, ratify or override a prior conclusion, or postmortem a failed run. The pickup playbook ends here. The routed playbook owns the rest.
+5. Route the remaining work to the matching playbook and pick the verdict: continue the execution, ship a finished recommendation, ratify or override a prior conclusion, or postmortem a failed run. Check the remote canonical branch that **working-on-issues** resolved and fetched in step 4. When it has an open pull request, the matching playbook is Babysit, and Babysit step 1 chooses the mode. When it has commits beyond the default branch and no open pull request, continue with the remaining steps of the build playbook that the work matches, then **Opening a PR**. The pickup playbook ends here. The routed playbook owns the rest.
 6. Verify the inherited claims against the original goal on the real artifact (the **principle-prove-it-works** skill). A passing prior self-report is not the proof.
 
 **Reply:** where the prior agent stopped, what you inherited vs redid (ideally nothing redone), the resume point, and the outcome.
