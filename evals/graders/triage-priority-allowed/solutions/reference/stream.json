@@ -1,0 +1,26 @@
+[
+  {
+    "tool": "tracker",
+    "args": [
+      "show",
+      "ISSUE-1"
+    ]
+  },
+  {
+    "tool": "tracker",
+    "args": [
+      "set-priority",
+      "ISSUE-1",
+      "4"
+    ]
+  },
+  {
+    "tool": "tracker",
+    "args": [
+      "comment",
+      "ISSUE-1",
+      "--body",
+      "Priority: Low, set by triage\nRule: Low lane, waiting costs users nothing visible."
+    ]
+  }
+]

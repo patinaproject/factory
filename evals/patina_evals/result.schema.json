@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/patinaproject/factory/evals/result.schema.json",
+  "title": "patina-mode eval result",
+  "type": "object",
+  "required": ["schema_version", "kind", "evidence", "run", "resources", "parity", "cases", "summary", "cost", "speed"],
+  "additionalProperties": false,
+  "$defs": {
+    "value": {
+      "type": "object",
+      "required": ["value", "complete", "flags"],
+      "properties": {
+        "value": {"type": ["number", "object", "null"]},
+        "complete": {"type": "boolean"},
+        "flags": {"type": "array", "items": {"type": "string"}}
+      },
+      "if": {"properties": {"value": {"type": "null"}}},
+      "then": {"properties": {"complete": {"const": false}}}
+    },
+    "trial": {
+      "type": "object",
+      "required": ["trial", "solution", "expect", "targets", "verdict", "outcome", "checks", "forbidden", "error", "leaked_process_groups"],
+      "additionalProperties": false,
+      "properties": {
+        "trial": {"type": ["string", "null"]},
+        "solution": {"type": "string"},
+        "expect": {"enum": ["pass", "fail"]},
+        "targets": {"type": "array", "items": {"type": "string"}},
+        "verdict": {"enum": ["pass", "fail", null]},
+        "outcome": {"enum": ["ok", "unexpected", "error", "missing"]},
+        "checks": {"type": "object", "additionalProperties": {"type": "boolean"}},
+        "forbidden": {"type": "object", "additionalProperties": {"type": "boolean"}},
+        "error": {"type": ["string", "null"]},
+        "leaked_process_groups": {"type": "array", "items": {"type": "integer"}}
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"const": 1},
+    "kind": {"const": "patina-eval-result"},
+    "evidence": {
+      "type": "object",
+      "required": ["type", "agent_reliability_evidence", "note"],
+      "properties": {
+        "type": {"enum": ["plumbing_validation"]},
+        "agent_reliability_evidence": {"const": false},
+        "note": {"type": "string"}
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": ["split", "suite", "loader", "harness_revision", "started_at", "inspect_ai_version", "model", "model_calls", "solver"],
+      "properties": {
+        "split": {"enum": ["development", "holdout"]},
+        "suite": {"enum": ["regression", "capability", "all"]},
+        "loader": {"type": "string"},
+        "harness_revision": {"type": ["string", "null"]},
+        "started_at": {"type": "string"},
+        "inspect_ai_version": {"type": "string"},
+        "model": {"const": "mockllm/model"},
+        "model_calls": {"type": "integer", "minimum": 0},
+        "solver": {"const": "scripted"},
+        "inspect_log": {"type": ["string", "null"]}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "required": ["sandbox", "cpu", "memory", "concurrency", "timeouts"],
+      "properties": {
+        "sandbox": {"type": "string"},
+        "cpu": {"type": "object", "required": ["guarantee_cores", "ceiling_cpu_seconds_per_command", "ceiling_enforced"]},
+        "memory": {"type": "object", "required": ["guarantee_bytes", "ceiling_bytes_per_command", "ceiling_enforced"]},
+        "concurrency": {"type": "integer", "minimum": 1},
+        "timeouts": {"type": "object", "required": ["command_seconds", "trial_seconds"]}
+      }
+    },
+    "parity": {
+      "type": "object",
+      "required": ["valid", "dimensions", "problems", "intentional_differences"],
+      "properties": {
+        "valid": {"type": "boolean"},
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["dimension", "status", "source"],
+            "properties": {"status": {"enum": ["equal", "intentional_difference", "incompatible", "unknown"]}}
+          }
+        },
+        "problems": {"type": "array"},
+        "intentional_differences": {"type": "array"}
+      }
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "version", "task_version", "area", "group", "split", "suite", "required", "status", "trials"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string"},
+          "version": {"type": "string"},
+          "task_version": {"type": "string"},
+          "area": {"type": "string"},
+          "group": {"type": "string"},
+          "split": {"enum": ["development", "holdout"]},
+          "suite": {"enum": ["regression", "capability"]},
+          "required": {"type": "boolean"},
+          "status": {"enum": ["pass", "fail", "incomplete"]},
+          "trials": {"type": "array", "items": {"$ref": "#/$defs/trial"}}
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["cases", "trials", "required_failed", "capability_failed", "incomplete", "cost_assertions", "diagnostics", "exit_code", "exit_reason"],
+      "properties": {
+        "cases": {"type": "integer"},
+        "trials": {"type": "integer"},
+        "required_failed": {"type": "array", "items": {"type": "string"}},
+        "capability_failed": {"type": "array", "items": {"type": "string"}},
+        "incomplete": {"type": "array", "items": {"type": "string"}},
+        "cost_assertions": {"type": "array"},
+        "diagnostics": {"type": "array", "items": {"type": "string"}},
+        "exit_code": {"enum": [0, 1, 3, 4, 5]},
+        "exit_reason": {"enum": ["ok", "required_failure", "incomplete", "parity_invalid", "cost_unknown"]}
+      }
+    },
+    "cost": {
+      "type": "object",
+      "required": ["schema_version", "complete", "flags", "scopes", "experiment_total", "worker_cost_per_successful_card"],
+      "properties": {
+        "experiment_total": {
+          "type": "object",
+          "required": ["tokens", "cost_usd"],
+          "properties": {"tokens": {"$ref": "#/$defs/value"}, "cost_usd": {"$ref": "#/$defs/value"}}
+        },
+        "worker_cost_per_successful_card": {
+          "type": "object",
+          "required": ["status", "value", "complete"],
+          "properties": {"status": {"enum": ["known", "unknown", "no_success"]}}
+        }
+      }
+    },
+    "speed": {
+      "type": "object",
+      "required": ["schema_version", "clock", "end_to_end_wall_ns", "parts", "trials", "calls", "turns", "retries", "retry_delay_ns"],
+      "properties": {"clock": {"const": "monotonic"}}
+    }
+  }
+}

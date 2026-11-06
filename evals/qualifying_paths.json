@@ -1,0 +1,27 @@
+{
+  "include": [
+    "**/AGENTS.md",
+    "**/CLAUDE.md",
+    "**/SOUL.md",
+    "templates/triage-*.md",
+    "templates/hermes-memory.txt",
+    ".agents/skills/**",
+    ".claude/skills/**",
+    ".claude/agents/**",
+    "skills/**",
+    ".github/workflows/evals.yml",
+    ".github/workflows/skills-sync.yml",
+    "skills-lock.json",
+    "profiles/claude-worker/SOUL.md",
+    "profiles/claude-worker/config.yaml",
+    "profiles/claude-worker/scripts/claude-session",
+    "plugins/blocker-order/result_line.py",
+    "evals/patina_evals/**",
+    "evals/requirements*",
+    "evals/qualifying_paths.json"
+  ],
+  "exclude": [
+    "evals/fixtures/**",
+    "evals/graders/**"
+  ]
+}

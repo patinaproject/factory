@@ -11,6 +11,8 @@ and `.env`.
 - `profiles/<name>/`: Hermes worker profiles and their scripts
 - `templates/`: webhook route and triage prompt templates rendered from
   settings
+- `evals/`: the model-free patina-mode eval harness, with its own pinned Python
+  dependencies, tests, and `Evals` workflow (see `evals/README.md`)
 - `skills/setup-factory/`: the agent runbook that sets up a factory on a
   machine
 - `docs/`: contributor docs such as `docs/file-structure.md` and
@@ -113,7 +115,8 @@ refuses a break of the last one only when you publish:
 - `pnpm test`: run every component's Python tests from the repository root.
   `scripts/test.sh` runs `python3 -m unittest discover` in each `tests`
   directory under `plugins/`, `profiles/`, `scripts/`, `skills/`, and `templates/`, with
-  the component as the top-level directory.
+  the component as the top-level directory. It does not run `evals/`, whose tests
+  need that component's own virtual environment; see `evals/README.md`.
 - `pnpm lint:md`: lint all Markdown.
 - `pnpm exec commitlint --edit <file>`: check a commit message.
 

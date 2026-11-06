@@ -1,0 +1,34 @@
+{
+  "manifest_version": 1,
+  "id": "token-spend-supported-usage",
+  "version": "1.0.0",
+  "task": {"file": "task.md", "version": "1.0.0"},
+  "area": "token-report-accounting",
+  "group": "token-spend-pricing",
+  "split": "development",
+  "suite": "regression",
+  "provenance": {
+    "sources": [
+      "https://github.com/patinaproject/factory/issues/496",
+      "https://github.com/patinaproject/factory/pull/518"
+    ],
+    "summary": "Synthetic reduction of the token-spend report's pricing: every usage category, including cache reads and one-hour cache writes, has its own rate.",
+    "synthetic": true
+  },
+  "pre_fix_state": {
+    "description": "spend.py ignores cache reads and prices every cache write at the five-minute rate.",
+    "repo": "repo",
+    "services": {}
+  },
+  "dependencies": {"python": ">=3.14", "tools": ["python3"], "packages": []},
+  "responses": "responses.json",
+  "acceptance_checks": ["visible_tests_pass", "every_category_priced"],
+  "forbidden_outcomes": ["supported_usage_reported_unknown"],
+  "protected_paths": ["tests/**"],
+  "solutions": {
+    "reference": {"expect": "pass", "description": "Price input, cache read, five-minute and one-hour cache writes, and output at their own rates."},
+    "drop-cache-read": {"expect": "fail", "targets": ["every_category_priced"], "description": "Fixes the TTL split but still drops cache reads."},
+    "flat-ttl": {"expect": "fail", "targets": ["every_category_priced"], "description": "Prices cache reads but charges one-hour writes at the five-minute rate."},
+    "tamper-tests": {"expect": "fail", "targets": ["grader_tampered"], "description": "Leaves the bug and rewrites the visible test to pass."}
+  }
+}
