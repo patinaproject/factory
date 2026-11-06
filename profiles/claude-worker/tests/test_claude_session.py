@@ -219,7 +219,11 @@ class ClaudeSessionTest(GitFixture):
         self.nvm_dir = self.tmp / "nvm"
         self.hermes_home = self.tmp / "hermes" / "profiles" / "claude-worker"
         self.hermes_bin = self.tmp / "hermes-bin"
-        self.hermes_bin.write_text(f"#!/bin/sh\necho \"$HERMES_HOME $@\" >> {self.tmp / 'hermes-calls'}\n")
+        self.hermes_bin.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1 $2" = "config get" ]; then echo "Config key not set: $3" >&2; exit 1; fi\n'
+            f"echo \"$HERMES_HOME $@\" >> {self.tmp / 'hermes-calls'}\n"
+        )
         os.chmod(self.hermes_bin, 0o755)
         self.install_linear_plugin(self.hermes_home)
         self.broker = self.start_broker(linear_token=[granted("cached-token")], proxy_token=[granted("token-value", None)])

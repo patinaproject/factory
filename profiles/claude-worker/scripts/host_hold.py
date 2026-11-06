@@ -23,7 +23,7 @@ import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 HOLDS_FILE = "dispatch-holds.json"
 LOG_FILE = "dispatch-holds.log"
@@ -73,6 +73,11 @@ def read_holds(root: Path) -> dict:
         raise HoldError(f"cannot read {root / HOLDS_FILE}: {error}") from None
     if not isinstance(data, dict) or not isinstance(data.get("holds"), dict) or not isinstance(data.get("applied"), bool):
         raise HoldError(f"{root / HOLDS_FILE} is not a hold list")
+    for holder, entry in data["holds"].items():
+        try:
+            parse(entry["until"])
+        except (TypeError, KeyError, ValueError):
+            raise HoldError(f"{root / HOLDS_FILE} has an entry for {holder} without a valid until") from None
     return data
 
 

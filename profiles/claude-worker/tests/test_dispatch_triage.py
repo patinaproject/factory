@@ -585,7 +585,6 @@ class HostLoadTest(ParkedHarness):
         calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         return [call[1:] for call in calls if call[:1] == ["config"] and call[1] in ("set", "unset")]
 
-
     def entry(self, until: str = "2999-01-01T00:00:00Z") -> dict:
         return {"reason": "load average 20", "until": until}
 
@@ -613,6 +612,15 @@ class HostLoadTest(ParkedHarness):
         self.assertEqual(self.holds_file(), {"holds": {}, "applied": False})
         self.assertEqual(self.config_calls(), [])
         self.assertEqual(json.loads(self.state_path.read_text())["dispatch_profiles"], ["claude-worker"])
+
+    def test_an_entry_without_a_valid_until_assigns_nothing_and_exits_nonzero(self) -> None:
+        self.write_holds({"auto-deploy": {"reason": "a factory deploy is installing"}}, applied=True)
+
+        proc = self.run_script([task("t_waiting", "ready")], _env={"HOST_HOLD_LOADAVG": "1,1,1"})
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("has an entry for auto-deploy without a valid until", proc.stderr)
+        self.assertIsNone(self.assignees()["t_waiting"])
 
     def test_the_five_minute_average_alone_holds(self) -> None:
         self.run_script([], _env={"HOST_HOLD_LOADAVG": "1,12.5,2"})

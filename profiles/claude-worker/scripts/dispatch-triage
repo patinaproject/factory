@@ -138,7 +138,11 @@ def main() -> int:
         binary = factory_settings.find_hermes()
         settings = factory_settings.read(raw=False)
         os.environ["HERMES_BIN"] = binary
-        holds, valid = hold_for_load(binary, settings)
+        try:
+            holds, valid = hold_for_load(binary, settings)
+        except host_hold.HoldError as exc:
+            print(f"dispatch-triage: {exc}", file=sys.stderr)
+            holds, valid = None, True
         cap = max_running(settings)
         released = release_waiting()
         released = release_parked(card_transition.sweep_login, "the gh login") and released
@@ -150,14 +154,14 @@ def main() -> int:
         released = release_parked(card_transition.sweep_issue, "a GitHub issue") and released
         released = release_parked(card_transition.sweep_pull_request, "a GitHub pull request") and released
         released = release_parked(card_transition.sweep_host_load, "the host load") and released
-        if host_hold.HOST_LOAD not in holds.holders():
+        if holds is not None and host_hold.HOST_LOAD not in holds.holders():
             tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
             for task_id in to_assign(tasks, cap):
                 hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)
                 print(f"assigned {task_id}")
         if not valid:
             return 2
-        if not released:
+        if holds is None or not released:
             return 1
     except Refusal as exc:
         print(f"dispatch-triage: {exc}", file=sys.stderr)
