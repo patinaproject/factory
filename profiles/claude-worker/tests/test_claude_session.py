@@ -177,6 +177,7 @@ ALLOWED_NAMES = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TZ", "NVM_DIR",
     "GH_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
     "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "DEVELOPER_DIR", "FACTORY_ARTIFACT_CAPABILITY",
+    "PATINAPROJECT_TEST_WORKERS",
 }
 TOOLCHAIN = {
     "JAVA_HOME": "/opt/jdk", "ANDROID_HOME": "/opt/android-sdk", "ANDROID_SDK_ROOT": "/opt/android-sdk",
@@ -277,7 +278,6 @@ class ClaudeSessionTest(GitFixture):
             GH_CONFIG_DIR=str(self.tmp / "gh"),
             HOST_HOLD_LOADAVG="0,0,0",
             HOST_HOLD_CPUS="18",
-            HERMES_BIN=str(self.hermes_bin),
             **HERMES_CHILD_ENV,
             **WORKER_SECRETS,
             **self.github.env(),
@@ -4092,6 +4092,9 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(self.claude_call()["argv"][1], "Continue.")
 
+    def overloaded(self, load: str) -> dict:
+        return {"HOST_HOLD_LOADAVG": load, "HERMES_BIN": str(self.hermes_bin)}
+
     def hermes_calls(self) -> list:
         log = self.tmp / "hermes-calls"
         return log.read_text().splitlines() if log.exists() else []
@@ -4105,7 +4108,7 @@ class ClaudeSessionTest(GitFixture):
         self.assertFalse((self.hermes_home / "claude-session-runs").exists())
 
     def test_a_load_over_the_threshold_starts_nothing_holds_dispatch_and_refuses_with_host_load(self) -> None:
-        status, report = self.run_session(env={"HOST_HOLD_LOADAVG": "30,10,5"})
+        status, report = self.run_session(env=self.overloaded("30,10,5"))
 
         reading = "load average 30 (1 min) and 10 (5 min) against a threshold of 27"
         self.assertEqual(status, 2)
@@ -4119,12 +4122,12 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(self.hermes_calls(), [f"{self.hermes_home.parent.parent} config set kanban.dispatch_profiles []"])
 
     def test_the_five_minute_average_alone_refuses(self) -> None:
-        status, report = self.run_session(env={"HOST_HOLD_LOADAVG": "1,27.5,5"})
+        status, report = self.run_session(env=self.overloaded("1,27.5,5"))
 
         self.assertEqual((status, report["precondition"]), (2, "host_load"))
 
     def test_a_load_at_the_threshold_starts_the_run(self) -> None:
-        status, _ = self.run_session(env={"HOST_HOLD_LOADAVG": "27,27,27"})
+        status, _ = self.run_session(env=self.overloaded("27,27,27"))
 
         self.assertEqual(status, 0)
         self.assertFalse(self.holds_file().exists())
@@ -4132,7 +4135,7 @@ class ClaudeSessionTest(GitFixture):
     def test_a_configured_threshold_replaces_the_per_cpu_default(self) -> None:
         self.settings = self.write_settings([self.repository], {"load_hold_threshold": 5.5})
 
-        status, report = self.run_session(env={"HOST_HOLD_LOADAVG": "6,1,1"})
+        status, report = self.run_session(env=self.overloaded("6,1,1"))
 
         self.assertEqual(status, 2)
         self.assertIn("against a threshold of 5.5", report["error"])
@@ -4140,7 +4143,7 @@ class ClaudeSessionTest(GitFixture):
     def test_a_card_refused_for_load_four_times_in_the_window_still_parks(self) -> None:
         self.write_parks(*[(age, "Waiting for the host load to fall:") for age in (30, 900, 2000, 3000)])
 
-        status, report = self.run_session(env={"HOST_HOLD_LOADAVG": "30,30,30"})
+        status, report = self.run_session(env=self.overloaded("30,30,30"))
 
         self.assertEqual((status, report["transient"], report["precondition"]), (2, True, "host_load"))
         self.assertNotIn("time in an hour", report["error"])
@@ -4152,7 +4155,7 @@ class ClaudeSessionTest(GitFixture):
         module.unlink()
         module.write_text(text.replace("    HOST_LOAD: HOST_LOAD_PARK,\n", ""))
 
-        status, report = self.run_session(env={"HOST_HOLD_LOADAVG": "30,30,30"})
+        status, report = self.run_session(env=self.overloaded("30,30,30"))
 
         self.assertEqual((status, report["transient"], "precondition" in report), (2, True, False))
         self.assertIn("the host load is too high", report["error"])
