@@ -41,7 +41,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 from . import triage_intent
 
@@ -178,7 +178,6 @@ class Trace:
 
     home: Optional[Path] = None
     route: Optional[str] = None
-    linear: bool = False
     rule: Optional[str] = None
     intent: Optional[triage_intent.Intent] = None
 
@@ -351,10 +350,14 @@ def _run(trace: Trace, chat_id: Any, payload: Any, text: Any, result: Any) -> No
             _pending -= 1
 
 
-def submit(trace: Trace, event: Any, result: Any) -> None:
+def submit(enabled: Callable[[], bool], trace: Trace, event: Any, result: Any) -> None:
     """Queue one decision for the worker and return at once. Nothing it does reaches the hook's return."""
     global _pending
-    if trace.route is None:
+    try:
+        if trace.route is None or not enabled():
+            return
+    except Exception as failure:
+        warn(f"the router_shadow setting could not be read: {type(failure).__name__}")
         return
     with _lock:
         full = _pending >= MAX_PENDING

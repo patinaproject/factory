@@ -244,7 +244,8 @@ def make_dispatch_hook(
     skip_home: Callable[[], Path] = triage_exit.gateway_home,
     comment_store: Callable[[], Optional[str]] = lambda: idempotency.store_dir(os.environ),
     forward_store: Callable[[], Optional[str]] = lambda: forwards.store_dir(os.environ),
-    router_shadow: Callable[[], bool] = lambda: True,
+    # `register` passes the `router_shadow` setting, which defaults to on.
+    router_shadow: Callable[[], bool] = lambda: False,
 ) -> Callable[..., Any]:
     pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-exit")
     # A bulk move can hold every triage-exit worker for minutes, and an intent must not wait behind it.
@@ -253,8 +254,7 @@ def make_dispatch_hook(
     async def dispatch(event: Any, **_: Any) -> Optional[dict[str, str]]:
         trace = router.Trace()
         result = await guard_then_acknowledge(event, trace)
-        if router_shadow():
-            router.submit(trace, event, result)
+        router.submit(router_shadow, trace, event, result)
         return result
 
     async def guard_then_acknowledge(event: Any, trace: router.Trace) -> Optional[dict[str, str]]:
@@ -271,7 +271,6 @@ def make_dispatch_hook(
         route = trace.route = _delivery_route(event)
         if route is None:
             return None
-        trace.linear = route == webhook_route()
         variable = unresolved_routes(load_config()).get(route)
         if variable is not None:
             logger.error(

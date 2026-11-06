@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests import PLUGIN_DIR, load_plugin
-from tests.test_plugin import RESOLVED_CONFIG, Platform, RecordingClient, event, session_event
+from tests.test_plugin import RESOLVED_CONFIG, FakeContext, Platform, RecordingClient, event, hermes_config, session_event
 
 plugin = load_plugin()
 router = plugin.router
@@ -149,7 +149,8 @@ class OneRecordPerDecisionTest(RouterCase):
             self.deliver(event(session_event("created")))
         unresolved = {"platforms": {"webhook": {"extra": {"routes": {"linear": {"secret": "${LINEAR_SECRET}"}}}}}}
         hook = plugin.make_dispatch_hook(
-            lambda: self.client, lambda: "linear", lambda: unresolved, not_handled, None, lambda: self.home
+            lambda: self.client, lambda: "linear", lambda: unresolved, not_handled, None, lambda: self.home,
+            router_shadow=lambda: True,
         )
         asyncio.run(hook(event=event(session_event("created"))))
         router.drain()
@@ -171,7 +172,7 @@ class OneRecordPerDecisionTest(RouterCase):
         restarted = load_plugin()
         asyncio.run(restarted.make_dispatch_hook(
             lambda: self.client, lambda: "linear", lambda: RESOLVED_CONFIG, not_handled,
-            lambda _: Intent(action="card_reply"), lambda: self.home,
+            lambda _: Intent(action="card_reply"), lambda: self.home, router_shadow=lambda: True,
         )(event=event(session_event("prompted"), chat_id=key)))
         router.drain()
         self.deliver(event(session_event("prompted"), chat_id=chat_key("other")))
@@ -196,6 +197,7 @@ class OneRecordPerDecisionTest(RouterCase):
         hook = plugin.make_dispatch_hook(
             lambda: self.client, lambda: "linear", lambda: RESOLVED_CONFIG, not_handled, lambda _: intent,
             lambda: self.home, comment_store=lambda: str(store), forward_store=lambda: str(self.home / "forwards"),
+            router_shadow=lambda: True,
         )
         with mock.patch.object(plugin.forwards, "pending", return_value=False):
             for _ in range(2):
@@ -289,6 +291,20 @@ class ActionTableTest(RouterCase):
         for record in records:
             self.assertIn(record["action"], router.ACTIONS)
             self.assertTrue(record["then"] is None or record["then"] in router.ACTIONS, record)
+
+
+class SettingTest(RouterCase):
+    def test_the_registered_hook_reads_router_shadow_and_defaults_it_on(self):
+        for settings, expected in (({}, True), ({"router_shadow": True}, True), ({"router_shadow": False}, False)):
+            with self.subTest(settings):
+                ctx = FakeContext({"webhook_route": "linear", **settings})
+                seen = []
+                with hermes_config(RESOLVED_CONFIG), mock.patch.dict(os.environ, {"HERMES_HOME": str(self.home)}):
+                    plugin.register(ctx)
+                    hook = dict(ctx.hooks)["pre_gateway_dispatch"]
+                    with mock.patch.object(router, "submit", lambda enabled, *_: seen.append(enabled())):
+                        asyncio.run(hook(event=event(session_event("created"), route="github")))
+                self.assertEqual(seen, [expected])
 
 
 class StorageTest(RouterCase):
@@ -395,11 +411,11 @@ class FailSafeTest(RouterCase):
         self.addCleanup(router.drain)
         self.addCleanup(release.set)
         evt = event(session_event("prompted"))
-        trace = router.Trace(home=self.home, route="linear", linear=True, rule="intent_turn", intent=Intent(action="x"))
+        trace = router.Trace(home=self.home, route="linear", rule="intent_turn", intent=Intent(action="x"))
         with mock.patch.object(router, "record", side_effect=lambda *_: release.wait(10)):
             started = time.monotonic()
             for _ in range(20):
-                router.submit(trace, evt, {"action": "rewrite", "text": "t"})
+                router.submit(lambda: True, trace, evt, {"action": "rewrite", "text": "t"})
             per_call = (time.monotonic() - started) / 20
             release.set()
             router.drain()
