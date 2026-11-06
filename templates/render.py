@@ -25,10 +25,8 @@ REPLY_INBOX = Path("profiles") / "claude-worker" / "scripts" / "reply_inbox.py"
 GITHUB_ROUTE = "github"
 EMAIL_ROUTE = "email"
 EMAIL_SECRET = "${EMAIL_WEBHOOK_SECRET}"
-# The script claims the email and prints [SILENT], so Hermes starts no model turn on untrusted mail.
 EMAIL_ROUTE_SCRIPT = "email-route"
-# The Worker's body always has message_id; the watch-gateway probe body has none, so the filter ignores it.
-EMAIL_FILTERS = [{"field": "message_id", "exists": True}]
+REQUIRE_MESSAGE_ID = [{"field": "message_id", "exists": True}]
 ROUTINGS = ("default", "linked", "synced_github")
 TOOLSETS = ["terminal", "kanban", "linear_agent_session"]
 LINEAR_EVENTS = ["AgentSessionEvent", "Comment", "Issue"]
@@ -566,7 +564,7 @@ def skill_text(spec: RouteSpec, config: dict) -> str:
 
 def email_shape() -> dict:
     """A script-only route: no prompt and no skills, because no gateway model turn may read an email."""
-    return {"secret": EMAIL_SECRET, "filters": EMAIL_FILTERS, "script": EMAIL_ROUTE_SCRIPT}
+    return {"secret": EMAIL_SECRET, "filters": REQUIRE_MESSAGE_ID, "script": EMAIL_ROUTE_SCRIPT}
 
 
 def build_routes(settings: Any) -> dict:

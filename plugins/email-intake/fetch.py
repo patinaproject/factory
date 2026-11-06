@@ -72,7 +72,6 @@ def _verified(path: Path, item: ledger_module.StoredObject) -> bool:
 def fetch_object(item: ledger_module.StoredObject, url: str, secret: str, destination: Path, opener) -> None:
     target = destination / item.file
     if target.exists():
-        # A fetch that a gateway restart cut short resumes here; a file is written once and never replaced.
         if _verified(target, item):
             return
         raise FetchError(f"{item.file} ({item.key}) is already on disk and does not match the listed object")

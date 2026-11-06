@@ -40,7 +40,6 @@ LISTED = {
     "linear": ["AgentSessionEvent", "Issue"],
     "factory-linear": ["AgentSessionEvent", "Issue"],
     "github": ["pull_request", "issue_comment", "check_run"],
-    # The email route lists no events; its message_id filter is what ignores the probe.
     "email": [],
 }
 HEARTBEAT_PATH = "/ping/9b1c-private-monitor-id"

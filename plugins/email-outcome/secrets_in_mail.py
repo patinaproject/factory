@@ -10,8 +10,7 @@ NEAR = 40
 URL = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
 SENSITIVE_URL_PART = re.compile(r"reset|token|verify|magic", re.IGNORECASE)
 TRAILING = ".,;:!?"
-# Hermes's redaction also covers these. They are repeated so the refusal holds where redaction is turned off.
-CREDENTIAL = re.compile(r"sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}")
+REDACTION_FALLBACK = re.compile(r"sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}")
 
 
 def codes(email_text: str) -> set:
@@ -41,6 +40,6 @@ def refusal(write: str, email_text: str, redact: Callable[[str], str]) -> Option
         return "it holds a number that the email gives next to a code word, such as a one-time code"
     if any(url in write for url in sensitive_urls(email_text)):
         return "it holds a link from the email whose path or query names a reset, token, verify, or magic link"
-    if CREDENTIAL.search(write) or redact(write) != write:
+    if REDACTION_FALLBACK.search(write) or redact(write) != write:
         return "it holds a string that the factory's secret redaction would hide, such as an API key or password"
     return None

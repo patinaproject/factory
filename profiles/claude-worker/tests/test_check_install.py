@@ -1404,8 +1404,6 @@ class CheckInstallTest(unittest.TestCase):
         self.assertNotIn("s3cr3t", self.raw)
 
     def test_an_email_whose_fetch_failed_or_stalled_is_reported_by_card(self) -> None:
-        import sqlite3
-
         path = self.root / "email-intake" / "ledger.db"
         path.parent.mkdir(parents=True)
         conn = sqlite3.connect(path)

@@ -18,7 +18,7 @@ from pathlib import Path
 
 SILENT = "[SILENT]"
 LEDGER_MODULE = Path("plugins") / "email-intake" / "ledger.py"
-# Well under Hermes's 30-second script timeout. The service answers once the card exists; the fetch runs after.
+# Well under Hermes's 30-second script timeout.
 SOCKET_TIMEOUT = 15.0
 
 

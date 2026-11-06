@@ -40,7 +40,6 @@ def hermes_board() -> fetch.Board:
     def create_card(delivery: ledger.Delivery) -> str:
         conn = kbc.connect()
         try:
-            # The card id is not known until the card exists, so the body names the attachments root.
             body = CARD_BODY.format(directory=kb.attachments_root(), email_file=ledger.EMAIL_FILE, raw_file=ledger.RAW_FILE)
             return kb.create_task(
                 conn, title=card_title(delivery), body=body, assignee=ledger.MAIL_PROFILE, created_by=AUTHOR,

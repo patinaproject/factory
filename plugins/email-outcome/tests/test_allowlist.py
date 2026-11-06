@@ -6,8 +6,6 @@ from pathlib import Path
 
 import allowlist
 
-# What Hermes resolves for a mail card run: the profile's `file` and `email` toolsets, plus the `kanban` toolset that
-# it forces onto every dispatcher-spawned run, and `terminal` for a model that asks for it by name.
 RESOLVED = (
     "read_file", "write_file", "patch", "search_files",
     "kanban_attach", "kanban_attach_url", "kanban_attachments", "kanban_block", "kanban_comment", "kanban_complete",

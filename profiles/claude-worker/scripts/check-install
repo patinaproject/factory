@@ -386,8 +386,6 @@ def check_profile(commit: Commit, homes: Homes) -> list:
 
 # Plugins that run in the gateway only. Their code lives in the root home and never in the worker's.
 ROOT_ONLY_PLUGINS = frozenset({"factory-uploads", "work", "webhook-retry", "factory-deploy", "email-intake"})
-# Plugins that run in the mail worker only. email-outcome's hook refuses every tool outside the mail allowlist, so it
-# must never load in the gateway or in claude-worker.
 MAIL_ONLY_PLUGINS = frozenset({"email-outcome"})
 
 
@@ -2500,8 +2498,6 @@ def check_email_ledger(root: Path, now: float) -> list:
     path = Path(root) / EMAIL_LEDGER
     if not path.is_file():
         return []
-    import sqlite3
-
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         rows = conn.execute("SELECT state, card_id, received_at, outcome FROM emails").fetchall()

@@ -107,8 +107,6 @@ def record(context: Context, args: dict) -> dict:
     if row.state != context.ledger_module.READY:
         raise Refused(f"this email's files are not ready; its fetch state is {row.state}")
     kind, write, texts = plan(args if isinstance(args, dict) else {})
-    if kind == "no-action" and "\n" in texts[0]:
-        raise Refused("reason must be one line")
     source = email_text(row.delivery)
     for text in texts:
         reason = context.secret_refusal(text, source)

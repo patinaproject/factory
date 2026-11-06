@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
 import stat
 import tempfile
 import unittest
@@ -94,7 +95,6 @@ class IntakeTest(unittest.TestCase):
         server = fetch.Server(ledger.socket_path(self.root), self.intake())
         server.start()
         self.addCleanup(server.stop)
-        import socket
 
         def ask(request):
             with socket.socket(socket.AF_UNIX) as client:

@@ -26,7 +26,6 @@ def load_ledger(root: Path):
 
 
 def load_linear(root: Path):
-    # A bare package skips linear-agent-session's __init__, which registers that plugin's own tools and hooks.
     name = "email_outcome_linear"
     package = types.ModuleType(name)
     package.__path__ = [str(root / LINEAR_PLUGIN)]

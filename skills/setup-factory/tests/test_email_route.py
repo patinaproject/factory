@@ -35,7 +35,6 @@ class EmailRouteTest(unittest.TestCase):
         shutil.copytree(PLUGIN, self.root / "plugins" / "email-intake")
         self.board = FakeBoard(self.root)
         self.store = ledger.Ledger(ledger.ledger_path(self.root))
-        # No object host is reachable, so each fetch fails; these tests cover the route, not the fetch.
         intake = fetch.Intake(self.store, self.board.board(), "objects.invalid", lambda: None)
         intake.deliver_and_fetch = intake.deliver
         self.server = fetch.Server(ledger.socket_path(self.root), intake)
@@ -62,7 +61,6 @@ class EmailRouteTest(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(4) as pool:
             results = list(pool.map(lambda _: self.run_route(worker_body()), range(4)))
         cards = list(self.board.cards)
-        # As if the first card were archived and deleted: the ledger alone must still refuse a second card.
         self.board.cards.clear()
         later = self.run_route(worker_body())
 

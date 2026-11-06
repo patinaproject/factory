@@ -19,9 +19,7 @@ LEDGER = "ledger.db"
 SOCKET = "fetch.sock"
 IDEMPOTENCY_PREFIX = "email:"
 MAX_MESSAGE_ID = 255
-# A Message-ID such as <abc.123@mail.example.com>, or the 64-hex raw SHA-256. No slash, backslash, space, or quote,
-# so a value can never name a path or break out of a shell word.
-MESSAGE_ID = re.compile(r"^[A-Za-z0-9<>@._+=%~!#$&*^{}|?-]+$")
+PATH_SAFE_MESSAGE_ID = re.compile(r"^[A-Za-z0-9<>@._+=%~!#$&*^{}|?-]+$")
 MESSAGE_ID_SOURCES = ("header", "raw-sha256")
 OBJECT_KEY = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -79,7 +77,7 @@ def valid_message_id(value) -> str:
         raise DeliveryError("message_id is missing")
     if len(value) > MAX_MESSAGE_ID:
         raise DeliveryError(f"message_id is {len(value)} characters, more than {MAX_MESSAGE_ID}")
-    if not MESSAGE_ID.match(value):
+    if not PATH_SAFE_MESSAGE_ID.match(value):
         raise DeliveryError("message_id has a character outside the safe set")
     return value
 
