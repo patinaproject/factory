@@ -113,7 +113,8 @@ def settings_problems(factory_settings: object) -> list:
     problems = section_problems(factory_settings)
     if not isinstance(factory_settings, dict):
         return problems
-    login = (factory_settings.get("github") or {}).get("login") if isinstance(factory_settings.get("github") or {}, dict) else None
+    github = factory_settings.get("github") or {}
+    login = github.get("login") if isinstance(github, dict) else None
     if not isinstance(login, str) or not login.endswith("[bot]"):
         problems.append(f"github.login {login!r} must be the App's <app-slug>[bot] login")
     if len(_repositories(factory_settings, "default")) != 1:
@@ -653,13 +654,13 @@ def _retire(repo: Repo, current: ExistingIssue, alerts: list) -> list:
         + "\n\n" + COMMENT_MARKER.format(kind=kind)
     )
     actions: list = []
+    if not current.notified:
+        actions.append(Comment(repo, current, text, kind))
     footer = parse_footer(current.body)
     if current.tracker == "github" and footer is not None:
         wanted = frozenset({"notified"}) | ({"canceled"} if cancelable else frozenset())
         if not wanted <= footer.flags:
             actions.append(UpdateBody(repo, current, replace_footer(current.body, footer.with_flags(add=wanted))))
-    if not current.notified:
-        actions.append(Comment(repo, current, text, kind))
     if cancelable:
         actions.append(Cancel(repo, current))
     return actions

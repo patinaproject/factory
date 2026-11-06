@@ -74,11 +74,15 @@ def read_kev(url: str) -> frozenset:
         raise ReadFailed(f"the CISA KEV catalog could not be read: {error}") from None
 
 
+def priority_owned(client, raw: dict) -> bool:
+    """Whether the sweep may still write this Triage issue's priority: no one but the App has changed it."""
+    return raw["stateType"] == "triage" and all(change["byMe"] for change in client.priority_changes(raw["id"]))
+
+
 def read_linear_issues(client, settings: sweep.Settings) -> list:
     issues = []
     for raw in client.list_issues_by_label(settings.team_key, settings.label):
-        owned = raw["stateType"] == "triage" and all(change["byMe"] for change in client.priority_changes(raw["id"]))
-        if issue := sweep.linear_issue(raw, owned):
+        if issue := sweep.linear_issue(raw, priority_owned(client, raw)):
             issues.append(issue)
     return issues
 
@@ -87,9 +91,7 @@ def read_copy(client, url: str):
     copies = sorted(client.issues_by_attachment_url(url), key=lambda c: (c["createdAt"], c["identifier"]))
     if not copies:
         return None
-    raw = copies[0]
-    owned = raw["stateType"] == "triage" and all(change["byMe"] for change in client.priority_changes(raw["id"]))
-    return sweep.copy_from(raw, owned)
+    return sweep.copy_from(copies[0], priority_owned(client, copies[0]))
 
 
 def read_public_issues(client, settings: sweep.Settings, repo: sweep.Repo) -> list:
@@ -120,8 +122,8 @@ def read_all(client, settings: sweep.Settings) -> tuple:
             continue
         repo = sweep.classify_repo(raw["full_name"], raw["visibility"], settings)
         if repo.buildability is Buildability.PUBLIC_SYNCED:
-            names = {label["name"] for label in gh_pages(f"repos/{repo.full_name}/labels")}
-            missing = [label for label in (settings.label, sweep.NEEDS_TRIAGE_LABEL) if label not in names]
+            names = {label["name"].lower() for label in gh_pages(f"repos/{repo.full_name}/labels")}
+            missing = [label for label in (settings.label, sweep.NEEDS_TRIAGE_LABEL) if label.lower() not in names]
             if missing:
                 reads.append(sweep.RepoRead(repo, skipped=f"the label {', '.join(repr(m) for m in missing)} is missing"))
                 continue
@@ -192,7 +194,8 @@ def apply(action, client, settings: sweep.Settings) -> str:
         case Relate():
             client.relate_issues(action.issue.identifier, action.previous, "related")
         case DelegateCopy():
-            client.delegate_self(action.copy.id)
+            if not action.copy.delegated:
+                client.delegate_self(action.copy.id)
             if action.priority:
                 client.set_priority(action.copy.id, action.priority.linear)
     return describe(action)

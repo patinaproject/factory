@@ -242,24 +242,24 @@ class RetireTest(unittest.TestCase):
     def test_a_skipped_repository_cancels_nothing(self) -> None:
         self.assertEqual(plan([], [issue([alert(1)])], skipped="Dependabot alerts are disabled").actions, ())
 
-    def test_a_github_issue_records_the_flags_before_the_comment_and_close(self) -> None:
+    def test_a_github_issue_is_commented_before_its_flags_are_recorded_and_it_is_closed(self) -> None:
         existing = issue([alert(1)], repo=SYNCED, tracker="github", state="open")
         actions = plan(self.closed(), [existing], repo=SYNCED).actions
-        self.assertEqual([type(a) for a in actions], [UpdateBody, Comment, Cancel])
-        self.assertEqual(sweep.parse_footer(actions[0].body).flags, frozenset({"notified", "canceled"}))
+        self.assertEqual([type(a) for a in actions], [Comment, UpdateBody, Cancel])
+        self.assertEqual(sweep.parse_footer(actions[1].body).flags, frozenset({"notified", "canceled"}))
 
     def test_a_github_issue_whose_copy_is_started_is_commented_but_not_closed(self) -> None:
         copy = Copy("c1", "ABC-9", "started", False, True, 2, True)
         existing = issue([alert(1)], repo=SYNCED, tracker="github", state="open", copy=copy)
         actions = plan(self.closed(), [existing], repo=SYNCED).actions
-        self.assertEqual([type(a) for a in actions], [UpdateBody, Comment])
-        self.assertEqual(sweep.parse_footer(actions[0].body).flags, frozenset({"notified"}))
+        self.assertEqual([type(a) for a in actions], [Comment, UpdateBody])
+        self.assertEqual(sweep.parse_footer(actions[1].body).flags, frozenset({"notified"}))
 
     def test_a_github_issue_with_an_assignee_is_commented_once(self) -> None:
         existing = issue([alert(1)], repo=SYNCED, tracker="github", state="open", assigned=True)
         first = plan(self.closed(), [existing], repo=SYNCED).actions
-        self.assertEqual([type(a) for a in first], [UpdateBody, Comment])
-        again = replace(existing, body=first[0].body, markers=frozenset({"notified"}))
+        self.assertEqual([type(a) for a in first], [Comment, UpdateBody])
+        again = replace(existing, body=first[1].body, markers=frozenset({"notified"}))
         self.assertEqual(plan(self.closed(), [again], repo=SYNCED).actions, ())
 
 

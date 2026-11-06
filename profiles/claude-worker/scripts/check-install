@@ -127,13 +127,13 @@ from typing import Callable, NamedTuple
 
 import app_events
 import artifact_service
+import dependabot_sweep
 import factory_settings
 import factory_source
 import gh_login
 import install_plan
 import kanban_board
 import recurring_issues
-import dependabot_sweep
 import sentry_sync
 import stale_failure
 import xcode

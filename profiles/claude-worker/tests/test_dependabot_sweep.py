@@ -203,6 +203,20 @@ class CopyTest(SweepTest):
         self.sweep_once()
         self.assertNoWrites()
 
+    def test_a_copy_another_agent_holds_is_not_delegated_and_the_rest_is_written(self) -> None:
+        copy = self.copy()
+        copy["delegate"] = {"id": "other-agent"}
+        self.serve_public(self.public_issue(), [copy])
+        self.sweep_once()
+        self.assertEqual(self.linear_writes("IssueUpdate"), [{"id": "id-ABC-7", "priority": 1}])
+        [(_, _, edit)] = self.github.written("edit")
+        self.assertIn("copy-delegated", sweep.parse_footer(edit["body"]).flags)
+
+    def test_a_label_cased_differently_still_counts(self) -> None:
+        self.serve(repos=[raw_repo(PUBLIC, "public")], alerts={PUBLIC: [raw_alert(1)]}, labels={PUBLIC: [LABEL.upper(), "needs triage"]})
+        self.sweep_once()
+        self.assertEqual(len(self.github.written("create")), 1)
+
     def test_an_absent_copy_writes_nothing(self) -> None:
         self.serve_public(self.public_issue())
         self.sweep_once()
