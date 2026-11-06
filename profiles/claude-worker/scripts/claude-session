@@ -373,8 +373,14 @@ NEEDS_BRIEF = "needs_brief"
 WORKTREE_HELD = "worktree_held"
 # The `precondition` of a refusal because GitHub or the gateway's broker answered with a server error.
 SERVER_ERROR = "server_error"
+# The `precondition` of a refusal because `xcodebuild -checkFirstLaunchStatus` timed out, which host load can cause.
+XCODE_CHECK_TIMEOUT = "xcode_check_timeout"
 # What each parking cause is called in the refusal that stops parking after PARK_CAP parks in PARK_WINDOW_SECONDS.
-PARK_CAUSES = {WORKTREE_HELD: "the worktree to be free", SERVER_ERROR: "a server error to clear"}
+PARK_CAUSES = {
+    WORKTREE_HELD: "the worktree to be free",
+    SERVER_ERROR: "a server error to clear",
+    XCODE_CHECK_TIMEOUT: "the Xcode first launch check to finish",
+}
 PARK_CAP = 3
 PARK_WINDOW_SECONDS = 3600
 
@@ -890,12 +896,16 @@ def child_env(worktree: Path, extra: dict | None = None) -> dict:
 
 
 def check_first_launch(repo: dict, worktree: Path) -> None:
-    """Refuse a run whose repository checks xcrun while the active Xcode has a first launch pending."""
+    """Refuse a run whose repository checks xcrun while the active Xcode has a first launch pending. A first launch
+    check that times out parks the card instead, because the sudo remedy would not help."""
     checks = repo.get("toolchain_checks")
     if not isinstance(checks, list) or not any(isinstance(check, str) and "xcrun" in check for check in checks):
         return
-    if xcode.first_launch_pending(os.environ.get("XCODEBUILD_BIN", "xcodebuild"), child_env(worktree)):
+    state = xcode.first_launch_status(os.environ.get("XCODEBUILD_BIN", "xcodebuild"), child_env(worktree)).state
+    if state is xcode.FirstLaunch.PENDING:
         raise Refusal(f"the active Xcode has a first launch pending; run {xcode.FIRST_LAUNCH_FIX}")
+    if state is xcode.FirstLaunch.TIMED_OUT:
+        raise Refusal(xcode.timeout_message(), transient=True, precondition=XCODE_CHECK_TIMEOUT)
 
 
 def group_commands(pgid: int) -> list[str]:
