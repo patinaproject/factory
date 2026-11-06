@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Claude Code PreToolUse hook for a worker's Skill calls: stop a fourth code-review round while a blocking finding is open.
+
+`HERMES_HOME=<worker home> python3 guard-code-review --session-id <id> --task-id <card> --board <kanban db>` reads
+the pending tool call as JSON on stdin. It acts only on the `code-review` skill. It finds the open pull request of
+the working directory's branch and reads the rounds recorded for it across the card's Linear agent sessions (see
+code_review_rounds.py). With three rounds recorded and a blocking finding open after the last, it refuses and tells
+the worker to end with `Needs input:`. Every other call, a branch without an open pull request, and any failed or
+slow lookup allow the call, the lookup failure with a note on stderr.
+
+Exit 0 allows the call. Exit 2 refuses it and Claude Code shows stderr to the model.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+
+import code_review_rounds as rounds
+
+DEFAULT_SECONDS = "30"
+REFUSAL = (
+    "Refused: this pull request has had {count} code-review rounds and the last left {blocking} blocking "
+    "finding(s) open. Do not run code-review again. Make the first line of your final message `Needs input:` "
+    "followed by a summary of the open findings, which are in {findings}."
+)
+
+
+class Unreadable(Exception):
+    pass
+
+
+class Clock:
+    def __init__(self) -> None:
+        text = os.environ.get("GUARD_CODE_REVIEW_SECONDS", DEFAULT_SECONDS)
+        try:
+            self.budget = float(text)
+        except ValueError:
+            self.budget = math.nan
+        if not math.isfinite(self.budget) or self.budget <= 0:
+            raise Unreadable(f"GUARD_CODE_REVIEW_SECONDS={text!r} is not a positive number of seconds")
+        self.end = time.monotonic() + self.budget
+
+    def left(self) -> float:
+        remaining = self.end - time.monotonic()
+        if remaining <= 0:
+            raise Unreadable(f"it ran past its {self.budget:g} s time limit")
+        return remaining
+
+
+def run(args: list[str], cwd: str, clock: Clock) -> str:
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=clock.left())
+    except subprocess.TimeoutExpired as failure:
+        raise Unreadable(f"{args[0]} ran past the {clock.budget:g} s time limit") from failure
+    except OSError as failure:
+        raise Unreadable(f"{args[0]} could not run: {failure.strerror or failure}") from failure
+    if proc.returncode != 0:
+        raise Unreadable(f"{' '.join(args[:3])} failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    return proc.stdout
+
+
+def open_pull(cwd: str, clock: Clock) -> str | None:
+    """`<owner>/<repo>#<number>` for the open pull request of the branch checked out in `cwd`, else None."""
+    gh = os.environ.get("GH_BIN", "gh")
+    branch = run(["git", "branch", "--show-current"], cwd, clock).strip()
+    if not branch:
+        return None
+    repo = json.loads(run([gh, "repo", "view", "--json", "nameWithOwner"], cwd, clock))["nameWithOwner"]
+    pulls = json.loads(run([gh, "pr", "list", "--head", branch, "--state", "open", "--json", "number", "--limit", "1"], cwd, clock))
+    return f"{repo}#{pulls[0]['number']}" if pulls else None
+
+
+def is_code_review(event: dict) -> bool:
+    skill = (event.get("tool_input") or {}).get("skill")
+    return event.get("tool_name") == "Skill" and isinstance(skill, str) and (skill == "code-review" or skill.endswith(":code-review"))
+
+
+def decide(event: dict, args: argparse.Namespace) -> tuple[int, str]:
+    if not is_code_review(event):
+        return 0, ""
+    try:
+        clock = Clock()
+        pull = open_pull(event.get("cwd") or os.getcwd(), clock)
+        if pull is None:
+            return 0, ""
+        linear = rounds.linear_module()
+        client = linear.TokenLinearClient(os.environ["LINEAR_API_KEY"], timeout=min(clock.left(), 10.0))
+        session_id = rounds.current_session_id(args.board, args.task_id, args.session_id)
+        status = rounds.read_status(client, session_id, pull, tick=clock.left)
+    except Exception as failure:
+        return 0, f"guard-code-review: allowed code-review without a round count ({failure})"
+    if not status.exhausted:
+        return 0, ""
+    path = rounds.findings_path(pull)
+    path.write_text(json.dumps(status.last.findings or [], indent=2))
+    return 2, REFUSAL.format(count=len(status.rounds), blocking=status.last.blocking, findings=path)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--session-id", required=True)
+    parser.add_argument("--task-id", required=True)
+    parser.add_argument("--board", required=True)
+    code, text = decide(json.load(sys.stdin), parser.parse_args())
+    if text:
+        print(text, file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

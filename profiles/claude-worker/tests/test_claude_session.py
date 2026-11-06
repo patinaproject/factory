@@ -2936,6 +2936,37 @@ class ClaudeSessionTest(GitFixture):
         self.assertEqual(settings["content"]["env"], {"LINEAR_API_KEY": "cached-token", "ENABLE_TOOL_SEARCH": "true"})
         self.assertFalse(settings["exists_after_start"])
 
+    def test_a_work_run_with_a_session_registers_the_code_review_guard_on_skill_calls_and_other_runs_do_not(self) -> None:
+        guard = (
+            f"HERMES_HOME={self.hermes_home} {sys.executable} {(SCRIPTS / 'guard-code-review').resolve()}"
+            " --session-id live-session --task-id t_1 --board /nonexistent/kanban.db"
+        )
+        for body, env, expected in (
+            (SESSION_BODY, None, ["Bash", "Skill"]),
+            (SESSION_BODY, TRIAGE_ENV, ["Bash"]),
+            (CARD_BODY, None, ["Bash"]),
+        ):
+            with self.subTest(session=body is SESSION_BODY, triage=bool(env)):
+                self.set_comments(body=body)
+
+                self.run_session(env=env)
+
+                hooks = self.claude_call()["settings"]["content"]["hooks"]["PreToolUse"]
+                self.assertEqual([group["matcher"] for group in hooks], expected)
+                if "Skill" in expected:
+                    self.assertEqual(hooks[1]["hooks"], [{"type": "command", "command": guard}])
+
+    def test_only_a_work_run_with_a_session_is_told_the_code_review_limit_command(self) -> None:
+        command = f"{(SCRIPTS / 'code-review-limit').resolve()} --session-id live-session --task-id t_1 --board /nonexistent/kanban.db"
+        for body, env, told in ((SESSION_BODY, None, True), (SESSION_BODY, TRIAGE_ENV, False), (CARD_BODY, None, False)):
+            with self.subTest(session=body is SESSION_BODY, triage=bool(env)):
+                self.set_comments(body=body)
+
+                self.run_session(env=env)
+
+                argv = self.claude_call()["argv"]
+                self.assertEqual(command in argv[argv.index("--append-system-prompt") + 1], told)
+
     def test_settings_register_the_ci_wait_guard_on_bash_calls(self) -> None:
         self.run_session()
 
