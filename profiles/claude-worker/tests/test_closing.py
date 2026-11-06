@@ -132,6 +132,31 @@ class WorkflowCheckTest(unittest.TestCase):
                 self.assertEqual(workflow_check("Sync skills v4.4.0", head_ref)[0], 1)
 
 
+class PartOfTest(unittest.TestCase):
+    def test_each_form_names_its_reference(self) -> None:
+        cases = {
+            "Part of #5": {"#5"},
+            f"part of {REPO}#5": {"#5"},
+            "PART OF Other/Repo#5": {"other/repo#5"},
+            "Part of [PAT-9](https://linear.app/x/issue/PAT-9)": {"PAT-9"},
+            f"Part of [#5](https://github.com/{REPO}/issues/5)": {"#5"},
+            "Part of PAT-9": {"PAT-9"},
+            "Part of #5, part of PAT-9": {"#5", "PAT-9"},
+        }
+        for body, expected in cases.items():
+            with self.subTest(body):
+                self.assertEqual(closing.part_of(body, REPO), expected)
+
+    def test_hidden_or_unanchored_text_names_nothing(self) -> None:
+        for body in ("`Part of #5`", "> Part of #5", "<!-- Part of #5 -->", "Counterpart of #5", "Part of the work #5",
+                     "Closes #5"):
+            with self.subTest(body):
+                self.assertEqual(closing.part_of(body, REPO), set())
+
+    def test_a_part_of_reference_is_not_a_closing_reference(self) -> None:
+        self.assertEqual(closing.references("Part of #5", REPO), set())
+
+
 class AgreementTest(unittest.TestCase):
     BODIES = {
         "```\nCloses #5\n```\nCloses https://linear.app/x/issue/PAT-9": False,
@@ -167,6 +192,14 @@ class AgreementTest(unittest.TestCase):
                 self.assertEqual(action, "unchanged" if closes_5 else "linked")
                 self.assertEqual(linked, body if closes_5 else f"{body}\n\nCloses #5")
                 self.assertEqual(workflow_check(linked)[0], 0)
+
+    def test_a_part_of_body_is_left_alone_and_fails_the_workflow_check(self) -> None:
+        body = "Part of #5"
+
+        action, linked = self.link(body)
+
+        self.assertEqual((action, linked), ("unchanged", body))
+        self.assertEqual(workflow_check(body)[0], 1)
 
 
 if __name__ == "__main__":
