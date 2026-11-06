@@ -1135,6 +1135,13 @@ delegated it, can start card work with a reply or a pull request review or
 comment. Do not discover or guess it, and commit no real id. The real value
 belongs in the private record. A value that is not a list is refused by name.
 
+`router_shadow` is optional and defaults to `true`. The shadow router then
+records one routing decision for each webhook delivery and each
+`webhook-retry` outcome in `<gateway home>/webhook-router/decisions/`, and
+keeps 14 days of them. It changes nothing the factory does.
+`profiles/claude-worker/scripts/router-shadow-report` compares the records with
+what each turn did. Set it to `false` to stop recording.
+
 `default_team` is the Linear team key, such as `ABC`, where
 `linear_issue_create` files an issue when the call names no team. Its value
 belongs in the private record. The plugin's `linear_issue_comment` and
@@ -3083,6 +3090,27 @@ webhook triggers, such as Slack or one-shot, fall outside the five buckets.
 
 Cost is the token counts times the list prices in `token_prices.json`. A model
 that file does not list shows its tokens and `unpriced`, never a zero cost.
+
+## Compare the shadow router with the turns
+
+`router-shadow-report` compares the shadow router's decisions with what each
+webhook turn did. It reads `<gateway home>/webhook-router/decisions/` and the
+gateway's `state.db`, and it writes nothing. Run it as the worker:
+
+```bash
+HERMES_HOME=<worker profile home> python3 <worker profile home>/scripts/router-shadow-report --since 2026-11-01 --until 2026-11-08
+```
+
+`--since` and `--until` are required and take the same values as
+`token-spend`. A decision counts when it was recorded in `[since, until)`. For
+each delivery, the report prints the decision, the turn's effects, whether
+they agree, and the turn's tokens, cost, and latency. Then it prints the
+agreement rate and every disagreement. A decision that expects a turn but has
+no session is `unjoined`, and a replay of a delivery with no computed intent is
+`unjudged`. Neither counts toward the rate. `--json` prints one object for each
+delivery. `--gateway-home`, `--plugin-dir`, and `--prices` override the
+gateway home beside `profiles/`, its `plugins/linear-agent-session`, and the
+`token_prices.json` beside the script.
 
 ## Report
 

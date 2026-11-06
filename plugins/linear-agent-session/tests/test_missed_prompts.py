@@ -12,8 +12,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from tests import load_plugin
+from tests.router_modes import dispatch_hook_mode, load_tests_in_both_modes
 
 plugin = load_plugin()
+load_tests = load_tests_in_both_modes(dispatch_hook_mode(plugin))
 missed_prompts = plugin.missed_prompts
 triage_intent = plugin.triage_intent
 
