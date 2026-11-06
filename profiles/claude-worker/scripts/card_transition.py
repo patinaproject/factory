@@ -157,6 +157,7 @@ TRIAGE_BOARD = "triage"
 STOPPED = "stopped"
 WORKTREE_LOCK = "claude-session.lock"
 SERVER_ERROR_WAIT_SECONDS = 300
+XCODE_CHECK_WAIT_SECONDS = 300
 # A card comment that starts with this records that a sweep resumed the card and told its agent session.
 RESUMED_NOTED = "Resumed:"
 RELEASED = "Released from scheduled for a Linear reply."
@@ -479,10 +480,10 @@ def worktree_free(card: Card) -> bool:
     return True
 
 
-def server_wait_over(show: dict) -> bool:
-    """Five minutes since the newest park, for a server error or an Xcode check timeout. Hermes stamps whole seconds."""
+def park_wait_over(show: dict, seconds: int) -> bool:
+    """`seconds` since the newest park. Hermes stamps whole seconds."""
     park = [event for event in show["events"] if event["kind"] == "scheduled"][-1]
-    return time.time() - park["created_at"] >= SERVER_ERROR_WAIT_SECONDS
+    return time.time() - park["created_at"] >= seconds
 
 
 def linear_poster() -> Callable[[str, str], None]:
@@ -557,14 +558,14 @@ def sweep_server_error() -> dict:
     """Release every card parked after a server error once five minutes have passed since its park. The resumed
     run is the check that the service answers. `dispatch-triage` runs it each minute."""
     prefix = getattr(plugin_module("blocker-order", "result_line"), "SERVER_ERROR_PARK", None)
-    return sweep_cause(prefix, lambda card, show: server_wait_over(show), "the server-error wait is over")
+    return sweep_cause(prefix, lambda card, show: park_wait_over(show, SERVER_ERROR_WAIT_SECONDS), "the server-error wait is over")
 
 
 def sweep_xcode_check() -> dict:
     """Release every card parked for a timed-out Xcode first launch check once five minutes have passed since its
     park. The resumed run is the check that Xcode answers. `dispatch-triage` runs it each minute."""
     prefix = getattr(plugin_module("blocker-order", "result_line"), "XCODE_CHECK_TIMEOUT_PARK", None)
-    return sweep_cause(prefix, lambda card, show: server_wait_over(show), "the Xcode check wait is over")
+    return sweep_cause(prefix, lambda card, show: park_wait_over(show, XCODE_CHECK_WAIT_SECONDS), "the Xcode check wait is over")
 
 
 def sweep_parked(prefix: str, ready: Callable[[], bool]) -> dict:

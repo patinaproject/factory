@@ -1182,16 +1182,15 @@ def check_host_updates(preferences_root: Path, xcodebuild: str, env: dict) -> li
             f"AutomaticallyInstallMacOSUpdates is on or unset; run sudo python3 {DISABLE_UPDATES}", DISABLE_UPDATES_FIX,
         ))
     first_launch = xcode.first_launch_status(xcodebuild, env)
-    developer = str(first_launch.developer)
     if first_launch.state is xcode.FirstLaunch.TIMED_OUT:
         drifts.append(Drift(
-            "xcode first launch timeout", developer,
+            "xcode first launch timeout", str(first_launch.developer),
             f"{xcode.timeout_message()}, so run check-install again once it drops",
             Manual("run check-install again once host load drops"),
         ))
     if first_launch.state is xcode.FirstLaunch.PENDING:
         drifts.append(Drift(
-            "xcode first launch", developer,
+            "xcode first launch", str(first_launch.developer),
             f"xcodebuild -checkFirstLaunchStatus reports a first launch pending; run {xcode.FIRST_LAUNCH_FIX}",
             Manual(f"run {xcode.FIRST_LAUNCH_FIX} in the operator's terminal"),
         ))
