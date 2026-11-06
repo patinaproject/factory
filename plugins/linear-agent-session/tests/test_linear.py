@@ -1026,6 +1026,11 @@ class IssueTest(unittest.TestCase):
             (None, ["Example-Org/Example-Repo", "Example-Org/Main"]),
         )
 
+    def test_no_configured_repositories_gives_null_repository_fields(self):
+        fake = FakeLinear([(200, self.RESPONSE), role_labels_response(team=[])])
+        output = json.loads(tools.run_issue(lambda: make_client(fake), lambda: [], {"issue": "ABC-123"}))
+        self.assertEqual((output["repository"], output["repositoryConflict"]), (None, None))
+
     def test_an_issue_read_survives_a_failed_role_label_read(self):
         fake = FakeLinear([(200, self.RESPONSE), (400, {"errors": [{"message": "Cannot query field"}]})])
         output = json.loads(tools.run_issue(lambda: make_client(fake), lambda: REPOSITORIES, {"issue": "ABC-123"}))
@@ -1582,6 +1587,18 @@ class CreateTest(unittest.TestCase):
                 {"input": {"issueId": "uuid-7", "url": "https://github.com/example-org/api", "title": "GitHub repository example-org/api"}},
             ],
         )
+
+    def test_a_failed_link_keeps_the_reservation_so_a_retry_files_no_second_issue(self):
+        identity = (200, {"data": {"issue": {"id": "uuid-7"}}})
+        attached = (200, {"data": {"attachmentCreate": {"success": True}}})
+        fake = FakeLinear([team_for_create(), CREATE_OK, (500, {"errors": [{"message": "boom"}]}), identity, attached])
+        args = {"title": "A title", "repository": "example-org/api", "idempotency_key": "2f9a6f0e-0000-4000-8000-00000000000a"}
+        with tempfile.TemporaryDirectory() as store:
+            first = json.loads(tools.run_create(lambda: make_client(fake), lambda: "ABC", args, store))
+            second = json.loads(tools.run_create(lambda: make_client(fake), lambda: "ABC", args, store))
+        self.assertIn("error", first)
+        self.assertEqual(second, {"identifier": "ABC-7", "url": "https://linear.app/x/issue/ABC-7"})
+        self.assertEqual(sum("IssueCreate" in r["query"] for r in fake.graphql_requests), 1)
 
     def test_a_malformed_repository_is_an_error_with_no_request(self):
         fake, output = self.create([], title="A title", repository="https://github.com/example-org/api")

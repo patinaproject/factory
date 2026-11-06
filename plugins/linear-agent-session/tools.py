@@ -6,7 +6,7 @@ import logging
 from typing import Callable, Optional
 
 from . import github_issue, idempotency, opened_sessions, triage_exit
-from .repository import resolve_repository
+from .repository import Resolution, resolve_repository
 from .linear import (
     ACTIVITY_TYPES,
     CLIENT_ERRORS,
@@ -391,7 +391,10 @@ def run_issue(client_factory: ClientFactory, repositories: Callable[[], list], a
     def run() -> dict:
         client = client_factory()
         issue = client.get_issue(_issue_argument(args))
-        resolved = resolve_repository(repositories(), [a["url"] for a in issue["attachments"]])
+        configured = repositories()
+        resolved = (
+            resolve_repository(configured, [a["url"] for a in issue["attachments"]]) if configured else Resolution(None, None)
+        )
         try:
             role_labels = client.role_labels(issue["id"])
         except CLIENT_ERRORS:
@@ -510,16 +513,19 @@ def run_create(
         if repository and not github_issue.REPOSITORY.fullmatch(repository):
             raise LinearError(f"{repository!r} is not a repository; pass owner/name")
 
+        client = client_factory()
+
         def send() -> dict:
-            client = client_factory()
-            issue = client.create_issue(team, title, args.get("description") or "", labels=_names(args.get("labels")))
-            if repository:
-                client.attach_url(issue["identifier"], *repository_link(repository))
-            return issue
+            return client.create_issue(team, title, args.get("description") or "", labels=_names(args.get("labels")))
 
         if args.get("idempotency_key") is None:
-            return send()
-        return idempotency.once(idempotency_dir, "linear_issue_create", args["idempotency_key"], args, send)
+            issue = send()
+        else:
+            issue = idempotency.once(idempotency_dir, "linear_issue_create", args["idempotency_key"], args, send)
+        # Outside `once`, so a failed attach keeps the reservation and a retry links the first issue instead of filing another.
+        if repository:
+            client.attach_url(issue["identifier"], *repository_link(repository))
+        return issue
 
     return _tool_result_or_error(run)
 

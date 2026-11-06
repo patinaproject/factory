@@ -39,5 +39,7 @@ def resolve_repository(repositories: Sequence[Mapping], attachment_urls: Sequenc
         return Resolution(None, (first, second))
     if named:
         return Resolution(next(iter(named)), None)
-    default = next(repo for repo in repositories if repo["routing"] == "default")
-    return Resolution(default["full_name"], None)
+    default = [repo["full_name"] for repo in repositories if repo["routing"] == "default"]
+    if len(default) != 1:
+        raise ValueError(f"the repositories setting needs exactly one repository with routing 'default', found {len(default)}")
+    return Resolution(default[0], None)

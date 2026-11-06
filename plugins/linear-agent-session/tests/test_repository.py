@@ -68,3 +68,7 @@ class ResolveRepositoryTest(unittest.TestCase):
         for name, (urls, expected) in cases.items():
             with self.subTest(name):
                 self.assertEqual(repository.resolve_repository(settings, urls), (expected, None))
+
+    def test_settings_without_one_default_repository_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "exactly one repository with routing 'default', found 0"):
+            repository.resolve_repository([REPOSITORIES[1]], [])
