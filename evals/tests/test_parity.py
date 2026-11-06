@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from patina_evals import adapter, parity
+from patina_evals import adapter, isolation, parity
 
 REPO = adapter.REPO_ROOT
 COPIED = ("profiles/claude-worker", "plugins/blocker-order", ".claude/agents", "AGENTS.md", "CLAUDE.md", "skills-lock.json")
@@ -34,6 +34,14 @@ class RealConstructionTest(unittest.TestCase):
 
     def test_every_recorded_difference_is_used(self):
         self.assertEqual(len(self.report["intentional_differences"]), len(parity.load_differences()))
+
+
+class TrialEnvironmentTest(unittest.TestCase):
+    def test_adapter_trial_endpoints_are_the_ones_trials_run_with(self):
+        trial_env = adapter.construction("trial")["environment"]["value"]
+        with tempfile.TemporaryDirectory() as scratch:
+            run_env = isolation.env_for(isolation.Trial("t", Path(scratch)))
+        self.assertEqual(trial_env["ANTHROPIC_BASE_URL"], run_env["ANTHROPIC_BASE_URL"])
 
 
 class ResumeContractTest(unittest.TestCase):

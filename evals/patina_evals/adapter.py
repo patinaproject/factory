@@ -23,6 +23,8 @@ from pathlib import Path
 
 import yaml
 
+from patina_evals import isolation
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPO_ROOT / "profiles" / "claude-worker"
 MOCK_TRACKER_SERVER = {"type": "stdio", "command": "python3", "args": ["<trial>/services/mock_tracker.py"]}
@@ -111,7 +113,7 @@ def dimension(source: list[str], read):
         return {"source": source, "value": Unknown(f"{type(error).__name__}: {error}")}
 
 
-def construction(mode: str, repo: Path = REPO_ROOT, blocked_url: str = "http://127.0.0.1:9") -> dict:
+def construction(mode: str, repo: Path = REPO_ROOT, blocked_url: str = isolation.BLOCKED_URL) -> dict:
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     profile = repo / "profiles" / "claude-worker"

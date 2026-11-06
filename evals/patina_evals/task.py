@@ -163,7 +163,9 @@ def grading_scorer():
         ctx = CONTEXT
         manifest = ctx.manifests[state.metadata["case"]]
         solution = solution_of(manifest, state.metadata["solution"])
-        info = ctx.trials[state.store.get("trial")]
+        info = ctx.trials.get(state.store.get("trial")) or {
+            "trial": None, "start_ns": ctx.recorder.now(), "error": "the solver never started this trial",
+        }
         result = {"verdict": None, "checks": {}, "forbidden": {}, "outcome": "error"}
         try:
             if "error" not in info:

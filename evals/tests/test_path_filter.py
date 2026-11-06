@@ -19,6 +19,8 @@ QUALIFY = [
     "SOUL.md",
     "profiles/claude-worker/SOUL.md",
     "profiles/claude-worker/config.yaml",
+    "profiles/claude-worker/scripts/claude-session",
+    "plugins/blocker-order/result_line.py",
     "templates/triage-linear.md",
     "templates/hermes-memory.txt",
     ".agents/skills/how/SKILL.md",
