@@ -322,7 +322,7 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(result.actions, ())
         self.assertEqual(
             [(e.repository, e.kind, e.open_alerts) for e in result.report],
-            [("example-org/other", "unbuildable", 2), ("example-org/oss", "unbuildable", 2), ("example-org/inner", "unbuildable", 2)],
+            [("example-org/other", "unbuildable", 2), ("example-org/oss", "unbuildable", 2), ("example-org/inner", "unknown", 2)],
         )
         self.assertEqual(internal.buildability, Buildability.UNKNOWN)
 

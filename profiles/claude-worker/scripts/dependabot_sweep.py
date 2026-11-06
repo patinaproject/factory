@@ -549,6 +549,8 @@ def plan(reads: list, issues: list, kev: frozenset) -> Plan:
         open_count = sum(1 for a in read.alerts if a.open)
         if read.skipped:
             report.append(ReportEntry(repo.full_name, "skipped", open_count, read.skipped))
+        elif repo.buildability is Buildability.UNKNOWN:
+            report.append(ReportEntry(repo.full_name, "unknown", open_count, repo.reason))
         elif not repo.buildable:
             if open_count:
                 report.append(ReportEntry(repo.full_name, "unbuildable", open_count, repo.reason))
@@ -678,6 +680,6 @@ def advisory_lines(state: object) -> list:
             continue
         count = entry.get("open_alerts")
         count_text = f"{count} open Dependabot alerts" if isinstance(count, int) and count else "no open Dependabot alerts read"
-        verb = "is not swept" if entry.get("kind") == "unbuildable" else "was skipped"
+        verb = "was skipped" if entry.get("kind") == "skipped" else "is not swept"
         lines.append(f"{entry.get('repository')} {verb}: {count_text}; {entry.get('reason')}")
     return lines

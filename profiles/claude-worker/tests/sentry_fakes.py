@@ -62,21 +62,24 @@ class _Server:
 
 def linear_issue(identifier: str, *, state: str = "triage", created_at: str = "2026-10-01T00:00:00.000Z", creator=APP_USER,
                  description: str = "", priority: int = 3, assigned: bool = False, attachments=(), comments=(),
-                 completed_at=None, canceled_at=None, duplicate_of=None, history=(), labels=("Sentry",)) -> dict:
+                 completed_at=None, canceled_at=None, duplicate_of=None, history=(), labels=("Sentry",), delegated: bool = False,
+                 related=()) -> dict:
     return {
         "id": f"id-{identifier}", "identifier": identifier, "createdAt": created_at, "completedAt": completed_at,
         "canceledAt": canceled_at, "description": description, "priority": priority,
         "state": next(s for s in STATES if s["type"] == state), "assignee": {"id": PERSON} if assigned else None,
         "creator": {"id": creator} if creator else None, "attachments": [dict(a) for a in attachments],
-        "comments": list(comments), "duplicateOf": duplicate_of, "relations": [], "history": list(history),
-        "labels": list(labels), "title": f"Title of {identifier}",
+        "comments": list(comments), "duplicateOf": duplicate_of, "relations": [{"type": "related", "to": r} for r in related],
+        "history": list(history), "labels": list(labels), "title": f"Title of {identifier}",
+        "delegate": {"id": APP_USER} if delegated else None,
     }
 
 
 class FakeLinear(_Server):
     """An in-memory Linear team. `writes` records each mutation as (operation, variables)."""
 
-    def __init__(self, issues=(), *, states=STATES, fail=()) -> None:
+    def __init__(self, issues=(), *, states=STATES, fail=(), labels=LABELS) -> None:
+        self.labels = list(labels)
         self.issues = {i["identifier"]: i for i in issues}
         self.states = list(states)
         self.fail = set(fail)
@@ -108,7 +111,10 @@ class FakeLinear(_Server):
             **{k: i[k] for k in ("id", "identifier", "createdAt", "completedAt", "canceledAt", "description", "priority",
                                  "state", "assignee", "creator")},
             "attachments": {"nodes": i["attachments"]},
-            "relations": {"nodes": [{"type": "duplicate", "relatedIssue": {"identifier": i["duplicateOf"]}}] if i["duplicateOf"] else []},
+            "relations": {"nodes": [
+                *([{"type": "duplicate", "relatedIssue": {"identifier": i["duplicateOf"]}}] if i["duplicateOf"] else []),
+                *({"type": r["type"], "relatedIssue": {"identifier": r["to"]}} for r in i["relations"] if r["type"] == "related"),
+            ]},
             "comments": {"nodes": [{"body": c} for c in i["comments"]], "pageInfo": {"hasNextPage": False}},
         } for i in self.issues.values() if label in i["labels"]]
         return {"viewer": {"id": APP_USER}, "issues": {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}}
@@ -119,7 +125,7 @@ class FakeLinear(_Server):
         return {"viewer": {"id": APP_USER}, "issue": {"history": {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
 
     def op_TeamForCreate(self, v: dict) -> dict:
-        labels = [{"id": f"label-{name}", "name": name, "isGroup": False, "parent": None} for name in LABELS]
+        labels = [{"id": f"label-{name}", "name": name, "isGroup": False, "parent": None} for name in self.labels]
         team = {"id": "team-1", "key": v["key"], "states": {"nodes": [{"id": s["id"], "type": s["type"]} for s in self.states]},
                 "labels": {"nodes": labels}}
         return {"viewer": {"id": APP_USER}, "teams": {"nodes": [team]}, "issueLabels": {"nodes": []}}
@@ -131,7 +137,8 @@ class FakeLinear(_Server):
         state = next(s for s in self.states if s["id"] == v["input"]["stateId"])
         issue = linear_issue(identifier, state=state["type"], created_at="2026-11-03T12:00:00.000Z",
                              description=v["input"]["description"], priority=v["input"].get("priority", 0),
-                             labels=[label.removeprefix("label-") for label in v["input"].get("labelIds", [])])
+                             labels=[label.removeprefix("label-") for label in v["input"].get("labelIds", [])],
+                             delegated="delegateId" in v["input"])
         issue["title"] = v["input"]["title"]
         self.issues[identifier] = issue
         return {"issueCreate": {"success": True, "issue": {"identifier": identifier, "url": f"https://linear.app/x/issue/{identifier}"}}}
@@ -168,7 +175,33 @@ class FakeLinear(_Server):
             issue["state"] = next(s for s in self.states if s["id"] == v["input"]["stateId"])
         if "priority" in v["input"]:
             issue["priority"] = v["input"]["priority"]
+        if "description" in v["input"]:
+            issue["description"] = v["input"]["description"]
+        if "delegateId" in v["input"]:
+            issue["delegate"] = {"id": v["input"]["delegateId"]}
         return {"issueUpdate": {"success": True}}
+
+    def op_IssueEdit(self, v: dict) -> dict:
+        i = self.find(v["id"])
+        return {"issue": {
+            "id": i["id"], "identifier": i["identifier"], "title": i["title"], "description": i["description"],
+            "state": i["state"], "labels": {"nodes": []},
+            "team": {"states": {"nodes": [dict(s) for s in self.states]}, "labels": {"nodes": []}},
+        }, "issueLabels": {"nodes": []}}
+
+    def op_IssueDelegate(self, v: dict) -> dict:
+        i = self.find(v["id"])
+        return {"viewer": {"id": APP_USER}, "issue": {"id": i["id"], "identifier": i["identifier"], "delegate": i["delegate"]}}
+
+    def op_AttachmentIssues(self, v: dict) -> dict:
+        nodes = [
+            {"issue": {
+                "id": i["id"], "identifier": i["identifier"], "createdAt": i["createdAt"], "priority": i["priority"],
+                "state": i["state"], "assignee": {"id": PERSON} if i["assignee"] else None, "delegate": i["delegate"],
+            }}
+            for i in self.issues.values() if any(a["url"] == v["url"] for a in i["attachments"])
+        ]
+        return {"attachmentsForURL": {"nodes": nodes}}
 
     def op_IssueStates(self, v: dict) -> dict:
         i = self.find(v["id"])
