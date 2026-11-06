@@ -73,7 +73,6 @@ def max_turns(transport: dict) -> int | None:
 
 
 def load_hold_threshold(transport: dict) -> float | None:
-    """The absolute load average above which no run starts, or None for the default of 1.5 per CPU."""
     value = transport.get("load_hold_threshold")
     if value is None:
         return None

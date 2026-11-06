@@ -125,7 +125,6 @@ def owner(*, session_id: str | None = None, worktree: str | None = None) -> Reco
 
 
 def live_count() -> int:
-    """How many runs have a record whose process is alive. A record of an ended process is deleted."""
     count = 0
     for path in sorted(runs_dir().glob("*.json")) if runs_dir().is_dir() else ():
         if alive(Record(**json.loads(path.read_text()))):

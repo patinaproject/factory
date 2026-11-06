@@ -34,7 +34,6 @@ WORKTREE_HELD_PARK = "Waiting for the worktree:"
 # GitHub or the gateway's token broker answered with a server error; the card waits a few minutes and runs again.
 SERVER_ERROR = "server_error"
 SERVER_ERROR_PARK = "Waiting after a server error:"
-# The host's load average is over the factory's threshold; the card waits until the `host_load` hold is gone.
 HOST_LOAD = "host_load"
 HOST_LOAD_PARK = "Waiting for the host load to fall:"
 # A finished implementation run that waits for a GitHub issue ends with this first line, then the issue's URL.

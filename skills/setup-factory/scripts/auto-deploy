@@ -257,7 +257,6 @@ class Deploy:
             raise DeployError(str(error)) from None
 
     def person_holds_dispatch(self) -> bool:
-        """Whether kanban.dispatch_profiles is set and the hold list did not set it."""
         module, _ = self.holds()
         try:
             applied = module.read_holds(self.root)["applied"]

@@ -114,8 +114,6 @@ def release_parked(sweep, waits_for: str) -> bool:
 
 
 def hold_for_load(binary: str, settings) -> tuple[host_hold.HoldList, bool]:
-    """Expire stale holds, then hold or release for the host's load, then apply. False when the threshold setting is
-    invalid: the load step is skipped, and the error is printed."""
     root = host_hold.root_home(Path(os.environ["HERMES_HOME"]))
     holds = host_hold.HoldList(root, host_hold.hermes_config(lambda: binary, root))
     holds.expire()

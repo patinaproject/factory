@@ -561,8 +561,6 @@ def sweep_server_error() -> dict:
 
 
 def sweep_host_load() -> dict:
-    """Release every card parked for the host's load once `dispatch-holds.json` has no `host_load` entry.
-    `dispatch-triage` runs it right after it removes that entry."""
     prefix = getattr(plugin_module("blocker-order", "result_line"), "HOST_LOAD_PARK", None)
     if prefix is None:
         return {"released": [], "failed": {}}

@@ -65,7 +65,6 @@ def root_home(worker_home: Path) -> Path:
 
 
 def read_holds(root: Path) -> dict:
-    """The list as a file reader sees it; a missing file is an empty list."""
     try:
         data = json.loads((root / HOLDS_FILE).read_text())
     except FileNotFoundError:
@@ -78,7 +77,6 @@ def read_holds(root: Path) -> dict:
 
 
 def hermes_config(find_binary: Callable[[], str], root: Path) -> Callable[..., subprocess.CompletedProcess]:
-    """A runner of `hermes config <args>` in the root home."""
     def run(*args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [find_binary(), "config", *args], env={**os.environ, "HERMES_HOME": str(root)}, capture_output=True, text=True,
@@ -97,7 +95,6 @@ class HoldList:
         return read_holds(self.root)["holds"]
 
     def add(self, holder: str, reason: str, until: datetime, readings: Optional[dict] = None) -> bool:
-        """Create or refresh the holder's entry and set the key before returning. True when the entry is new."""
         with self.locked():
             data = read_holds(self.root)
             created = holder not in data["holds"]
@@ -109,7 +106,6 @@ class HoldList:
         return created
 
     def remove(self, holder: str, readings: Optional[dict] = None, expired: bool = False) -> bool:
-        """Delete only the holder's entry, then unset the key when it was the last and the list set the key."""
         with self.locked():
             data = read_holds(self.root)
             entry = data["holds"].pop(holder, None)
@@ -120,7 +116,6 @@ class HoldList:
         return entry is not None
 
     def expire(self) -> List[str]:
-        """Remove each entry whose `until` has passed."""
         now = self.clock()
         gone = [holder for holder, entry in self.holders().items() if parse(entry["until"]) <= now]
         for holder in gone:
@@ -144,7 +139,6 @@ class HoldList:
             self.write(data)
 
     def adopt(self) -> None:
-        """Record that the list owns a key already set, for a caller whose own state proves it set the key."""
         with self.locked():
             data = read_holds(self.root)
             if not data["applied"]:
@@ -230,7 +224,6 @@ def cpu_count() -> Optional[int]:
 
 
 def read_load(configured: Optional[float], reader: Callable = load_average, cpus: Callable = cpu_count) -> Reading:
-    """The load against the threshold: `configured`, else 1.5 per CPU. Raises Unreadable."""
     try:
         one, five, _ = reader()
         count = cpus()
@@ -245,7 +238,6 @@ def read_load(configured: Optional[float], reader: Callable = load_average, cpus
 
 def observe(holds: HoldList, configured: Optional[float], reader: Callable = load_average,
             cpus: Callable = cpu_count) -> Optional[Reading]:
-    """The load reading, or None when it cannot be read: the gate fails open and the failure goes to the log."""
     try:
         return read_load(configured, reader, cpus)
     except Unreadable as error:
@@ -261,7 +253,6 @@ def hold_for_load(holds: HoldList, reading: Reading) -> None:
 
 def refresh(holds: HoldList, configured: Optional[float], reader: Callable = load_average,
             cpus: Callable = cpu_count) -> Optional[Reading]:
-    """One backstop pass: hold while either average is over the threshold, release when both are under it."""
     reading = observe(holds, configured, reader, cpus)
     if reading is not None and reading.over:
         hold_for_load(holds, reading)
@@ -291,7 +282,6 @@ def log_events(root: Path) -> List[dict]:
 
 
 def held_seconds(root: Path, holder: str, now: datetime, window: timedelta = WINDOW) -> float:
-    """How long the holder's entry existed in the last `window`, from the log. An entry still present counts to `now`."""
     start = now - window
     total = 0.0
     since: Optional[datetime] = None
@@ -314,7 +304,6 @@ def held_seconds(root: Path, holder: str, now: datetime, window: timedelta = WIN
 
 
 def overdue(root: Path, now: datetime) -> List[Tuple[str, str]]:
-    """Each entry still present after its `until`, as (holder, until)."""
     return [
         (holder, entry["until"]) for holder, entry in sorted(read_holds(root)["holds"].items())
         if parse(entry["until"]) <= now

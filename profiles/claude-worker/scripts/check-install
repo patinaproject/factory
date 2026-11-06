@@ -1153,8 +1153,6 @@ def hold_engaged(root: Path) -> bool:
 
 
 def check_host_hold(root: Path, settings, now: datetime) -> list:
-    """Report the time `host_load` held dispatch in the last 24 hours, each hold entry past its `until`, and a
-    load average that cannot be read. A threshold that is not valid is reported by `check_settings`."""
     where = str(root / host_hold.HOLDS_FILE)
     drifts = []
     try:

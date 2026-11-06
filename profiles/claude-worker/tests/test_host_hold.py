@@ -20,7 +20,6 @@ LATER = NOW + timedelta(minutes=10)
 
 
 class Config:
-    """A `hermes config` runner that records each call and the hold file as the call saw it."""
 
     def __init__(self, root: Path, fail: bool = False, key: str | None = None) -> None:
         self.root = root

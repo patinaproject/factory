@@ -374,7 +374,6 @@ NEEDS_BRIEF = "needs_brief"
 WORKTREE_HELD = "worktree_held"
 # The `precondition` of a refusal because GitHub or the gateway's broker answered with a server error.
 SERVER_ERROR = "server_error"
-# The `precondition` of a refusal because the host's load average is over the threshold.
 HOST_LOAD = host_hold.HOST_LOAD
 # What each parking cause is called in the refusal that stops parking after PARK_CAP parks in PARK_WINDOW_SECONDS.
 PARK_CAUSES = {WORKTREE_HELD: "the worktree to be free", SERVER_ERROR: "a server error to clear"}
@@ -1486,7 +1485,6 @@ def last_bash_command(session_id: str, worktree: Path) -> str:
 
 
 def test_worker_env() -> dict:
-    """Each live run gets an equal share of the CPUs for its test workers. The count includes this run's own record."""
     cpus = host_hold.cpu_count()
     if cpus is None:
         return {}
@@ -1632,7 +1630,6 @@ def require_fresh_login() -> None:
 
 
 def require_load_below_threshold(threshold: float | None) -> None:
-    """Refuse the run, and hold dispatch, while the host's load is over the threshold. An unreadable load lets the run start."""
     root = host_hold.root_home(Path(os.environ["HERMES_HOME"]))
     holds = host_hold.HoldList(root, host_hold.hermes_config(factory_settings.find_hermes, root))
     reading = host_hold.observe(holds, threshold)
