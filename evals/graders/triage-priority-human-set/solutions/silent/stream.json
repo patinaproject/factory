@@ -1,0 +1,9 @@
+[
+  {
+    "tool": "tracker",
+    "args": [
+      "show",
+      "ISSUE-2"
+    ]
+  }
+]

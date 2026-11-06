@@ -207,11 +207,13 @@ message, because the `blocker-order` hook sees tool results and not that message
   claude-session holds this card's worktree. A line that holds
   `"precondition": "server_error"` means GitHub or the gateway's broker
   answered with a server error. A line that holds `"precondition": "host_load"`
-  means the host's load is over the factory's threshold. The `blocker-order`
-  hook parks the card the same way and adds `worktree_held_park`,
-  `server_error_park`, or `host_load_park` to the result, and a sweep returns
-  the card to the queue once the lock is free, five minutes after the park, or
-  when the load hold is gone. Follow the park key exactly as `gh_login_park`
+  means the host's load is over the factory's threshold. A line that holds
+  `"precondition": "xcode_check_timeout"` means `xcodebuild
+  -checkFirstLaunchStatus` timed out. The `blocker-order` hook parks the card
+  the same way and adds `worktree_held_park`, `server_error_park`,
+  `host_load_park`, or `xcode_check_timeout_park` to the result, and a sweep
+  returns the card to the queue once the lock is free, five minutes after the
+  park, or when the load hold is gone. Follow the park key exactly as `gh_login_park`
   above: stop, post no activity, never call `kanban_block`, and treat a
   result without it as the `"transient": true` case below. A line with
   `"transient": true` and no precondition is a cause that keeps coming back,

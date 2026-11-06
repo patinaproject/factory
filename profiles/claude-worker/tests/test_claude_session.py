@@ -2281,22 +2281,62 @@ class ClaudeSessionTest(GitFixture):
         self.assertFalse(marker.exists())
         self.assertFalse(self.log.exists())
 
-    def test_a_first_launch_check_that_hangs_refuses_the_run(self) -> None:
+    def hung_check(self):
         xcode, marker, env = self.xcode_session()
         xcode.answer(hang=True)
         module = self.session_module()
-
         with mock.patch.object(module.xcode, "FIRST_LAUNCH_SECONDS", 0.5), \
                 mock.patch.dict(os.environ, env), self.assertRaises(module.Refusal) as refused:
             module.check_first_launch(self.repository, self.worktree)
+        self.assertFalse(marker.exists())
+        return module, refused.exception
+
+    def test_a_first_launch_check_that_hangs_parks_the_card_without_asking_for_sudo(self) -> None:
+        _, refusal = self.hung_check()
+
+        self.assertEqual((refusal.transient, refusal.precondition), (True, "xcode_check_timeout"))
+        self.assertIn("xcodebuild -checkFirstLaunchStatus timed out after 0.5 seconds", str(refusal))
+        self.assertIn("host load", str(refusal))
+        self.assertNotIn("sudo", str(refusal))
+        self.assertNotIn("-runFirstLaunch", str(refusal))
+
+    def test_a_pending_first_launch_stays_a_plain_refusal(self) -> None:
+        xcode, _, env = self.xcode_session(status=1)
+        module = self.session_module()
+
+        with mock.patch.dict(os.environ, env), self.assertRaises(module.Refusal) as refused:
+            module.check_first_launch(self.repository, self.worktree)
 
         self.assertEqual(
-            str(refused.exception), "the active Xcode has a first launch pending; run sudo xcodebuild -runFirstLaunch"
+            (str(refused.exception), refused.exception.transient, refused.exception.precondition),
+            ("the active Xcode has a first launch pending; run sudo xcodebuild -runFirstLaunch", False, None),
         )
-        self.assertFalse(marker.exists())
 
-    def test_the_first_launch_check_waits_ten_seconds(self) -> None:
-        self.assertEqual(self.session_module().xcode.FIRST_LAUNCH_SECONDS, 10)
+    def test_a_timeout_parks_three_times_in_an_hour_and_the_fourth_is_a_plain_transient_refusal(self) -> None:
+        module, refusal = self.hung_check()
+        spec = importlib.util.spec_from_file_location(
+            "result_line_under_test", FACTORY / "plugins" / "blocker-order" / "result_line.py")
+        result_line = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = result_line
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(result_line)
+        args = types.SimpleNamespace(mcp_status=False, card_json=str(self.card), task_id=TASK_ID)
+        prefix = "Waiting for the Xcode check:"
+        for ages, precondition in (((60, 600), "xcode_check_timeout"), ((60, 600, 3000), None), ((60, 600, 3601), "xcode_check_timeout")):
+            with self.subTest(ages=ages):
+                self.write_parks(*[(age, prefix) for age in ages])
+
+                sent = module.capped(result_line, args, refusal)
+
+                self.assertEqual((sent.transient, sent.precondition), (True, precondition))
+                if precondition is None:
+                    self.assertTrue(str(sent).endswith(
+                        "(waited for the Xcode first launch check to finish for the 4th time in an hour, "
+                        "so it no longer waits on its own)"
+                    ))
+
+    def test_the_first_launch_check_waits_thirty_seconds(self) -> None:
+        self.assertEqual(self.session_module().xcode.FIRST_LAUNCH_SECONDS, 30)
 
     def test_a_first_launch_that_is_done_lets_the_toolchain_checks_run(self) -> None:
         xcode, marker, env = self.xcode_session(status=0, check="true # xcrun")

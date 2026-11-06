@@ -1,0 +1,19 @@
+{
+  "issues": {
+    "ISSUE-1": {
+      "title": "Tidy the wording of an internal log line",
+      "body": "The worker's debug log says 'finsihed'. Nobody outside the team reads it.",
+      "priority": 0,
+      "priority_history": [],
+      "comments": []
+    },
+    "ISSUE-9": {
+      "title": "An unrelated issue",
+      "body": "Not part of this task.",
+      "priority": 3,
+      "priority_history": [{"actor": "person", "value": 3}],
+      "comments": []
+    }
+  },
+  "writes": []
+}

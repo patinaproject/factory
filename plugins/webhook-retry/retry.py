@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -38,6 +38,11 @@ TRIAGE_INTENT_TIMEOUT_SECONDS = 120
 # Above the check's own worst case: three `hermes` reads of up to 60 s each, the live issue read, and a 120 s archive.
 TRIAGE_EXIT_TIMEOUT_SECONDS = 360
 TEAMMATE_REPLY_TIMEOUT_SECONDS = 120
+# `hermes chat -Q` ends its stderr with this line.
+SESSION_LINE = re.compile(r"^session_id: (\S+)$", re.MULTILINE)
+INTENT_JSON = re.compile(r"<triage_intent>\s*(\{.*?\})\s*</triage_intent>", re.DOTALL)
+ROUTER_OFF = re.compile(r"^\s*router_shadow:\s*(?:false|no|off)\s*(?:#.*)?$", re.IGNORECASE | re.MULTILINE)
+ROUTER_VERSION = 1
 # The sweep pages Linear and computes one intent, with its Hermes reads, for each prompt it keeps.
 MISSED_PROMPTS_TIMEOUT_SECONDS = 600
 TEMPLATE_KEY = re.compile(r"\{([a-zA-Z0-9_.]+)\}")
@@ -115,10 +120,69 @@ def route_list(hermes: str, home: Path, route: str, key: str) -> str:
     return ",".join(value) if isinstance(value, list) else (value or "")
 
 
+def router_shadow(home: Path) -> bool:
+    try:
+        text = (home / "config.yaml").read_text()
+    except OSError:
+        return True
+    return ROUTER_OFF.search(text) is None
+
+
+def record_decision(
+    home: Path, key: str, attempts: int, action: str, rule: str, outcome: str,
+    then: Optional[str] = None, session_id: Optional[str] = None,
+) -> None:
+    """The format `linear-agent-session/router.py` documents. Hermes runs this script outside the gateway, so it
+    cannot import that plugin and has its own writer."""
+    if not router_shadow(home):
+        return
+    moment = dt.datetime.now(dt.timezone.utc)
+    profile, route, delivery = store.decode_key(key) or (None, None, None)
+    record = {
+        "version": ROUTER_VERSION, "recorded_at": moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), "chat_id": key,
+        "profile": profile, "route": route, "delivery": delivery, "attempt": attempts + 1, "retry": True,
+        "session_id": session_id, "action": action, "then": then, "rule": rule, "outcome": outcome,
+    }
+    try:
+        decisions = home / "webhook-router" / "decisions"
+        for directory in (decisions.parent, decisions):
+            directory.mkdir(mode=0o700, exist_ok=True)
+            os.chmod(directory, 0o700)
+        fd = os.open(decisions / f"{moment.date().isoformat()}.jsonl", os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError as failure:
+        print(f"retry-failed-webhooks: the shadow router recorded no decision: {type(failure).__name__}", file=sys.stderr)
+
+
+def intent_names(block: str) -> tuple[Optional[str], Optional[str]]:
+    found = INTENT_JSON.search(block)
+    try:
+        intent = json.loads(found.group(1)) if found else {}
+    except ValueError:
+        intent = {}
+    return intent.get("action"), intent.get("then")
+
+
+class Replay(NamedTuple):
+    code: int
+    stderr: str
+    usage: Optional[dict]
+    intent: Optional[str]
+
+    @property
+    def session_id(self) -> Optional[str]:
+        found = SESSION_LINE.findall(self.stderr)
+        return found[-1] if found else None
+
+
 class Run:
     def __init__(self, home: Path, directory: Path) -> None:
         self.home = home
         self.directory = directory
+
+    def decide(self, key: str, entry: dict[str, Any], action: str, rule: str, outcome: str, **fields: Any) -> None:
+        record_decision(self.home, key, entry["attempts"], action, rule, outcome, **fields)
 
     def say(self, line: str) -> None:
         print(line)
@@ -157,6 +221,7 @@ class Run:
         self.prune_skip_markers(moment)
         for key, entry in self.entries().items():
             if entry["state"] == "running" and self.update(key, "interrupted", last_error="a retry was interrupted"):
+                self.decide(key, entry, "retry_interrupted", "running_at_start", "interrupted")
                 self.say(f"interrupted {entry['route']} {entry['delivery']}: not retried again, it may have run")
                 continue
             age = moment - store.parse_stamp(entry["delivered_at"])
@@ -174,6 +239,7 @@ class Run:
             elif state == "queued" and (age > store.GIVE_UP_AGE or entry["attempts"] >= store.MAX_ATTEMPTS):
                 reason = "older than 48 hours" if age > store.GIVE_UP_AGE else f"{entry['attempts']} attempts"
                 if self.update(key, "give_up"):
+                    self.decide(key, entry, "retry_gave_up", "too_old" if age > store.GIVE_UP_AGE else "too_many_attempts", "gave_up")
                     self.say(f"gave up {entry['route']} {entry['delivery']}: {reason}")
 
     def log(self, line: str) -> None:
@@ -332,17 +398,18 @@ class Run:
                 return "\n\n" + ERROR_BLOCK
         return "\n\n" + (proc.stdout if proc.returncode == 0 and "<triage_intent>" in proc.stdout else ERROR_BLOCK)
 
-    def replay(self, hermes: str, entry: dict[str, Any]) -> tuple[int, str, Optional[dict]]:
+    def replay(self, hermes: str, entry: dict[str, Any]) -> Replay:
         toolsets = route_list(hermes, self.home, entry["route"], "toolsets")
         if not toolsets:
-            return 1, f"route {entry['route']} has no toolsets in the config", None
+            return Replay(1, f"route {entry['route']} has no toolsets in the config", None, None)
         skills = route_list(hermes, self.home, entry["route"], "skills")
         with tempfile.TemporaryDirectory(prefix="webhook-retry-") as scratch:
             query = Path(scratch) / "query.txt"
             report = Path(scratch) / "report.json"
+            block = self.intent_block(entry)
             query.write_text(
                 REPLAY_PREAMBLE.format(delivered_at=entry["delivered_at"], cause=CAUSES[store.reason_of(entry)])
-                + entry["prompt"] + self.intent_block(entry)
+                + entry["prompt"] + block
             )
             os.chmod(query, 0o600)
             command = [
@@ -358,7 +425,7 @@ class Run:
                 usage = json.loads(report.read_text())
             except (OSError, ValueError):
                 usage = None
-        return proc.returncode, proc.stderr, usage
+        return Replay(proc.returncode, proc.stderr, usage, intent_names(block)[0])
 
     def retry(self, everything: bool) -> None:
         retried = 0
@@ -369,6 +436,9 @@ class Run:
             if store.now() >= deadline:
                 break
             if store.paused(self.home):
+                waiting = self.entries().get(key)
+                if waiting is not None:
+                    self.decide(key, waiting, "retry_paused", "paused", "waiting")
                 self.say("Hermes is paused: the queued deliveries wait for hermes resume")
                 return
             entry = self.entries().get(key)
@@ -378,22 +448,29 @@ class Run:
             if self.triage_exit_handled(entry):
                 retried += 1
                 self.update(key, "retry_succeeded")
+                self.decide(key, entry, "retry_triage_exit_handled", "triage_exit", "handled")
                 self.say(f"retried {who}: handled the Triage exit without a turn")
                 continue
             if self.addressed_to_teammate(entry):
                 retried += 1
                 self.update(key, "retry_succeeded")
+                self.decide(key, entry, "retry_teammate_reply", "teammate_reply", "handled")
                 self.say(f"retried {who}: skipped a reply addressed to a teammate")
                 continue
             if self.comment_skipped(entry):
                 retried += 1
                 self.update(key, "retry_succeeded")
+                rule = "unadmitted_comment" if entry.get("reason") == "unadmitted" else "comment_skip"
+                self.decide(key, entry, "retry_comment_skipped", rule, "handled")
                 self.say(f"retried {who}: skipped a comment that resumes no card")
                 continue
-            code, stderr, usage = self.replay(hermes, entry)
+            replay = self.replay(hermes, entry)
+            code, stderr, usage = replay.code, replay.stderr, replay.usage
             retried += 1
+            replayed = {"then": replay.intent, "session_id": replay.session_id}
             if code == 0:
                 self.update(key, "retry_succeeded")
+                self.decide(key, entry, "replay_succeeded", "replay", "succeeded", **replayed)
                 self.say(f"retried {who}: succeeded")
             elif usage is not None and usage.get("reason") in store.USAGE_LIMIT_REASONS:
                 attempts = entry["attempts"] + 1
@@ -404,10 +481,12 @@ class Run:
                     key, "retry_usage_limit", attempts=attempts, next_try_at=next_try, reason="usage_limit",
                     last_error=store.truncate(usage.get("message", ""), store.ERROR_LIMIT),
                 )
+                self.decide(key, entry, "replay_rate_limited", "usage_limit", "rate_limited", **replayed)
                 self.say(f"retried {who}: rate-limited again, next try {next_try}")
                 return
             else:
                 self.update(key, "retry_failed", last_error=redact(stderr)[-store.ERROR_LIMIT:])
+                self.decide(key, entry, "replay_failed", "replay_failed", "failed", **replayed)
                 self.say(f"retried {who}: failed ({code})")
         if retried and not any(e["state"] == "queued" for e in self.entries().values()):
             self.say("webhook retry queue drained")
@@ -429,21 +508,22 @@ def list_entries(directory: Path) -> int:
     return 0
 
 
-def drop(directory: Path, name: str) -> int:
+def drop(home: Path, directory: Path, name: str) -> int:
     removed = []
 
     def change(entries: dict[str, dict[str, Any]]) -> bool:
         for key, entry in list(entries.items()):
             if name in (key, entry["delivery"]):
                 del entries[key]
-                removed.append(entry)
+                removed.append((key, entry))
         return bool(removed)
 
     store.mutate(directory, change)
     if not removed:
         print(f"retry-failed-webhooks: no webhook delivery matches {name}", file=sys.stderr)
         return 1
-    for entry in removed:
+    for key, entry in removed:
+        record_decision(home, key, entry["attempts"], "retry_dropped", "operator_drop", "dropped")
         print(f"dropped {entry['route']} {entry['delivery']}")
     return 0
 
@@ -464,7 +544,7 @@ def main(argv: list[str]) -> int:
     if args.list:
         return list_entries(directory)
     if args.drop:
-        return drop(directory, args.drop)
+        return drop(home, directory, args.drop)
     with store.file_lock(directory, "run.lock", blocking=False) as acquired:
         if not acquired:
             return 0

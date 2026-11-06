@@ -1246,6 +1246,7 @@ class IssueWaitTest(BriefHarness):
 RESUME_PARK = "Waiting for hermes resume: claude-session was stopped by SIGTERM after 12 s, during a Hermes pause."
 WORKTREE_PARK = "Waiting for the worktree: another claude-session holds /w for card t_old (running)"
 SERVER_PARK = "Waiting after a server error: gh api repos/o/r failed: gh: Server Error (HTTP 500)"
+XCODE_PARK = "Waiting for the Xcode check: xcodebuild -checkFirstLaunchStatus timed out after 30 seconds"
 PARK_AT = 200
 
 
@@ -1304,6 +1305,9 @@ class CauseWaitTest(BriefHarness):
 
     def server_sweep(self, now: float) -> dict:
         return self.call("card_transition.sweep_server_error()", now)
+
+    def xcode_sweep(self, now: float) -> dict:
+        return self.call("card_transition.sweep_xcode_check()", now)
 
     def thoughts(self) -> list:
         return [activity["content"] for activity in self.activities()]
@@ -1389,6 +1393,18 @@ class CauseWaitTest(BriefHarness):
         self.assertEqual(self.thoughts(), [{"type": "thought", "body": "The server-error wait is over, so this card runs again."}])
         self.assertEqual(self.server_sweep(PARK_AT + 400), {"released": [], "failed": {}})
         self.assertEqual(len(self.thoughts()), 1)
+
+    def test_the_xcode_check_wait_ends_at_300_seconds_and_not_before(self) -> None:
+        self.wait("default", "t_1", XCODE_PARK)
+
+        before = self.xcode_sweep(PARK_AT + 299)
+        self.assertEqual((before, self.statuses()["t_1"]), ({"released": [], "failed": {}}, ("scheduled", "claude-worker")))
+
+        after = self.xcode_sweep(PARK_AT + 300)
+
+        self.assertEqual(after, {"released": ["t_1"], "failed": {}})
+        self.assertEqual(self.statuses()["t_1"], ("ready", "claude-worker"))
+        self.assertEqual(self.thoughts(), [{"type": "thought", "body": "The Xcode check wait is over, so this card runs again."}])
 
     def test_a_card_still_inside_its_wait_does_not_stop_the_release_of_one_whose_wait_is_over(self) -> None:
         self.wait("default", "t_a_recent", SERVER_PARK, parked_at=PARK_AT + 250)
