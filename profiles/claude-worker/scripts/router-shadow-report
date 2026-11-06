@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""Compare the shadow router's decisions with what each webhook turn did, and print where they disagree."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import re
+import sqlite3
+import sys
+from contextlib import closing
+from dataclasses import dataclass
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+from typing import Any, Optional
+
+SCRIPTS = Path(__file__).resolve().parent
+
+
+def load_script(name: str) -> Any:
+    loader = SourceFileLoader(name.replace("-", "_"), str(SCRIPTS / name))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+token_spend = load_script("token-spend")
+
+TOOL_EFFECTS = {
+    "linear_agent_activity": "linear_activity",
+    "linear_card_reply": "card_reply",
+    "kanban_comment": "card_comment",
+    "kanban_create": "card_create",
+    "linear_issue_edit": "issue_edit",
+    "linear_issue_to_todo": "issue_edit",
+    "linear_issue_undelegate": "issue_edit",
+    "linear_issue_relate": "issue_edit",
+    "github_issue_edit": "issue_edit",
+    "linear_issue_create": "issue_create",
+    "github_issue_create": "issue_create",
+    "linear_issue_comment": "issue_comment",
+    "linear_agent_session_create": "session_create",
+}
+KANBAN = r"\bkanban(?:\s+--board\s+\S+)?\s+"
+COMMAND_EFFECTS = (
+    (re.compile(r"card_transition\.py"), "card_transition"),
+    (re.compile(r"archive_card\.py"), "card_archive"),
+    (re.compile(KANBAN + r"create\b"), "card_create"),
+    (re.compile(KANBAN + r"comment\b"), "card_comment"),
+    (re.compile(KANBAN + r"edit\b"), "card_edit"),
+    (re.compile(KANBAN + r"archive\b"), "card_archive"),
+)
+TERMINAL = "terminal"
+JOIN_SLACK_SECONDS = 60.0
+SESSION_SQL = (
+    "SELECT id, source, chat_id, model, started_at, ended_at, COALESCE(input_tokens, 0) AS input_tokens, "
+    "COALESCE(output_tokens, 0) AS output_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, "
+    "COALESCE(cache_write_tokens, 0) AS cache_write_tokens FROM sessions"
+)
+TOOL_CALL_SQL = "SELECT session_id, tool_calls FROM messages WHERE role = 'assistant' AND tool_calls IS NOT NULL"
+
+
+def load_router(plugin_dir: Path) -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "linear_agent_session_for_report", plugin_dir / "__init__.py", submodule_search_locations=[str(plugin_dir)]
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.router
+
+
+def tool_name(name: str) -> str:
+    """Claude Code names an MCP tool `mcp__<server>__<tool>`."""
+    parts = name.split("__", 2)
+    return parts[2] if len(parts) == 3 and parts[0] == "mcp" else name
+
+
+def call_effects(call: Any) -> set[str]:
+    function = call.get("function") if isinstance(call, dict) else None
+    function = function if isinstance(function, dict) else call if isinstance(call, dict) else {}
+    name = tool_name(str(function.get("name") or ""))
+    if name in TOOL_EFFECTS:
+        return {TOOL_EFFECTS[name]}
+    if name != TERMINAL:
+        return set()
+    arguments = function.get("arguments")
+    try:
+        arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
+    except ValueError:
+        arguments = {}
+    command = arguments.get("command") if isinstance(arguments, dict) else None
+    if not isinstance(command, str):
+        return set()
+    return {effect for pattern, effect in COMMAND_EFFECTS if pattern.search(command)}
+
+
+def read_records(gateway: Path, since: float, until: float) -> list[dict]:
+    records = []
+    for path in sorted((gateway / "webhook-router" / "decisions").glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and since <= token_spend.parse_time(record["recorded_at"]) < until:
+                records.append(record)
+    return sorted(records, key=lambda r: r["recorded_at"])
+
+
+def read_sessions(gateway: Path) -> tuple[dict[str, dict], dict[str, set[str]]]:
+    with closing(sqlite3.connect(f"file:{gateway / 'state.db'}?mode=ro", uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        sessions = {row["id"]: dict(row) for row in db.execute(SESSION_SQL)}
+        effects: dict[str, set[str]] = {session_id: set() for session_id in sessions}
+        for row in db.execute(TOOL_CALL_SQL):
+            try:
+                calls = json.loads(row["tool_calls"])
+            except ValueError:
+                continue
+            for call in calls if isinstance(calls, list) else [calls]:
+                effects.setdefault(row["session_id"], set()).update(call_effects(call))
+    return sessions, effects
+
+
+def join(records: list[dict], sessions: dict[str, dict]) -> dict[int, Optional[dict]]:
+    joined: dict[int, Optional[dict]] = {}
+    by_chat: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        if record.get("retry"):
+            joined[index] = sessions.get(record.get("session_id") or "")
+        else:
+            joined[index] = None
+            by_chat.setdefault(record["chat_id"], []).append(index)
+    for session in sorted(sessions.values(), key=lambda s: s["started_at"]):
+        if session["source"] == "webhook-retry":
+            continue
+        owner = None
+        for index in by_chat.get(session["chat_id"], []):
+            if token_spend.parse_time(records[index]["recorded_at"]) <= session["started_at"] + JOIN_SLACK_SECONDS:
+                owner = index
+        if owner is not None and joined[owner] is None:
+            joined[owner] = session
+    return joined
+
+
+@dataclass
+class Row:
+    record: dict
+    session: Optional[dict]
+    effects: Optional[frozenset]
+    expected: Optional[set]
+    status: str
+    tokens: int
+    cost: Optional[float]
+    latency: Optional[float]
+
+
+def judge(router: Any, record: dict, session: Optional[dict], effects: Optional[frozenset]) -> tuple[Optional[set], str]:
+    action = router.ACTIONS.get(record["action"])
+    if action is None:
+        return None, "unknown_action"
+    if not action.turn or record["outcome"] == "skip":
+        return None, "agree" if session is None else "disagree"
+    if session is None:
+        return None, "unjoined"
+    expected = router.acceptable(record["action"], record.get("then"))
+    if expected is None:
+        return None, "unjudged"
+    return expected, "agree" if effects in expected else "disagree"
+
+
+def build(router: Any, records: list[dict], sessions: dict, effects: dict, prices: dict) -> list[Row]:
+    rows = []
+    for index, session in join(records, sessions).items():
+        record = records[index]
+        found = frozenset(effects.get(session["id"], set())) if session else None
+        expected, status = judge(router, record, session, found)
+        tokens = cost = latency = None
+        if session:
+            spent = token_spend.session_tokens(session)
+            tokens = spent.total
+            rate = prices.get(session["model"] or "")
+            cost = None if rate is None else token_spend.cost_of(spent, rate)
+            latency = None if session["ended_at"] is None else session["ended_at"] - session["started_at"]
+        rows.append(Row(record, session, found, expected, status, tokens or 0, cost, latency))
+    return rows
+
+
+def names(effects: Optional[frozenset]) -> str:
+    return "-" if effects is None else ",".join(sorted(effects)) or "none"
+
+
+def decision(record: dict) -> str:
+    return record["action"] + (f" -> {record['then']}" if record.get("then") else "")
+
+
+def render(rows: list[Row]) -> str:
+    lines = ["recorded_at  delivery  attempt  action  effects  agreement  tokens  cost_usd  latency_s"]
+    for row in rows:
+        r = row.record
+        lines.append("  ".join([
+            r["recorded_at"], f"{r.get('route') or '-'}/{r.get('delivery') or r['chat_id']}",
+            f"{r['attempt']}{' retry' if r.get('retry') else ''}", decision(r), names(row.effects), row.status,
+            str(row.tokens), "-" if row.cost is None else f"{row.cost:.4f}",
+            "-" if row.latency is None else f"{row.latency:.1f}",
+        ]))
+    judged = [row for row in rows if row.status in ("agree", "disagree", "unknown_action")]
+    agreed = sum(row.status == "agree" for row in judged)
+    rate = f"{agreed / len(judged):.1%}" if judged else "n/a"
+    counts = {status: sum(row.status == status for row in rows) for status in ("unjoined", "unjudged")}
+    lines += ["", f"agreement: {agreed}/{len(judged)} ({rate}); unjoined {counts['unjoined']}, unjudged {counts['unjudged']}"]
+    disagreements = [row for row in judged if row.status != "agree"]
+    if disagreements:
+        lines += ["", "disagreements:"]
+        for row in disagreements:
+            if row.expected is None:
+                verdict = f"expected no turn, got session {row.session['id']}" if row.session else "unknown action"
+            else:
+                verdict = f"expected {' or '.join(sorted(names(e) for e in row.expected))}, got {names(row.effects)}"
+            lines.append(
+                f"- {row.record['recorded_at']} {row.record['chat_id']} {decision(row.record)} ({row.record['rule']}): {verdict}"
+            )
+    return "\n".join(lines)
+
+
+def as_json(rows: list[Row]) -> str:
+    return json.dumps([{
+        "record": row.record, "session_id": row.session["id"] if row.session else None,
+        "effects": None if row.effects is None else sorted(row.effects), "agreement": row.status,
+        "expected": None if row.expected is None else sorted(sorted(e) for e in row.expected),
+        "tokens": row.tokens, "cost_usd": row.cost, "latency_seconds": row.latency,
+    } for row in rows], indent=2)
+
+
+def gateway_home(given: Optional[str]) -> Path:
+    if given:
+        return Path(given)
+    home = os.environ.get("HERMES_HOME")
+    if not home:
+        sys.exit("router-shadow-report: pass --gateway-home or set HERMES_HOME")
+    home = Path(home)
+    return home.parent.parent if home.parent.name == "profiles" else home
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--since", required=True, type=token_spend.parse_time)
+    parser.add_argument("--until", required=True, type=token_spend.parse_time)
+    parser.add_argument("--gateway-home")
+    parser.add_argument("--plugin-dir", help="the linear-agent-session plugin; default <gateway home>/plugins/linear-agent-session")
+    parser.add_argument("--prices", default=str(SCRIPTS / "token_prices.json"))
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    gateway = gateway_home(args.gateway_home)
+    router = load_router(Path(args.plugin_dir) if args.plugin_dir else gateway / "plugins" / "linear-agent-session")
+    prices = json.loads(Path(args.prices).read_text(encoding="utf-8"))
+    sessions, effects = read_sessions(gateway)
+    rows = build(router, read_records(gateway, args.since, args.until), sessions, effects, prices)
+    print(as_json(rows) if args.json else render(rows))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

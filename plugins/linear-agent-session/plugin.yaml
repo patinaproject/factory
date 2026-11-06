@@ -51,6 +51,13 @@ config_schema:
     type: str
     default: linear
     description: Hermes webhook route whose AgentSessionEvent deliveries get the instant acknowledgement.
+  router_shadow:
+    type: bool
+    default: true
+    description: >-
+      The shadow router. It records one routing decision for each webhook delivery and each webhook-retry outcome
+      in <gateway home>/webhook-router/decisions, which router-shadow-report compares with what each turn did. It
+      changes nothing the factory does. Set it to false to stop recording.
   repositories:
     type: list
     default: []

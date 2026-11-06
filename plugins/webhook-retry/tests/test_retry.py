@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -11,8 +13,12 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests import PLUGIN_DIR, chat_key
+
+sys.path.insert(0, str(Path(PLUGIN_DIR).parent / "linear-agent-session" / "tests"))
+from router_modes import load_tests_in_both_modes  # noqa: E402
 
 RETRY = Path(PLUGIN_DIR) / "retry.py"
 FAKE_HERMES = textwrap.dedent(
@@ -46,6 +52,8 @@ FAKE_HERMES = textwrap.dedent(
         with open(os.environ["WEBHOOK_RETRY_REPORT"], "w") as report:
             json.dump({"reason": "rate_limit", "message": "limit", "reset_seconds": behavior["usage"]}, report)
     sys.stderr.write(behavior.get("stderr", ""))
+    if behavior.get("session"):
+        sys.stderr.write("\\nsession_id: " + behavior["session"] + "\\n")
     sys.exit(behavior["exit"])
     """
 )
@@ -117,7 +125,7 @@ def missed_payload(created=None):
     }
 
 
-class RetryTest(unittest.TestCase):
+class RetryCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -177,6 +185,36 @@ class RetryTest(unittest.TestCase):
 
     def chats(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+
+STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+
+
+@contextlib.contextmanager
+def retry_mode(case, on):
+    log = []
+    real = RetryCase.run_retry
+
+    def run_retry(self, *args):
+        if not on:
+            (self.home / "config.yaml").write_text(ROUTER_OFF_CONFIG)
+        result = real(self, *args)
+        queue = self.queue / "queue.json"
+        log.append(STAMP.sub("<stamp>", repr((
+            args, result.returncode, result.stdout, result.stderr, self.chats(),
+            self.cli_calls(self.home.parent / "triage.log"), queue.read_text() if queue.exists() else None,
+        ))))
+        return result
+
+    with mock.patch.object(RetryCase, "run_retry", run_retry):
+        yield log
+
+
+ROUTER_OFF_CONFIG = "plugins:\n  entries:\n    linear-agent-session:\n      settings:\n        router_shadow: false\n"
+load_tests = load_tests_in_both_modes(retry_mode)
+
+
+class RetryTest(RetryCase):
 
     def test_due_entries_run_oldest_first_one_at_a_time(self):
         older = ago(hours=3)
