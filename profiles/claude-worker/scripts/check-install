@@ -307,6 +307,11 @@ CONFIG = (
     ConfigKey(10, "kanban.auto_decompose", (ROOT,), equal(False)),
     ConfigKey(10, "kanban.default_assignee", (ROOT,), unset()),
     ConfigKey(5, "terminal.timeout", (WORKER,), equal(400)),
+    ConfigKey(5, "timeouts.tools.sequential_call", (WORKER,), equal(28900)),
+    ConfigKey(
+        5, "platform_toolsets.cli", (WORKER,),
+        Want(lambda live: isinstance(live, list) and "claude_session" in live, "a list that includes claude_session"),
+    ),
     ConfigKey(5, "terminal.env_passthrough", (WORKER,), Want(lambda live: not live, "empty", [])),
     ConfigKey(5, "platforms.factory_uploads.enabled", (ROOT,), equal(True)),
     ConfigKey(

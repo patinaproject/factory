@@ -162,6 +162,9 @@ class Hooked(unittest.TestCase):
             def register_hook(_, name, callback):
                 hooks.append((name, callback))
 
+            def register_tool(_, **kwargs):
+                pass
+
         order.register(Ctx())
         self.assertEqual([name for name, _ in hooks], ["transform_tool_result"])
         os.environ["HERMES_KANBAN_TASK"] = task
@@ -309,6 +312,9 @@ class HookTest(Hooked):
 
                 def register_hook(_, name, callback):
                     hooks.append(callback)
+
+                def register_tool(_, **kwargs):
+                    pass
 
             order.register(Ctx())
             self.assertIsNone(hooks[0](tool_name="process_manage", args={}, result=process_result(waiting("t_a"))))
@@ -512,6 +518,9 @@ class TriageRoundTest(Hooked):
             def register_hook(_, name, callback):
                 hooks.append(callback)
 
+            def register_tool(_, **kwargs):
+                pass
+
         order.register(Ctx())
         return hooks[0](tool_name="kanban_schedule", args={"reason": reason}, result=json.dumps(result))
 
@@ -708,6 +717,9 @@ class GhLoginTest(Hooked):
 
             def register_hook(_, name, callback):
                 hooks.append(callback)
+
+            def register_tool(_, **kwargs):
+                pass
 
         order.register(Ctx())
         os.environ["HERMES_KANBAN_BOARD"] = "triage"
@@ -909,6 +921,44 @@ class StoppedTest(Hooked):
         for session_id in (None, "s-1"):
             report = result_line.Stopped("SIGHUP", 0, False, session_id)
             self.assertEqual(result_line.last(result_line.line(report)), report)
+
+
+class SessionRunResultTest(Hooked):
+    """A `claude_session_run` result is read exactly as a `process_manage` wait result."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        for task in ("t_1", "t_a"):
+            self.board.add(task, "todo")
+        self.board.start("t_1")
+
+    def tool_result(self, *lines: str) -> str:
+        return json.dumps({"output": "".join(f"{line}\n" for line in lines), "exit_code": 0})
+
+    def test_waiting_on_links_and_blocks_the_card(self):
+        outcome = json.loads(self.call(self.tool_result("starting", waiting("t_a")), tool_name="claude_session_run"))
+
+        self.assertEqual(outcome["blocker_order"]["linked"], ["t_a"])
+        self.assertTrue(outcome["blocker_order"]["blocked"])
+        self.assertEqual(self.board.links, {("t_a", "t_1")})
+        self.assertEqual(self.board.status["t_1"], "todo")
+
+    def test_a_stop_line_blocks_the_card_as_transient(self):
+        stop = result_line.line(result_line.Stopped("SIGTERM", 28800, False, "s-1"))
+
+        outcome = json.loads(self.call(self.tool_result(stop), tool_name="claude_session_run"))
+
+        (name, args), = self.board.calls
+        self.assertEqual((name, args["kind"]), ("kanban_block", "transient"))
+        self.assertTrue(outcome["stopped_block"]["blocked"])
+
+    def test_a_paused_stop_line_parks_the_card(self):
+        stop = result_line.line(result_line.Stopped("SIGTERM", 42, True, "s-1"))
+
+        outcome = json.loads(self.call(self.tool_result(stop), tool_name="claude_session_run"))
+
+        self.assertTrue(outcome["stopped_park"]["parked"])
+        self.assertTrue(self.board.reasons["t_1"].startswith(result_line.STOPPED_PARK))
 
 
 class PullRequestParkTest(Hooked):

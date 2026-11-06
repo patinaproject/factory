@@ -2,8 +2,9 @@
 
 `claude-session` runs fenced from the board. When the issue's blockers have live cards, it starts no
 Claude run and prints one line, `{"waiting_on": [task id, ...]}`. This hook reads that line in the
-worker's `terminal` tool result and in the `output` of its process tool's `wait` and `log` results. It
-reads nothing from `poll`, whose `output_preview` it ignores, and nothing from the `notify: true`
+worker's `terminal` tool result, in the `output` of its process tool's `wait` and `log` results, and in the
+`output` of its `claude_session_run` result (`session_run.py`, which runs `claude-session` to its end in one
+call and calls no `kanban_*` tool). It reads nothing from `poll`, whose `output_preview` it ignores, and nothing from the `notify: true`
 completion message, so a worker that never calls `wait` or `log` shows the hook no result.
 
 The hook runs in the worker process, which holds the card's identity, so it can link each card as this card's parent and then block this card with kind
@@ -75,7 +76,7 @@ import json
 import os
 from typing import Any, Callable, Optional
 
-from . import result_line
+from . import result_line, session_run
 
 # Hermes renames the `process` tool to `process_manage` before it runs hooks (`_LEGACY_TOOL_ALIASES` in
 # `model_tools.py`), so a hook sees `process_manage`. Older Hermes passes `process`.
@@ -83,7 +84,7 @@ from . import result_line
 PROCESS_TOOLS = ("process_manage", "process")
 SCHEDULE_TOOL = "kanban_schedule"
 REQUIRED_TOOLS = ("terminal", SCHEDULE_TOOL)
-WATCHED_TOOLS = (*PROCESS_TOOLS, "terminal")
+WATCHED_TOOLS = (*PROCESS_TOOLS, "terminal", session_run.TOOL)
 TRIAGE_BOARD = "triage"
 ROUND_TOOL = "linear_triage_round"
 POSTED, FAILED, UNKNOWN = "posted", "failed", "unknown"
@@ -440,3 +441,4 @@ def make_hook(ctx: Any):
 
 def register(ctx: Any) -> None:
     ctx.register_hook("transform_tool_result", make_hook(ctx))
+    session_run.register(ctx)

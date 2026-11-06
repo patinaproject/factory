@@ -819,13 +819,17 @@ hermes -p claude-worker skills opt-in --sync </dev/null
 
 The sync makes the bundled `claude-code` skill available to the worker. A
 distribution install sets no model, so now run part 4 for the worker profile.
-An update keeps the installed `config.yaml`, so set the worker's wait limit
-on a machine installed before the profile shipped it. `SOUL.md` waits on
-`claude-session` with a 400 second timeout, which Hermes clamps to this value.
-It stays under the 420 second limit Hermes puts on every tool call:
+An update keeps the installed `config.yaml`, so set the worker's limits and
+toolsets on a machine installed before the profile shipped them. The worker runs
+`claude-session` through the `claude_session_run` tool, which stops a run at 28800
+seconds and gives it 30 more to end. Hermes ends any tool call at
+`timeouts.tools.sequential_call`, so set that above both. `terminal.timeout` still
+caps a foreground terminal command and one process wait:
 
 ```sh
 hermes -p claude-worker config set terminal.timeout 400 </dev/null
+hermes -p claude-worker config set timeouts.tools.sequential_call 28900 </dev/null
+hermes -p claude-worker config set platform_toolsets.cli '["terminal", "kanban", "linear_agent_session", "claude_session"]' </dev/null
 ```
 
 When the proxy needs a token, or part 4 uses the Anthropic API provider, point
@@ -854,7 +858,7 @@ hermes -p claude-worker config set secrets.command "$value" </dev/null
   exist. Run them with `python3`.
 - `<worker>/SOUL.md` matches `<repo>/profiles/claude-worker/SOUL.md`.
 - `hermes -p claude-worker config get platform_toolsets.cli` lists `terminal`,
-  `kanban`, and `linear_agent_session`.
+  `kanban`, `linear_agent_session`, and `claude_session`.
 - The worker's `PONG` test from part 4 passes.
 
 ## 6. Webhook secrets and listener

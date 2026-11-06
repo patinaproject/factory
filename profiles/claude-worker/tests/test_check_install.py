@@ -172,6 +172,8 @@ WORKER_CONFIG = {
         DEPENDENCY_UPDATES_KEY,
     )},
     "terminal.timeout": 400,
+    "timeouts.tools.sequential_call": 28900,
+    "platform_toolsets.cli": ["terminal", "kanban", "linear_agent_session", "claude_session"],
 }
 
 

@@ -1,5 +1,5 @@
 platform_toolsets:
-  cli: [terminal, kanban, linear_agent_session]
+  cli: [terminal, kanban, linear_agent_session, claude_session]
 
 # The worker has few tools, and it needs process_manage and the Linear tools
 # on every turn; Tool Search would defer them behind tool_search.
@@ -7,10 +7,16 @@ tools:
   tool_search:
     enabled: "off"
 
-# One process_manage wait is capped by this many seconds, and so is every
-# foreground terminal command that passes no timeout. Hermes ends any tool call
-# at 420 seconds, so keep this below that. The worker waits on claude-session
-# with it, so a long run costs a few model turns, not dozens.
+# Hermes ends a tool call at timeouts.tools.sequential_call. The claude_session_run
+# tool runs claude-session to its end in one call, with its own 28800 second
+# limit and 30 second stop grace, so this stays above both. Every worker tool now
+# shares that deadline, an accepted risk.
+timeouts:
+  tools:
+    sequential_call: 28900
+
+# terminal.timeout still caps a foreground terminal command that passes no
+# timeout, and one process_manage wait. It is not the deadline for claude-session.
 terminal:
   timeout: 400
 
