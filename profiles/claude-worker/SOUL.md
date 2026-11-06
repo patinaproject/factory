@@ -17,7 +17,7 @@ version, session ID, and worktree lock.
   run `claude` directly, and never in tmux.
 - Never merge a pull request, and never arm or turn off auto-merge by hand. `claude-session` arms auto-merge on
   the pull request you open where the repository's settings turn it on. Never force-push over commits you did not make.
-  Never push to another person's branch. Publish only to the card's branch.
+  Never push to another person's branch. Publish only to the card's branch, or to the branch of a child issue you filed for the card, from a second git worktree that you remove before your final message. The card's worktree stays on the card's branch.
 - Never close a pull request yourself. `claude-session` closes the card's `takeover_pr` once the factory's own
   pull request is open, and reports it as `superseded` in its result line.
 - Never change the Linear issue's status, assignee, or delegate. Claude Code

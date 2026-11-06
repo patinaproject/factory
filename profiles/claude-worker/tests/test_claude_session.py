@@ -53,7 +53,9 @@ TODAYS_SYSTEM_PROMPT = (
     "current base head. Then wait for checks and finish through the ready gate as usual. When you cannot "
     "resolve a conflict with confidence, for example both sides change the same behavior, do not guess: stop, "
     "and make the first line of your final message `Needs input:` followed by a reason naming each "
-    "conflicting file. The worker reads that line and blocks the card.\n\n"
+    "conflicting file. The worker reads that line and blocks the card. Publish only to the card's branch, "
+    "except to the branch of a child issue you filed for the card, which you publish from a second git "
+    "worktree and remove before your final message. The card's worktree stays on the card's branch.\n\n"
     "Reach Linear only with the token in LINEAR_API_KEY, which the factory's Linear agent app issued for this "
     "run. Never mint a Linear token yourself and never run a secrets helper: a token request with another scope "
     "set revokes the factory's tokens.\n\n"
@@ -66,8 +68,9 @@ TODAYS_SYSTEM_PROMPT = (
     "A commit message closes an issue when its type is `fix` (`fix: #12 ...`) or it says `Closes #12`, and a "
     "squash merge carries every commit message. Before your first commit, decide whether the pull request "
     "completes each issue it names. When it completes the issue, close it in the body with `Closes #<n>`. When "
-    "it addresses only part of the issue, write `Part of #<n>` in the body and give every commit a type that "
-    "does not close it, such as `feat` or `refactor`, because `fix` is a closing keyword. push-signed cannot "
+    "it addresses only part of the issue, write `Part of #<n>` in the body, or `Part of [<identifier>](<url>)` "
+    "for a Linear issue, and give every commit a type that does not close it, such as `feat` or `refactor`, "
+    "because `fix` is a closing keyword. push-signed cannot "
     "reword a published commit. A hook refuses a `git commit` whose message closes an issue the body does "
     "not, and a push-signed call whose unpublished commits do, and tells you how to fix them.\n\n"
     "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
@@ -77,6 +80,8 @@ TODAYS_SYSTEM_PROMPT = (
     "evidence. The App's token cannot upload, so this helper replaces `gh pr edit --attach` and browser "
     "uploads, even where a skill names them. When the helper exits 3, attach the images to the Linear issue "
     "instead and say so in the pull request body.\n\n"
+    "When you hand a pull request off for review, the final message lists each acceptance criterion of each "
+    "issue the pull request closes, marked met or not met, with the evidence for each.\n\n"
     "Stop every background command, monitor, and watcher you started before you write your final result. "
     "The run ends when you finish, and anything still running is killed. To wait for CI, run "
     f"`python3 {(SCRIPTS / 'wait-for-checks').resolve()} <number> --repo <owner/repo>` in the foreground. It "
@@ -114,7 +119,8 @@ _session_loader = importlib.machinery.SourceFileLoader("claude_session_prompt", 
 _SESSION = importlib.util.module_from_spec(importlib.util.spec_from_loader(_session_loader.name, _session_loader))
 _session_loader.exec_module(_SESSION)
 SYSTEM_PROMPT = TODAYS_SYSTEM_PROMPT.replace(TODAYS_ENDING, ISSUE_ENDING) + "\n\n" + _SESSION.PULL_REQUEST_WAIT.format(
-    waiting=RESULT_LINE.WAITING_FOR_PULL_REQUEST, noted=RESULT_LINE.PULL_REQUEST_NOTED)
+    waiting=RESULT_LINE.WAITING_FOR_PULL_REQUEST, noted=RESULT_LINE.PULL_REQUEST_NOTED) + "\n\n" + _SESSION.PARTIAL_WORK_RULE.format(
+    waiting=RESULT_LINE.WAITING_FOR_PULL_REQUEST)
 REPO = "example-org/example-repo"
 LINEAR_MCP_CONFIG = (
     '{"mcpServers": {"linear": {"type": "http", "url": "https://mcp.linear.app/mcp", '
@@ -655,7 +661,8 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual(status, 0)
         argv = self.claude_call()["argv"]
-        self.assertEqual(argv[argv.index("--append-system-prompt") + 1], TODAYS_SYSTEM_PROMPT)
+        self.assertEqual(
+            argv[argv.index("--append-system-prompt") + 1], TODAYS_SYSTEM_PROMPT + "\n\n" + _SESSION.NO_PARTIAL_WORK_RULE)
 
     def test_the_implementation_prompt_follows_the_constants_the_installed_result_line_has(self) -> None:
         module = self.session_module()
@@ -666,15 +673,41 @@ class ClaudeSessionTest(GitFixture):
             **vars(issue_only), PULL_REQUEST_PARK="Waiting for a pull request:",
             WAITING_FOR_PULL_REQUEST="Waiting for pull request:", PULL_REQUEST_NOTED="Parked on pull request")
 
-        self.assertEqual(module.implementation_prompt(neither), module.SYSTEM_PROMPT)
-        self.assertNotEqual(module.implementation_prompt(issue_only), module.SYSTEM_PROMPT)
+        base = module.SYSTEM_PROMPT + "\n\n" + module.NO_PARTIAL_WORK_RULE
+        self.assertEqual(module.implementation_prompt(neither), base)
+        self.assertNotEqual(module.implementation_prompt(issue_only), base)
         self.assertNotEqual(module.implementation_prompt(both), module.implementation_prompt(issue_only))
         self.assertEqual(
             module.implementation_prompt(issue_only),
-            module.SYSTEM_PROMPT.replace(
+            base.replace(
                 module.CHECKS_RULE,
                 module.CHECKS_START + module.CHECKS_ISSUE_ENDING.format(waiting="Waiting for issue:", noted="Parked on issue")),
         )
+
+    def test_the_partial_work_flow_is_in_the_prompt_only_when_the_result_line_can_park_on_a_pull_request(self) -> None:
+        module = self.session_module()
+        park = types.SimpleNamespace(
+            PULL_REQUEST_PARK="Waiting for a pull request:",
+            WAITING_FOR_PULL_REQUEST="Waiting for pull request:", PULL_REQUEST_NOTED="Parked on pull request")
+        rendered = dict(push_signed="p", upload_image="u", wait_for_checks="w", command_limit=270)
+
+        with_park = module.implementation_prompt(park).format(**rendered)
+        without = module.implementation_prompt(types.SimpleNamespace()).format(**rendered)
+
+        flow = module.PARTIAL_WORK_RULE.format(waiting="Waiting for pull request:")
+        self.assertIn(flow, with_park)
+        self.assertNotIn(module.NO_PARTIAL_WORK_RULE, with_park)
+        self.assertIn(module.NO_PARTIAL_WORK_RULE, without)
+        self.assertNotIn(flow, without)
+
+    def test_every_implementation_prompt_requires_the_acceptance_criteria_report(self) -> None:
+        module = self.session_module()
+
+        for result_line in (types.SimpleNamespace(), RESULT_LINE):
+            with self.subTest(result_line=result_line):
+                prompt = module.implementation_prompt(result_line).format(
+                    push_signed="p", upload_image="u", wait_for_checks="w", command_limit=270)
+                self.assertIn(module.ACCEPTANCE_RULE, prompt)
 
     def test_an_implementation_card_with_the_agent_brief_starts(self) -> None:
         self.set_documents(("d1", "ABC-123 Agent brief", "someone-else"))
@@ -3848,6 +3881,22 @@ class ClaudeSessionTest(GitFixture):
                 links, after = self.linked_body(body)
 
                 self.assertEqual((links["action"], after), ("unchanged", body))
+
+    def test_a_part_of_reference_to_a_card_issue_keeps_the_closing_line_off(self) -> None:
+        for body in (
+            f"Adds the thing.\n\nPart of [ABC-123]({LINEAR_URL})",
+            "Adds the thing.\n\nPart of #12",
+            f"Adds the thing.\n\nPart of ABC-123 and part of {REPO}#12",
+        ):
+            with self.subTest(body=body):
+                links, after = self.linked_body(body)
+
+                self.assertEqual((links["action"], after), ("unchanged", body))
+
+    def test_a_part_of_reference_to_another_issue_still_gets_the_closing_line(self) -> None:
+        _, body = self.linked_body("Adds the thing.\n\nPart of ABC-999 and part of #99")
+
+        self.assertEqual(body, f"Adds the thing.\n\nPart of ABC-999 and part of #99\n\n{CLOSING_LINE}")
 
     def test_a_card_without_a_github_issue_gets_only_the_linear_closing_line(self) -> None:
         _, body = self.linked_body("", card_body="linear_issue_identifier: ABC-123")

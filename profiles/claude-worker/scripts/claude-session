@@ -140,7 +140,9 @@ PUBLISH_RULE = (
     "base head. Then wait for checks and finish through the ready gate as usual. When you cannot resolve a "
     "conflict with confidence, for example both sides change the same behavior, do not guess: stop, "
     "and make the first line of your final message `Needs input:` followed by a reason naming each "
-    "conflicting file. The worker reads that line and blocks the card."
+    "conflicting file. The worker reads that line and blocks the card. Publish only to the card's branch, "
+    "except to the branch of a child issue you filed for the card, which you publish from a second git "
+    "worktree and remove before your final message. The card's worktree stays on the card's branch."
 )
 LINEAR_RULE = (
     "Reach Linear only with the token in LINEAR_API_KEY, which the factory's Linear agent app issued for this "
@@ -180,10 +182,15 @@ CLOSING_RULE = (
     "A commit message closes an issue when its type is `fix` (`fix: #12 ...`) or it says `Closes #12`, and a "
     "squash merge carries every commit message. Before your first commit, decide whether the pull request "
     "completes each issue it names. When it completes the issue, close it in the body with `Closes #<n>`. When "
-    "it addresses only part of the issue, write `Part of #<n>` in the body and give every commit a type that "
-    "does not close it, such as `feat` or `refactor`, because `fix` is a closing keyword. push-signed cannot "
+    "it addresses only part of the issue, write `Part of #<n>` in the body, or `Part of [<identifier>](<url>)` "
+    "for a Linear issue, and give every commit a type that does not close it, such as `feat` or `refactor`, "
+    "because `fix` is a closing keyword. push-signed cannot "
     "reword a published commit. A hook refuses a `git commit` whose message closes an issue the body does "
     "not, and a push-signed call whose unpublished commits do, and tells you how to fix them."
+)
+ACCEPTANCE_RULE = (
+    "When you hand a pull request off for review, the final message lists each acceptance criterion of each "
+    "issue the pull request closes, marked met or not met, with the evidence for each."
 )
 EVIDENCE_RULE = (
     "Every pull request description shows its proof inline. A UI change shows its screens. Any other change "
@@ -275,7 +282,7 @@ TRIAGE_RULE = (
     "`Priority: <value>, set by triage` when you wrote it, `Priority: <value>, kept` when a person's choice "
     "stands, or `Priority: none` when the issue has none, such as a confident duplicate. Then add a short summary."
 )
-SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{CLOSING_RULE}\n\n{EVIDENCE_RULE}\n\n{FINISH_RULE}"
+SYSTEM_PROMPT = f"{PUBLISH_RULE}\n\n{LINEAR_RULE}\n\n{CHECKS_RULE}\n\n{CLOSING_RULE}\n\n{EVIDENCE_RULE}\n\n{ACCEPTANCE_RULE}\n\n{FINISH_RULE}"
 TRIAGE_SYSTEM_PROMPT = f"{TRIAGE_RULE}\n\n{LINEAR_RULE}\n\n{STOP_RULE}"
 
 # Used only when the installed blocker-order parks a card on `Waiting for pull request:`. The steps to take after
@@ -286,6 +293,23 @@ PULL_REQUEST_WAIT = (
     "to take after the merge in the rest of the message. The worker reads that line and parks the card until "
     "that pull request merges or closes. Make the first line `Needs input:` instead when a card comment starts "
     "`{noted} <owner>/<name>#<number>` for the same pull request, because this card already waited for it once."
+)
+PARTIAL_WORK_RULE = (
+    "When a person asks on the card for work that completes only part of the card's issue, such as a "
+    "prerequisite, file a child issue of the card's issue. In a public repository, create a GitHub issue and "
+    "make it a sub-issue with `gh api repos/<owner>/<repo>/issues/<parent>/sub_issues -F sub_issue_id=<child "
+    "REST id>`, using the child's REST id and not its number. In a private repository, create a Linear child "
+    "issue with `parentId`. Open the prerequisite pull request on a branch named for the child by the "
+    "repository's issue-tracker adapter branch rule, forked from the fetched default branch, with a title "
+    "that names the child. Its body closes only the child, with `Closes #<child>` and `Closes [<child "
+    "identifier>](<url>)` in a public repository and `Closes [<child identifier>](<url>)` in a private one, "
+    "and refers to the card's issue with `Part of`. Do this from a second git worktree and remove it before "
+    "your final message. The card's worktree stays on the card's branch. Then make the first line of your "
+    "final message `{waiting} <url>`, with the prerequisite pull request's URL."
+)
+NO_PARTIAL_WORK_RULE = (
+    "Do no partial-work flow. When a person asks on the card for work that completes only part of the card's "
+    "issue, make the first line of your final message `Needs input:` followed by the reason."
 )
 
 
@@ -300,6 +324,9 @@ def implementation_prompt(result_line) -> str:
     if hasattr(result_line, "PULL_REQUEST_PARK"):
         prompt += "\n\n" + PULL_REQUEST_WAIT.format(
             waiting=result_line.WAITING_FOR_PULL_REQUEST, noted=result_line.PULL_REQUEST_NOTED)
+        prompt += "\n\n" + PARTIAL_WORK_RULE.format(waiting=result_line.WAITING_FOR_PULL_REQUEST)
+    else:
+        prompt += "\n\n" + NO_PARTIAL_WORK_RULE
     return prompt
 # Replaces a repository's own `linear` server, which has no credential in a headless run. Claude Code
 # expands ${LINEAR_API_KEY} from the settings file's env, so the token never appears in argv.
@@ -579,6 +606,8 @@ def link_issues(
             written[ref] = ref
         written[identifier.upper()] = f"[{identifier.upper()}]({linear_url})"
         missing = [written[ref] for ref in closing.missing(edited, repo, written)]
+        if len(missing) == len(written) and closing.part_of(edited, repo) & written.keys():
+            missing = []
         if missing:
             edited = f"{edited.rstrip()}\n\nCloses {', closes '.join(missing)}".strip()
         if edited == body:

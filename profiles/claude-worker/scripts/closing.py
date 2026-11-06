@@ -20,15 +20,16 @@ IDENTIFIER = re.compile(r"^[A-Z][A-Z0-9]*-[1-9][0-9]*$")
 NUMBER = re.compile(r"^#([1-9][0-9]*)$")
 # A reference may be the text of a Markdown link to a GitHub or Linear issue, as in `Closes [PAT-9](<its URL>)`,
 # which GitHub and Linear both close on.
-CLOSING = re.compile(
-    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[ \t]*:?[ \t]+(?P<link>\[)?"
+REFERENCE = (
+    r"(?P<link>\[)?"
     r"(?:(?P<repo>[\w.-]+/[\w.-]+)?#(?P<number>[1-9][0-9]*)\b"
     r"|https://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/(?P<url_number>[1-9][0-9]*)\b"
     r"|(?P<linear>https://linear\.app/[\w-]+/issue/)?(?P<identifier>[A-Z][A-Z0-9]*-[1-9][0-9]*)\b)"
     r"(?(link)\]\((?:https://github\.com/[\w.-]+/[\w.-]+/issues/[1-9][0-9]*"
-    r"|https://linear\.app/[\w-]+/issue/[A-Z][A-Z0-9]*-[1-9][0-9]*(?:/[^\s)]*)?)\))",
-    re.IGNORECASE,
+    r"|https://linear\.app/[\w-]+/issue/[A-Z][A-Z0-9]*-[1-9][0-9]*(?:/[^\s)]*)?)\))"
 )
+CLOSING = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[ \t]*:?[ \t]+" + REFERENCE, re.IGNORECASE)
+PART_OF = re.compile(r"\bpart[ \t]+of[ \t]+" + REFERENCE, re.IGNORECASE)
 # The `fix` commit type is itself a closing keyword, so a squash commit titled `fix: #5 ...` closes #5.
 FIX_TYPE = re.compile(r"^fix(?:\([^)]*\))?!?:[ \t]*#(?P<number>[1-9][0-9]*)\b", re.IGNORECASE)
 HIDDEN = re.compile(r"<!--.*?-->|^(```|~~~).*?^\1|`[^`\n]*`|~~.*?~~|^[ \t]*>.*?$", re.DOTALL | re.MULTILINE)
@@ -55,15 +56,23 @@ def reference(text: str, repo: str) -> str:
     raise ValueError(f"{text} is not a Linear identifier, #n, or an issue URL in {repo}")
 
 
-def references(body: str | None, repo: str) -> set[str]:
+def named(pattern: re.Pattern[str], body: str | None, repo: str) -> set[str]:
     found = set()
-    for match in CLOSING.finditer(HIDDEN.sub("", body or "")):
+    for match in pattern.finditer(HIDDEN.sub("", body or "")):
         if match["identifier"]:
             found.add(match["identifier"].upper())
         else:
             issue_repo = match["repo"] or match["url_repo"] or repo
             found.add(github_reference(issue_repo, match["number"] or match["url_number"], repo))
     return found
+
+
+def references(body: str | None, repo: str) -> set[str]:
+    return named(CLOSING, body, repo)
+
+
+def part_of(body: str | None, repo: str) -> set[str]:
+    return named(PART_OF, body, repo)
 
 
 def closes(body: str | None, repo: str) -> set[str]:
