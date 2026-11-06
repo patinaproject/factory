@@ -112,11 +112,16 @@ def discover(root: Path, port: int, broker_config: Path, lock: Path | None) -> T
     return Target(port, route.group(1) if route else None, socket_path, root / BROKER_CLIENT, lock or root / LOCK_FILE)
 
 
+V2_SIGNATURE = "X-Webhook-Signature-V2"
+V2_TIMESTAMP = "X-Webhook-Timestamp"
+
+
 def routes(linear_route: str) -> tuple[Route, ...]:
     """The routes and secret names that templates/render.py renders and the setup runbook's forged-signature check uses."""
     return (
         Route(linear_route, "${LINEAR_WEBHOOK_SECRET}", "Linear-Signature", ""),
         Route("github", "${GITHUB_WEBHOOK_SECRET}", "X-Hub-Signature-256", "ping"),
+        Route("email", "${EMAIL_WEBHOOK_SECRET}", V2_SIGNATURE, ""),
     )
 
 
@@ -130,11 +135,18 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def signed_headers(route: Route, body: bytes, now: float) -> dict:
+    if route.header == V2_SIGNATURE:
+        timestamp = str(int(now))
+        digest = hmac.new(route.literal.encode(), timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+        return {V2_TIMESTAMP: timestamp, V2_SIGNATURE: digest}
+    digest = hmac.new(route.literal.encode(), body, hashlib.sha256).hexdigest()
+    return {route.header: digest if route.header == "Linear-Signature" else f"sha256={digest}"}
+
+
 def probe_route(port: int, route: Route) -> Finding:
     body = b'{"type": "GatewayWatch"}'
-    digest = hmac.new(route.literal.encode(), body, hashlib.sha256).hexdigest()
-    headers = {"Content-Type": "application/json"}
-    headers[route.header] = digest if route.header == "Linear-Signature" else f"sha256={digest}"
+    headers = {"Content-Type": "application/json", **signed_headers(route, body, time.time())}
     if route.event:
         headers["X-GitHub-Event"] = route.event
     request = urllib.request.Request(f"http://127.0.0.1:{port}/webhooks/{route.name}", data=body, headers=headers)

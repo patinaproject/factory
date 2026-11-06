@@ -229,7 +229,13 @@ class RouteStructureTest(unittest.TestCase):
         self.routes = render.build_routes(SETTINGS)
 
     def test_renders_one_route_per_source(self):
-        self.assertEqual(sorted(self.routes), ["github", "linear"])
+        self.assertEqual(sorted(self.routes), ["email", "github", "linear"])
+
+    def test_the_email_route_is_script_only_with_no_prompt_or_skills(self):
+        self.assertEqual(
+            self.routes["email"],
+            {"secret": "${EMAIL_WEBHOOK_SECRET}", "filters": [{"field": "message_id", "exists": True}], "script": "email-route"},
+        )
 
     def test_linear_route(self):
         route = {k: v for k, v in self.routes["linear"].items() if k != "prompt"}
@@ -284,7 +290,7 @@ class RouteStructureTest(unittest.TestCase):
 
     def test_linear_route_name_follows_settings(self):
         routes = render.build_routes(settings(webhook_route="linear-agent"))
-        self.assertEqual(sorted(routes), ["github", "linear-agent"])
+        self.assertEqual(sorted(routes), ["email", "github", "linear-agent"])
 
 
 PROMPTED_EVENT = {
@@ -414,7 +420,7 @@ class ReplyPrefixContractTest(unittest.TestCase):
 class PromptSubstitutionTest(unittest.TestCase):
     def setUp(self):
         routes = render.build_routes(SETTINGS)
-        self.prompts = {name: full_prompt(name) for name in routes}
+        self.prompts = {name: full_prompt(name) for name, route in routes.items() if "prompt" in route}
 
     def test_prompts_list_every_repository(self):
         for name, prompt in self.prompts.items():
@@ -622,7 +628,7 @@ class TransitionCommandTest(unittest.TestCase):
 
     def setUp(self):
         with mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
-            self.prompts = {name: full_prompt(name) for name in render.build_routes(SETTINGS)}
+            self.prompts = {name: full_prompt(name) for name, route in render.build_routes(SETTINGS).items() if "prompt" in route}
 
     def test_no_prompt_runs_a_transition_command_itself(self):
         for name, prompt in self.prompts.items():
@@ -692,6 +698,7 @@ class ValidationTest(unittest.TestCase):
         "webhook_route must be a non-empty string": settings(webhook_route=None),
         "webhook_route 'lin ear' may contain only": settings(webhook_route="lin ear"),
         "webhook_route must not be 'github'": settings(webhook_route="github"),
+        "webhook_route must not be 'email'": settings(webhook_route="email"),
         "repositories must be a non-empty list": settings(repositories=[]),
         "repositories[0] must be an object": settings(repositories=["example-org/app"]),
         "repositories[1].full_name 'site' must look like owner/name": with_repo(1, full_name="site"),
@@ -763,6 +770,7 @@ class CommandLineTest(unittest.TestCase):
             "platforms.webhook.extra.rate_limit": 1200,
             "platforms.webhook.extra.routes.linear": routes["linear"],
             "platforms.webhook.extra.routes.github": routes["github"],
+            "platforms.webhook.extra.routes.email": routes["email"],
         })
 
     def test_invalid_settings_exit_nonzero_with_the_reason(self):
@@ -771,7 +779,11 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(err, "render.py: invalid settings: repositories must be a non-empty list\n")
 
 
-SECRETS = {"LINEAR_WEBHOOK_SECRET": "linear-signing-secret-0123456789", "GITHUB_WEBHOOK_SECRET": "github-signing-secret-9876543210"}
+SECRETS = {
+    "LINEAR_WEBHOOK_SECRET": "linear-signing-secret-0123456789",
+    "GITHUB_WEBHOOK_SECRET": "github-signing-secret-9876543210",
+    "EMAIL_WEBHOOK_SECRET": "email-signing-secret-5555555555",
+}
 
 # Stands in for `hermes config get <key> --json --raw`, which expands ${VAR} into the live secret.
 FAKE_HERMES = """#!PYTHON
@@ -826,7 +838,7 @@ class RouteCheckTest(unittest.TestCase):
     def install_rendered(self):
         for name, route in self.routes.items():
             self.install(name, route)
-        self.write_config("secret: ${LINEAR_WEBHOOK_SECRET}\nsecret: ${GITHUB_WEBHOOK_SECRET}\n")
+        self.write_config("secret: ${LINEAR_WEBHOOK_SECRET}\nsecret: ${GITHUB_WEBHOOK_SECRET}\nsecret: ${EMAIL_WEBHOOK_SECRET}\n")
         self.install_rate_limit(1200)
         with mock.patch.dict(os.environ, {"HERMES_HOME": str(self.tmp)}):
             self.skills = render.build_skills(SETTINGS)
@@ -843,6 +855,7 @@ class RouteCheckTest(unittest.TestCase):
         self.assertEqual(self.check(), (0, [
             "route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference",
             "route github: matches; secret is the ${GITHUB_WEBHOOK_SECRET} reference",
+            "route email: matches; secret is the ${EMAIL_WEBHOOK_SECRET} reference",
             "rate_limit: matches 1200",
             "skill factory-linear-triage: matches",
             "skill factory-github-triage: matches",
@@ -856,7 +869,7 @@ class RouteCheckTest(unittest.TestCase):
         code, lines = self.check()
 
         self.assertEqual(code, 1)
-        self.assertEqual(lines[3:], ["skill factory-linear-triage: not installed", "skill factory-github-triage: differs"])
+        self.assertEqual(lines[4:], ["skill factory-linear-triage: not installed", "skill factory-github-triage: differs"])
 
     def test_a_missing_rate_limit_is_reported(self):
         self.install_rendered()
@@ -865,7 +878,7 @@ class RouteCheckTest(unittest.TestCase):
         code, lines = self.check()
 
         self.assertEqual(code, 1)
-        self.assertEqual(lines[2], "rate_limit: not installed, so Hermes allows 30 a minute; install 1200")
+        self.assertEqual(lines[3], "rate_limit: not installed, so Hermes allows 30 a minute; install 1200")
 
     def test_a_lower_rate_limit_is_reported(self):
         self.install_rendered()
@@ -874,7 +887,7 @@ class RouteCheckTest(unittest.TestCase):
         code, lines = self.check()
 
         self.assertEqual(code, 1)
-        self.assertEqual(lines[2], "rate_limit: 30 differs from 1200")
+        self.assertEqual(lines[3], "rate_limit: 30 differs from 1200")
 
     def test_a_changed_route_names_the_differing_keys(self):
         self.install_rendered()
@@ -921,6 +934,7 @@ class RouteCheckTest(unittest.TestCase):
         self.assertEqual(self.check(), (1, [
             "route linear: matches; secret is the ${LINEAR_WEBHOOK_SECRET} reference",
             "route github: not installed",
+            "route email: matches; secret is the ${EMAIL_WEBHOOK_SECRET} reference",
             "rate_limit: matches 1200",
             "skill factory-linear-triage: matches",
             "skill factory-github-triage: matches",
@@ -1226,6 +1240,16 @@ class HermesFilterTest(HermesFiltersCase):
         self.assertIs(dropped, False)
         self.assertIs(review, False)
         self.assertIs(self.matches("issue_comment", payload("created", issue=issue(APP), comment=comment(HUMAN, "Hi."))), True)
+
+
+class EmailFilterTest(HermesFiltersCase):
+    route_name = "email"
+
+    def test_the_watch_probe_is_ignored_and_a_worker_body_is_kept(self):
+        worker_body = {"message_id": "<invoice-1@vendor.example>", "message_id_source": "header", "raw": {"key": "r", "size": 1}}
+
+        self.assertIs(self.matches("GatewayWatch", {"type": "GatewayWatch"}), False)
+        self.assertIs(self.matches("unknown", worker_body), True)
 
 
 def push(ref: str = "refs/heads/main", repo: str = "example-org/factory", sender: str = APP) -> dict:
