@@ -113,7 +113,8 @@ folder already exists, the secret lives there. In the lines below, replace
 >
 > - **Repository permissions:** Contents read and write, Pull requests read
 >   and write, Issues read and write, Checks read-only, Commit statuses
->   read-only, Actions read and write, and Metadata read-only.
+>   read-only, Actions read and write, and Metadata read-only. When the
+>   factory settings set `dependabot_sweep`, also Dependabot alerts read-only.
 > - **Subscribe to events:** Issues, Issue comment, Pull request, Pull request
 >   review, Pull request review comment, Workflow run, Check run, and Push.
 >   Not Check suite.
@@ -591,6 +592,7 @@ The App can do what its repository permissions allow:
 | Commit statuses | Read-only | Read commit statuses, which the completion gate needs |
 | Actions | Read and write | Read workflow runs and logs, and re-run failed jobs with `gh run rerun --failed` |
 | Metadata | Read-only | Read repository names, settings, and collaborators |
+| Dependabot alerts | Read-only | Read Dependabot alerts for `dependabot-sweep`, only when the `dependabot_sweep` settings section is set |
 
 When a command fails:
 

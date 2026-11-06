@@ -938,6 +938,7 @@ key file but does not contain the key.
     {"repository": "<owner>/<name>", "team_key": "<Linear team key>", "title_prefix": "<title>, week of ", "cadence": "weekly", "labels": ["<label name>"], "description": "<what the issue asks the agent to do>"}
   ],
   "sentry_sync": {},
+  "dependabot_sweep": {},
   "scheduled_commands": [],
   "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0, "command_timeout_seconds": 600, "idle_limit_seconds": 2700}
 }
@@ -1085,6 +1086,27 @@ releases, and projects. `check-install` reports each malformed key, and a
 `mcp_server` that names no `claude_session.mcp_servers` entry, but it does not
 read the rules file. The job never enters the worker's own settings checks, so
 a mistake here stops only the sync.
+
+`dependabot_sweep` configures the optional `dependabot-sweep` job from part
+12, default `{}`. Leave it empty for a factory that does not file issues for
+Dependabot alerts. To turn the sweep on, set both keys, and record the real
+values in the private record:
+
+```json
+"dependabot_sweep": {
+  "team_key": "<Linear team key>",
+  "label": "<theme label name>"
+}
+```
+
+`team_key` is the Linear team that gets the issues for the `default`
+repository. `label` is the theme label every issue gets. It must exist in that
+Linear team and in each `synced_github` repository, which also needs a
+`Needs triage` label. The sweep also uses `github.login` and the repositories'
+`routing`. The section needs the App's Dependabot alerts permission; see
+"Upgrade an existing App's permissions" in `references/github.md`.
+`check-install` reports each malformed key, and `check-github-access` reports
+the missing permission once the section is set.
 
 `scheduled_commands` lists repository commands that run on a cron schedule, default `[]`. Part 12 installs
 a runner and a job for each entry. An entry has five keys:
@@ -1580,6 +1602,35 @@ hermes -p claude-worker cron create "every 30m" --name sentry-linear-sync --no-a
 
 When `sentry_sync` is empty, remove any `sentry-linear-sync` job.
 `check-install` reports such a job as drift.
+
+**Dependabot sweep job.** `dependabot-sweep` runs once a day, and only when
+the factory settings have a non-empty `dependabot_sweep` section (part 10). It
+lists every repository the App is installed on, skips archived ones, and
+reads each one's Dependabot alerts, the public CISA KEV catalog, and the
+issues it filed before. It reads everything before it writes, so a failed read
+writes nothing. It keeps one open issue for each package with open alerts in
+each repository the factory can build: a Linear issue in Triage, delegated to
+the agent, for the private `default` repository, and a GitHub issue with
+`Needs triage` for a public `synced_github` repository. Its first line names
+the repository, the ecosystem, and the package, and the sweep finds its own
+issues only by that line and the App as creator. It sets the priority from KEV,
+severity, and EPSS, updates the alert list in place, cancels an unstarted issue
+whose alerts all closed, and files a new related issue when a package
+recurs. It never reopens an issue and never dismisses an alert. Each other
+repository with open alerts, and each repository it skipped, goes to
+`dependabot-sweep-state.json` in the worker home, and `check-install` prints
+one advisory line for each. Run it with `--dry-run` to print the plan without
+writing. It exits 1 when a read or a write fails, and 2 when the settings are
+invalid. Create the job when `dependabot_sweep` is set and `cron list` has no
+`dependabot-sweep` job:
+
+```sh
+hermes -p claude-worker cron create "every 24h" --name dependabot-sweep --no-agent --script dependabot-sweep </dev/null
+```
+
+When `dependabot_sweep` is empty, remove any `dependabot-sweep` job.
+`check-install` reports such a job as drift. The first run files the whole
+backlog with no cap, and `dispatch-triage` paces the triage cards it starts.
 
 **Conflict job.** GitHub sends no webhook when a pull request starts to
 conflict because its base branch moved, or when a required check fails after
@@ -2803,6 +2854,16 @@ Hermes process starts. The new helper also writes
      remove the job, or add the section as in part 10.
    - A `config sentry_sync` line: correct that key of the `sentry_sync`
      section in both homes as in part 10.
+   - A `cron job dependabot-sweep` line that says the job is missing: after
+     the profile update, create the job with the part 12 `cron create`
+     command. A line that says the job runs without a `dependabot_sweep`
+     section: remove the job, or add the section as in part 10.
+   - A `config dependabot_sweep` line: correct that key of the
+     `dependabot_sweep` section in both homes as in part 10.
+   - A `dependabot sweep` line is advisory. It names a repository the last
+     sweep filed nothing for, with its open-alert count or the reason it was
+     skipped. Add a public repository to the factory settings as
+     `synced_github`, add a missing label, or enable Dependabot alerts.
    - A `config plugins.entries.linear-agent-session.settings.dependency_updates`
      line: add the `dependency_updates` section to the factory settings and set
      them in both homes as in part 10, before the profile update.

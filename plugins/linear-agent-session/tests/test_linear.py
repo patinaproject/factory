@@ -1265,12 +1265,13 @@ TEAM_LABELS = [
 WORKSPACE_LABELS = [label("bug")]
 
 
-def issue_for_edit(labels, state="Triage"):
+def issue_for_edit(labels, state="Triage", priority=0.0):
     issue = {
         "id": "issue-uuid",
         "identifier": "ABC-1",
         "title": "Old title",
         "description": "Old text.",
+        "priority": priority,
         "state": {"name": state},
         "labels": {"nodes": [{k: n[k] for k in ("id", "name", "parent")} for n in labels]},
         "team": {
@@ -1298,6 +1299,7 @@ class EditTest(unittest.TestCase):
                 "title": "Old title",
                 "labels": ["Factory", "Ready for agent", "bug"],
                 "state": "Canceled",
+                "priority": 0,
             },
         )
         self.assertEqual(
@@ -1323,7 +1325,7 @@ class EditTest(unittest.TestCase):
     def test_an_issue_that_already_matches_is_not_updated(self):
         fake, output = self.edit([issue_for_edit([TEAM_LABELS[3]], state="Todo")], add_labels=["factory"], state="todo")
         self.assertEqual(
-            output, {"identifier": "ABC-1", "changed": False, "title": "Old title", "labels": ["Factory"], "state": "Todo"}
+            output, {"identifier": "ABC-1", "changed": False, "title": "Old title", "labels": ["Factory"], "state": "Todo", "priority": 0}
         )
         self.assertEqual(len(fake.graphql_requests), 1)
 
@@ -1343,7 +1345,7 @@ class EditTest(unittest.TestCase):
 
     def test_without_a_change_it_asks_for_one(self):
         fake, output = self.edit([])
-        self.assertEqual(output, {"error": "pass title, description, add_labels, remove_labels, or state"})
+        self.assertEqual(output, {"error": "pass title, description, add_labels, remove_labels, state, or priority"})
         self.assertEqual(fake.graphql_requests, [])
 
     def test_edits_the_title_and_description_of_any_named_issue(self):
@@ -1352,13 +1354,55 @@ class EditTest(unittest.TestCase):
             tools.run_edit(lambda: make_client(fake), {"issue": "XYZ-9", "title": "New title", "description": "New text."})
         )
         self.assertEqual(
-            output, {"identifier": "ABC-1", "changed": True, "title": "New title", "labels": [], "state": "Triage"}
+            output, {"identifier": "ABC-1", "changed": True, "title": "New title", "labels": [], "state": "Triage", "priority": 0}
         )
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "XYZ-9"})
         self.assertEqual(
             fake.graphql_requests[1]["variables"],
             {"id": "issue-uuid", "input": {"title": "New title", "description": "New text."}},
         )
+
+    def test_sets_the_priority_in_one_update(self):
+        fake, output = self.edit([issue_for_edit([]), UPDATE_OK], priority=2)
+        self.assertTrue(output["changed"])
+        self.assertEqual(output["priority"], 2)
+        self.assertEqual(len(fake.graphql_requests), 2)
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "issue-uuid", "input": {"priority": 2}})
+
+    def test_a_priority_equal_to_the_current_one_is_not_sent(self):
+        fake, output = self.edit([issue_for_edit([], priority=2.0)], priority=2)
+        self.assertFalse(output["changed"])
+        self.assertEqual(output["priority"], 2)
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_an_edit_without_priority_keeps_the_current_one(self):
+        fake, output = self.edit([issue_for_edit([], priority=3.0), UPDATE_OK], add_labels=["bug"])
+        self.assertNotIn("priority", fake.graphql_requests[1]["variables"]["input"])
+        self.assertEqual(output["priority"], 3)
+        self.assertIsInstance(output["priority"], int)
+
+    def test_priority_and_state_go_in_one_update(self):
+        fake, output = self.edit([issue_for_edit([]), UPDATE_OK], priority=1, state="Todo")
+        self.assertEqual(len(fake.graphql_requests), 2)
+        self.assertEqual(
+            fake.graphql_requests[1]["variables"]["input"], {"priority": 1, "stateId": "state-Todo"}
+        )
+
+    def test_a_value_that_is_not_an_int_from_0_to_4_is_refused_before_any_request(self):
+        for bad in (5, -1, "High", True, 2.5, 2.0):
+            with self.subTest(priority=bad):
+                fake, output = self.edit([], priority=bad)
+                self.assertEqual(output, {"error": "priority must be an integer from 0 to 4"})
+                self.assertEqual(fake.graphql_requests, [])
+
+    def test_priority_zero_alone_is_a_change(self):
+        fake, output = self.edit([issue_for_edit([], priority=2.0), UPDATE_OK], priority=0)
+        self.assertEqual(output["priority"], 0)
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "issue-uuid", "input": {"priority": 0}})
+
+    def test_the_schema_bounds_priority_to_0_through_4(self):
+        prop = tools.EDIT_SCHEMA["parameters"]["properties"]["priority"]
+        self.assertEqual((prop["type"], prop["minimum"], prop["maximum"]), ("integer", 0, 4))
 
     def test_an_unchanged_title_and_description_are_not_written(self):
         fake, output = self.edit([issue_for_edit([])], title="Old title", description="Old text.")
@@ -2042,6 +2086,73 @@ class UndelegateTest(unittest.TestCase):
     def test_unsuccessful_update_is_an_error(self):
         _, output = self.run_undelegate([issue_delegate("app-user-1"), (200, {"data": {"issueUpdate": {"success": False}}})])
         self.assertEqual(output, {"error": "issueUpdate reported success: false"})
+
+
+class DelegateSelfTest(unittest.TestCase):
+    def delegate(self, responses):
+        fake = FakeLinear(responses)
+        return fake, make_client(fake)
+
+    def test_delegates_an_undelegated_issue_to_the_app(self):
+        fake, client = self.delegate([issue_delegate(None), (200, {"data": {"issueUpdate": {"success": True}}})])
+        self.assertEqual(client.delegate_self("ABC-1"), {"identifier": "ABC-1", "delegated": True})
+        self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "issue-uuid", "input": {"delegateId": "app-user-1"}})
+
+    def test_an_issue_already_delegated_to_the_app_is_not_written(self):
+        fake, client = self.delegate([issue_delegate("app-user-1")])
+        self.assertEqual(client.delegate_self("ABC-1"), {"identifier": "ABC-1", "delegated": False})
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_another_agents_delegation_is_refused_without_a_write(self):
+        fake, client = self.delegate([issue_delegate("other-agent")])
+        with self.assertRaisesRegex(linear.LinearError, "delegated to another agent"):
+            client.delegate_self("ABC-1")
+        self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_an_unsuccessful_update_is_an_error(self):
+        _, client = self.delegate([issue_delegate(None), (200, {"data": {"issueUpdate": {"success": False}}})])
+        with self.assertRaisesRegex(linear.LinearError, "success: false"):
+            client.delegate_self("ABC-1")
+
+
+class IssuesByAttachmentUrlTest(unittest.TestCase):
+    URL = "https://github.com/example-org/example-repo/issues/7"
+
+    def test_returns_each_issue_that_carries_the_url(self):
+        node = {"issue": {
+            "id": "issue-uuid", "identifier": "ABC-9", "createdAt": "2026-11-01T00:00:00.000Z", "priority": 3,
+            "state": {"name": "Triage", "type": "triage"}, "assignee": None, "delegate": {"id": "app-user-1"},
+        }}
+        fake = FakeLinear([(200, {"data": {"attachmentsForURL": {"nodes": [node]}}})])
+        issues = make_client(fake).issues_by_attachment_url(self.URL)
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"url": self.URL})
+        self.assertEqual(issues, [{
+            "id": "issue-uuid", "identifier": "ABC-9", "createdAt": "2026-11-01T00:00:00.000Z", "priority": 3,
+            "state": "Triage", "stateType": "triage", "assigned": False, "delegated": True,
+        }])
+
+    def test_no_attachment_is_an_empty_list(self):
+        fake = FakeLinear([(200, {"data": {"attachmentsForURL": {"nodes": []}}})])
+        self.assertEqual(make_client(fake).issues_by_attachment_url(self.URL), [])
+
+
+class LabeledIssuesTest(unittest.TestCase):
+    def test_lists_the_issues_each_one_relates_to_apart_from_its_duplicate_target(self):
+        node = {
+            "id": "issue-uuid", "identifier": "ABC-2", "createdAt": "2026-11-01T00:00:00.000Z", "completedAt": None,
+            "canceledAt": None, "description": None, "priority": 2, "state": {"name": "Triage", "type": "triage"},
+            "assignee": None, "creator": {"id": "app-user-1"}, "attachments": {"nodes": []},
+            "relations": {"nodes": [
+                {"type": "related", "relatedIssue": {"identifier": "ABC-1"}},
+                {"type": "duplicate", "relatedIssue": {"identifier": "ABC-0"}},
+            ]},
+            "comments": {"nodes": [{"body": "c"}], "pageInfo": {"hasNextPage": False}},
+        }
+        page = {"viewer": {"id": "app-user-1"}, "issues": {"nodes": [node], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+        [issue] = make_client(FakeLinear([(200, {"data": page})])).list_issues_by_label("ABC", "Theme")
+        self.assertEqual(
+            (issue["related"], issue["duplicateOf"], issue["createdByMe"], issue["description"]), (["ABC-1"], "ABC-0", True, ""),
+        )
 
 
 class CardTitleTest(unittest.TestCase):
