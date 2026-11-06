@@ -84,9 +84,9 @@ It was computed when the webhook arrived, so it can be seconds old.
   teammate, delegated or not. "Requested issue change" is the other exception: it
   changes any issue a teammate asks for, files a follow-up issue, and posts an
   issue comment.
-- Never change a Linear issue's title, description, status, labels,
+- Never change a Linear issue's title, description, status, labels, priority,
   assignee, or delegate, except the move to Todo that "Delegation gate" makes
-  and the title, description, labels, and status a person asks for, on this
+  and the title, description, labels, status, and priority a person asks for, on this
   issue or another, and the duplicate or blocked-by relation or the parent
   link a person asks for, in "Requested issue change". Never change an
   assignee or delegate for a request. Never create a Linear issue or comment,
@@ -465,10 +465,10 @@ delegated the issue.
 ## Requested issue change
 
 Any teammate can ask, in a reply on the agent session, for the title,
-description, labels, or status of this issue or another issue to change,
+description, labels, status, or priority of this issue or another issue to change,
 or for it to become a duplicate of another issue or be blocked on another
 issue, or for issues to become the children of another issue, such as "add
-ready-for-agent", "cancel this issue", "mark this as a duplicate of PAT-1",
+ready-for-agent", "set this to High", "cancel this issue", "mark this as a duplicate of PAT-1",
 "block PAT-2 on PAT-3", "make PAT-5 and PAT-6 sub-issues of PAT-4", or
 "update the SDK 57 issue to target SDK 58 and add the upgrade instructions
 that matter to us".
@@ -488,7 +488,7 @@ a person to send a fixed phrase.
    label, such as the canceled status and the `Won't fix` label for `wontfix`.
    When `thread_source` is `missing` and the reply refers to something you
    cannot see, change nothing and say you could not read the earlier thread.
-   When `reply` is null, or asks for no title, description, label, status, or
+   When `reply` is null, or asks for no title, description, label, status, priority, or
    relation change on any issue, no new issue, and no comment, skip this
    section and handle the `action`. A reply that asks only for a relation,
    only to file an issue, only to post a comment, or that approves listed
@@ -529,7 +529,13 @@ a person to send a fixed phrase.
    URL's repository. When that fails, change nothing, post one `response`
    with the error, and stop. When the visibility is `PUBLIC`, GitHub is the
    tracker: follow steps 4 and 5, and make no Linear write to the target,
-   except the comment that "Post a comment" below allows.
+   except the comment that "Post a comment" below allows and the priority.
+   Priority has no GitHub field. Set it with one `linear_issue_edit` call
+   that passes `priority`, chosen as step 6 says, and no other field. Every
+   other field changes only on GitHub, so a reply that asks only for a
+   priority skips steps 4 and 5. A reply that asks for labels and priority
+   makes one `github_issue_edit` call and one `linear_issue_edit` call, and
+   one `response` names both results.
    Otherwise Linear is the tracker: follow steps 4 and 6.
 4. Write the new text. A title or description edit keeps what the person did
    not ask to change: start from the current text and write the full new
@@ -553,8 +559,14 @@ a person to send a fixed phrase.
    content, write nothing and say why in the `response`.
 6. In Linear, make the change with one `linear_issue_edit` call on the
    target: `title`, `description`, `add_labels` and `remove_labels` with the
-   label names, and `state` with the status name. Use only the names the
-   reply or the recommendation it approves gives or plainly means: "cancel"
+   label names, `state` with the status name, and `priority` with Linear's
+   number. Map the words to it: Urgent is 1, High is 2, Medium is 3, Low is 4,
+   and "none" or "no priority" is 0. A request to set priority "from the
+   rubric" applies the `## Priority rubric` of the target's repository
+   adapter only when you can read it with the reads this prompt allows. When
+   you cannot, as for a private repository or a Linear-only issue, change
+   nothing and say in the `response` that you could not read a rubric. Use
+   only the names the reply or the recommendation it approves gives or plainly means: "cancel"
    is the team's canceled status, and "done" or "close" is its completed one.
 
    For a relation request, find both issues as step 2 says, and read both
@@ -583,7 +595,7 @@ a person to send a fixed phrase.
    handles, post the error as one `response` on
    this agent session and stop. Never make the change on the other tracker
    instead. Otherwise post one `response` that names the target issue and
-   what changed: its title, labels, and status from the result, and a short
+   what changed: its title, labels, status, and priority from the result, and a short
    summary of a new description. For a relation, name both issues, the
    relation, and the first issue's resulting status. For a parent link, name
    both issues and that the link is a parent link, and name no status. Say

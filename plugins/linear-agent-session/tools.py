@@ -169,8 +169,9 @@ EDIT_SCHEMA = {
     "description": (
         "Edit `issue` (UUID or ABC-123), any issue the agent app can read: title, description (the full new "
         "text), add_labels, remove_labels, and state, labels and status by name, matched whatever their case and "
-        "punctuation. An added label replaces the issue's other label in its group. Creates no label or status, "
-        "and never changes assignee or delegate. Returns identifier, changed, title, labels (names), and state."
+        "punctuation, and priority, an integer from 0 to 4 (0 No priority, 1 Urgent, 2 High, 3 Medium, 4 Low). "
+        "An added label replaces the issue's other label in its group. Creates no label or status, and never "
+        "changes assignee or delegate. Returns identifier, changed, title, labels (names), state, and priority."
     ),
     "parameters": {
         "type": "object",
@@ -181,6 +182,12 @@ EDIT_SCHEMA = {
             "add_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to add."},
             "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to remove."},
             "state": {"type": "string", "description": "Status name to move the issue to, such as Canceled."},
+            "priority": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4,
+                "description": "Linear priority: 0 No priority, 1 Urgent, 2 High, 3 Medium, 4 Low.",
+            },
         },
     },
 }
@@ -453,10 +460,20 @@ def run_edit(client_factory: ClientFactory, args: dict) -> str:
         issue = _issue_argument(args)
         add, remove, state = _names(args.get("add_labels")), _names(args.get("remove_labels")), args.get("state")
         title, description = _title(args), args.get("description")
-        if not (add or remove or state or title or description is not None):
-            raise LinearError("pass title, description, add_labels, remove_labels, or state")
+        priority = args.get("priority")
+        # bool is an int subclass, and a float such as 2.0 is not a Linear priority.
+        if priority is not None and (type(priority) is not int or not 0 <= priority <= 4):
+            raise LinearError("priority must be an integer from 0 to 4")
+        if not (add or remove or state or title or description is not None or priority is not None):
+            raise LinearError("pass title, description, add_labels, remove_labels, state, or priority")
         return client_factory().edit_issue(
-            issue, add_labels=add, remove_labels=remove, state=state, title=title, description=description
+            issue,
+            add_labels=add,
+            remove_labels=remove,
+            state=state,
+            title=title,
+            description=description,
+            priority=priority,
         )
 
     return _tool_result_or_error(run)
