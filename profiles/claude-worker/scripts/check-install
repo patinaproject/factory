@@ -385,7 +385,24 @@ def check_profile(commit: Commit, homes: Homes) -> list:
 
 
 # Plugins that run in the gateway only. Their code lives in the root home and never in the worker's.
-ROOT_ONLY_PLUGINS = frozenset({"factory-uploads", "work", "webhook-retry", "factory-deploy"})
+ROOT_ONLY_PLUGINS = frozenset({"factory-uploads", "work", "webhook-retry", "factory-deploy", "email-intake"})
+# Plugins that run in the mail worker only. email-outcome's hook refuses every tool outside the mail allowlist, so it
+# must never load in the gateway or in claude-worker.
+MAIL_ONLY_PLUGINS = frozenset({"email-outcome"})
+
+
+def mail_home(root: Path) -> Path:
+    return Path(root) / "profiles" / install_plan.MAIL_PROFILE
+
+
+def plugin_homes(name: str, root: Path, worker: Path) -> list:
+    if name in MAIL_ONLY_PLUGINS:
+        return [mail_home(root)]
+    return [root] if name in ROOT_ONLY_PLUGINS else [root, worker]
+
+
+def plugin_placement(name: str) -> str:
+    return "only in the mail-worker home" if name in MAIL_ONLY_PLUGINS else "only in the root home"
 
 
 def check_plugins(commit: Commit, homes: Homes) -> list:
@@ -395,16 +412,18 @@ def check_plugins(commit: Commit, homes: Homes) -> list:
         if not rest.startswith("tests/"):
             plugins.setdefault(name, {})[path] = blob_id
     drifts = []
-    pair = [homes.root, homes.worker]
+    every = [homes.root, homes.worker, mail_home(homes.root)]
     for name, files in sorted(plugins.items()):
-        wanted = pair[:1] if name in ROOT_ONLY_PLUGINS else pair
-        for home in pair[len(wanted):]:
-            if (home / "plugins" / name).exists():
+        wanted = plugin_homes(name, homes.root, homes.worker)
+        for home in every:
+            if home not in wanted and (home / "plugins" / name).exists():
                 drifts.append(Drift(
-                    "plugin", f"{name} in {home}", "installed, but it runs only in the root home",
+                    "plugin", f"{name} in {home}", f"installed, but it runs {plugin_placement(name)}",
                     install_plan.plugin_remove(homes, home, name),
                 ))
         for home in wanted:
+            if name in MAIL_ONLY_PLUGINS and not home.is_dir():
+                continue
             where = f"{name} in {home}"
             installed = home / "plugins" / name
             if not installed.is_dir():
@@ -670,6 +689,7 @@ def check_upload_broker(root: Path, token_env: str, mcp_envs: dict) -> list:
 GATEWAY_ONLY = {
     "LINEAR_CLIENT_ID": 8, "LINEAR_CLIENT_SECRET": 8,
     "FACTORY_INFISICAL_CLIENT_ID": 14, "FACTORY_INFISICAL_CLIENT_SECRET": 14,
+    "EMAIL_WEBHOOK_SECRET": 11,
 }
 SECRET_NAMES = "plugins/factory-secret-names/plugin.yaml"
 DECLARED_NAME = re.compile(r"^\s*-\s*name:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", re.MULTILINE)
@@ -691,12 +711,13 @@ def check_worker_secrets(commit: Commit, worker: Path, hermes: str, settings) ->
             Manual("turn off the worker's secrets.command as part 5 describes"),
         ))
     held = {**GATEWAY_ONLY, **{name: 3 for name in (token_env, *mcp_envs.values()) if name}}
-    for name, part in held.items():
-        if env_has(worker, name):
-            drifts.append(Drift(
-                "secret", f"{name} in {worker}/.env", f"is set, but the worker holds no factory secret; remove it (part {part})",
-                Manual("follow Retire the worker's identity in references/infisical.md"),
-            ))
+    for home in (worker, mail_home(worker.parent.parent)):
+        for name, part in held.items():
+            if env_has(home, name):
+                drifts.append(Drift(
+                    "secret", f"{name} in {home}/.env", f"is set, but the worker holds no factory secret; remove it (part {part})",
+                    Manual("follow Retire the worker's identity in references/infisical.md"),
+                ))
     files = commit.files(SECRET_NAMES)
     declared = set(DECLARED_NAME.findall(commit.blob(files[SECRET_NAMES]).decode())) if SECRET_NAMES in files else set()
     keys = [("auth_token_env", token_env), *((f"mcp_servers.{server}.token_env", name) for server, name in sorted(mcp_envs.items()))]
@@ -2399,7 +2420,7 @@ def installed_plugins(commit: Commit, homes: list) -> list:
     """The (home, name) pairs of repository plugins installed where check_plugins wants them."""
     names = sorted({path.split("/")[1] for path in commit.files("plugins")})
     return [
-        (home, name) for name in names for home in (homes[:1] if name in ROOT_ONLY_PLUGINS else homes)
+        (home, name) for name in names for home in plugin_homes(name, homes[0], homes[1])
         if (home / "plugins" / name).is_dir()
     ]
 
@@ -2436,6 +2457,66 @@ def check_plugin_status(commit: Commit, homes: Homes) -> list:
                     "plugin status", f"{name} in {home}", f"{shown} in hermes plugins list, so its hooks do not run",
                     install_plan.plugin_enable(homes, home, name) if status else install_plan.plugin_install(homes, home, name, reinstall=True),
                 ))
+    return drifts
+
+
+MAIL_PROFILE_PATHS = (f"profiles/{install_plan.MAIL_PROFILE}/SOUL.md",)
+EMAIL_LEDGER = Path("email-intake") / "ledger.db"
+HERMES_HAS_MODULE = Path(__file__).resolve().parent / "hermes-has-module"
+PDF_MODULE = "anydoc"
+EMAIL_STALE_MINUTES = 30
+EMAIL_FIX = Manual("read the card and the gateway log, then redeliver or close the email by hand (templates/README.md)")
+
+
+def check_mail_profile(commit: Commit, homes: Homes) -> list:
+    files = {}
+    for path in MAIL_PROFILE_PATHS:
+        files.update(commit.files(path))
+    if not files:
+        return []
+    home = mail_home(homes.root)
+    if not home.is_dir():
+        return [Drift("profile", install_plan.MAIL_PROFILE, "is not installed (part 5)", install_plan.mail_profile_install(homes, update=False))]
+    fix = install_plan.mail_profile_install(homes, update=True)
+    drifts = [
+        Drift("profile", install_plan.MAIL_PROFILE, d, fix)
+        for d in compare_files(commit, files, f"profiles/{install_plan.MAIL_PROFILE}/", home)
+    ]
+    try:
+        found = run_in_hermes(homes.root, HERMES_HAS_MODULE, PDF_MODULE)
+    except Refusal as error:
+        return [*drifts, Drift("pdf extractor", PDF_MODULE, f"cannot check Hermes' environment: {error}", ADVISORY)]
+    if not (isinstance(found, dict) and found.get(PDF_MODULE) is True):
+        drifts.append(Drift(
+            "pdf extractor", "firecrawl-anydoc",
+            "is not installed in Hermes' environment, so the mail worker's read_file returns no PDF text (part 5)",
+            Manual("install firecrawl-anydoc as part 5 describes"),
+        ))
+    return drifts
+
+
+def check_email_ledger(root: Path, now: float) -> list:
+    """Each email whose card never got its files or its outcome. Hermes answered the Worker 200 either way."""
+    path = Path(root) / EMAIL_LEDGER
+    if not path.is_file():
+        return []
+    import sqlite3
+
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute("SELECT state, card_id, received_at, outcome FROM emails").fetchall()
+    finally:
+        conn.close()
+    drifts = []
+    for state, card_id, received_at, outcome in rows:
+        where = f"email card {card_id or '(none)'}"
+        minutes = (now - received_at) / 60
+        if state == "failed":
+            drifts.append(Drift("email", where, "failed its attachment fetch; the card stays blocked with the reason", EMAIL_FIX))
+        elif state != "ready" and minutes > EMAIL_STALE_MINUTES:
+            drifts.append(Drift("email", where, f"has been {state} for {int(minutes)} minutes; the gateway's email-intake never finished it", EMAIL_FIX))
+        elif outcome is not None and outcome.startswith("pending "):
+            drifts.append(Drift("email", where, f"stopped while it recorded its outcome ({outcome}); check Linear before a retry", EMAIL_FIX))
     return drifts
 
 
@@ -2515,6 +2596,7 @@ def main() -> int:
             slack = SlackRoute(None, None, (f"cannot be read: {error}",))
         drifts = [
             *check_profile(commit, homes_),
+            *check_mail_profile(commit, homes_),
             *check_plugins(commit, homes_),
             *check_config(homes_, CONFIG if broker is None else BROKER_USER_CONFIG),
             *check_worker_secrets(commit, worker, hermes, settings),
@@ -2524,6 +2606,7 @@ def main() -> int:
             *check_routes(commit, homes_),
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
+            *check_email_ledger(root, time.time()),
             *check_gateway_watch(root),
             *check_owned_refs(homes_),
             *check_triage_board(homes_, settings),

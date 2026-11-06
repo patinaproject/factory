@@ -118,7 +118,7 @@ class Homes(NamedTuple):
     repo: Path
 
     def cli(self, home: Path) -> Tuple[str, ...]:
-        return (self.hermes,) if Path(home) == self.root else (self.hermes, "-p", self.worker.name)
+        return (self.hermes,) if Path(home) == self.root else (self.hermes, "-p", Path(home).name)
 
     def gateway_reads(self, home: Path) -> bool:
         # The gateway runs from the root home and reads its plugins and config only at startup.
@@ -157,6 +157,16 @@ def origin_head(path: str) -> Install:
 
 def profile_update(homes: Homes) -> Install:
     return Install(Step.PROFILE, (homes.hermes, "profile", "update", homes.worker.name, "-y"), False)
+
+
+MAIL_PROFILE = "mail-worker"
+
+
+def mail_profile_install(homes: Homes, *, update: bool) -> Install:
+    if update:
+        return Install(Step.PROFILE, (homes.hermes, "profile", "update", MAIL_PROFILE, "-y"), False)
+    source = str(homes.repo / "profiles" / MAIL_PROFILE)
+    return Install(Step.PROFILE, (homes.hermes, "profile", "install", source, "--name", MAIL_PROFILE, "-y"), False)
 
 
 def plugin_install(homes: Homes, home: Path, name: str, *, reinstall: bool) -> Install:
@@ -204,7 +214,7 @@ def route_set(homes: Homes, key: str, value) -> Install:
 
 
 # Hermes fails closed on a route whose script is missing, so these install before the routes.
-ROUTE_SCRIPTS = ("linear-route",)
+ROUTE_SCRIPTS = ("linear-route", "email-route")
 
 
 def wrapper_install(homes: Homes, name: str, source_name: str | None = None) -> Install:

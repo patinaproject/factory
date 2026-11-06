@@ -301,6 +301,9 @@ REMEDY_CLASSES = (
     ("hermes tool", "cannot read", "advisory"),
     ("hermes tool", "", "manual"),
     ("prompt command", "", "manual"),
+    ("email", "", "manual"),
+    ("pdf extractor", "cannot check", "advisory"),
+    ("pdf extractor", "", "manual"),
     ("github app", "", "manual"),
     ("app auto-update", "", "manual"),
     ("macos auto-update", "", "manual"),
@@ -822,6 +825,44 @@ class CheckInstallTest(unittest.TestCase):
             self.check(),
             (1, f"plugin factory-uploads in {self.worker}: installed, but it runs only in the root home\n"),
         )
+
+    def commit_plugins(self, *names: str, mail_profile: bool = False) -> str:
+        for name in names:
+            self.install(self.repo, f"plugins/{name}/__init__.py", f"# {name}\n")
+        if mail_profile:
+            self.install(self.repo, "profiles/mail-worker/SOUL.md", "# mail-worker\n")
+        git(self.repo, "checkout", "-q", "-b", "mail")
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-q", "-m", "mail")
+        return git(self.repo, "rev-parse", "--short=7", "HEAD")
+
+    def test_the_mail_plugin_is_required_only_in_the_mail_home_and_never_in_another(self) -> None:
+        self.commit_plugins("email-outcome", "email-intake")
+        self.install(self.root, "plugins/email-intake/__init__.py", "# email-intake\n")
+        mail = self.root / "profiles" / "mail-worker"
+
+        self.assertEqual(self.check("--ref", "mail", "--no-fetch"), (0, ""))
+
+        mail.mkdir(parents=True)
+        self.assertEqual(self.check("--ref", "mail", "--no-fetch"), (1, f"plugin email-outcome in {mail}: not installed\n"))
+
+        self.install(mail, "plugins/email-outcome/__init__.py", "# email-outcome\n")
+        for home in (self.root, self.worker):
+            self.install(home, "plugins/email-outcome/__init__.py", "# email-outcome\n")
+        self.install(self.worker, "plugins/email-intake/__init__.py", "# email-intake\n")
+        self.assertEqual(self.check("--ref", "mail", "--no-fetch"), (1, "".join([
+            f"plugin email-intake in {self.worker}: installed, but it runs only in the root home\n",
+            f"plugin email-outcome in {self.root}: installed, but it runs only in the mail-worker home\n",
+            f"plugin email-outcome in {self.worker}: installed, but it runs only in the mail-worker home\n",
+        ])))
+
+    def test_a_missing_mail_profile_is_reported_with_its_install_command(self) -> None:
+        self.commit_plugins(mail_profile=True)
+
+        code, out = self.check("--ref", "mail", "--no-fetch")
+
+        self.assertEqual((code, out), (1, "profile mail-worker: is not installed (part 5)\n"))
+        self.assertEqual(json.loads(self.raw)[0]["remedy"]["argv"][1:3], ["profile", "install"])
 
     def test_plugin_tests_are_ignored(self) -> None:
         self.install(self.worker, "plugins/p1/tests/test_a.py", "different\n")
@@ -1347,6 +1388,46 @@ class CheckInstallTest(unittest.TestCase):
             f"secret CLAUDE_PROXY_TOKEN in {self.worker}/.env: {held} (part 3)\n",
         ])))
         self.assertNotIn("s3cr3t", self.raw)
+
+    def test_the_email_route_secret_in_either_worker_env_is_reported_by_name_only(self) -> None:
+        mail = self.root / "profiles" / "mail-worker"
+        self.install(self.worker, ".env", "EMAIL_WEBHOOK_SECRET=s3cr3t-7\n")
+        self.install(mail, ".env", "EMAIL_WEBHOOK_SECRET=s3cr3t-8\n")
+
+        code, out = self.check()
+
+        held = "is set, but the worker holds no factory secret; remove it"
+        self.assertEqual((code, out), (1, "".join([
+            f"secret EMAIL_WEBHOOK_SECRET in {self.worker}/.env: {held} (part 11)\n",
+            f"secret EMAIL_WEBHOOK_SECRET in {mail}/.env: {held} (part 11)\n",
+        ])))
+        self.assertNotIn("s3cr3t", self.raw)
+
+    def test_an_email_whose_fetch_failed_or_stalled_is_reported_by_card(self) -> None:
+        import sqlite3
+
+        path = self.root / "email-intake" / "ledger.db"
+        path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "CREATE TABLE emails (message_id TEXT UNIQUE, received_at REAL, delivery TEXT, state TEXT, card_id TEXT, reason TEXT, outcome TEXT)"
+        )
+        now = time.time()
+        conn.executemany("INSERT INTO emails VALUES (?, ?, '{}', ?, ?, NULL, ?)", [
+            ("<a@x>", now, "failed", "t_a", None),
+            ("<b@x>", now - 3600, "fetching", "t_b", None),
+            ("<c@x>", now, "fetching", "t_c", None),
+            ("<d@x>", now, "ready", "t_d", "pending new-issue"),
+            ("<e@x>", now, "ready", "t_e", "no-action A newsletter."),
+        ])
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self.check(), (1, "".join([
+            "email email card t_a: failed its attachment fetch; the card stays blocked with the reason\n",
+            "email email card t_b: has been fetching for 60 minutes; the gateway's email-intake never finished it\n",
+            "email email card t_d: stopped while it recorded its outcome (pending new-issue); check Linear before a retry\n",
+        ])))
 
     def test_an_mcp_token_in_the_worker_env_is_reported_by_name_only(self) -> None:
         self.uploads.answers["status"] = [{**STATUS, "mcp_tokens_present": {"sentry": True}}]
