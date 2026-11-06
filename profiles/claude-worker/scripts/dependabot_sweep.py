@@ -92,8 +92,8 @@ def configured(factory_settings: object) -> bool:
     return isinstance(factory_settings, dict) and factory_settings.get(SETTINGS_SECTION) not in (None, {})
 
 
-def settings_problems(factory_settings: object) -> list:
-    """Every problem with the `dependabot_sweep` section and the settings it needs. Empty when all are valid."""
+def section_problems(factory_settings: object) -> list:
+    """Every problem with the `dependabot_sweep` section's own fields. Empty when all are valid."""
     section = factory_settings.get(SETTINGS_SECTION) if isinstance(factory_settings, dict) else None
     if not isinstance(section, dict) or not section:
         return [f"{SETTINGS_SECTION} is missing from the factory settings; it must be an object"]
@@ -105,6 +105,14 @@ def settings_problems(factory_settings: object) -> list:
     unknown = sorted(set(section) - {name for name, _, _ in SETTINGS_FIELDS})
     if unknown:
         problems.append(f"{SETTINGS_SECTION} has unknown fields: {', '.join(unknown)}")
+    return problems
+
+
+def settings_problems(factory_settings: object) -> list:
+    """Every problem with the section and the other settings the sweep needs. Empty when all are valid."""
+    problems = section_problems(factory_settings)
+    if not isinstance(factory_settings, dict):
+        return problems
     login = (factory_settings.get("github") or {}).get("login") if isinstance(factory_settings.get("github") or {}, dict) else None
     if not isinstance(login, str) or not login.endswith("[bot]"):
         problems.append(f"github.login {login!r} must be the App's <app-slug>[bot] login")

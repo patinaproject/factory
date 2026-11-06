@@ -133,6 +133,7 @@ import gh_login
 import install_plan
 import kanban_board
 import recurring_issues
+import dependabot_sweep
 import sentry_sync
 import stale_failure
 import xcode
@@ -328,6 +329,7 @@ CRON = (
     CronJob(12, "file-dependency-update", 10080, equal("local")),
     CronJob(12, "file-recurring-issues", 60, equal("local")),
     CronJob(12, "sentry-linear-sync", 30, equal("local"), section=sentry_sync.SETTINGS_SECTION),
+    CronJob(12, "dependabot-sweep", 1440, equal("local"), section=dependabot_sweep.SETTINGS_SECTION),
     CronJob(12, "retry-failed-webhooks", 10, declared("the operator's chat platform", besides=("local",)), home=ROOT),
     CronJob(12, "report-deploy", 5, declared("the operator's chat platform", besides=("local",)), home=ROOT),
 )
@@ -859,6 +861,28 @@ def check_sentry_sync(homes: Homes, settings) -> list:
     ]
 
 
+def check_dependabot_sweep(homes: Homes, settings) -> list:
+    """One drift for each malformed field of a present dependabot_sweep section, and one advisory for each repository
+    the last sweep did not file issues for. The repositories and github.login checks own those settings."""
+    if not dependabot_sweep.configured(settings):
+        return []
+    where = f"{dependabot_sweep.SETTINGS_SECTION} in {homes.worker}"
+    problems = dependabot_sweep.section_problems(settings)
+    if problems:
+        return [
+            Drift("config", where, f"{problem} (part 10)", Manual(f"correct {dependabot_sweep.SETTINGS_SECTION} in both homes as part 10 describes"))
+            for problem in problems
+        ]
+    path = homes.worker / dependabot_sweep.STATE_FILE
+    try:
+        state = json.loads(path.read_text())
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as error:
+        return [Drift("dependabot sweep", str(path), f"cannot be read: {error} (part 12)", ADVISORY)]
+    return [Drift("dependabot sweep", str(path), f"{line} (part 12)", ADVISORY) for line in dependabot_sweep.advisory_lines(state)]
+
+
 def check_cron(commit: Commit, homes: Homes, settings=None) -> list:
     hermes = homes.hermes
     paths = {ROOT: homes.root, WORKER: homes.worker}
@@ -877,6 +901,7 @@ def check_cron(commit: Commit, homes: Homes, settings=None) -> list:
     expected = tuple(job for job in owners.values() if job.wanted(settings))
     drifts.extend(check_root_wrappers(commit, homes, entries))
     drifts.extend(check_sentry_sync(homes, settings))
+    drifts.extend(check_dependabot_sweep(homes, settings))
     secrets = known_secrets(paths.values())
     for job in expected:
         home = paths[job.home]
