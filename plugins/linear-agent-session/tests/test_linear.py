@@ -37,6 +37,12 @@ class Clock:
         return self.now
 
 
+REPOSITORIES = [
+    {"full_name": "Example-Org/Main", "path": "/srv/checkouts/main", "routing": "default"},
+    {"full_name": "Example-Org/Example-Repo", "path": "/srv/checkouts/example-repo", "routing": "linked"},
+]
+
+
 def make_client(fake, clock=None, token_cache_path=None):
     return linear.LinearClient(
         "client-id", "client-secret", urlopen=fake, clock=clock or Clock(), token_cache_path=token_cache_path
@@ -474,7 +480,7 @@ class TokenTest(unittest.TestCase):
             body = b'{"error":"Error","error_description":"Client does not support the client_credentials grant type"}'
             raise urllib.error.HTTPError(request.full_url, 400, "error", {}, io.BytesIO(body))
 
-        output = json.loads(tools.run_issue(lambda: make_client(refuse), {"issue": "ABC-1"}))
+        output = json.loads(tools.run_issue(lambda: make_client(refuse), lambda: REPOSITORIES, {"issue": "ABC-1"}))
         self.assertEqual(
             output,
             {"error": "client credentials token request failed: Client does not support the client_credentials grant type"},
@@ -744,7 +750,7 @@ class IssueArgumentTest(unittest.TestCase):
     """Hermes defers these tools, so models call them without the schema and guess the argument name."""
 
     RUNNERS = {
-        "linear_issue": lambda fake, args: tools.run_issue(lambda: make_client(fake), args),
+        "linear_issue": lambda fake, args: tools.run_issue(lambda: make_client(fake), lambda: REPOSITORIES, args),
         "linear_agent_session_create": lambda fake, args: tools.run_session_create(
             lambda: make_client(fake), {**args, "purpose": "work"}
         ),
@@ -964,7 +970,7 @@ class IssueTest(unittest.TestCase):
 
     def test_issue_fields(self):
         fake = FakeLinear([(200, self.RESPONSE), role_labels_response(team=["Ready for agent", "Bug"])])
-        output = json.loads(tools.run_issue(lambda: make_client(fake), {"issue": "ABC-123"}))
+        output = json.loads(tools.run_issue(lambda: make_client(fake), lambda: REPOSITORIES, {"issue": "ABC-123"}))
         self.assertEqual(
             output,
             {
@@ -987,6 +993,8 @@ class IssueTest(unittest.TestCase):
                 "assignee": {"id": "user-1", "name": "Ted Example", "gitHubUserId": "1001", "app": False},
                 "labels": ["bug", "ready-for-agent"],
                 "role_labels": {"ready-for-agent": "Ready for agent"},
+                "repository": "Example-Org/Example-Repo",
+                "repositoryConflict": None,
                 "attachments": [
                     {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"},
                     {"url": "https://github.com/example-org/example-repo/pull/10", "sourceType": "github"},
@@ -1006,9 +1014,26 @@ class IssueTest(unittest.TestCase):
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-123"})
         self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "2f9a6f0e-0000-4000-8000-000000000001"})
 
+    def test_an_issue_that_links_two_configured_repositories_reports_the_conflict(self):
+        response = json.loads(json.dumps(self.RESPONSE))
+        response["data"]["issue"]["attachments"]["nodes"].append(
+            {"url": "https://github.com/example-org/main", "sourceType": "github"}
+        )
+        fake = FakeLinear([(200, response), role_labels_response(team=[])])
+        output = json.loads(tools.run_issue(lambda: make_client(fake), lambda: REPOSITORIES, {"issue": "ABC-123"}))
+        self.assertEqual(
+            (output["repository"], output["repositoryConflict"]),
+            (None, ["Example-Org/Example-Repo", "Example-Org/Main"]),
+        )
+
+    def test_no_configured_repositories_gives_null_repository_fields(self):
+        fake = FakeLinear([(200, self.RESPONSE), role_labels_response(team=[])])
+        output = json.loads(tools.run_issue(lambda: make_client(fake), lambda: [], {"issue": "ABC-123"}))
+        self.assertEqual((output["repository"], output["repositoryConflict"]), (None, None))
+
     def test_an_issue_read_survives_a_failed_role_label_read(self):
         fake = FakeLinear([(200, self.RESPONSE), (400, {"errors": [{"message": "Cannot query field"}]})])
-        output = json.loads(tools.run_issue(lambda: make_client(fake), {"issue": "ABC-123"}))
+        output = json.loads(tools.run_issue(lambda: make_client(fake), lambda: REPOSITORIES, {"issue": "ABC-123"}))
         self.assertEqual((output["identifier"], output["role_labels"]), ("ABC-123", {}))
 
     def test_card_priority_inverts_the_linear_scale(self):
@@ -1590,6 +1615,39 @@ class CreateTest(unittest.TestCase):
         )
         self.assertEqual(output, {"error": "Linear has no team with the key 'ABC' that the agent app can read"})
         self.assertEqual(len(fake.graphql_requests), 1)
+
+    def test_a_repository_attaches_its_link_and_sets_no_delegate(self):
+        identity = (200, {"data": {"issue": {"id": "uuid-7"}}})
+        attached = (200, {"data": {"attachmentCreate": {"success": True}}})
+        fake, output = self.create(
+            [team_for_create(), CREATE_OK, identity, attached], title="A title", repository="example-org/api"
+        )
+        self.assertEqual(output, {"identifier": "ABC-7", "url": "https://linear.app/x/issue/ABC-7"})
+        self.assertEqual(
+            [request["variables"] for request in fake.graphql_requests[1:]],
+            [
+                {"input": {"teamId": "team-ABC", "title": "A title", "description": ""}},
+                {"id": "ABC-7"},
+                {"input": {"issueId": "uuid-7", "url": "https://github.com/example-org/api", "title": "GitHub repository example-org/api"}},
+            ],
+        )
+
+    def test_a_failed_link_keeps_the_reservation_so_a_retry_files_no_second_issue(self):
+        identity = (200, {"data": {"issue": {"id": "uuid-7"}}})
+        attached = (200, {"data": {"attachmentCreate": {"success": True}}})
+        fake = FakeLinear([team_for_create(), CREATE_OK, (500, {"errors": [{"message": "boom"}]}), identity, attached])
+        args = {"title": "A title", "repository": "example-org/api", "idempotency_key": "2f9a6f0e-0000-4000-8000-00000000000a"}
+        with tempfile.TemporaryDirectory() as store:
+            first = json.loads(tools.run_create(lambda: make_client(fake), lambda: "ABC", args, store))
+            second = json.loads(tools.run_create(lambda: make_client(fake), lambda: "ABC", args, store))
+        self.assertIn("error", first)
+        self.assertEqual(second, {"identifier": "ABC-7", "url": "https://linear.app/x/issue/ABC-7"})
+        self.assertEqual(sum("IssueCreate" in r["query"] for r in fake.graphql_requests), 1)
+
+    def test_a_malformed_repository_is_an_error_with_no_request(self):
+        fake, output = self.create([], title="A title", repository="https://github.com/example-org/api")
+        self.assertEqual(output, {"error": "'https://github.com/example-org/api' is not a repository; pass owner/name"})
+        self.assertEqual(fake.graphql_requests, [])
 
     def test_an_assignee_or_delegate_argument_is_refused_before_linear_is_asked(self):
         for key in ("assignee", "delegate_id"):

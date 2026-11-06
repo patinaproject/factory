@@ -953,6 +953,19 @@ class LinearClient:
             raise LinearError("issueCreate reported success: false")
         return {"identifier": payload["issue"]["identifier"], "url": payload["issue"]["url"]}
 
+    def create_issue_for_repository(
+        self, team_key: str, title: str, description: str, labels: list, repository: str, *, delegate_self: bool, **fields: Any
+    ) -> dict:
+        """Create the issue undelegated, attach the repository's GitHub link, then delegate it.
+
+        Delegating at creation starts the triage card at once, and the card's repository comes from the issue's links.
+        """
+        issue = self.create_issue(team_key, title, description, labels, **fields)
+        self.attach_url(issue["identifier"], *repository_link(repository))
+        if delegate_self:
+            self.delegate_self(issue["identifier"])
+        return issue
+
     def list_issues_by_label(self, team_key: str, label: str) -> list:
         """Every issue of the team that carries the label, in any state, with who created it, its attachments, comments,
         duplicate-of target, and the issues it relates to.
@@ -1432,6 +1445,11 @@ def slugify_branch(name: str) -> str:
         if slug:
             segments.append(slug)
     return "/".join(segments)
+
+
+def repository_link(repository: str) -> tuple[str, str]:
+    """The URL and title of the attachment that names the repository an issue's cards run in."""
+    return f"https://github.com/{repository}", f"GitHub repository {repository}"
 
 
 def _issue_summary(issue: dict) -> dict:

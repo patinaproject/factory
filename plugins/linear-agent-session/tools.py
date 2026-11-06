@@ -6,6 +6,7 @@ import logging
 from typing import Callable, Optional
 
 from . import github_issue, idempotency, opened_sessions, triage_exit
+from .repository import Resolution, resolve_repository
 from .linear import (
     ACTIVITY_TYPES,
     CLIENT_ERRORS,
@@ -18,6 +19,7 @@ from .linear import (
     authority,
     lookup_approvers,
     pull_request_urls,
+    repository_link,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,7 +80,8 @@ ISSUE_SCHEMA = {
         "description, githubIssues (the URLs of the GitHub issues attached to it), "
         "state, stateType, delegate (the delegate's user ID, or null), labels (names), role_labels (the live label name of each triage role the issue's team and workspace "
         "have, keyed needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix; name a label to people "
-        "by it, never by the role), attachments, "
+        "by it, never by the role), attachments, repository (the configured owner/name whose checkout the issue's "
+        "cards run in), repositoryConflict (null, or the two configured repositories the issue links, so it gets no card), "
         "blockedBy (each blocking issue's id, identifier, gitBranchName, stateType, delegate), and agentSessions "
         "(id, status, createdAt, appUserId, creatorId (null when no person opened it); newest first)."
     ),
@@ -223,7 +226,8 @@ CREATE_SCHEMA = {
         "Create a Linear issue as the agent app: title (required), description in Markdown, team (a team key "
         "such as ABC, else the configured default team), and labels by name, matched whatever their case and "
         "punctuation. Sends no status, so Linear applies the team's default for new issues. Creates no label "
-        "and never sets assignee or delegate. Pass idempotency_key, a string that starts with a UUID, so a retry "
+        "and never sets assignee or delegate. Pass repository (owner/name) to attach that GitHub repository's link, "
+        "which names the private repository the issue's cards run in. Pass idempotency_key, a string that starts with a UUID, so a retry "
         "returns the first result and creates nothing twice. Returns identifier and url."
     ),
     "parameters": {
@@ -233,6 +237,10 @@ CREATE_SCHEMA = {
             "description": {"type": "string", "description": "The issue's description, in Markdown."},
             "team": {"type": "string", "description": "Team key, such as ABC. Defaults to the configured default team."},
             "labels": {"type": "array", "items": {"type": "string"}, "description": "Label names to apply."},
+            "repository": {
+                "type": "string",
+                "description": "owner/name of the private repository the issue is for. Attaches https://github.com/<owner>/<name>.",
+            },
             "idempotency_key": {"type": "string", "description": IDEMPOTENCY_KEY_DESCRIPTION},
         },
     },
@@ -386,16 +394,25 @@ def run_session_read(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(run)
 
 
-def run_issue(client_factory: ClientFactory, args: dict) -> str:
+def run_issue(client_factory: ClientFactory, repositories: Callable[[], list], args: dict) -> str:
     def run() -> dict:
         client = client_factory()
         issue = client.get_issue(_issue_argument(args))
+        configured = repositories()
+        resolved = (
+            resolve_repository(configured, [a["url"] for a in issue["attachments"]]) if configured else Resolution(None, None)
+        )
         try:
             role_labels = client.role_labels(issue["id"])
         except CLIENT_ERRORS:
             # Every route decision reads the issue; the label names only word messages to people.
             role_labels = {}
-        return {**issue, "role_labels": role_labels}
+        return {
+            **issue,
+            "role_labels": role_labels,
+            "repository": resolved.repository,
+            "repositoryConflict": list(resolved.conflict) if resolved.conflict else None,
+        }
 
     return _tool_result_or_error(run)
 
@@ -509,15 +526,23 @@ def run_create(
         team = (args.get("team") or default_team() or "").strip()
         if not team:
             raise LinearError("pass team, a Linear team key, or set the default_team setting")
+        repository = (args.get("repository") or "").strip()
+        if repository and not github_issue.REPOSITORY.fullmatch(repository):
+            raise LinearError(f"{repository!r} is not a repository; pass owner/name")
+
+        client = client_factory()
 
         def send() -> dict:
-            return client_factory().create_issue(
-                team, title, args.get("description") or "", labels=_names(args.get("labels"))
-            )
+            return client.create_issue(team, title, args.get("description") or "", labels=_names(args.get("labels")))
 
         if args.get("idempotency_key") is None:
-            return send()
-        return idempotency.once(idempotency_dir, "linear_issue_create", args["idempotency_key"], args, send)
+            issue = send()
+        else:
+            issue = idempotency.once(idempotency_dir, "linear_issue_create", args["idempotency_key"], args, send)
+        # Outside `once`, so a failed attach keeps the reservation and a retry links the first issue instead of filing another.
+        if repository:
+            client.attach_url(issue["identifier"], *repository_link(repository))
+        return issue
 
     return _tool_result_or_error(run)
 

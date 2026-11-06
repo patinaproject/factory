@@ -66,10 +66,14 @@ def releases_issue(short_id: str = "WEB-1", number: int = 101, **fields) -> dict
     return sentry_issue(short_id, number=number, filename=RELEASES_FILE, function="ReleaseList", **fields)
 
 
-def tracked(identifier: str, key: str, members=(("WEB-1", "101"),), users: int = 5, **fields) -> dict:
+REPOSITORY_URL = "https://github.com/example-org/example-repo"
+
+
+def tracked(identifier: str, key: str, members=(("WEB-1", "101"),), users: int = 5, linked: bool = True, **fields) -> dict:
     links = "\n".join(f"- [{s}](https://{ORG}.sentry.io/issues/{n}/)" for s, n in members)
     description = f"## Sentry issues in this error group\n\n{links}\n\nSentry error group: {key} usersWhenCreated={users}\n"
-    return linear_issue(identifier, description=description, attachments=[{"url": url(key), "sourceType": "api"}], **fields)
+    attachments = [{"url": url(key), "sourceType": "api"}] + ([{"url": REPOSITORY_URL, "sourceType": "api"}] if linked else [])
+    return linear_issue(identifier, description=description, attachments=attachments, **fields)
 
 
 def legacy(identifier: str, sentry_id: str, created_at: str, **fields) -> dict:
@@ -281,6 +285,7 @@ class CreateTest(SyncTest):
         )
         self.assertTrue(created["description"].endswith(f"\n\nSentry error group: {RELEASES_KEY} usersWhenCreated=30\n"))
         self.assertEqual(self.writes("AttachmentCreate"), [
+            {"issueId": "id-ABC-900", "url": REPOSITORY_URL, "title": "GitHub repository example-org/example-repo"},
             {"issueId": "id-ABC-900", "url": url(RELEASES_KEY), "title": f"Sentry error group {RELEASES_KEY}"},
         ])
 
@@ -288,9 +293,35 @@ class CreateTest(SyncTest):
         self.assertEqual((again.returncode, self.lines(again)), (0, []))
         self.assertEqual(len(self.writes("IssueCreate")), 1)
 
+    def test_an_issue_is_created_undelegated_linked_to_the_repository_and_then_delegated(self) -> None:
+        self.commit_rules({**RULES, "delegation": "agent-fixable"})
+        self.serve([], FakeSentry(issues=[releases_issue(users=30, count=96)]))
+        self.assertEqual(self.run_sync().returncode, 0)
+        self.assertEqual(
+            [(op, variables.get("delegateId", variables.get("url"))) for op, variables in self.linear.writes],
+            [
+                ("IssueCreate", None),
+                ("AttachmentCreate", REPOSITORY_URL),
+                ("IssueUpdate", APP_USER),
+                ("AttachmentCreate", url(RELEASES_KEY)),
+            ],
+        )
+
+    def test_an_open_issue_without_the_repository_link_gets_it_and_a_rerun_adds_nothing(self) -> None:
+        self.serve([tracked("ABC-1", RELEASES_KEY, linked=False)], FakeSentry(issues=[releases_issue()]))
+        proc = self.run_sync()
+        self.assertEqual((proc.returncode, self.lines(proc)), (0, ["linking     ABC-1 example-org/example-repo"]))
+        self.assertEqual(self.writes("AttachmentCreate"), [
+            {"issueId": "id-ABC-1", "url": REPOSITORY_URL, "title": "GitHub repository example-org/example-repo"},
+        ])
+
+        again = self.run_sync()
+        self.assertEqual((again.returncode, self.lines(again)), (0, []))
+        self.assertEqual(len(self.writes("AttachmentCreate")), 1)
+
     def test_an_issue_with_the_origin_line_and_no_attachment_is_repaired_not_created_again(self) -> None:
         crashed = tracked("ABC-1", RELEASES_KEY)
-        crashed["attachments"] = []
+        crashed["attachments"] = [{"url": REPOSITORY_URL, "sourceType": "api"}]
         self.serve([crashed], FakeSentry(issues=[releases_issue()]))
         dry = self.run_sync("--dry-run")
         self.assertEqual((dry.returncode, self.lines(dry)), (0, [f"repaired    ABC-1 {RELEASES_KEY}"]))
@@ -357,7 +388,7 @@ class TextSafetyTest(SyncTest):
         self.serve([tracked("ABC-1", RELEASES_KEY, members=(("WEB-2", "102"),))], FakeSentry(issues=issues))
         proc = self.run_sync()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual([op for op, _ in self.linear.writes], ["CommentOnIssue", "IssueCreate", "AttachmentCreate"])
+        self.assertEqual([op for op, _ in self.linear.writes], ["CommentOnIssue", "IssueCreate", "AttachmentCreate", "AttachmentCreate"])
         written = json.dumps(self.linear.writes) + proc.stdout
         for sentinel in SENTINELS:
             self.assertNotIn(sentinel, written)

@@ -42,12 +42,15 @@ def main() -> int:
             title = entry.title(now)
             found = client.issues_titled(entry.team_key, title)
             if found:
+                client.attach_url(found[0]["identifier"], *linear.repository_link(entry.repository))
                 print(f"slot {entry.index} {found[0]['identifier']} {found[0]['url']}")
             elif found := client.open_issues_titled(entry.team_key, entry.title_prefix):
+                client.attach_url(found[0]["identifier"], *linear.repository_link(entry.repository))
                 print(f"open {entry.index} {found[0]['identifier']} {found[0]['url']}")
             else:
-                issue = client.create_issue(
-                    entry.team_key, title, entry.description, list(entry.labels), state_type="triage", delegate_self=True,
+                issue = client.create_issue_for_repository(
+                    entry.team_key, title, entry.description, list(entry.labels), entry.repository,
+                    state_type="triage", delegate_self=True,
                 )
                 print(f"filed {entry.index} {issue['identifier']} {issue['url']}")
             print(f"next {entry.index} {entry.next_slot_start(now).isoformat()}T00:00:00Z")

@@ -53,7 +53,12 @@ config_schema:
   repositories:
     type: list
     default: []
-    description: Repositories the factory works, each with full_name, path, routing, and an optional worker_entry, such as /patina-mode, that claude-session puts before its built-in task prompt.
+    description: >-
+      Repositories the factory works, each with full_name, path, routing, and an optional worker_entry, such as
+      /patina-mode, that claude-session puts before its built-in task prompt. routing is default for exactly one
+      repository, synced_github for a public repository whose GitHub issues sync to Linear, or linked for another
+      private repository. A person names a linked repository on a Linear issue by attaching a link to it on GitHub,
+      and linear_issue returns it as repository.
   factory_repository:
     type: dict
     default: {}

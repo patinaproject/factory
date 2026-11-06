@@ -23,7 +23,7 @@ RATE_LIMIT = 1200
 TEMPLATE_DIR = Path(__file__).resolve().parent
 REPLY_INBOX = Path("profiles") / "claude-worker" / "scripts" / "reply_inbox.py"
 GITHUB_ROUTE = "github"
-ROUTINGS = ("default", "synced_github")
+ROUTINGS = ("default", "linked", "synced_github")
 TOOLSETS = ["terminal", "kanban", "linear_agent_session"]
 LINEAR_EVENTS = ["AgentSessionEvent", "Comment", "Issue"]
 # Relative, so the value is the same on every machine; Hermes resolves it under its home's scripts directory.

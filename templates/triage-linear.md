@@ -173,10 +173,11 @@ Actions `create_card`, `foreign_cards`, and `reuse_card`, and the `then` of
 "Delegation gate". The session is `agent_session_id`.
 
 1. Read the issue with `linear_issue`.
-2. Pick the repository. Check the issue's `attachments` for a URL of the form
-   `https://github.com/<owner>/<name>/issues/<number>`. If `<owner>/<name>`
-   matches, ignoring case, a repository with routing `synced_github`, use that
-   repository. Otherwise use the repository with routing `default`.
+2. Pick the repository. Use the configured repository whose `full_name` is
+   the issue's `repository`. When `repositoryConflict` is not null, the issue
+   links two configured repositories. Post one `thought` on the session that
+   names both repositories in `repositoryConflict` and asks a person to keep
+   the link to one of them. Create no card and stop.
 3. Take the card priority from the issue's `cardPriority` and the priority
    name from its `priorityName`. Use both exactly as `linear_issue` returns
    them. Never derive them from `priority`.
@@ -650,7 +651,8 @@ memory says, and decide the tracker from the repository's visibility, with
   `body`, and `labels` holding the adapter's `needs-triage` label by the name
   that repository gives it. Write the text under the limits of step 5.
 - Any other repository: call `linear_issue_create` with `title`,
-  `description`, and `labels`. Name `team` when the reply does.
+  `description`, `labels`, and `repository` set to the target repository's
+  `<owner>/<repo>`. Name `team` when the reply does.
 - When the reply names no repository and the source issue has a GitHub URL,
   the target repository is that URL's repository.
 - When the reply names no repository and the source issue has no GitHub URL,

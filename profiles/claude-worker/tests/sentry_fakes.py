@@ -187,13 +187,13 @@ class FakeLinear(_Server):
         i = self.find(v["id"])
         return {"issue": {
             "id": i["id"], "identifier": i["identifier"], "title": i["title"], "description": i["description"],
-            "state": i["state"], "labels": {"nodes": []},
+            "priority": i["priority"], "state": i["state"], "labels": {"nodes": []},
             "team": {"states": {"nodes": [dict(s) for s in self.states]}, "labels": {"nodes": []}},
         }, "issueLabels": {"nodes": []}}
 
     def op_IssueDelegate(self, v: dict) -> dict:
         i = self.find(v["id"])
-        return {"viewer": {"id": APP_USER}, "issue": {"id": i["id"], "identifier": i["identifier"], "delegate": i["delegate"]}}
+        return {"viewer": {"id": APP_USER}, "issue": {"id": i["id"], "identifier": i["identifier"], "delegate": i["delegate"]} if i else None}
 
     def op_AttachmentIssues(self, v: dict) -> dict:
         nodes = [

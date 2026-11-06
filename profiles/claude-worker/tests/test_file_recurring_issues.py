@@ -33,6 +33,7 @@ ENTRY = {
     "description": "Audit `example-org/example-app`.\n\nClose with `Closes ABC-N`.",
 }
 WEDNESDAY = "2026-11-04T10:30:00Z"
+REPOSITORY_LINK = {"issueId": "issue-uuid", "url": "https://github.com/example-org/example-app", "title": "GitHub repository example-org/example-app"}
 FILED = "filed 0 ABC-900 https://linear.app/example/issue/ABC-900\n"
 NEXT_MONDAY = "next 0 2026-11-09T00:00:00Z\n"
 TITLE_FILTER = {
@@ -83,6 +84,11 @@ class FileRecurringIssuesTest(unittest.TestCase):
     def requests(self, key: str) -> list:
         return [entry[key] for entry in GitFixture.linear_requests(self.home) if key in entry]
 
+    def writes(self) -> list:
+        """Each issue write in the order the script made it."""
+        names = ("issue_create", "attachment_create", "issue_update")
+        return [(name, entry[name]) for entry in GitFixture.linear_requests(self.home) for name in names if name in entry]
+
     def test_files_one_triage_issue_for_the_slot_delegated_to_the_app(self) -> None:
         self.linear(team_labels=["Security"])
 
@@ -90,10 +96,14 @@ class FileRecurringIssuesTest(unittest.TestCase):
 
         self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, FILED + NEXT_MONDAY, ""))
         self.assertEqual(self.requests("open_titled"), [{"filter": TITLE_FILTER}, {"filter": PREFIX_FILTER}])
-        self.assertEqual(self.requests("issue_create"), [{"input": {
-            "teamId": "team-ABC", "title": "Audit the example app, week of 2026-11-02", "description": ENTRY["description"],
-            "stateId": "state-triage", "labelIds": ["label-Security"], "delegateId": "app-user",
-        }}])
+        self.assertEqual(self.writes(), [
+            ("issue_create", {"input": {
+                "teamId": "team-ABC", "title": "Audit the example app, week of 2026-11-02",
+                "description": ENTRY["description"], "stateId": "state-triage", "labelIds": ["label-Security"],
+            }}),
+            ("attachment_create", REPOSITORY_LINK),
+            ("issue_update", {"id": "issue-uuid", "input": {"delegateId": "app-user"}}),
+        ])
 
     def test_an_open_issue_with_the_prefix_files_nothing(self) -> None:
         self.linear(team_labels=["Security"], issues=[issue("ABC-41", "2026-10-26", "started")])
@@ -103,7 +113,7 @@ class FileRecurringIssuesTest(unittest.TestCase):
         self.assertEqual(
             (proc.returncode, proc.stdout), (0, "open 0 ABC-41 https://linear.app/example/issue/ABC-41\n" + NEXT_MONDAY),
         )
-        self.assertEqual(self.requests("issue_create"), [])
+        self.assertEqual(self.writes(), [("attachment_create", REPOSITORY_LINK)])
 
     def test_a_closed_issue_for_the_slot_files_nothing_until_the_next_slot(self) -> None:
         self.linear(team_labels=["Security"], issues=[issue("ABC-42", "2026-11-02", "completed")])
@@ -122,6 +132,7 @@ class FileRecurringIssuesTest(unittest.TestCase):
             [created["input"]["title"] for created in self.requests("issue_create")],
             ["Audit the example app, week of 2026-11-09"],
         )
+        self.assertEqual(self.requests("attachment_create")[0], REPOSITORY_LINK)
 
     def test_entries_on_two_teams_each_file_their_own_issue(self) -> None:
         self.linear(team_labels=["Security"])

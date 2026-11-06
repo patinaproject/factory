@@ -142,7 +142,7 @@ def main(argv: Optional[list] = None) -> int:
     elif args.command == "undelegate":
         output = plugin.tools.run_undelegate(plugin.linear.client_from_env, {"issue": args.issue})
     else:
-        output = plugin.tools.run_issue(plugin.linear.client_from_env, {"issue": args.issue})
+        output = plugin.tools.run_issue(plugin.linear.client_from_env, lambda: [], {"issue": args.issue})
     print(output)
     return 1 if "error" in json.loads(output) else 0
 

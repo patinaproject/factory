@@ -167,9 +167,9 @@ def apply(action, client, settings: sweep.Settings) -> str:
                 )
                 made = "#" + out.strip().rsplit("/", 1)[-1]
             else:
-                made = client.create_issue(
-                    settings.team_key, action.title, action.body, [settings.label], state_type="triage", delegate_self=True,
-                    priority=action.priority.linear,
+                made = client.create_issue_for_repository(
+                    settings.team_key, action.title, action.body, [settings.label], repo, state_type="triage",
+                    delegate_self=True, priority=action.priority.linear,
                 )["identifier"]
                 if action.previous:
                     client.relate_issues(made, action.previous, "related")

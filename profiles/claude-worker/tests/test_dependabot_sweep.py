@@ -112,8 +112,16 @@ class CreateTest(SweepTest):
         self.assertEqual(created["title"], f"Remediate lodash Dependabot alerts in {DEFAULT}")
         self.assertEqual(created["stateId"], "state-triage")
         self.assertEqual(created["labelIds"], [f"label-{LABEL}"])
-        self.assertEqual(created["delegateId"], APP_USER)
+        self.assertNotIn("delegateId", created)
         self.assertNotIn("assigneeId", created)
+        self.assertEqual(
+            [op for op, _ in self.linear.writes if op in ("IssueCreate", "AttachmentCreate", "IssueUpdate")],
+            ["IssueCreate", "AttachmentCreate", "IssueUpdate"],
+        )
+        [link] = self.linear_writes("AttachmentCreate")
+        self.assertEqual(link["url"], f"https://github.com/{DEFAULT}")
+        [delegated] = self.linear_writes("IssueUpdate")
+        self.assertEqual(delegated["delegateId"], APP_USER)
         self.assertEqual(created["priority"], 1)
         self.assertEqual(created["description"].split("\n", 1)[0], origin(DEFAULT))
         self.assertIn("[alert 1](", created["description"])

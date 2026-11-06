@@ -88,7 +88,7 @@ your task notes, not in the repository.
 | Hermes release tag to pin, `v0.21.4` or later | Hermes |
 | Model alias for Hermes' own agent loop, for example `sonnet`, or a full model id with the Anthropic API provider | Model provider |
 | Whether Hermes and Claude Code run on a Console API key with no proxy, the Anthropic API provider. The operator enters the key in their own terminal, never in chat | Model provider |
-| Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one, `synced_github` for the rest), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
+| Repositories: for each, `full_name`, local `path`, and `routing` (`default` for exactly one; `synced_github` for a public repository whose GitHub issues sync to Linear; `linked` for another private repository, picked by a GitHub link on the Linear issue), and an optional `worker_entry` prefix such as `/patina-mode` | Settings, clones, routes |
 | `kanban.max_in_progress`, how many workers may run at once on the host | Kanban |
 | `kanban.max_spawn`, how many workers the default board may run at once | Kanban |
 | `triage.max_running`, how many triage cards may run at once | Kanban |
@@ -944,7 +944,16 @@ key file but does not contain the key.
 }
 ```
 
-Exactly one repository has `routing: default`. Leave
+Exactly one repository has `routing: default`. Its checkout gets every issue
+that names no other repository. Give each public repository whose GitHub
+issues sync to Linear `routing: synced_github`. Give each other private
+repository `routing: linked`. A person names a `linked` repository on a Linear
+issue by attaching a link to it on GitHub, such as the repository page, a
+file, a Dependabot alert, or a pull request. The factory's own sweeps attach
+that link when they file an issue for their `repository`. An issue that links
+two configured private repositories gets no card. The agent posts one
+`thought` that names both. Changing a link later never moves an existing card.
+Leave
 `claude_session.base_url`, `model`, and `auth_token_env` empty when the factory
 uses neither a proxy from part 3 nor the Anthropic API provider from part 4.
 With the Anthropic API provider, leave `base_url` empty and set
@@ -2195,6 +2204,9 @@ each check. Report each result.
 2. Delegate a `ready-for-agent` issue synced from a `synced_github` repository. Its card has that
    repository's contract, and its worktree starts from that repository's
    default branch.
+   When the factory has a `linked` repository, also delegate a
+   `ready-for-agent` issue that links that repository on GitHub. Its card
+   runs in that repository's checkout.
 3. The worker moves the issue to In Progress through the repository's own
    issue-start workflow. Hermes makes no status change.
 4. While the pull request is a draft, has a pending or failing required
