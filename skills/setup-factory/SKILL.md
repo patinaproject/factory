@@ -1133,6 +1133,13 @@ delegated it, can start card work with a reply or a pull request review or
 comment. Do not discover or guess it, and commit no real id. The real value
 belongs in the private record. A value that is not a list is refused by name.
 
+`router_shadow` is optional and defaults to `true`. The shadow router then
+records one routing decision for each webhook delivery and each
+`webhook-retry` outcome in `<gateway home>/webhook-router/decisions/`, and
+keeps 14 days of them. It changes nothing the factory does.
+`profiles/claude-worker/scripts/router-shadow-report` compares the records with
+what each turn did. Set it to `false` to stop recording.
+
 `default_team` is the Linear team key, such as `ABC`, where
 `linear_issue_create` files an issue when the call names no team. Its value
 belongs in the private record. The plugin's `linear_issue_comment` and

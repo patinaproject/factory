@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.router_modes import dispatch_hook_mode, load_tests_in_both_modes
 from tests.test_triage_intent import (
     APP,
     ASSIGNEE,
@@ -40,6 +41,7 @@ from tests.test_triage_intent import (
 
 History = plugin.triage_exit.History
 Park = plugin.triage_exit.Park
+load_tests = load_tests_in_both_modes(dispatch_hook_mode(plugin))
 
 COMMENT_ID = "6c1f0a52-3a8e-4f43-9d0b-1f5c2a7d9e01"
 BOT = "user-bot"

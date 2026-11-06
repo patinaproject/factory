@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.router_modes import dispatch_hook_mode, load_tests_in_both_modes
 from tests import (
     BUSY,
     PLUGIN_DIR,
@@ -31,6 +32,7 @@ from tests import (
 )
 
 plugin = load_plugin()
+load_tests = load_tests_in_both_modes(dispatch_hook_mode(plugin))
 
 
 class Platform(enum.Enum):

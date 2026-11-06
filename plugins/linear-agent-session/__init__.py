@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import blocks, bursts, forwards, idempotency, kanban_guard, linear, missing_secret, opened_sessions, replies, tools, triage_exit, triage_intent, triage_round
+from . import blocks, bursts, forwards, idempotency, kanban_guard, linear, missing_secret, opened_sessions, replies, router, tools, triage_exit, triage_intent, triage_round
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ UNRESOLVED_REFERENCE = re.compile(r"^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$")
 # Linear writes a mention in an agent activity body as `<user id="<user id>" notify>name</user>`.
 MENTION = re.compile(r"<user\b[^>]*\bid=\"([^\"]+)\"")
 TEAMMATE_REPLY = "the session reply mentions teammates and not the agent"
+ALREADY_RESUMED = "the comment already resumed its card"
 
 
 def session_platform() -> str:
@@ -197,6 +198,7 @@ def register(ctx: Any) -> None:
                 cards=triage_exit.kanban_cards,
                 opened_by_factory=lambda sid: opened_sessions.recorded(opened_sessions.store_dir(os.environ), sid),
             ),
+            router_shadow=lambda: ctx.get_config("router_shadow", default=True) is not False,
         ),
     )
     ctx.register_hook("pre_tool_call", kanban_guard.make_hook(session_platform))
@@ -242,22 +244,34 @@ def make_dispatch_hook(
     skip_home: Callable[[], Path] = triage_exit.gateway_home,
     comment_store: Callable[[], Optional[str]] = lambda: idempotency.store_dir(os.environ),
     forward_store: Callable[[], Optional[str]] = lambda: forwards.store_dir(os.environ),
+    router_shadow: Callable[[], bool] = lambda: True,
 ) -> Callable[..., Any]:
     pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-exit")
     # A bulk move can hold every triage-exit worker for minutes, and an intent must not wait behind it.
     intent_pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-intent")
 
-    async def guard_then_acknowledge(event: Any, **_: Any) -> Optional[dict[str, str]]:
+    async def dispatch(event: Any, **_: Any) -> Optional[dict[str, str]]:
+        trace = router.Trace()
+        result = await guard_then_acknowledge(event, trace)
+        if router_shadow():
+            router.submit(trace, event, result)
+        return result
+
+    async def guard_then_acknowledge(event: Any, trace: router.Trace) -> Optional[dict[str, str]]:
         # Cleared on entry, before any exit or slow step, so an update that lands mid-turn is not swept into this burst.
         try:
-            bursts.clear(skip_home(), event.raw_message)
+            trace.home = skip_home()
+            bursts.clear(trace.home, event.raw_message)
         except Exception as failure:
             logger.warning("linear-agent-session: the Issue burst was not cleared: %s: %s", type(failure).__name__, failure)
         if paused():
+            trace.rule = "paused"
+            trace.route = _paused_route(event)
             return None
-        route = _delivery_route(event)
+        route = trace.route = _delivery_route(event)
         if route is None:
             return None
+        trace.linear = route == webhook_route()
         variable = unresolved_routes(load_config()).get(route)
         if variable is not None:
             logger.error(
@@ -265,17 +279,25 @@ def make_dispatch_hook(
                 route,
                 variable,
             )
+            trace.rule = "unresolved_secret"
             return {"action": "skip", "reason": f"route {route} secret is the unresolved reference ${{{variable}}}"}
         if route == webhook_route() and addressed_to_teammate(event.raw_message):
             logger.info("linear-agent-session: %s; no acknowledgement or triage turn", TEAMMATE_REPLY)
+            trace.rule = "teammate_reply"
             return {"action": "skip", "reason": TEAMMATE_REPLY}
         if route == webhook_route() and compute_intent is not None and _is_comment(event.raw_message):
-            return await resume_from_comment(event)
+            return await resume_from_comment(event, trace)
         await acknowledge_best_effort(event, route)
         skipped = await archive_triage_exit(event, route)
-        if skipped is not None or route != webhook_route() or compute_intent is None:
+        if skipped is not None:
+            trace.rule = "triage_exit_handled"
             return skipped
-        return await prepend_intent(event)
+        if route != webhook_route():
+            return None
+        if compute_intent is None:
+            trace.rule = "no_intent"
+            return None
+        return await prepend_intent(event, trace)
 
     async def acknowledge_best_effort(event: Any, route: str) -> None:
         try:
@@ -333,32 +355,39 @@ def make_dispatch_hook(
             idempotency.once(comment_store(), "comment_resume", comment_id, {}, lambda: ran.append(True) or {"recorded": True})
         except linear.LinearError as failure:
             return f"the comment's id could not be recorded: {failure}"
-        return None if ran else "the comment already resumed its card"
+        return None if ran else ALREADY_RESUMED
 
-    async def resume_from_comment(event: Any) -> dict[str, str]:
-        intent = await compute_for(event)
+    async def resume_from_comment(event: Any, trace: router.Trace) -> dict[str, str]:
+        intent = trace.intent = await compute_for(event)
         if intent.action == "comment_resume":
             reason = first_delivery(intent.comment_id)
             # A turn that crashed before its forward left the reply pending, and this delivery finishes it.
             if reason is None or forwards.pending(forward_store(), intent.reply_key):
+                trace.rule = "comment_first_delivery" if reason is None else "comment_pending_forward"
                 return rewrite(intent, event)
+            trace.rule = "duplicate_comment" if reason == ALREADY_RESUMED else "comment_id_unrecorded"
         elif intent.action == "error":
+            trace.rule = "comment_intent_error"
             reason = f"the comment's intent failed: {intent.error}"
         else:
+            trace.rule = "comment_skip"
             reason = intent.skip_reason
         logger.info("linear-agent-session: skipped a comment: %s", reason)
         return {"action": "skip", "reason": reason}
 
-    async def prepend_intent(event: Any) -> dict[str, str]:
-        intent = await compute_for(event)
+    async def prepend_intent(event: Any, trace: router.Trace) -> dict[str, str]:
+        intent = trace.intent = await compute_for(event)
+        trace.rule = "intent_turn"
         if triage_intent.needs_no_turn(intent, event.raw_message):
             reason = f"{intent.action}: the computed intent needs no action"
             try:
                 write_skip_record(skip_home(), event.source.chat_id)
             except Exception as failure:
                 logger.warning("linear-agent-session: no skip record, so the turn runs: %s: %s", type(failure).__name__, failure)
+                trace.rule = "intent_skip_unrecorded"
             else:
                 logger.info("linear-agent-session: %s; no triage turn", reason)
+                trace.rule = "intent_needs_no_turn"
                 return {"action": "skip", "reason": reason}
         return rewrite(intent, event)
 
@@ -389,7 +418,7 @@ def make_dispatch_hook(
             intent = triage_intent.error_intent(message)
         return intent
 
-    return guard_then_acknowledge
+    return dispatch
 
 
 def write_skip_record(home: Path, chat_id: str) -> None:
@@ -409,6 +438,14 @@ def _delivery_route(event: Any) -> Optional[str]:
     if source.platform.value != "webhook" or not source.user_id.startswith("webhook:"):
         return None
     return source.user_id.removeprefix("webhook:")
+
+
+def _paused_route(event: Any) -> Optional[str]:
+    """A paused hook returned before it read the event's source, so a malformed source must not raise here."""
+    try:
+        return _delivery_route(event)
+    except Exception:
+        return None
 
 
 def addressed_to_teammate(payload: Any) -> bool:
