@@ -364,7 +364,7 @@ class ResultLineTest(unittest.TestCase):
             {"error": "stale", "transient": True, "precondition": "gh_login"},
         )
         self.assertIsNone(result_line.precondition_refusal(written))
-        for precondition in ("gh_login", "install_skew", "needs_brief", "worktree_held", "server_error"):
+        for precondition in ("gh_login", "install_skew", "needs_brief", "worktree_held", "server_error", "xcode_check_timeout"):
             refusal = result_line.Refused("stale", True, precondition)
             self.assertEqual(result_line.precondition_refusal(refusal), refusal)
         self.assertIsNone(result_line.precondition_refusal(result_line.Refused("stale", True, "unknown")))
@@ -792,6 +792,16 @@ class ServerErrorTest(GhLoginTest):
     )
     PRECONDITION, PARK, KEY = "server_error", "Waiting after a server error:", "server_error_park"
     ERROR = "Linear token: the gateway's broker is busy"
+
+
+class XcodeCheckTimeoutTest(GhLoginTest):
+    STOPPED = (
+        "The Xcode first launch check timed out, so this card waits in scheduled and goes back to the queue after "
+        "a short wait. Stop now: call no other tool, do not call kanban_block, do not post an activity, and do not "
+        "run claude-session again."
+    )
+    PRECONDITION, PARK, KEY = "xcode_check_timeout", "Waiting for the Xcode check:", "xcode_check_timeout_park"
+    ERROR = "xcodebuild -checkFirstLaunchStatus timed out after 30 seconds; host load is a likely cause"
 
 
 class IssueParkTest(Hooked):

@@ -90,7 +90,8 @@ store Python, so a plugin Hermes would skip or fail to load is reported. Hermes 
 On macOS, it checks that the App Store (com.apple.commerce AutoUpdate) and macOS
 (com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates) automatic installs are off, a managed
 preference winning over the local one, and that the active full Xcode has no first launch pending, from
-`xcodebuild -checkFirstLaunchStatus` with a 10 second limit, a hang counting as pending. The
+`xcodebuild -checkFirstLaunchStatus` with a 30 second limit. A check that outlives the limit is its own
+`xcode first launch timeout` line, not a pending first launch. The
 Command Line Tools alone skip the Xcode check. PREFERENCES_ROOT (default /Library), XCODEBUILD_BIN
 (default xcodebuild), and DEVELOPER_DIR (default xcode-select -p) override where it looks.
 
@@ -1173,7 +1174,7 @@ def preference_value(root: Path, domain: str, key: str):
 
 
 def check_host_updates(preferences_root: Path, xcodebuild: str, env: dict) -> list:
-    """Report App Store and macOS automatic installs that are on or unset, and a pending Xcode first launch."""
+    """Report App Store and macOS automatic installs that are on or unset, a pending Xcode first launch, and a first launch check that timed out."""
     drifts = []
     if preference_value(preferences_root, "com.apple.commerce", "AutoUpdate") is not False:
         drifts.append(Drift(
@@ -1185,10 +1186,16 @@ def check_host_updates(preferences_root: Path, xcodebuild: str, env: dict) -> li
             "macos auto-update", "com.apple.SoftwareUpdate",
             f"AutomaticallyInstallMacOSUpdates is on or unset; run sudo python3 {DISABLE_UPDATES}", DISABLE_UPDATES_FIX,
         ))
-    developer = xcode.first_launch_pending(xcodebuild, env)
-    if developer is not None:
+    first_launch = xcode.first_launch_status(xcodebuild, env)
+    if first_launch.state is xcode.FirstLaunch.TIMED_OUT:
         drifts.append(Drift(
-            "xcode first launch", str(developer),
+            "xcode first launch timeout", str(first_launch.developer),
+            f"{xcode.timeout_message()}, so run check-install again once it drops",
+            Manual("run check-install again once host load drops"),
+        ))
+    if first_launch.state is xcode.FirstLaunch.PENDING:
+        drifts.append(Drift(
+            "xcode first launch", str(first_launch.developer),
             f"xcodebuild -checkFirstLaunchStatus reports a first launch pending; run {xcode.FIRST_LAUNCH_FIX}",
             Manual(f"run {xcode.FIRST_LAUNCH_FIX} in the operator's terminal"),
         ))

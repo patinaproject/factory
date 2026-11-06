@@ -307,6 +307,7 @@ REMEDY_CLASSES = (
     ("app auto-update", "", "manual"),
     ("macos auto-update", "", "manual"),
     ("xcode first launch", "", "manual"),
+    ("xcode first launch timeout", "", "manual"),
 )
 
 
@@ -2831,16 +2832,20 @@ class CheckHostUpdatesTest(unittest.TestCase):
         self.assertEqual(self.lines(), first_launch_line(self.host.xcode.developer))
         self.assertEqual(self.host.xcode.called(), ["-checkFirstLaunchStatus"])
 
-    def test_a_first_launch_check_that_hangs_counts_as_pending(self) -> None:
+    def test_a_first_launch_check_that_hangs_is_reported_as_a_timeout_without_the_sudo_remedy(self) -> None:
         self.host.xcode.answer(hang=True)
 
         with mock.patch.object(check_install.xcode, "FIRST_LAUNCH_SECONDS", 0.5):
             lines = self.lines()
 
-        self.assertEqual(lines, first_launch_line(self.host.xcode.developer))
+        self.assertEqual(lines, (
+            f"xcode first launch timeout {self.host.xcode.developer}: xcodebuild -checkFirstLaunchStatus timed out "
+            "after 0.5 seconds; host load is a likely cause, so run check-install again once it drops\n"
+        ))
+        self.assertNotIn("sudo", lines)
 
-    def test_the_first_launch_check_waits_ten_seconds(self) -> None:
-        self.assertEqual(check_install.xcode.FIRST_LAUNCH_SECONDS, 10)
+    def test_the_first_launch_check_waits_thirty_seconds(self) -> None:
+        self.assertEqual(check_install.xcode.FIRST_LAUNCH_SECONDS, 30)
 
     def test_command_line_tools_alone_skip_the_first_launch_check(self) -> None:
         self.host.xcode.answer(status=1)
