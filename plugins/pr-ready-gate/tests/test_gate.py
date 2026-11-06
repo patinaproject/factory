@@ -1439,7 +1439,12 @@ class BotThreadTest(unittest.TestCase):
         self.assertEqual(self.failures(bot_thread(resolver=A_PERSON)), [])
 
     def test_a_resolver_that_is_not_a_person_is_refused(self):
-        resolvers = {"bot login": BOT_RESOLVER_LOGIN, "non-user type": BOT, "null resolver": None}
+        resolvers = {
+            "bot login": BOT_RESOLVER_LOGIN,
+            "non-user type": BOT,
+            "null resolver": None,
+            "user without a login": {"__typename": "User", "login": None},
+        }
         for name, resolver in resolvers.items():
             with self.subTest(name):
                 self.assertEqual(self.failures(bot_thread(resolver=resolver)), [NOT_ADDRESSED])
@@ -1470,6 +1475,11 @@ class BotThreadTest(unittest.TestCase):
         for tool_name in ("kanban_complete", "kanban_request_review"):
             with self.subTest(tool_name):
                 self.assertEqual(self.failures(bot_thread(), tool_name=tool_name, rules=rules), [])
+
+    def test_a_clean_completion_without_a_thread_rule_reads_no_pull_request_state(self):
+        shell = FakeShell(pr=CLEAN, rules=[{"type": "required_signatures"}], state=threads_state(bot_thread()))
+        self.assertEqual(evaluate_handoff(CLEAN, tool_name="kanban_complete", shell=shell), [])
+        self.assertEqual(graphql_calls(shell, "reviewThreads"), [])
 
     def test_the_review_hook_does_not_flag_queue_entry_and_reads_the_state_once(self):
         shell = FakeShell(pr=APPROVED_BLOCKED, rules=UPDATE_RULES, state=threads_state(bot_thread()))
