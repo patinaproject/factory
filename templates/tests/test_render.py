@@ -627,6 +627,41 @@ class TransitionCommandTest(unittest.TestCase):
         self.assertFalse(self.TRANSITION.search("hermes kanban edit <task id> --body '<new body>'"))
 
 
+class LinkedRoutingTest(unittest.TestCase):
+    LINKED = [
+        {"full_name": "example-org/app", "path": "/srv/checkouts/app", "routing": "default", "worker_entry": ""},
+        {"full_name": "example-org/api", "path": "/srv/checkouts/api", "routing": "linked", "worker_entry": ""},
+        {"full_name": "example-org/web", "path": "/srv/checkouts/web", "routing": "linked", "worker_entry": ""},
+    ]
+
+    def test_one_default_beside_linked_repositories_is_valid(self):
+        render.build_routes(settings(repositories=self.LINKED))
+
+    def test_each_linked_repository_gets_its_own_worktree_flag(self):
+        self.assertEqual(
+            [render.workspace_flag(repo) for repo in self.LINKED],
+            [
+                "--workspace worktree",
+                "--workspace worktree:/srv/checkouts/api",
+                "--workspace worktree:/srv/checkouts/web",
+            ],
+        )
+
+    def test_triage_flags_give_each_linked_repository_its_worktree(self):
+        with mock.patch.object(card_transition.factory_settings, "read", return_value={"repositories": self.LINKED}), \
+                mock.patch.object(card_transition.factory_source, "checkout", return_value=Path(render.__file__).parent.parent), \
+                mock.patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes"}):
+            self.assertEqual(
+                [card_transition.triage_flags(name) for name in ("example-org/api", "Example-Org/web")],
+                [["--workspace", "worktree:/srv/checkouts/api"], ["--workspace", "worktree:/srv/checkouts/web"]],
+            )
+
+    def test_a_repeated_linked_repository_is_refused(self):
+        repositories = self.LINKED + [dict(self.LINKED[1], full_name="Example-Org/API")]
+        with self.assertRaisesRegex(render.SettingsError, "is listed more than once"):
+            render.build_routes(settings(repositories=repositories))
+
+
 class ValidationTest(unittest.TestCase):
     CASES = {
         "settings must be an object": [],
@@ -641,7 +676,7 @@ class ValidationTest(unittest.TestCase):
             1, full_name="Example-Org/App"
         ),
         "repositories[0].path 'checkouts/app' must be an absolute path": with_repo(0, path="checkouts/app"),
-        "repositories[1].routing 'github' must be one of default, synced_github": with_repo(1, routing="github"),
+        "repositories[1].routing 'github' must be one of default, linked, synced_github": with_repo(1, routing="github"),
         "exactly one repository must have routing 'default', found 2": with_repo(1, routing="default"),
         "exactly one repository must have routing 'default', found 0": with_repo(0, routing="synced_github"),
         "github must be an object": settings(github="example-factory-bot"),
