@@ -1,0 +1,65 @@
+name: Evals
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    name: Eval harness (model-free)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        # actions/checkout@v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        # actions/setup-python@v7.1.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.14'
+
+      - name: Decide whether the change qualifies for the eval
+        id: filter
+        run: >-
+          python3 evals/patina_evals/path_filter.py
+          --base "origin/${{ github.base_ref }}" --head HEAD
+
+      - name: Install the harness's pinned dependencies
+        working-directory: evals
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --require-hashes -r requirements.txt
+
+      - name: Run the harness's tests
+        working-directory: evals
+        env:
+          EVALS_REQUIRE_DOCKER: '1'
+        run: .venv/bin/python -m unittest discover -s tests -t . -v
+
+      - name: Run the smoke fixtures
+        if: steps.filter.outputs.qualifies == 'true'
+        working-directory: evals
+        run: >-
+          .venv/bin/python -m patina_evals run
+          --split development --suite regression
+          --out results/smoke.json --log-dir results/logs
+
+      - name: Upload the smoke result
+        if: always() && steps.filter.outputs.qualifies == 'true'
+        # actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: eval-smoke-result
+          path: evals/results/
+          if-no-files-found: warn
