@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "differences": [
+    {
+      "path": "agents_and_hooks.mcp.mcpServers.linear.args",
+      "worker": "<absent>",
+      "trial": [
+        "<trial>/services/mock_tracker.py"
+      ],
+      "reason": "A trial reaches the tracker through the local file-backed mock, never Linear's hosted MCP server."
+    },
+    {
+      "path": "agents_and_hooks.mcp.mcpServers.linear.command",
+      "worker": "<absent>",
+      "trial": "python3",
+      "reason": "A trial reaches the tracker through the local file-backed mock, never Linear's hosted MCP server."
+    },
+    {
+      "path": "agents_and_hooks.mcp.mcpServers.linear.headers.Authorization",
+      "worker": "Bearer ${LINEAR_API_KEY}",
+      "trial": "<absent>",
+      "reason": "A trial reaches the tracker through the local file-backed mock, never Linear's hosted MCP server."
+    },
+    {
+      "path": "agents_and_hooks.mcp.mcpServers.linear.type",
+      "worker": "http",
+      "trial": "stdio",
+      "reason": "A trial reaches the tracker through the local file-backed mock, never Linear's hosted MCP server."
+    },
+    {
+      "path": "agents_and_hooks.mcp.mcpServers.linear.url",
+      "worker": "https://mcp.linear.app/mcp",
+      "trial": "<absent>",
+      "reason": "A trial reaches the tracker through the local file-backed mock, never Linear's hosted MCP server."
+    },
+    {
+      "path": "environment.ANTHROPIC_BASE_URL",
+      "worker": "<absent>",
+      "trial": "http://127.0.0.1:9",
+      "reason": "A trial points the model endpoint at a refusing local address so no model or provider call can leave the machine."
+    }
+  ]
+}

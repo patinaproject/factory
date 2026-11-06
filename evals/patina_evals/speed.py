@@ -37,6 +37,18 @@ class Recorder:
                 {"id": span_id, "kind": kind, "trial": trial, "parent": parent, "start_ns": start, "end_ns": self._clock()}
             )
 
+    def add(self, kind: str, start_ns: int, end_ns: int, trial: str | None = None, parent: str | None = None) -> str:
+        """Record a span whose start and end happen in different calls, such as a trial's solver and scorer."""
+        if kind not in KINDS:
+            raise ValueError(f"span kind must be one of {KINDS}, got {kind!r}")
+        self._next += 1
+        span_id = f"s{self._next}"
+        self._spans.append({"id": span_id, "kind": kind, "trial": trial, "parent": parent, "start_ns": start_ns, "end_ns": end_ns})
+        return span_id
+
+    def now(self) -> int:
+        return self._clock()
+
     def count(self, trial: str, calls: int = 0, turns: int = 0, retries: int = 0, retry_delay_ns: int = 0) -> None:
         self._counts.append(
             {"trial": trial, "calls": calls, "turns": turns, "retries": retries, "retry_delay_ns": retry_delay_ns}
