@@ -112,6 +112,7 @@ HOOK_EXITS = {
     "teammate_reply": Action(effects(), False),
     "duplicate_comment": Action(effects(), False),
     "triage_exit_handled": Action(effects(), False),
+    "prompt_already_claimed": Action(effects(), False),
     "no_intent": Action(effects(), True),
 }
 GITHUB_ACTIONS = {

@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests import PLUGIN_DIR, load_plugin
+from tests.test_missed_prompts import PROMPT_ID, prompted_event
 from tests.test_plugin import RESOLVED_CONFIG, FakeContext, Platform, RecordingClient, event, hermes_config, session_event
 
 plugin = load_plugin()
@@ -421,6 +422,24 @@ class FailSafeTest(RouterCase):
             router.drain()
 
         self.assertLess(per_call, 0.05)
+
+
+class ClaimedPromptTest(RouterCase):
+    def test_the_shadow_router_records_a_claimed_prompt_as_its_own_exit(self):
+        self.assertTrue(plugin.missed_prompts.claim(str(self.home / "idempotency"), PROMPT_ID))
+        hook = plugin.make_dispatch_hook(
+            lambda: None, lambda: "linear", lambda: {}, lambda payload: None, None, lambda: self.home,
+            lambda: str(self.home / "idempotency"), router_shadow=lambda: True,
+        )
+        key = "webhook:v2:late"
+        asyncio.run(hook(event=prompted_event(chat_id=key)))
+        router.drain()
+        (path,) = (self.home / "webhook-router" / "decisions").glob("*.jsonl")
+        (record,) = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual(
+            (record["chat_id"], record["action"], record["rule"], record["outcome"]),
+            (key, "prompt_already_claimed", "prompt_already_claimed", "skip"),
+        )
 
 
 if __name__ == "__main__":

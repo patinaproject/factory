@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -26,6 +26,7 @@ CAUSES = {
     "usage_limit": "the model's usage limit was reached",
     "paused": "Hermes was paused",
     "unadmitted": "it never reached an agent turn, because a restart, drain, or concurrency cap dropped it",
+    "missed": "its webhook never reached this gateway, so the retry job found the reply in Linear",
 }
 # The shape of `triage_intent.render`, which this script cannot import from the plugin.
 ERROR_BLOCK = (
@@ -42,6 +43,9 @@ SESSION_LINE = re.compile(r"^session_id: (\S+)$", re.MULTILINE)
 INTENT_JSON = re.compile(r"<triage_intent>\s*(\{.*?\})\s*</triage_intent>", re.DOTALL)
 ROUTER_OFF = re.compile(r"^\s*router_shadow:\s*(?:false|no|off)\s*(?:#.*)?$", re.IGNORECASE | re.MULTILINE)
 ROUTER_VERSION = 1
+# The sweep pages Linear and computes one intent, with its Hermes reads, for each prompt it keeps.
+MISSED_PROMPTS_TIMEOUT_SECONDS = 600
+TEMPLATE_KEY = re.compile(r"\{([a-zA-Z0-9_.]+)\}")
 SECRET_PATTERNS = (
     re.compile(r"lin_(?:api|oauth)_\w+"),
     re.compile(r"gh[pousr]_\w+"),
@@ -55,6 +59,28 @@ def redact(text: str) -> str:
     for pattern in SECRET_PATTERNS:
         text = pattern.sub("[redacted]", text)
     return text
+
+
+def render_prompt(template: str, payload: dict, event_type: str, route: str) -> str:
+    """Hermes' `WebhookAdapter._render_prompt`, which this script cannot import."""
+    if not template:
+        truncated = json.dumps(payload, indent=2)[:4000]
+        return f"Webhook event '{event_type}' on route '{route}':\n\n```json\n{truncated}\n```"
+
+    def resolve(match: re.Match) -> str:
+        key = match.group(1)
+        if key == "__raw__":
+            return json.dumps(payload, indent=2)[:4000]
+        if key == "event_type":
+            return event_type
+        value: Any = payload
+        for part in key.split("."):
+            if not isinstance(value, dict):
+                return f"{{{key}}}"
+            value = value.get(part, f"{{{key}}}")
+        return json.dumps(value, indent=2)[:2000] if isinstance(value, (dict, list)) else str(value)
+
+    return TEMPLATE_KEY.sub(resolve, template)
 
 
 def find_hermes() -> str:
@@ -74,6 +100,19 @@ def route_setting(hermes: str, home: Path, route: str, key: str) -> Any:
         return json.loads(proc.stdout) if proc.returncode == 0 else None
     except ValueError:
         return None
+
+
+def linear_route(hermes: str, home: Path) -> str:
+    """The `webhook_route` setting of linear-agent-session, `linear` when it is not set."""
+    proc = subprocess.run(
+        [hermes, "config", "get", "plugins.entries.linear-agent-session.settings.webhook_route", "--json"],
+        env={**os.environ, "HERMES_HOME": str(home)}, capture_output=True, text=True,
+    )
+    try:
+        value = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except ValueError:
+        value = None
+    return value if isinstance(value, str) and value else "linear"
 
 
 def route_list(hermes: str, home: Path, route: str, key: str) -> str:
@@ -147,9 +186,7 @@ class Run:
 
     def say(self, line: str) -> None:
         print(line)
-        with open(self.directory / "retry.log", "a") as log:
-            log.write(f"{store.stamp(store.now())} {line}\n")
-        os.chmod(self.directory / "retry.log", 0o600)
+        self.log(line)
 
     def entries(self) -> dict[str, dict[str, Any]]:
         with store.file_lock(self.directory, "queue.lock"):
@@ -204,6 +241,63 @@ class Run:
                 if self.update(key, "give_up"):
                     self.decide(key, entry, "retry_gave_up", "too_old" if age > store.GIVE_UP_AGE else "too_many_attempts", "gave_up")
                     self.say(f"gave up {entry['route']} {entry['delivery']}: {reason}")
+
+    def log(self, line: str) -> None:
+        with open(self.directory / "retry.log", "a") as log:
+            log.write(f"{store.stamp(store.now())} {line}\n")
+        os.chmod(self.directory / "retry.log", 0o600)
+
+    def sweep_missed(self, hermes_finder: Callable[[], str]) -> None:
+        """Queue each person's session reply that linear-agent-session's sweep found in Linear and no webhook delivered.
+
+        A failed sweep is logged and skipped, so it never holds back the replay of what is already queued."""
+        cli = self.home / "plugins" / "linear-agent-session" / "cli.py"
+        if store.paused(self.home) or not cli.is_file():
+            return
+        try:
+            hermes = hermes_finder()
+        except SystemExit as failure:
+            self.log(f"missed prompts: no sweep: {failure}")
+            return
+        route = linear_route(hermes, self.home)
+        template = route_setting(hermes, self.home, route, "prompt")
+        if not isinstance(template, str) or not template:
+            # The sweep claims what it prints, so it runs only once the entries can be written in full.
+            self.log(f"missed prompts: no sweep: route {route} has no prompt in the config")
+            return
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(cli), "missed-prompts"], capture_output=True, text=True,
+                timeout=MISSED_PROMPTS_TIMEOUT_SECONDS, env={**os.environ, "HERMES_HOME": str(self.home)},
+            )
+        except (subprocess.TimeoutExpired, OSError) as failure:
+            self.log(f"missed prompts: the sweep did not finish: {type(failure).__name__}")
+            return
+        if proc.returncode != 0:
+            self.log(f"missed prompts: the sweep failed ({proc.returncode}): {redact(proc.stderr)[-store.ERROR_LIMIT:]}")
+            return
+        try:
+            entries = [self.missed_entry(route, template, payload) for payload in json.loads(proc.stdout)["prompts"]]
+        except (ValueError, KeyError, TypeError) as failure:
+            self.log(f"missed prompts: the sweep printed output this job cannot read: {type(failure).__name__}")
+            return
+
+        def change(queue: dict[str, dict[str, Any]]) -> bool:
+            return any([store.apply(queue, key, "missed", **fields) for key, fields in entries])
+
+        store.mutate(self.directory, change)
+
+    def missed_entry(self, route: str, template: str, payload: dict) -> tuple[str, dict[str, Any]]:
+        profile = self.home.name if self.home.parent.name == "profiles" else "default"
+        delivery = "missed-" + payload["agentActivity"]["id"]
+        delivered_at = store.stamp(dt.datetime.fromisoformat(payload["createdAt"].replace("Z", "+00:00")))
+        key = store.encode_key(profile, route, delivery)
+        return key, {
+            "key": key, "profile": profile, "route": route, "delivery": delivery, "delivered_at": delivered_at,
+            "summary": {"event": "AgentSessionEvent", "action": "prompted", "subject": payload["agentSession"]["issue"]["identifier"]},
+            "prompt": render_prompt(template, payload, payload["type"], route), "payload": payload, "attempts": 0, "last_error": "",
+            "next_try_at": delivered_at, "reported": False, "admitted": False, "reason": "missed",
+        }
 
     def announce(self) -> None:
         for key, entry in self.entries().items():
@@ -456,6 +550,7 @@ def main(argv: list[str]) -> int:
             return 0
         run = Run(home, directory)
         run.apply_caps()
+        run.sweep_missed(find_hermes)
         run.announce()
         run.retry(args.now)
     return 0

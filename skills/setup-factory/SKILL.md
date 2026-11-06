@@ -786,7 +786,9 @@ skill is served at once.
 **Webhook retry, root home only.** The `webhook-retry` plugin runs inside the
 gateway. It records each webhook delivery. It queues one that arrives while
 Hermes is paused, one whose agent turn fails on a usage limit, and one that
-never reaches a turn, and it clears a delivery when its turn finishes. While
+never reaches a turn, and it clears a delivery when its turn finishes. Its
+cron job also queues a person's agent session reply that never reached the
+gateway at all. While
 Hermes is paused it skips the delivery, so the pause notice does not eat it. The
 `retry-failed-webhooks` cron job in part 12 reruns the queued deliveries.
 Install and enable the plugin in the root home and never in the worker's home. `check-install` reports an
@@ -1774,11 +1776,24 @@ sees it reported as a job the runbook does not create. Remove it with
 `hermes cron remove <job id>`, and remove `<root>/scripts/check-install-alert`.
 
 **Webhook retry job.** The `webhook-retry` plugin from part 5 keeps a queue in
-`<root>/webhook-retry/`. A delivery waits there for one of three reasons, which
+`<root>/webhook-retry/`. A delivery waits there for one of four reasons, which
 `--list` and the job's output name: `usage_limit` (its triage turn failed on a
-usage limit), `paused` (it arrived while Hermes was paused), or `unadmitted`
+usage limit), `paused` (it arrived while Hermes was paused), `unadmitted`
 (a recorded delivery that no `post_gateway_admission` hook marked as started
-within 10 minutes, because a restart, drain, or concurrency cap dropped it). This
+within 10 minutes, because a restart, drain, or concurrency cap dropped it), or
+`missed` (a person's agent session reply whose webhook never reached the
+gateway). Before it reruns anything, the job runs the `missed-prompts` command
+of the `linear-agent-session` plugin. That command reads the app's session
+prompts from Linear for the last 24 hours and keeps each one from an
+approver of the issue that is older than 10 minutes, is still the newest
+activity in its session, and needs a turn. The job queues each one it keeps.
+The dispatch hook and the command share one record per prompt under
+`<root>/plugin-data/linear-agent-session/idempotency/`, so a prompt gets one
+answer whichever of them sees it first. The first run writes
+`missed-prompts.json` there and queues nothing, so replies from before the
+deploy are never answered late. A failed Linear read queues nothing and goes to
+`retry.log` only. The settings `missed_prompt_window_hours` and
+`missed_prompt_grace_minutes` change the two limits. This
 job reruns the due deliveries every 10 minutes, oldest first within each Linear
 issue or pull request and one at a time. A delivery that is not due holds back
 only later deliveries for its own subject. The job starts nothing while Hermes
