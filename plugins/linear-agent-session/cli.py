@@ -218,12 +218,11 @@ def _positive_setting(triage_exit, name: str, default: float) -> float:
 
 
 def _missed_prompts(plugin) -> int:
-    """Print the route and the claimed prompts as one JSON object. Any failure prints its reason to stderr and nothing to stdout."""
+    """Print the claimed prompts as one JSON object. Any failure prints its reason to stderr and nothing to stdout."""
     triage_exit, triage_intent = plugin.triage_exit, plugin.triage_intent
     try:
         window = dt.timedelta(hours=_positive_setting(triage_exit, "missed_prompt_window_hours", 24))
         grace = dt.timedelta(minutes=_positive_setting(triage_exit, "missed_prompt_grace_minutes", 10))
-        route = triage_exit.configured_setting("webhook_route", "linear")
         prompts = plugin.missed_prompts.sweep(
             client=plugin.linear.client_from_env(),
             app_user_id=triage_exit.configured_app_user_id(),
@@ -246,7 +245,7 @@ def _missed_prompts(plugin) -> int:
     except Exception as failure:
         print(plugin.blocks.hermes_redact(f"{type(failure).__name__}: {failure}"), file=sys.stderr)
         return 1
-    print(json.dumps({"route": route, "prompts": prompts}))
+    print(json.dumps({"prompts": prompts}))
     return 0
 
 

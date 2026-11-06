@@ -119,6 +119,7 @@ class SweepTest(unittest.TestCase):
             "other app's session": prompt(owner="app-user-2"),
             "no author": {**prompt(), "promptAuthor": None},
             "ephemeral": {**prompt(), "ephemeral": True},
+            "no issue": {**prompt(), "agentSession": {**prompt()["agentSession"], "issue": None}},
         }
         for name, node in cases.items():
             with self.subTest(name):

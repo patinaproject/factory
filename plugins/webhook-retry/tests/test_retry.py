@@ -20,7 +20,10 @@ FAKE_HERMES = textwrap.dedent(
     import json, os, sys
     args = sys.argv[1:]
     if args[:2] == ["config", "get"]:
-        if "routes.unknown." in args[2]:
+        if "routes.unknown." in args[2] or args[2].startswith("plugins.entries."):
+            sys.stderr.write("Config key not set")
+            sys.exit(1)
+        if args[2].endswith(".prompt") and os.path.exists(os.environ["FAKE_BEHAVIOR"] + ".noprompt"):
             sys.stderr.write("Config key not set")
             sys.exit(1)
         if args[2].endswith(".prompt"):
@@ -59,7 +62,7 @@ FAKE_TRIAGE_EXIT = textwrap.dedent(
         if behavior.get("sweep_exit"):
             sys.stderr.write("sweep failed with Bearer abc123")
             sys.exit(behavior["sweep_exit"])
-        print(behavior.get("sweep_stdout") or json.dumps({"route": "linear", "prompts": behavior.get("prompts", [])}))
+        print(behavior.get("sweep_stdout") or json.dumps({"prompts": behavior.get("prompts", [])}))
         sys.exit(0)
     payload = json.load(open(args[args.index("--payload-file") + 1]))
     now = args[args.index("--now") + 1] if "--now" in args else None
@@ -796,7 +799,7 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(len(self.chats()), 1)
 
     def test_a_sweep_with_unreadable_output_queues_nothing(self):
-        for output in ("not json", json.dumps({"route": "linear"}), json.dumps({"route": "linear", "prompts": [{"x": 1}]})):
+        for output in ("not json", json.dumps({}), json.dumps({"prompts": [{"x": 1}]})):
             with self.subTest(output):
                 self.setUp()
                 self.install_triage_exit(sweep_stdout=output)
@@ -805,6 +808,15 @@ class RetryTest(unittest.TestCase):
 
                 self.assertEqual((result.stdout, self.chats()), ("", []))
                 self.assertIn("missed prompts: the sweep printed output this job cannot read", (self.queue / "retry.log").read_text())
+
+    def test_no_sweep_runs_when_the_route_has_no_prompt_to_render(self):
+        self.install_triage_exit(prompts=[missed_payload()])
+        Path(str(self.behavior) + ".noprompt").write_text("")
+
+        result = self.run_retry()
+
+        self.assertEqual((result.stdout, self.sweeps(), (self.queue / "queue.json").exists()), ("", [], False))
+        self.assertIn("missed prompts: no sweep: route linear has no prompt in the config", (self.queue / "retry.log").read_text())
 
     def test_no_sweep_runs_while_paused_or_without_the_cli(self):
         self.install_triage_exit(prompts=[missed_payload()])

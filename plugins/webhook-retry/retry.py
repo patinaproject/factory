@@ -97,6 +97,19 @@ def route_setting(hermes: str, home: Path, route: str, key: str) -> Any:
         return None
 
 
+def linear_route(hermes: str, home: Path) -> str:
+    """The `webhook_route` setting of linear-agent-session, `linear` when it is not set."""
+    proc = subprocess.run(
+        [hermes, "config", "get", "plugins.entries.linear-agent-session.settings.webhook_route", "--json"],
+        env={**os.environ, "HERMES_HOME": str(home)}, capture_output=True, text=True,
+    )
+    try:
+        value = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except ValueError:
+        value = None
+    return value if isinstance(value, str) and value else "linear"
+
+
 def route_list(hermes: str, home: Path, route: str, key: str) -> str:
     value = route_setting(hermes, home, route, key)
     return ",".join(value) if isinstance(value, list) else (value or "")
@@ -178,8 +191,13 @@ class Run:
         try:
             hermes = hermes_finder()
         except SystemExit as failure:
-            # The sweep claims what it prints, so it must not run when the prompt template cannot be read.
             self.log(f"missed prompts: no sweep: {failure}")
+            return
+        route = linear_route(hermes, self.home)
+        template = route_setting(hermes, self.home, route, "prompt")
+        if not isinstance(template, str) or not template:
+            # The sweep claims what it prints, so it runs only once the entries can be written in full.
+            self.log(f"missed prompts: no sweep: route {route} has no prompt in the config")
             return
         try:
             proc = subprocess.run(
@@ -193,9 +211,7 @@ class Run:
             self.log(f"missed prompts: the sweep failed ({proc.returncode}): {redact(proc.stderr)[-store.ERROR_LIMIT:]}")
             return
         try:
-            found = json.loads(proc.stdout)
-            route, prompts = found["route"], found["prompts"]
-            entries = [self.missed_entry(hermes, route, payload) for payload in prompts]
+            entries = [self.missed_entry(route, template, payload) for payload in json.loads(proc.stdout)["prompts"]]
         except (ValueError, KeyError, TypeError) as failure:
             self.log(f"missed prompts: the sweep printed output this job cannot read: {type(failure).__name__}")
             return
@@ -205,16 +221,15 @@ class Run:
 
         store.mutate(self.directory, change)
 
-    def missed_entry(self, hermes: str, route: str, payload: dict) -> tuple[str, dict[str, Any]]:
+    def missed_entry(self, route: str, template: str, payload: dict) -> tuple[str, dict[str, Any]]:
         profile = self.home.name if self.home.parent.name == "profiles" else "default"
         delivery = "missed-" + payload["agentActivity"]["id"]
         delivered_at = store.stamp(dt.datetime.fromisoformat(payload["createdAt"].replace("Z", "+00:00")))
-        template = route_setting(hermes, self.home, route, "prompt")
         key = store.encode_key(profile, route, delivery)
         return key, {
             "key": key, "profile": profile, "route": route, "delivery": delivery, "delivered_at": delivered_at,
             "summary": {"event": "AgentSessionEvent", "action": "prompted", "subject": payload["agentSession"]["issue"]["identifier"]},
-            "prompt": render_prompt(template if isinstance(template, str) else "", payload, "", route), "payload": payload, "attempts": 0, "last_error": "",
+            "prompt": render_prompt(template, payload, payload["type"], route), "payload": payload, "attempts": 0, "last_error": "",
             "next_try_at": delivered_at, "reported": False, "admitted": False, "reason": "missed",
         }
 

@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from . import idempotency, linear, triage_intent
 
-TOOL = "session_prompt"
+ONCE_NAMESPACE = "session_prompt"
 MARKER_NAME = "missed-prompts.json"
 
 IntentComputer = Callable[[dict, dt.datetime], triage_intent.Intent]
@@ -26,7 +26,7 @@ def claim(directory: Optional[str], activity_id: str) -> bool:
     """True only when this call created the activity's record. A record that already exists, even a reserved one, is False."""
     created = []
     try:
-        idempotency.once(directory, TOOL, activity_id, {}, lambda: created.append(True) or {"recorded": True})
+        idempotency.once(directory, ONCE_NAMESPACE, activity_id, {}, lambda: created.append(True) or {"recorded": True})
     except linear.LinearError:
         if directory is None or not idempotency.recorded(directory, activity_id):
             raise
@@ -85,6 +85,7 @@ def _candidate(node: Mapping[str, Any], app_user_id: str, start: dt.datetime, cu
     created = triage_intent.parse_time(node["createdAt"])
     return (
         node["agentSession"]["appUser"]["id"] == app_user_id
+        and node["agentSession"]["issue"] is not None
         and not node["ephemeral"]
         and node["signal"] != "stop"
         and author is not None
