@@ -20,13 +20,11 @@ import argparse
 import importlib
 import json
 import os
-import sqlite3
 import sys
 from pathlib import Path
 from urllib.parse import quote
 
 import card_branch
-import kanban_board
 import reply_inbox
 import session_links
 
@@ -47,14 +45,6 @@ def link_created_pull(linear, client, session_id: str, event: dict) -> dict | No
     if url is None:
         return None
     return session_links.add(linear, client, session_id, [session_links.pull_link(url)])
-
-
-def current_session_id(board: str, task_id: str, fallback: str) -> str:
-    try:
-        card = next(card for card in kanban_board.cards(board) if card["id"] == task_id)
-    except (sqlite3.Error, OSError, StopIteration):
-        return fallback
-    return reply_inbox.session_id_of(card["body"]) or fallback
 
 
 def arm_auto_merge(event: dict, repo: str, gh=card_branch.run_gh) -> str | None:
@@ -109,7 +99,7 @@ def main() -> int:
         try:
             linear = linear_module()
             client = linear.TokenLinearClient(os.environ["LINEAR_API_KEY"])
-            session_id = current_session_id(args.board, args.task_id, args.session_id) if args.board else args.session_id
+            session_id = reply_inbox.current_session_id(args.board, args.task_id, args.session_id) if args.board else args.session_id
             link_created_pull(linear, client, session_id, event)
         except Exception as failure:
             log(f"linking failed: {failure!r}")

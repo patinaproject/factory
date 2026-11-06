@@ -13,14 +13,11 @@ import importlib
 import json
 import os
 import re
-import sqlite3
 import sys
 import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
-import kanban_board
-import reply_inbox
 
 LIMIT = 3
 PULL = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)")
@@ -61,14 +58,6 @@ def linear_module():
     sys.path.insert(0, str(plugin))
     return importlib.import_module("linear")
 
-
-def current_session_id(board: str, task_id: str, fallback: str) -> str:
-    """The `linear_agent_session_id` the board holds for the card now, since a later session can take it over mid-run."""
-    try:
-        card = next(card for card in kanban_board.cards(board) if card["id"] == task_id)
-    except (sqlite3.Error, OSError, StopIteration):
-        return fallback
-    return reply_inbox.session_id_of(card["body"]) or fallback
 
 
 def blocking_count(findings: list[dict]) -> int:

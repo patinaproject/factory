@@ -70,7 +70,7 @@ class GuardCodeReviewTest(unittest.TestCase):
             mock.patch.dict(os.environ, env),
             mock.patch.object(tempfile, "tempdir", str(self.tmp)),
             mock.patch.object(rounds, "linear_module", lambda: FakeLinearModule),
-            mock.patch.object(rounds, "current_session_id", lambda board, task, fallback: fallback),
+            mock.patch.object(GUARD.reply_inbox, "current_session_id", lambda board, task, fallback: fallback),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)

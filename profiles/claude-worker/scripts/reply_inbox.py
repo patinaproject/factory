@@ -16,11 +16,14 @@ import fcntl
 import json
 import os
 import re
+import sqlite3
 import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+
+import kanban_board
 
 REPLY_PREFIX = "Linear reply:"
 NOT_ASSIGNEE_MARKER = "Context only, not from the assignee:"
@@ -119,6 +122,15 @@ def is_not_from_assignee(body: str | None) -> bool:
 def session_id_of(card_body: str | None) -> str | None:
     match = SESSION_LINE.search(card_body or "")
     return match.group(1) if match else None
+
+
+def current_session_id(board: str, task_id: str, fallback: str) -> str:
+    """The `linear_agent_session_id` the board holds for the card now, since a later session can take it over mid-run."""
+    try:
+        card = next(card for card in kanban_board.cards(board) if card["id"] == task_id)
+    except (sqlite3.Error, OSError, StopIteration):
+        return fallback
+    return session_id_of(card["body"]) or fallback
 
 
 def add(inbox: dict, replies: list[dict], session_id: str | None, now: float) -> None:
