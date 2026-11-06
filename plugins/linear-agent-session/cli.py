@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import importlib.util
 import json
 import os
@@ -82,6 +83,11 @@ def main(argv: Optional[list] = None) -> int:
     intent.add_argument("--payload-file", required=True, help="the Linear webhook payload, as JSON")
     intent.add_argument("--now", help="the delivery time as ISO 8601, for a replay; default is the payload's timestamp")
 
+    commands.add_parser(
+        "missed-prompts",
+        help="print a person's session replies that no webhook delivered and nobody has answered, as JSON, and claim them",
+    )
+
     owner = commands.add_parser("review-owner", help="name who reviews an issue's pull request and their GitHub user id")
     owner.add_argument("--issue", required=True, help="the issue's UUID or identifier")
 
@@ -103,6 +109,8 @@ def main(argv: Optional[list] = None) -> int:
         log = Path(replies.hermes_home()) / "logs" / replies.EXIT_LOG
         replies.reask_exit(plugin.linear.client_from_env, args.agent_session_id, log)
         return 0
+    if args.command == "missed-prompts":
+        return _missed_prompts(plugin)
     if args.command == "triage-intent":
         return _triage_intent(plugin, args.payload_file, args.now)
     if args.command == "activity":
@@ -199,6 +207,45 @@ def _triage_intent(plugin, payload_file: str, now: Optional[str]) -> int:
     except Exception as failure:
         print(f"cli.py: reply {intent.reply_key} was not recorded, so its forward will refuse: {type(failure).__name__}", file=sys.stderr)
     print(triage_intent.render(intent), end="")
+    return 0
+
+
+def _positive_setting(triage_exit, name: str, default: float) -> float:
+    value = triage_exit.configured_setting(name, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError(f"{name} must be a positive number")
+    return value
+
+
+def _missed_prompts(plugin) -> int:
+    """Print the claimed prompts as one JSON object. Any failure prints its reason to stderr and nothing to stdout."""
+    triage_exit, triage_intent = plugin.triage_exit, plugin.triage_intent
+    try:
+        window = dt.timedelta(hours=_positive_setting(triage_exit, "missed_prompt_window_hours", 24))
+        grace = dt.timedelta(minutes=_positive_setting(triage_exit, "missed_prompt_grace_minutes", 10))
+        prompts = plugin.missed_prompts.sweep(
+            client=plugin.linear.client_from_env(),
+            app_user_id=triage_exit.configured_app_user_id(),
+            compute_intent=lambda payload, moment: triage_intent.compute(
+                payload,
+                app_user_id=triage_exit.configured_app_user_id,
+                operator_user_ids=triage_exit.configured_operator_user_ids,
+                client=plugin.linear.client_from_env,
+                cards=triage_exit.listed_cards,
+                history=triage_exit.listed_history,
+                now=moment,
+                opened_by_factory=lambda sid: plugin.opened_sessions.recorded(plugin.opened_sessions.store_dir(os.environ), sid),
+            ),
+            store=plugin.idempotency.store_dir(os.environ),
+            marker=plugin.missed_prompts.marker_path(os.environ),
+            now=dt.datetime.now(dt.timezone.utc),
+            window=window,
+            grace=grace,
+        )
+    except Exception as failure:
+        print(plugin.blocks.hermes_redact(f"{type(failure).__name__}: {failure}"), file=sys.stderr)
+        return 1
+    print(json.dumps({"prompts": prompts}))
     return 0
 
 
