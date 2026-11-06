@@ -49,7 +49,6 @@ def linear_module():
     return importlib.import_module("linear")
 
 
-
 def blocking_count(findings: list[dict]) -> int:
     return sum(
         1

@@ -16,6 +16,8 @@ from contextlib import closing
 from typing import NamedTuple
 from urllib.parse import quote
 
+import reply_inbox
+
 COLUMNS = ("id", "title", "body", "branch_name", "status", "block_kind", "completion_contract")
 COMMENT_COLUMNS = ("id", "task_id", "author", "body", "created_at")
 EVENT_COLUMNS = ("id", "task_id", "kind", "payload", "created_at")
@@ -132,3 +134,11 @@ def missing_columns(path: str) -> list[str]:
         present = {row["name"] for row in read(path, f"PRAGMA table_info({table})")}
         missing += [f"{table}.{column}" for column in columns if column not in present]
     return missing
+
+
+def current_session_id(board: str, task_id: str, fallback: str) -> str:
+    try:
+        card = next(card for card in cards(board) if card["id"] == task_id)
+    except (sqlite3.Error, OSError, StopIteration):
+        return fallback
+    return reply_inbox.session_id_of(card["body"]) or fallback

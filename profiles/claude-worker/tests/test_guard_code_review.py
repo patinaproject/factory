@@ -70,7 +70,7 @@ class GuardCodeReviewTest(unittest.TestCase):
             mock.patch.dict(os.environ, env),
             mock.patch.object(tempfile, "tempdir", str(self.tmp)),
             mock.patch.object(rounds, "linear_module", lambda: FakeLinearModule),
-            mock.patch.object(GUARD.reply_inbox, "current_session_id", lambda board, task, fallback: fallback),
+            mock.patch.object(GUARD.kanban_board, "current_session_id", lambda board, task, fallback: fallback),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -88,6 +88,15 @@ class GuardCodeReviewTest(unittest.TestCase):
         self.assertIn("`Needs input:` followed by a summary of the open findings", text)
         self.assertIn(str(path), text)
         self.assertEqual(len(json.loads(path.read_text())), 2)
+
+    def test_a_refusal_whose_last_round_has_unreadable_findings_points_to_the_session(self) -> None:
+        unreadable = {**blocked_round(3, 2), "body": blocked_round(3, 2)["body"].split("\n", 1)[0]}
+
+        code, text = self.decide(sessions=[blocked_round(1, 1), blocked_round(2, 1), unreadable])
+
+        self.assertEqual(code, 2)
+        self.assertIn("which are in your session, because the last round's record holds no readable findings", text)
+        self.assertFalse((self.tmp / "code-review-example-org-example-repo-42-findings.json").exists())
 
     def test_a_namespaced_skill_name_is_the_code_review_skill(self) -> None:
         event = {"tool_name": "Skill", "tool_input": {"skill": "code:code-review"}}

@@ -22,13 +22,13 @@ import sys
 import time
 
 import code_review_rounds as rounds
-import reply_inbox
+import kanban_board
 
 DEFAULT_SECONDS = "30"
 REFUSAL = (
     "Refused: this pull request has had {count} code-review rounds and the last left {blocking} blocking "
     "finding(s) open. Do not run code-review again. Make the first line of your final message `Needs input:` "
-    "followed by a summary of the open findings, which are in {findings}."
+    "followed by a summary of the open findings, which are {findings}."
 )
 
 
@@ -91,15 +91,19 @@ def decide(event: dict, args: argparse.Namespace) -> tuple[int, str]:
             return 0, ""
         linear = rounds.linear_module()
         client = linear.TokenLinearClient(os.environ["LINEAR_API_KEY"], timeout=min(clock.left(), 10.0))
-        session_id = reply_inbox.current_session_id(args.board, args.task_id, args.session_id)
+        session_id = kanban_board.current_session_id(args.board, args.task_id, args.session_id)
         status = rounds.read_status(client, session_id, pull, tick=clock.left)
     except Exception as failure:
         return 0, f"guard-code-review: allowed code-review without a round count ({failure})"
     if not status.exhausted:
         return 0, ""
-    path = rounds.findings_path(pull)
-    path.write_text(json.dumps(status.last.findings or [], indent=2))
-    return 2, REFUSAL.format(count=len(status.rounds), blocking=status.last.blocking, findings=path)
+    if status.last.findings is None:
+        where = "in your session, because the last round's record holds no readable findings"
+    else:
+        path = rounds.findings_path(pull)
+        path.write_text(json.dumps(status.last.findings, indent=2))
+        where = f"in {path}"
+    return 2, REFUSAL.format(count=len(status.rounds), blocking=status.last.blocking, findings=where)
 
 
 def main() -> int:

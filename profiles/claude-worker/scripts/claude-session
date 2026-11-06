@@ -316,14 +316,14 @@ NO_PARTIAL_WORK_RULE = (
 CODE_REVIEW_RULE = (
     "Make at most three code-review rounds on a pull request, counting every `code-review` report you make on it. "
     "Keep each report in your session. Put nothing about code review on the pull request: no review, comment, "
-    "round count, or SHA in the description. After each round, write its findings to a JSON file, a list of "
-    "records with `id`, `axis`, `severity`, `location`, `text`, and `state` (`open` or `answered`), and run "
+    "round count, or SHA in the description. After each round, write its findings to a JSON file: its new "
+    "findings and the earlier findings it reports still open, not the fixed ones, as a list of records with `id`, `axis`, `severity`, `location`, `text`, and `state` (`open` or `answered`), and run "
     "`{command} record --pr <owner>/<repo>#<number> --base <base sha> --head <head sha> --findings <file>`. "
     "From round 2, run `{command} status --pr <owner>/<repo>#<number>` and pass its `last_head` and `findings` "
     "file to `code-review` as its Earlier round inputs, the reviewed head and the earlier findings. After round 3 "
     "with a blocking finding open, make the first line of your final message `Needs input:` followed by a "
-    "summary of the open findings. File every `Pre-existing` finding as one follow-up issue in the pull "
-    "request's base repository. It never blocks."
+    "summary of the open findings. File all `Pre-existing` findings together in one follow-up issue in the "
+    "pull request's base repository. They never block."
 )
 
 

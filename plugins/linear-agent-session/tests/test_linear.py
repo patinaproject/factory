@@ -186,7 +186,7 @@ class ActivityTest(unittest.TestCase):
             ],
         )
 
-    def test_the_issues_sessions_are_listed_oldest_first_whoever_created_them(self):
+    def test_the_issues_sessions_of_the_same_app_are_listed_oldest_first(self):
         others = [
             ("newer", "active", "2026-10-27T11:00:00.000Z", "app-1"),
             ("other-app", "complete", "2026-10-27T08:00:00.000Z", "app-2"),
@@ -194,7 +194,7 @@ class ActivityTest(unittest.TestCase):
         ]
         fake = FakeLinear([sessions_ok(others)])
 
-        self.assertEqual(make_client(fake).issue_session_ids("live"), ["other-app", "old", "live", "newer"])
+        self.assertEqual(make_client(fake).issue_session_ids("live"), ["old", "live", "newer"])
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "live"})
 
     def test_a_session_without_an_issue_lists_no_sessions(self):

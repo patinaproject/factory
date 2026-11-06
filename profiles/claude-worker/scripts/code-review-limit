@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 import code_review_rounds as rounds
-import reply_inbox
+import kanban_board
 
 
 def status_report(status: rounds.Status, pull: str) -> dict:
@@ -70,7 +70,7 @@ def main() -> int:
         findings = rounds.parse_findings(json.loads(args.findings.read_text())) if args.command == "record" else None
         linear = rounds.linear_module()
         client = linear.TokenLinearClient(os.environ["LINEAR_API_KEY"])
-        session_id = reply_inbox.current_session_id(args.board, args.task_id, args.session_id)
+        session_id = kanban_board.current_session_id(args.board, args.task_id, args.session_id)
         if args.command == "status":
             report = status_report(rounds.read_status(client, session_id, args.pr), args.pr)
         else:
