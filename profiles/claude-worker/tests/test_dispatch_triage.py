@@ -22,10 +22,20 @@ state = json.load(open(path))
 argv = sys.argv[1:]
 with open(path + ".log", "a") as log:
     log.write(json.dumps(argv) + "\\n")
-if argv[:2] == ["config", "get"]:
+if argv[:3] == ["config", "get", "kanban.dispatch_profiles"]:
+    if "dispatch_profiles" in state:
+        print(json.dumps(state["dispatch_profiles"]))
+    else:
+        sys.stderr.write("Config key not set: kanban.dispatch_profiles\\n")
+        sys.exit(1)
+elif argv[:2] == ["config", "get"]:
     print(json.dumps(state["settings"]))
-elif argv[:2] in (["config", "set"], ["config", "unset"]):
-    pass
+elif argv[:2] == ["config", "set"]:
+    state["dispatch_profiles"] = []
+    json.dump(state, open(path, "w"))
+elif argv[:2] == ["config", "unset"]:
+    state.pop("dispatch_profiles", None)
+    json.dump(state, open(path, "w"))
 elif argv == ["kanban", "boards", "list", "--json"]:
     print(json.dumps([{"slug": "default", "db_path": state.get("default_db", "/nowhere")},
                       {"slug": "triage", "db_path": state["db_path"]}]))
@@ -575,6 +585,7 @@ class HostLoadTest(ParkedHarness):
         calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         return [call[1:] for call in calls if call[:1] == ["config"] and call[1] in ("set", "unset")]
 
+
     def entry(self, until: str = "2999-01-01T00:00:00Z") -> dict:
         return {"reason": "load average 20", "until": until}
 
@@ -587,6 +598,21 @@ class HostLoadTest(ParkedHarness):
         reason = self.holds_file()["holds"]["host_load"]["reason"]
         self.assertEqual(reason, "load average 13 (1 min) and 2 (5 min) against a threshold of 12")
         self.assertEqual(self.config_calls(), [["set", "kanban.dispatch_profiles", "[]"]])
+
+    def test_a_key_a_person_set_is_neither_overwritten_nor_unset_by_a_load_hold(self) -> None:
+        proc = self.run_script([task("t_waiting", "ready")], _env={"HOST_HOLD_LOADAVG": "13,2,2"}, dispatch_profiles=["claude-worker"])
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+        self.assertIsNone(self.assignees()["t_waiting"])
+        self.assertIn("host_load", self.holds_file()["holds"])
+        self.assertFalse(self.holds_file()["applied"])
+
+        proc = self.run_script([task("t_waiting", "ready")], dispatch_profiles=["claude-worker"])
+
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertEqual(self.holds_file(), {"holds": {}, "applied": False})
+        self.assertEqual(self.config_calls(), [])
+        self.assertEqual(json.loads(self.state_path.read_text())["dispatch_profiles"], ["claude-worker"])
 
     def test_the_five_minute_average_alone_holds(self) -> None:
         self.run_script([], _env={"HOST_HOLD_LOADAVG": "1,12.5,2"})

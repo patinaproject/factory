@@ -171,7 +171,7 @@ class Machine:
         return [call["argv"] for call in self.calls("hermes")]
 
     def changes(self) -> list:
-        return [argv for argv in self.hermes_argv() if argv[0] != "kanban"]
+        return [argv for argv in self.hermes_argv() if argv[0] != "kanban" and argv[:2] != ["config", "get"]]
 
     def state(self) -> dict:
         return json.loads((self.root / "auto-deploy.json").read_text())
@@ -685,6 +685,35 @@ class AutoDeployTest(unittest.TestCase):
         self.assertEqual(self.m.changes(), [])
         self.assertTrue(self.m.hermes_state()["key"])
 
+    def test_a_pre_list_runs_key_is_released_with_no_list_file_or_no_entry(self) -> None:
+        for holds in (None, {}):
+            with self.subTest(holds=holds):
+                self.m.update_hermes(key=True)
+                (self.m.root / "dispatch-holds.json").unlink(missing_ok=True)
+                if holds is not None:
+                    self.m.set_holds(holds, applied=False)
+                state = auto_deploy.fresh_state()
+                state["hold"] = {"pid": dead_pid(), "commit": "abc", "dispatch_profiles": True, "pause": None, "gateway_lock": False}
+                (self.m.root / "auto-deploy.json").write_text(json.dumps(state))
+
+                self.deploy()
+
+                self.assertFalse(self.m.hermes_state()["key"])
+                self.assertEqual(self.m.holds(), {"holds": {}, "applied": False})
+
+    def test_a_pre_list_runs_key_stays_while_a_host_load_entry_holds(self) -> None:
+        entry = {"reason": "load average 30", "until": FAR}
+        self.m.set_holds({"host_load": entry}, applied=False)
+        self.m.update_hermes(key=True)
+        state = auto_deploy.fresh_state()
+        state["hold"] = {"pid": dead_pid(), "commit": "abc", "dispatch_profiles": True, "pause": None, "gateway_lock": False}
+        (self.m.root / "auto-deploy.json").write_text(json.dumps(state))
+
+        self.deploy()
+
+        self.assertTrue(self.m.hermes_state()["key"])
+        self.assertEqual(self.m.holds(), {"holds": {"host_load": entry}, "applied": True})
+
     def test_a_run_whose_installed_profile_lacks_host_hold_uses_the_source_checkouts_copy(self) -> None:
         (self.m.worker / "scripts" / "host_hold.py").unlink()
         self.m.drifts([self.m.install("profile", "update", "claude-worker", "-y", step="PROFILE")])
@@ -717,7 +746,7 @@ class AutoDeployTest(unittest.TestCase):
 
         self.deploy()
 
-        self.assertEqual(self.m.changes()[:3], [["resume"], HOLD, RELEASE])
+        self.assertEqual(self.m.changes()[:3], [["resume"], RELEASE, HOLD])
         self.assertEqual(self.m.state()["deployed"], self.m.head)
         self.assertTrue(self.m.released())
         self.assertFalse((self.m.root / "auto-deploy.lock").exists())

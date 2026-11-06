@@ -4,7 +4,7 @@
 `auto-deploy.json`) is `{"holds": {<holder>: {"reason": str, "until": ISO-8601 UTC}}, "applied": bool}`. Each holder
 owns its own entry: `host_load` (this module's load gate), `auto-deploy`, and later `usage_limit`. While any entry
 exists, `kanban.dispatch_profiles` is `[]` in the root home and Hermes' dispatcher claims no card. `applied` records
-that the list set the key, so a key set while `applied` is false is a person's hold and the list never unsets it.
+that the list set the key, so a key set while `applied` is false is a person's hold: the list neither overwrites nor unsets it.
 
 `dispatch-holds.log` in the same home gets one JSON line for each entry an `add` creates and each entry a removal
 deletes, which `held_seconds` reads back.
@@ -133,6 +133,8 @@ class HoldList:
 
     def apply_locked(self, data: dict) -> None:
         if data["holds"] and not data["applied"]:
+            if self.key_present():
+                return
             self.run_config("set", HOLD_KEY, "[]")
             data["applied"] = True
             self.write(data)
@@ -140,6 +142,25 @@ class HoldList:
             self.run_config("unset", HOLD_KEY)
             data["applied"] = False
             self.write(data)
+
+    def adopt(self) -> None:
+        """Record that the list owns a key already set, for a caller whose own state proves it set the key."""
+        with self.locked():
+            data = read_holds(self.root)
+            if not data["applied"]:
+                data["applied"] = True
+                self.write(data)
+
+    def key_present(self) -> bool:
+        proc = self.config("get", HOLD_KEY, "--json")
+        if proc.returncode == 0:
+            try:
+                return json.loads(proc.stdout) is not None
+            except ValueError:
+                raise HoldError(f"hermes config get {HOLD_KEY} did not return JSON") from None
+        if "not set" in f"{proc.stdout}{proc.stderr}":
+            return False
+        raise HoldError(f"hermes config get {HOLD_KEY} exited {proc.returncode}: {proc.stderr.strip()}")
 
     def run_config(self, *args: str) -> None:
         proc = self.config(*args)

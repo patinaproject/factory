@@ -251,8 +251,7 @@ class Deploy:
         module, holds = self.holds()
         try:
             if module.AUTO_DEPLOY not in holds.holders():
-                # A run of the code before the hold list set the key itself; the entry makes the removal unset it.
-                self.hold_dispatch(0)
+                holds.adopt()
             holds.remove(module.AUTO_DEPLOY)
         except module.HoldError as error:
             raise DeployError(str(error)) from None

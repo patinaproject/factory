@@ -54,6 +54,11 @@ def hermes() -> int:
     elif argv[:2] == ["kanban", "diagnostics"]:
         scope = "none (fail-closed: present)" if state["key"] else "any"
         out = json.dumps([{"task_id": None, "dispatch_profiles": scope, "diagnostics": []}])
+    elif argv == ["config", "get", "kanban.dispatch_profiles", "--json"]:
+        if state["key"]:
+            out = "[]"
+        else:
+            out, code = "Config key not set: kanban.dispatch_profiles", 1
     elif argv == ["config", "set", "kanban.dispatch_profiles", "[]"]:
         state["key"] = True
     elif argv == ["config", "unset", "kanban.dispatch_profiles"]:

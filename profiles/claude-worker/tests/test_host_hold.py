@@ -22,13 +22,18 @@ LATER = NOW + timedelta(minutes=10)
 class Config:
     """A `hermes config` runner that records each call and the hold file as the call saw it."""
 
-    def __init__(self, root: Path, fail: bool = False) -> None:
+    def __init__(self, root: Path, fail: bool = False, key: str | None = None) -> None:
         self.root = root
         self.fail = fail
+        self.key = key
         self.calls: list = []
 
     def __call__(self, *args: str) -> subprocess.CompletedProcess:
         seen = json.loads((self.root / host_hold.HOLDS_FILE).read_text())
+        if args[0] == "get":
+            if self.key is None:
+                return subprocess.CompletedProcess(args, 1, "", "Config key not set: kanban.dispatch_profiles")
+            return subprocess.CompletedProcess(args, 0, self.key, "")
         self.calls.append((list(args), sorted(seen["holds"]), seen["applied"]))
         return subprocess.CompletedProcess(args, 1 if self.fail else 0, "", "boom" if self.fail else "")
 
@@ -50,6 +55,40 @@ class HostHoldTest(unittest.TestCase):
         self.assertTrue(created)
         self.assertEqual(self.config.calls, [(["set", "kanban.dispatch_profiles", "[]"], ["host_load"], False)])
         self.assertEqual(self.file(), {"holds": {"host_load": {"reason": "load 20", "until": "2026-11-06T12:10:00Z"}}, "applied": True})
+
+    def test_a_key_a_person_set_is_left_alone_and_never_unset(self) -> None:
+        for key in ('["claude-worker"]', "[]"):
+            with self.subTest(key=key):
+                self.config.key = key
+                self.config.calls.clear()
+
+                self.holds.add("host_load", "load 20", LATER)
+
+                self.assertEqual(self.config.calls, [])
+                self.assertEqual(self.file(), {"holds": {"host_load": {"reason": "load 20", "until": "2026-11-06T12:10:00Z"}}, "applied": False})
+
+                self.holds.remove("host_load")
+
+                self.assertEqual(self.config.calls, [])
+                self.assertEqual(self.file(), {"holds": {}, "applied": False})
+
+    def test_a_null_key_is_absent_so_the_list_sets_it(self) -> None:
+        self.config.key = "null"
+
+        self.holds.add("host_load", "load 20", LATER)
+
+        self.assertEqual([call[0] for call in self.config.calls], [["set", "kanban.dispatch_profiles", "[]"]])
+        self.assertTrue(self.file()["applied"])
+
+    def test_adopt_makes_the_list_own_a_key_a_caller_set_so_the_last_removal_unsets_it(self) -> None:
+        self.config.key = "[]"
+        self.holds.add("host_load", "load 20", LATER)
+
+        self.holds.adopt()
+        self.holds.remove("host_load")
+
+        self.assertEqual([call[0] for call in self.config.calls], [["unset", "kanban.dispatch_profiles"]])
+        self.assertEqual(self.file(), {"holds": {}, "applied": False})
 
     def test_removing_one_of_two_holders_leaves_the_other_and_the_key(self) -> None:
         self.holds.add("host_load", "load 20", LATER)
