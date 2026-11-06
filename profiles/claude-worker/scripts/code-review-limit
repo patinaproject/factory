@@ -12,7 +12,7 @@ card's current Linear agent session and prints JSON with its `round` number, one
 findings file is a JSON list of records with `id`, `axis`, `severity`, `location`, `text`, and `state` (`open` or
 `answered`). The script computes `blocking` from them. It is the only way a round is recorded.
 
-Exit 0 on success, 1 with the reason on stderr otherwise. See code_review_rounds.py for the record's format.
+Exit 0 on success, 1 with the reason on stderr otherwise.
 """
 
 from __future__ import annotations

@@ -1,12 +1,3 @@
-"""The record of a pull request's code-review rounds, kept as thoughts in the card's Linear agent sessions.
-
-A round is one code-review report the worker makes on a pull request. The worker records it as a non-ephemeral
-`thought` whose first line is the marker below and whose body holds the round's findings as one fenced json
-block. The round count is the number of such thoughts for the pull request across every agent session on the
-Linear issue, so a new session on the same issue continues the count. `code-review-limit` reads and writes the
-record, and `guard-code-review` reads it.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -49,7 +40,6 @@ class Status(NamedTuple):
 
     @property
     def exhausted(self) -> bool:
-        """Three rounds are made and the last still has a blocking finding."""
         return len(self.rounds) >= LIMIT and self.rounds[-1].blocking > 0
 
 
@@ -61,7 +51,6 @@ def linear_module():
 
 
 def blocking_count(findings: list[dict]) -> int:
-    """Every open `Important` finding and every open Security finding that is not `Pre-existing`; an answered one no longer blocks."""
     return sum(
         1
         for finding in findings
@@ -98,7 +87,6 @@ def round_body(line: str, findings: list[dict]) -> str:
 
 
 def parse_round(body: str, pull: str) -> Round | None:
-    """The round a thought body records for `pull`, else None. Only a first line that is exactly the marker counts."""
     first, _, rest = body.partition("\n")
     match = MARKER.fullmatch(first)
     if match is None or match[2].lower() != pull.lower():

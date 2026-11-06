@@ -1315,7 +1315,6 @@ def claude_settings(
         *(["--auto-merge-repo", shlex.quote(auto_merge_repo)] if auto_merge_repo else []),
     ]
     if session_id and not triage:
-        # A third code-review round stops here while a blocking finding is open; see guard-code-review.
         review = {"type": "command", "command": " ".join([helper_command(CODE_REVIEW_GUARD), *session_arguments(session_id, task_id, board)])}
         settings["hooks"]["PreToolUse"].append({"matcher": "Skill", "hooks": [review]})
     if hook_arguments and not triage:

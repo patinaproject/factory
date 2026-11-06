@@ -125,7 +125,6 @@ def session_id_of(card_body: str | None) -> str | None:
 
 
 def current_session_id(board: str, task_id: str, fallback: str) -> str:
-    """The `linear_agent_session_id` the board holds for the card now, since a later session can take it over mid-run."""
     try:
         card = next(card for card in kanban_board.cards(board) if card["id"] == task_id)
     except (sqlite3.Error, OSError, StopIteration):
