@@ -34,6 +34,9 @@ WORKTREE_HELD_PARK = "Waiting for the worktree:"
 # GitHub or the gateway's token broker answered with a server error; the card waits a few minutes and runs again.
 SERVER_ERROR = "server_error"
 SERVER_ERROR_PARK = "Waiting after a server error:"
+# `xcodebuild -checkFirstLaunchStatus` timed out, which host load can cause; the card waits and runs again.
+XCODE_CHECK_TIMEOUT = "xcode_check_timeout"
+XCODE_CHECK_TIMEOUT_PARK = "Waiting for the Xcode check:"
 # A finished implementation run that waits for a GitHub issue ends with this first line, then the issue's URL.
 # The hook parks the card with a reason that starts with ISSUE_PARK and the URL, which `card_transition.py` reads
 # back. It is not a `Refused` precondition, so it is in MACHINE_PARKS but not in PRECONDITION_PARKS.
@@ -63,6 +66,7 @@ PRECONDITION_PARKS = {
     NEEDS_BRIEF: NEEDS_BRIEF_PARK,
     WORKTREE_HELD: WORKTREE_HELD_PARK,
     SERVER_ERROR: SERVER_ERROR_PARK,
+    XCODE_CHECK_TIMEOUT: XCODE_CHECK_TIMEOUT_PARK,
 }
 MACHINE_PARKS = (*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK, PULL_REQUEST_PARK)
 _COMMENTS_SEEN_LINE = re.compile(r"\s*^" + COMMENTS_SEEN + r"[ \t]*(\d+)[ \t]*\Z", re.MULTILINE)
@@ -145,7 +149,7 @@ class Refused:
     `gh_login` parks the card until the worker's gh login is fresh, `install_skew` until the install matches
     the commit auto-deploy recorded as deployed (a deploy that failed or was blocked keeps the card parked until a
     person finishes it and runs `auto-deploy --retry`), `needs_brief` until triage writes the issue's Agent brief, `worktree_held` until no run holds the card's
-    worktree, and `server_error` until five minutes have passed since the park."""
+    worktree, `server_error` until five minutes have passed since the park, and `xcode_check_timeout` likewise."""
 
     error: str
     transient: bool = False
