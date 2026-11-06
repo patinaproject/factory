@@ -72,6 +72,16 @@ def max_turns(transport: dict) -> int | None:
     return value
 
 
+def load_hold_threshold(transport: dict) -> float | None:
+    """The absolute load average above which no run starts, or None for the default of 1.5 per CPU."""
+    value = transport.get("load_hold_threshold")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+        raise SettingsError(f"claude_session.load_hold_threshold {value!r} must be a positive number")
+    return float(value)
+
+
 def is_count(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
@@ -226,6 +236,7 @@ def artifact(settings) -> ArtifactSettings:
 
 GLOBAL_FIELDS = (
     fresh_after_tokens, max_turns, command_timeout_seconds, idle_limit_seconds, tier_models, mcp_servers, disabled_mcp_servers,
+    load_hold_threshold,
 )
 REPOSITORY_FIELDS = (worker_entry, toolchain_checks, auto_merge)
 
