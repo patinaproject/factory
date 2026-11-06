@@ -129,6 +129,21 @@ SESSION_HISTORY_QUERY = f"""query AgentSessionHistory($id: String!) {{
   }}
 }}"""
 
+RECENT_PROMPTS_QUERY = """query RecentPrompts($since: DateTimeOrDuration!, $after: String) {
+  agentActivities(first: 50, after: $after, orderBy: createdAt, filter: {type: {eq: "prompt"}, createdAt: {gt: $since}}) {
+    nodes {
+      id createdAt ephemeral signal promptAuthor { id app }
+      agentSession { id appUser { id } issue { id identifier } }
+      content { __typename ... on AgentActivityPromptContent { body } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
+
+SESSION_NEWEST_ACTIVITIES_QUERY = """query AgentSessionNewest($id: String!) {
+  agentSession(id: $id) { activities(first: 50, orderBy: createdAt) { nodes { id ephemeral } } }
+}"""
+
 COMMENT_CREATE_MUTATION = """mutation CommentCreate($input: CommentCreateInput!) {
   commentCreate(input: $input) { success }
 }"""
@@ -695,6 +710,23 @@ class LinearClient:
             }
             for n in nodes
         ]
+
+    def recent_prompts(self, since: str) -> list:
+        """Every prompt activity in the app's sessions created after `since` (ISO 8601), newest first."""
+        nodes, after = [], None
+        while True:
+            page = self._graphql(RECENT_PROMPTS_QUERY, {"since": since, "after": after})["agentActivities"]
+            nodes += page["nodes"]
+            if not page["pageInfo"]["hasNextPage"]:
+                return nodes
+            after = page["pageInfo"]["endCursor"]
+
+    def newest_activity_id(self, agent_session_id: str) -> Optional[str]:
+        """The id of the session's newest activity that is not ephemeral, or None when its newest 50 all are."""
+        session = self._graphql(SESSION_NEWEST_ACTIVITIES_QUERY, {"id": agent_session_id})["agentSession"]
+        if session is None:
+            raise LinearError(f"Linear has no agent session {agent_session_id} that the agent app can read")
+        return next((n["id"] for n in session["activities"]["nodes"] if not n["ephemeral"]), None)
 
     def create_session_on_issue(self, id_or_identifier: str) -> str:
         payload = self._graphql(SESSION_CREATE_MUTATION, {"input": {"issueId": id_or_identifier}})[

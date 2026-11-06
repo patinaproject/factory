@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import base64
 import importlib.util
 import json
 import os
 import sys
 
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PLUGIN_DIR)
+
+import queue_store  # noqa: E402
 
 
 def load_plugin():
@@ -20,8 +22,7 @@ def load_plugin():
 
 
 def chat_key(delivery: str, route: str = "linear", profile: str = "default") -> str:
-    body = base64.urlsafe_b64encode(json.dumps([profile, route, delivery]).encode()).decode().rstrip("=")
-    return f"webhook:v2:{body}"
+    return queue_store.encode_key(profile, route, delivery)
 
 
 SKILL_PREFIX = '[IMPORTANT: The user has invoked the "factory-linear-triage" skill, indicating they want you to follow its instructions. '
