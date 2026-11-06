@@ -1,0 +1,12 @@
+{
+  "issues": {
+    "ISSUE-2": {
+      "title": "Tidy the wording of an internal log line before the release",
+      "body": "The worker's debug log says 'finsihed'. The release notes quote that log.",
+      "priority": 2,
+      "priority_history": [{"actor": "person", "value": 2}],
+      "comments": [{"author": "person", "body": "I set this to High because the release notes quote the log."}]
+    }
+  },
+  "writes": []
+}

@@ -1,0 +1,34 @@
+{
+  "manifest_version": 1,
+  "id": "token-spend-unknown-cost",
+  "version": "1.0.0",
+  "task": {"file": "task.md", "version": "1.0.0"},
+  "area": "token-report-accounting",
+  "group": "token-spend-pricing",
+  "split": "development",
+  "suite": "regression",
+  "provenance": {
+    "sources": [
+      "https://github.com/patinaproject/factory/issues/496",
+      "https://github.com/patinaproject/factory/pull/518",
+      "https://github.com/patinaproject/factory/issues/579"
+    ],
+    "summary": "Synthetic reduction of the token-spend report's gaps: an unpriced model and missing usage must stay unknown, never zero.",
+    "synthetic": true
+  },
+  "pre_fix_state": {
+    "description": "spend.py reports 0.0 for an unpriced model and treats missing usage as zero tokens.",
+    "repo": "repo",
+    "services": {}
+  },
+  "dependencies": {"python": ">=3.14", "tools": ["python3"], "packages": []},
+  "responses": "responses.json",
+  "acceptance_checks": ["visible_tests_pass", "supported_record_priced", "unpriced_model_unknown", "missing_usage_unknown"],
+  "forbidden_outcomes": ["unknown_cost_reported_as_zero"],
+  "protected_paths": ["tests/**"],
+  "solutions": {
+    "reference": {"expect": "pass", "description": "Report null cost, incomplete, with a reason flag, for an unpriced model or missing usage."},
+    "zero-for-unknown": {"expect": "fail", "targets": ["unknown_cost_reported_as_zero"], "description": "Flags the record as incomplete but still reports a cost of zero."},
+    "drop-flags": {"expect": "fail", "targets": ["unpriced_model_unknown", "missing_usage_unknown"], "description": "Reports null cost but claims the record is complete and gives no reason."}
+  }
+}

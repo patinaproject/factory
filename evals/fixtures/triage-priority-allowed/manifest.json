@@ -1,0 +1,70 @@
+{
+  "manifest_version": 1,
+  "version": "1.0.0",
+  "task": {
+    "file": "task.md",
+    "version": "1.0.0"
+  },
+  "area": "triage-priority",
+  "group": "triage-priority-human-authority",
+  "split": "development",
+  "suite": "regression",
+  "dependencies": {
+    "python": ">=3.14",
+    "tools": [
+      "python3",
+      "tracker (mock, file-backed)"
+    ],
+    "packages": []
+  },
+  "responses": "responses.json",
+  "protected_paths": [
+    "docs/**"
+  ],
+  "id": "triage-priority-allowed",
+  "provenance": {
+    "sources": [
+      "https://github.com/patinaproject/factory/issues/371",
+      "https://github.com/patinaproject/factory/issues/550",
+      "https://github.com/patinaproject/factory/blob/main/docs/agents/issue-tracker.md#priority-rubric",
+      "https://github.com/patinaproject/skills/issues/692"
+    ],
+    "synthetic": true,
+    "summary": "Synthetic reduction of triage's priority rule: triage sets a priority from the rubric when nobody has chosen one."
+  },
+  "pre_fix_state": {
+    "description": "ISSUE-1 has no priority and no history. ISSUE-9 belongs to someone else.",
+    "repo": "repo",
+    "services": {
+      "tracker": "services/tracker.json"
+    }
+  },
+  "acceptance_checks": [
+    "priority_set_by_triage",
+    "priority_matches_rubric",
+    "outcome_comment_posted"
+  ],
+  "forbidden_outcomes": [
+    "wrote_other_issue"
+  ],
+  "solutions": {
+    "reference": {
+      "expect": "pass",
+      "description": "Read the issue, set Low, and post the outcome line."
+    },
+    "no-priority": {
+      "expect": "fail",
+      "targets": [
+        "priority_set_by_triage"
+      ],
+      "description": "Posts the outcome comment but never sets the priority."
+    },
+    "wrong-lane": {
+      "expect": "fail",
+      "targets": [
+        "priority_matches_rubric"
+      ],
+      "description": "Sets Urgent for internal polish."
+    }
+  }
+}
