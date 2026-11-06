@@ -244,7 +244,6 @@ def make_dispatch_hook(
     skip_home: Callable[[], Path] = triage_exit.gateway_home,
     comment_store: Callable[[], Optional[str]] = lambda: idempotency.store_dir(os.environ),
     forward_store: Callable[[], Optional[str]] = lambda: forwards.store_dir(os.environ),
-    # `register` passes the `router_shadow` setting, which defaults to on.
     router_shadow: Callable[[], bool] = lambda: False,
 ) -> Callable[..., Any]:
     pool = concurrent.futures.ThreadPoolExecutor(TRIAGE_EXIT_WORKERS, thread_name_prefix="triage-exit")
@@ -440,7 +439,6 @@ def _delivery_route(event: Any) -> Optional[str]:
 
 
 def _paused_route(event: Any) -> Optional[str]:
-    """A paused hook returned before it read the event's source, so a malformed source must not raise here."""
     try:
         return _delivery_route(event)
     except Exception:

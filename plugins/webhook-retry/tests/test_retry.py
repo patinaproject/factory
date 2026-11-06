@@ -166,7 +166,6 @@ STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
 
 @contextlib.contextmanager
 def retry_mode(case, on):
-    """Turns the router off through the setting in the profile's config.yaml, and logs what each run did."""
     log = []
     real = RetryCase.run_retry
 

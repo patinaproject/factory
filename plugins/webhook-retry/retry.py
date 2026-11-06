@@ -40,7 +40,6 @@ TEAMMATE_REPLY_TIMEOUT_SECONDS = 120
 # `hermes chat -Q` ends its stderr with this line.
 SESSION_LINE = re.compile(r"^session_id: (\S+)$", re.MULTILINE)
 INTENT_JSON = re.compile(r"<triage_intent>\s*(\{.*?\})\s*</triage_intent>", re.DOTALL)
-# The `router_shadow` setting of linear-agent-session, the only plugin with that key, read from YAML without a parser.
 ROUTER_OFF = re.compile(r"^\s*router_shadow:\s*['\"]?(?:false|no|off)['\"]?\s*(?:#.*)?$", re.IGNORECASE | re.MULTILINE)
 ROUTER_VERSION = 1
 SECRET_PATTERNS = (
@@ -94,8 +93,8 @@ def record_decision(
     home: Path, key: str, attempts: int, action: str, rule: str, outcome: str,
     then: Optional[str] = None, session_id: Optional[str] = None,
 ) -> None:
-    """Append one shadow router record in the format `linear-agent-session/router.py` documents. This script cannot
-    import that plugin, so it has its own writer. A failed write changes nothing the retry does."""
+    """The format `linear-agent-session/router.py` documents. Hermes runs this script outside the gateway, so it
+    cannot import that plugin and has its own writer."""
     if not router_shadow(home):
         return
     moment = dt.datetime.now(dt.timezone.utc)
@@ -118,7 +117,6 @@ def record_decision(
 
 
 def intent_names(block: str) -> tuple[Optional[str], Optional[str]]:
-    """The `action` and `then` of the intent block a replay carries, or nulls when it has none."""
     found = INTENT_JSON.search(block)
     try:
         intent = json.loads(found.group(1)) if found else {}

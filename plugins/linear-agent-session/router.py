@@ -1,10 +1,5 @@
 """Shadow webhook router: one routing decision for every webhook delivery and every retry, recorded and never acted on.
 
-The dispatch hook hands `submit` the facts it already holds: the event, the `Trace` its exits filled, and its return.
-`submit` queues the work on one worker thread and returns at once, so the hook never waits on a decision or a write.
-The worker names the decision from the closed `ACTIONS` table and appends one record. `webhook-retry`'s `retry.py`
-cannot import this plugin, so it writes the same records with its own writer.
-
 Records are JSON Lines, appended to `<gateway home>/webhook-router/decisions/<UTC date>.jsonl` (files 0600, directories
 0700). A file older than `RETENTION_DAYS` days is pruned. Version 1 records hold exactly these fields:
 
@@ -52,7 +47,6 @@ DIRECTORY = Path("webhook-router")
 RETENTION_DAYS = 14
 KEY_PREFIX = "webhook:v2:"
 WARNING_INTERVAL_SECONDS = 60.0
-# A stuck worker must not grow memory without bound; past this many queued records new ones are dropped.
 MAX_PENDING = 1000
 EVENT_LINE = re.compile(r"^- Event: (\S+), action (\S+)$", re.MULTILINE)
 PUSH_KEYS = ("ref", "before", "after", "pusher")
@@ -75,11 +69,6 @@ EFFECTS = frozenset({
 
 
 class Action(NamedTuple):
-    """`expects` is the effect set a turn for this action should have, assuming its card is found.
-
-    `kind` says how `then` widens it. A `question` also agrees with the effects of `then`, or of `yes` when the record
-    has no `then`. A `replay` expects the effects of `then`, the replayed intent's action."""
-
     expects: frozenset
     turn: bool
     kind: str = "decision"
@@ -90,7 +79,6 @@ def effects(*names: str) -> frozenset:
     return frozenset(names)
 
 
-# A first approximation of what `templates/triage-linear.md` does for each intent. The report shows where it is wrong.
 INTENT_EXPECTS = {
     "ignore_factory_session": effects(),
     "answer_mention": effects(LINEAR_ACTIVITY),
@@ -118,17 +106,14 @@ INTENT_EXPECTS = {
     "open_session": effects(SESSION_CREATE, CARD_CREATE, LINEAR_ACTIVITY),
     "error": effects(LINEAR_ACTIVITY),
 }
-# The hook's early exits. Each name is also the `rule` the hook writes into its `Trace` when it takes that exit.
 HOOK_EXITS = {
     "paused": Action(effects(), False),
     "unresolved_secret": Action(effects(), False),
     "teammate_reply": Action(effects(), False),
     "duplicate_comment": Action(effects(), False),
     "triage_exit_handled": Action(effects(), False),
-    # Only a hook built without an intent computer takes this exit; the gateway always passes one.
     "no_intent": Action(effects(), True),
 }
-# One action for each branch of `templates/triage-github.md`, and `auto_deploy` for a push that factory-deploy takes.
 GITHUB_ACTIONS = {
     "auto_deploy": Action(effects(), False),
     "complete_merged_card": Action(effects(CARD_COMMENT, CARD_TRANSITION, LINEAR_ACTIVITY), True),
@@ -139,7 +124,6 @@ GITHUB_ACTIONS = {
     "needs_sender_authority": Action(effects(CARD_COMMENT), True, "question"),
     "needs_change_request_judgment": Action(effects(CARD_COMMENT), True, "question", yes="act_on_feedback"),
 }
-# One action for each `retry.py` outcome. `retry.py` writes these names; a test holds it to this table.
 RETRY_ACTIONS = {
     "retry_triage_exit_handled": Action(effects(), False),
     "retry_teammate_reply": Action(effects(), False),
@@ -161,7 +145,6 @@ ACTIONS: dict[str, Action] = {
 
 
 def acceptable(action: str, then: Optional[str]) -> Optional[set]:
-    """Every effect set that agrees with a decision, or None when nothing says what the turn should do."""
     entry = ACTIONS[action]
     if entry.kind == "replay":
         return acceptable(then, None) if then in ACTIONS else None
@@ -174,8 +157,6 @@ def acceptable(action: str, then: Optional[str]) -> Optional[set]:
 
 @dataclasses.dataclass
 class Trace:
-    """What the hook learned on its way to a return. It fills these as it goes; the router reads them afterward."""
-
     home: Optional[Path] = None
     route: Optional[str] = None
     rule: Optional[str] = None
@@ -189,7 +170,6 @@ class Decision(NamedTuple):
 
 
 def decode_key(key: Any) -> Optional[tuple]:
-    """`webhook-retry`'s `queue_store.decode_key`, which this plugin cannot import."""
     if not isinstance(key, str) or not key.startswith(KEY_PREFIX):
         return None
     body = key[len(KEY_PREFIX):]
@@ -207,10 +187,6 @@ def is_push(payload: Any) -> bool:
 
 
 def github_decision(payload: Any, text: Any) -> Decision:
-    """The branch of `templates/triage-github.md` an event takes, read from the payload and the prompt's event line.
-
-    A person's review or comment needs `pr-authority`, a remote lookup the router never makes, so it records the
-    question with the branch a yes answer takes."""
     if is_push(payload):
         return Decision("auto_deploy", None, "push")
     payload = payload if isinstance(payload, dict) else {}
@@ -258,7 +234,6 @@ def ensure_directory(path: Path) -> None:
 
 
 def next_attempt(root: Path, chat_id: str) -> int:
-    """A per-`chat_id` counter on disk, so a redelivery after a gateway restart still counts one higher."""
     attempts = root / "attempts"
     ensure_directory(attempts)
     path = attempts / hashlib.sha256(chat_id.encode()).hexdigest()
@@ -296,11 +271,9 @@ def append(root: Path, record: dict, moment: dt.datetime) -> None:
 
 
 def record(trace: Trace, chat_id: Any, payload: Any, text: Any, result: Any) -> None:
-    """Decide and append one record. Runs on the router's worker thread."""
     if trace.home is None:
         raise RuntimeError("the gateway home was not resolved")
     root = trace.home / DIRECTORY
-    # The home must already exist: creating it would resurrect a removed home.
     ensure_directory(root)
     decision = decide(trace, payload, text)
     profile, route, delivery = decode_key(chat_id) or (None, None, None)
@@ -351,7 +324,6 @@ def _run(trace: Trace, chat_id: Any, payload: Any, text: Any, result: Any) -> No
 
 
 def submit(enabled: Callable[[], bool], trace: Trace, event: Any, result: Any) -> None:
-    """Queue one decision for the worker and return at once. Nothing it does reaches the hook's return."""
     global _pending
     try:
         if trace.route is None or not enabled():
@@ -375,5 +347,4 @@ def submit(enabled: Callable[[], bool], trace: Trace, event: Any, result: Any) -
 
 
 def drain() -> None:
-    """Wait for every queued decision. Tests call it; the hook never does."""
     _executor.submit(lambda: None).result()

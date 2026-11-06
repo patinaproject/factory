@@ -18,7 +18,6 @@ FIELDS = {
 
 
 def load_router():
-    """The router's table, from the plugin package `retry.py` cannot import."""
     spec = importlib.util.spec_from_file_location(
         "linear_agent_session_for_retry", LINEAR_AGENT_SESSION / "__init__.py",
         submodule_search_locations=[str(LINEAR_AGENT_SESSION)],

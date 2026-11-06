@@ -1,6 +1,4 @@
 """Run a test module's cases with the shadow router off and then on, and require both runs to observe the same thing.
-
-`webhook-retry`'s tests import this file by path, so it imports nothing from this package.
 """
 from __future__ import annotations
 
@@ -20,7 +18,6 @@ TEMPORARY = re.compile(
 
 
 def normalized(observed: list) -> str:
-    """Each run makes its own temporary directories, so their names are not part of what a run observed."""
     return TEMPORARY.sub("<tmp>", repr(observed))
 
 
@@ -70,8 +67,6 @@ def load_tests_in_both_modes(mode: Mode) -> Callable[..., unittest.TestSuite]:
 
 
 class RecordingProxy:
-    """Delegates to the real object and logs each method call, so a test's own assertions on it still hold."""
-
     def __init__(self, target: Any, log: list, name: str) -> None:
         self._target = target
         self._log = log
@@ -102,9 +97,6 @@ def recorded_subprocess(log: list):
 
 
 def dispatch_hook_mode(plugin: Any) -> Mode:
-    """Builds each dispatch hook with `router_shadow` fixed, logs its returns and its client and subprocess calls, and
-    with the router on waits for each decision to be written before the test goes on."""
-
     @contextlib.contextmanager
     def mode(case: unittest.TestCase, on: bool):
         log: list = []

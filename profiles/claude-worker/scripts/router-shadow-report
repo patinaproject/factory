@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the shadow router's decisions with what each webhook turn did, and print where they disagree.
-
-It reads the router's records under `<gateway home>/webhook-router/decisions/` and the gateway's `state.db`. A hook
-record joins the session whose `sessions.chat_id` is its `chat_id`; a retry record joins the session id it stores.
-A turn's effects are its tool calls, through `TOOL_EFFECTS` and `COMMAND_EFFECTS`. A decision agrees when the effect
-set is one its action expects, and a decision that runs no turn agrees when no session exists. A record that should
-have a session and has none is `unjoined`, and is left out of the agreement rate.
-"""
+"""Compare the shadow router's decisions with what each webhook turn did, and print where they disagree."""
 
 from __future__ import annotations
 
@@ -34,7 +27,6 @@ def load_script(name: str) -> Any:
     return module
 
 
-# Cost and the time format follow token-spend, so the two reports price a session the same way.
 token_spend = load_script("token-spend")
 
 TOOL_EFFECTS = {
@@ -62,7 +54,6 @@ COMMAND_EFFECTS = (
     (re.compile(KANBAN + r"archive\b"), "card_archive"),
 )
 TERMINAL = "terminal"
-# A hook record is written just after the hook returns, and its session starts moments later.
 JOIN_SLACK_SECONDS = 60.0
 SESSION_SQL = (
     "SELECT id, source, chat_id, model, started_at, ended_at, COALESCE(input_tokens, 0) AS input_tokens, "
@@ -136,7 +127,6 @@ def read_sessions(gateway: Path) -> tuple[dict[str, dict], dict[str, set[str]]]:
 
 
 def join(records: list[dict], sessions: dict[str, dict]) -> dict[int, Optional[dict]]:
-    """Each session of a chat goes to the latest of the chat's hook records written before it started."""
     joined: dict[int, Optional[dict]] = {}
     by_chat: dict[str, list[int]] = {}
     for index, record in enumerate(records):
