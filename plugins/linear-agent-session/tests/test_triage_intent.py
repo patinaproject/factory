@@ -97,6 +97,7 @@ def replied(action, **overrides):
     fields = dict(
         reply="yes",
         reply_source="payload",
+        reply_key="activity-1",
         reply_author_id=ASSIGNEE,
         reply_author_kind="person",
         assignee=ASSIGNEE_FIELDS,

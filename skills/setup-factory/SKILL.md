@@ -1460,6 +1460,30 @@ configuration remains.
 Render and install again whenever the settings change, then restart the
 gateway.
 
+**Shell approvals in triage turns.** Before the terminal tool runs a command,
+Hermes checks it with `tools.approval.detect_dangerous_command`. It flags, for
+example, an interpreter such as `python3` that reads a heredoc, as
+`script execution via heredoc`. What happens next depends on the turn:
+
+- A gateway webhook turn asks for approval, because the gateway sets
+  `HERMES_EXEC_ASK=1`. With no person present, smart approval decides, or the
+  command waits until the terminal times out.
+- A `hermes chat -Q --oneshot` turn is single-query mode. The `webhook-retry`
+  replays and the reply re-asks run this way. `approvals.single_query_mode`
+  defaults to deny, so Hermes refuses the command.
+
+So no route prompt step may need a flagged command. A person's reply reaches
+its card through the `linear_card_reply` tool of the `linear-agent-session`
+plugin, not through the shell. The plugin stores the reply when the delivery
+arrives, under its agent activity or comment id, in
+`<root>/plugin-data/linear-agent-session/forwards/`. The tool runs
+`card_transition.py` with the reply on standard input and no shell. Never
+loosen Hermes' approvals to make a prompt step pass. Do not set
+`approvals.mode: off`, `unattended_mode: approve`, or
+`single_query_mode: approve`, and do not add a `command_allowlist` entry.
+`check-install` renders each route skill, asks the installed Hermes which of
+its shell commands it flags, and reports each one as a `prompt command` row.
+
 ## 12. Checkout refresh and drift cron jobs
 
 The script lives in the worker profile's `scripts/` directory, so the job

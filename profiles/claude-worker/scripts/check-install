@@ -78,6 +78,11 @@ checkout and the selected environment's site-packages, with a scratch HERMES_HOM
 never through the `hermes` launcher, which can rebuild environments. It prints a row when Hermes cannot be
 imported. HERMES_AGENT_DIR overrides the checkout, which defaults to <root home>/hermes-agent.
 
+The same way, it runs hermes-dangerous-commands over the shell commands each route skill rendered at the commit
+prescribes: each fenced sh block and each inline command that starts `python3 ` or `hermes `. It reports each
+command Hermes' detect_dangerous_command flags, because a turn with no person present waits for an approval or is
+refused, and it reports a Hermes it cannot import.
+
 It checks that each repository plugin installed in a home is enabled there, from `hermes plugins list
 --user --json`, and imports each installed plugin the way Hermes does with import-plugins, in the same
 store Python, so a plugin Hermes would skip or fail to load is reported. Hermes only logs both.
@@ -117,6 +122,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import types
 import urllib.request
@@ -452,12 +458,9 @@ def check_skills(commit: Commit, homes: Homes) -> list:
     A render failure is check_routes' to report. An installed route names the skills this commit renders whenever
     it matches the rendered route, so a route that names a skill nobody installed is a skill that is missing here.
     """
-    render = render_at(commit, homes, "--skills-json")
-    if render.returncode != 0:
-        return []
     fix = install_plan.skills_install(homes)
     drifts = []
-    for name, text in json.loads(render.stdout).items():
+    for name, text in rendered_skills(commit, homes).items():
         path = homes.root / "skills" / name / "SKILL.md"
         if not path.is_file():
             drifts.append(Drift("route skill", str(path), f"is missing; a route at {commit.short} names it", fix))
@@ -2340,6 +2343,58 @@ def check_hermes_tools(root: Path, plugin: Path) -> list:
     return drifts
 
 
+HERMES_DANGEROUS_COMMANDS = Path(__file__).resolve().parent / "hermes-dangerous-commands"
+FENCED_SHELL = re.compile(r"^[ \t]*```(?:sh|bash|shell)[ \t]*\n(.*?)^[ \t]*```", re.MULTILINE | re.DOTALL)
+FENCE = re.compile(r"^[ \t]*```.*?^[ \t]*```", re.MULTILINE | re.DOTALL)
+INLINE_CODE = re.compile(r"`([^`]+)`")
+COMMAND_STARTS = ("python3 ", "hermes ")
+PROMPT_COMMAND_FIX = Manual(
+    "change the prompt step to a plugin tool or to a command Hermes does not flag, in a pull request; never loosen "
+    "Hermes' approvals"
+)
+
+
+def prompt_commands(text: str) -> list:
+    """The shell commands a rendered prompt tells the model to run: each fenced sh block, and each inline code span
+    that starts with a rendered command such as `python3 <script>` or `hermes kanban`."""
+    commands = [textwrap.dedent(block).strip() for block in FENCED_SHELL.findall(text)]
+    prose = FENCE.sub("", text)
+    commands += [" ".join(span.split()) for span in INLINE_CODE.findall(prose) if span.startswith(COMMAND_STARTS)]
+    return list(dict.fromkeys(command for command in commands if command))
+
+
+def check_prompt_commands(root: Path, skills: dict) -> list:
+    """Fail for each command a route skill prescribes that Hermes flags as dangerous.
+
+    A flagged command waits for an approval in a gateway webhook turn and is refused in a `hermes chat -Q --oneshot`
+    replay or re-ask, so a step that needs it never finishes when no person is there to approve it."""
+    commands = {name: prompt_commands(text) for name, text in skills.items()}
+    flat = sorted({command for listed in commands.values() for command in listed})
+    if not flat:
+        return []
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / "commands.json"
+        path.write_text(json.dumps(flat), encoding="utf-8")
+        try:
+            verdicts = run_in_hermes(root, HERMES_DANGEROUS_COMMANDS, str(path))
+        except Refusal as error:
+            return [Drift("prompt command", ", ".join(sorted(skills)), f"cannot ask Hermes which commands it flags: {error}", PROMPT_COMMAND_FIX)]
+    flagged = {
+        entry["command"]: entry["reason"]
+        for entry in verdicts if isinstance(entry, dict) and entry.get("dangerous")
+    }
+    return [
+        Drift("prompt command", name, f"Hermes flags {command.splitlines()[0]!r} as {flagged[command]}, so a turn with no person present waits for an approval or refuses it", PROMPT_COMMAND_FIX)
+        for name, listed in sorted(commands.items()) for command in listed if command in flagged
+    ]
+
+
+def rendered_skills(commit: Commit, homes: Homes) -> dict:
+    """Each route skill's text as the commit renders it, or nothing when render.py fails, which check_routes reports."""
+    render = render_at(commit, homes, "--skills-json")
+    return json.loads(render.stdout) if render.returncode == 0 else {}
+
+
 def installed_plugins(commit: Commit, homes: list) -> list:
     """The (home, name) pairs of repository plugins installed where check_plugins wants them."""
     names = sorted({path.split("/")[1] for path in commit.files("plugins")})
@@ -2497,6 +2552,7 @@ def main() -> int:
             *check_slack_profile(root, hermes, slack),
             *(check_root_mcp_servers(root, slack.home, hermes) if slack.home else ()),
             *check_hermes_tools(root, worker / "plugins" / "blocker-order" / "__init__.py"),
+            *check_prompt_commands(root, rendered_skills(commit, homes_)),
             *check_plugin_status(commit, homes_),
             *check_plugin_imports(commit, [root, worker], root),
         ]

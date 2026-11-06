@@ -503,6 +503,7 @@ class RegisterTest(unittest.TestCase):
                 "linear_agent_activity",
                 "linear_agent_activity_read",
                 "linear_agent_session_create",
+                "linear_card_reply",
                 "linear_delegated_issues",
                 "linear_issue",
                 "linear_issue_comment",
@@ -827,6 +828,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
                 error_intent=intent.error_intent,
                 render=intent.render,
             )
+            forwards = types.SimpleNamespace(
+                store_dir=lambda environ: "store", receive=lambda store, received: calls.append(("receive", store, received.action))
+            )
 
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(cli, "_load_hyphenated_plugin_dir_as_package", lambda: Plugin):
             path = os.path.join(tmp, "payload.json")
@@ -838,6 +842,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             self.assertEqual(code, 0)
             self.assertEqual(calls[0][0], {"type": "Issue"})
             self.assertEqual(calls[0][1]["now"], ("parsed", "2026-10-27T12:00:00Z"))
+            self.assertEqual(calls[1], ("receive", "store", "open_session"))
             self.assertTrue(out.getvalue().startswith("## Computed triage intent\n\n<triage_intent>\n"))
             self.assertIn('"action": "open_session"', out.getvalue())
 
