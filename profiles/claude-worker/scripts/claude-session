@@ -62,6 +62,7 @@ import closing
 import factory_settings
 import factory_source
 import gh_login
+import host_hold
 import install_drift
 import kanban_board
 import reply_inbox
@@ -373,6 +374,8 @@ NEEDS_BRIEF = "needs_brief"
 WORKTREE_HELD = "worktree_held"
 # The `precondition` of a refusal because GitHub or the gateway's broker answered with a server error.
 SERVER_ERROR = "server_error"
+# The `precondition` of a refusal because the host's load average is over the threshold.
+HOST_LOAD = host_hold.HOST_LOAD
 # What each parking cause is called in the refusal that stops parking after PARK_CAP parks in PARK_WINDOW_SECONDS.
 PARK_CAUSES = {WORKTREE_HELD: "the worktree to be free", SERVER_ERROR: "a server error to clear"}
 PARK_CAP = 3
@@ -1482,6 +1485,14 @@ def last_bash_command(session_id: str, worktree: Path) -> str:
     return command[:LAST_COMMAND_CHARS]
 
 
+def test_worker_env() -> dict:
+    """Each live run gets an equal share of the CPUs for its test workers. The count includes this run's own record."""
+    cpus = host_hold.cpu_count()
+    if cpus is None:
+        return {}
+    return {host_hold.TEST_WORKERS_ENV: str(host_hold.test_workers(cpus, run_owner.live_count()))}
+
+
 def run_claude(
     command: list[str], worktree: Path, session_id: str, idle_limit: int, extra_env: dict, watch: run_owner.Watch,
 ) -> tuple[dict | None, int, str, Idle | None]:
@@ -1620,6 +1631,21 @@ def require_fresh_login() -> None:
         )
 
 
+def require_load_below_threshold(threshold: float | None) -> None:
+    """Refuse the run, and hold dispatch, while the host's load is over the threshold. An unreadable load lets the run start."""
+    root = host_hold.root_home(Path(os.environ["HERMES_HOME"]))
+    holds = host_hold.HoldList(root, host_hold.hermes_config(factory_settings.find_hermes, root))
+    reading = host_hold.observe(holds, threshold)
+    if reading is None or not reading.over:
+        return
+    note = ""
+    try:
+        host_hold.hold_for_load(holds, reading)
+    except host_hold.HoldError as error:
+        note = f"; dispatch-triage sets the hold on its next run ({error})"
+    raise Refusal(f"the host load is too high to start a run: {reading.describe()}{note}", transient=True, precondition=HOST_LOAD)
+
+
 def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     import result_line
 
@@ -1640,6 +1666,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     servers = factory_settings.mcp_servers(transport)
     threshold = factory_settings.fresh_after_tokens(transport)
     prefix = factory_settings.worker_entry(repo)
+    require_load_below_threshold(factory_settings.load_hold_threshold(transport))
     worktree = resolve_worktree(workspace, repo["path"])
     check_first_launch(repo, worktree)
     check_toolchain(repo, worktree)
@@ -1742,7 +1769,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 try:
                     output, exit_code, detail, idle = run_claude(
                         command, worktree, session_id, idle_limit,
-                        {artifact_service.CAPABILITY_ENV: capability.secret}, watch,
+                        {artifact_service.CAPABILITY_ENV: capability.secret, **test_worker_env()}, watch,
                     )
                 except CardEnded as ended:
                     output, exit_code, detail, idle, card_ended = None, None, "", None, ended

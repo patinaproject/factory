@@ -144,6 +144,7 @@ import completion_contract
 import factory_settings
 import factory_source
 import gh_login
+import host_hold
 import install_drift
 import kanban_board
 import merged_checks
@@ -557,6 +558,16 @@ def sweep_server_error() -> dict:
     run is the check that the service answers. `dispatch-triage` runs it each minute."""
     prefix = getattr(plugin_module("blocker-order", "result_line"), "SERVER_ERROR_PARK", None)
     return sweep_cause(prefix, lambda card, show: server_wait_over(show), "the server-error wait is over")
+
+
+def sweep_host_load() -> dict:
+    """Release every card parked for the host's load once `dispatch-holds.json` has no `host_load` entry.
+    `dispatch-triage` runs it right after it removes that entry."""
+    prefix = getattr(plugin_module("blocker-order", "result_line"), "HOST_LOAD_PARK", None)
+    if prefix is None:
+        return {"released": [], "failed": {}}
+    root = host_hold.root_home(Path(os.environ["HERMES_HOME"]))
+    return sweep_parked(prefix, lambda: host_hold.HOST_LOAD not in host_hold.read_holds(root)["holds"])
 
 
 def sweep_parked(prefix: str, ready: Callable[[], bool]) -> dict:

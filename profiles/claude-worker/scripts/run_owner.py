@@ -124,6 +124,17 @@ def owner(*, session_id: str | None = None, worktree: str | None = None) -> Reco
     return None
 
 
+def live_count() -> int:
+    """How many runs have a record whose process is alive. A record of an ended process is deleted."""
+    count = 0
+    for path in sorted(runs_dir().glob("*.json")) if runs_dir().is_dir() else ():
+        if alive(Record(**json.loads(path.read_text()))):
+            count += 1
+        else:
+            path.unlink(missing_ok=True)
+    return count
+
+
 def judge(record: Record) -> Verdict:
     """The card's status and why the run is no longer its card's, None for a live card or one that cannot be read."""
     state = card_state(record.board, record.task_id)

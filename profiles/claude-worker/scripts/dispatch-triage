@@ -26,6 +26,10 @@ For each card parked for a GitHub issue it applies `card_transition.sweep_issue`
 same line once the issue closes or a person replies, and otherwise leaves it parked.
 For each card parked for a GitHub pull request it applies `card_transition.sweep_pull_request`: it releases
 the card with the same line once the pull request merges or closes or a person replies.
+Before any release it expires stale holds in the hold list and holds dispatch while the host's load average is over
+the threshold (`host_hold.refresh`), and it assigns no card while the `host_load` hold exists. A card
+parked for the load is released once that hold is gone (`card_transition.sweep_host_load`). An invalid
+`claude_session.load_hold_threshold` skips the load step and exits 2.
 Then it counts the board's cards that are `running`, or `ready` with an
 assignee, and assigns `claude-worker` to waiting `ready` cards, highest priority
 and then oldest first, until that count reaches `triage.max_running` in the
@@ -40,9 +44,11 @@ import os
 import sqlite3
 import subprocess
 import sys
+from pathlib import Path
 
 import card_transition
 import factory_settings
+import host_hold
 
 TRIAGE_BOARD = "triage"
 WORKER = "claude-worker"
@@ -107,14 +113,35 @@ def release_parked(sweep, waits_for: str) -> bool:
     return not swept["failed"]
 
 
+def hold_for_load(binary: str, settings) -> tuple[host_hold.HoldList, bool]:
+    """Expire stale holds, then hold or release for the host's load, then apply. False when the threshold setting is
+    invalid: the load step is skipped, and the error is printed."""
+    root = host_hold.root_home(Path(os.environ["HERMES_HOME"]))
+    holds = host_hold.HoldList(root, host_hold.hermes_config(lambda: binary, root))
+    holds.expire()
+    transport = settings.get("claude_session") if isinstance(settings, dict) else None
+    valid = True
+    try:
+        threshold = factory_settings.load_hold_threshold(transport if isinstance(transport, dict) else {})
+    except factory_settings.SettingsError as error:
+        print(f"dispatch-triage: {error}", file=sys.stderr)
+        valid = False
+    else:
+        host_hold.refresh(holds, threshold)
+    holds.apply()
+    return holds, valid
+
+
 def main() -> int:
     if not os.environ.get("HERMES_HOME"):
         print("dispatch-triage: HERMES_HOME is not set; point it at the claude-worker profile home", file=sys.stderr)
         return 2
     try:
         binary = factory_settings.find_hermes()
-        cap = max_running(factory_settings.read(raw=False))
+        settings = factory_settings.read(raw=False)
         os.environ["HERMES_BIN"] = binary
+        holds, valid = hold_for_load(binary, settings)
+        cap = max_running(settings)
         released = release_waiting()
         released = release_parked(card_transition.sweep_login, "the gh login") and released
         released = release_parked(card_transition.sweep_deploy, "a factory deploy") and released
@@ -124,15 +151,22 @@ def main() -> int:
         released = release_parked(card_transition.sweep_brief, "an Agent brief") and released
         released = release_parked(card_transition.sweep_issue, "a GitHub issue") and released
         released = release_parked(card_transition.sweep_pull_request, "a GitHub pull request") and released
-        tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
-        for task_id in to_assign(tasks, cap):
-            hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)
-            print(f"assigned {task_id}")
+        released = release_parked(card_transition.sweep_host_load, "the host load") and released
+        if host_hold.HOST_LOAD not in holds.holders():
+            tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
+            for task_id in to_assign(tasks, cap):
+                hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)
+                print(f"assigned {task_id}")
+        if not valid:
+            return 2
         if not released:
             return 1
     except Refusal as exc:
         print(f"dispatch-triage: {exc}", file=sys.stderr)
         return exc.code
+    except host_hold.HoldError as exc:
+        print(f"dispatch-triage: {exc}", file=sys.stderr)
+        return 1
     except factory_settings.SettingsError as exc:
         print(f"dispatch-triage: {exc}", file=sys.stderr)
         return 2

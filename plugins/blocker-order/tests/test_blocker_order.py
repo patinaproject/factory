@@ -358,7 +358,7 @@ class ResultLineTest(unittest.TestCase):
             {"error": "stale", "transient": True, "precondition": "gh_login"},
         )
         self.assertIsNone(result_line.precondition_refusal(written))
-        for precondition in ("gh_login", "install_skew", "needs_brief", "worktree_held", "server_error"):
+        for precondition in ("gh_login", "install_skew", "needs_brief", "worktree_held", "server_error", "host_load"):
             refusal = result_line.Refused("stale", True, precondition)
             self.assertEqual(result_line.precondition_refusal(refusal), refusal)
         self.assertIsNone(result_line.precondition_refusal(result_line.Refused("stale", True, "unknown")))
@@ -780,6 +780,16 @@ class ServerErrorTest(GhLoginTest):
     )
     PRECONDITION, PARK, KEY = "server_error", "Waiting after a server error:", "server_error_park"
     ERROR = "Linear token: the gateway's broker is busy"
+
+
+class HostLoadTest(GhLoginTest):
+    STOPPED = (
+        "The host's load is over the factory's threshold, so this card waits in scheduled and goes back to the "
+        "queue once the load falls. Stop now: call no other tool, do not call kanban_block, do not post "
+        "an activity, and do not run claude-session again."
+    )
+    PRECONDITION, PARK, KEY = "host_load", "Waiting for the host load to fall:", "host_load_park"
+    ERROR = "the host load is too high to start a run: load average 30 (1 min)"
 
 
 class IssueParkTest(Hooked):
