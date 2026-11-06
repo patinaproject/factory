@@ -113,11 +113,12 @@ def rules_requiring(*contexts):
     ]
 
 
+PERSON_RESOLVED = {"isResolved": True, "comments": {"nodes": [{"author": {"__typename": "User", "login": "reviewer"}}]}}
 REVIEW_STATE = {
     "data": {
         "repository": {
             "pullRequest": {
-                "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": True}]},
+                "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [PERSON_RESOLVED]},
                 "commits": {
                     "pageInfo": {"hasNextPage": False},
                     "nodes": [{"commit": {"oid": HEAD, "signature": {"isValid": True}}}],
@@ -507,14 +508,15 @@ class HookScopeTest(unittest.TestCase):
 
 
 class HookDecisionTest(unittest.TestCase):
-    def test_ready_pr_allows_completion_with_one_gh_call_on_the_branch(self):
+    def test_ready_pr_allows_completion_after_viewing_the_branch_then_reading_its_rules_and_threads(self):
         shell = FakeShell()
         self.assertIsNone(call_hook(shell))
         gh_calls = [call for call in shell.calls if call[0][0] == "gh"]
         self.assertEqual(
-            gh_calls,
-            [(["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews,labels"], WORKSPACE, 15)],
+            gh_calls[0],
+            (["gh", "pr", "view", BRANCH, "--json", "url,isDraft,mergeStateStatus,headRefOid,state,reviewDecision,statusCheckRollup,baseRefName,reviewRequests,latestReviews,labels"], WORKSPACE, 15),
         )
+        self.assertEqual(len(gh_calls), 3)
 
     def test_published_pr_url_is_viewed_with_its_repo(self):
         shell = FakeShell()
@@ -630,7 +632,6 @@ class HookDecisionTest(unittest.TestCase):
         shell = FakeShell(pr={**CLEAN, **AWAITING_APPROVAL})
         result = call_hook(shell, tool_name="kanban_complete")
         self.assert_blocked(result, "mergeStateStatus is 'BLOCKED'")
-        self.assertEqual([call for call in shell.calls if call[0][:2] == ["gh", "api"]], [])
 
     def test_approval_wait_with_a_failing_check_no_rule_requires_is_allowed(self):
         failed = [*PASSING_CHECKS, {"__typename": "CheckRun", "name": "Diff infra", "status": "COMPLETED", "conclusion": "FAILURE"}]
@@ -720,7 +721,7 @@ class HookDecisionTest(unittest.TestCase):
         self.assert_blocked(self.review_handoff({**AWAITING_APPROVAL, "headRefOid": OTHER}), f"headRefOid is '{OTHER}'")
 
     def test_approval_wait_with_an_unresolved_thread_is_refused(self):
-        state = state_with(reviewThreads={"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": True}, {"isResolved": False}]})
+        state = state_with(reviewThreads={"pageInfo": {"hasNextPage": False}, "nodes": [PERSON_RESOLVED, {"isResolved": False}]})
         self.assert_blocked(self.review_handoff(AWAITING_APPROVAL, state=state), "1 review thread(s) are unresolved")
 
     def test_approval_wait_with_unconfirmed_threads_is_refused(self):
@@ -1380,6 +1381,101 @@ class QueueEntryHookTest(unittest.TestCase):
                 ctx = FakeCtx()
                 ctx.settings["merge_queue"] = {"example-org/example-repo": {"labels": ["queued"]}}
                 self.assertEqual(self.result(shell, ctx=ctx), {**json.loads(LANDED_IN_REVIEW), "waiting_for_merge_queue": True})
+
+
+BOT = {"__typename": "Bot", "login": "copilot-pull-request-reviewer[bot]"}
+BOT_TWO = {"__typename": "Bot", "login": "other-bot[bot]"}
+A_PERSON = {"__typename": "User", "login": "reviewer"}
+BOT_RESOLVER_LOGIN = {"__typename": "User", "login": "patinaproject-goodyear[bot]"}
+NOT_ADDRESSED = "1 resolved bot review thread(s) got neither a fix nor a reply: fix the commented lines or reply in the thread with a reason"
+UNCONFIRMABLE = "1 resolved bot review thread(s) have more than 20 comments, so the gate cannot confirm a reply: reply in the thread with a reason"
+BLOCKED_AWAITING = {**CLEAN, **AWAITING_APPROVAL}
+
+
+def bot_thread(*authors, resolver=None, outdated=False, more=False, starter=BOT):
+    return {
+        "isResolved": True,
+        "isOutdated": outdated,
+        "resolvedBy": resolver,
+        "comments": {"pageInfo": {"hasNextPage": more}, "nodes": [{"author": a} for a in (starter, *authors)]},
+    }
+
+
+class BotThreadTest(unittest.TestCase):
+    def failures(self, thread, pr=CLEAN, tool_name="kanban_complete", rules=None):
+        return evaluate_handoff(pr, rules=rules, state=threads_state(thread), tool_name=tool_name)
+
+    def test_a_clean_pull_request_with_an_unaddressed_bot_thread_is_refused_for_either_tool(self):
+        for tool_name in ("kanban_complete", "kanban_request_review"):
+            with self.subTest(tool_name):
+                self.assertEqual(self.failures(bot_thread(), tool_name=tool_name), [NOT_ADDRESSED])
+
+    def test_a_blocked_pull_request_with_an_unaddressed_bot_thread_is_refused_for_either_tool(self):
+        for tool_name in ("kanban_complete", "kanban_request_review"):
+            with self.subTest(tool_name):
+                failures = self.failures(bot_thread(), pr=BLOCKED_AWAITING, tool_name=tool_name)
+                self.assertIn(NOT_ADDRESSED, failures)
+
+    def test_two_unaddressed_bot_threads_are_counted(self):
+        failures = evaluate_handoff(CLEAN, state=threads_state(bot_thread(), bot_thread()), tool_name="kanban_complete")
+        self.assertEqual(failures, [NOT_ADDRESSED.replace("1 resolved", "2 resolved")])
+
+    def test_an_outdated_thread_counts_as_fixed(self):
+        self.assertEqual(self.failures(bot_thread(outdated=True)), [])
+
+    def test_a_later_comment_from_another_login_counts_as_a_reply(self):
+        self.assertEqual(self.failures(bot_thread(A_PERSON)), [])
+        self.assertEqual(self.failures(bot_thread(BOT_TWO)), [])
+
+    def test_later_comments_only_from_the_starter_or_without_an_author_are_refused(self):
+        self.assertEqual(self.failures(bot_thread(BOT, BOT)), [NOT_ADDRESSED])
+        self.assertEqual(self.failures(bot_thread(None, None)), [NOT_ADDRESSED])
+
+    def test_a_thread_with_no_starter_author_takes_any_later_login_as_a_reply(self):
+        self.assertEqual(self.failures(bot_thread(A_PERSON, starter=None)), [])
+        self.assertEqual(self.failures(bot_thread(None, starter=None)), [NOT_ADDRESSED])
+
+    def test_a_person_as_resolver_passes(self):
+        self.assertEqual(self.failures(bot_thread(resolver=A_PERSON)), [])
+
+    def test_a_resolver_that_is_not_a_person_is_refused(self):
+        resolvers = {"bot login": BOT_RESOLVER_LOGIN, "non-user type": BOT, "null resolver": None}
+        for name, resolver in resolvers.items():
+            with self.subTest(name):
+                self.assertEqual(self.failures(bot_thread(resolver=resolver)), [NOT_ADDRESSED])
+
+    def test_more_comments_than_read_with_no_reply_among_them_is_unconfirmable(self):
+        self.assertEqual(self.failures(bot_thread(more=True)), [UNCONFIRMABLE])
+
+    def test_a_reply_among_the_comments_read_passes_even_with_more_to_read(self):
+        self.assertEqual(self.failures(bot_thread(A_PERSON, more=True)), [])
+
+    def test_a_thread_failing_the_other_conditions_is_not_refused_for_its_comment_count(self):
+        person_started = bot_thread(more=True, starter=A_PERSON)
+        for name, thread in {
+            "person started": person_started,
+            "outdated": bot_thread(outdated=True, more=True),
+            "person resolved": bot_thread(resolver=A_PERSON, more=True),
+        }.items():
+            with self.subTest(name):
+                self.assertEqual(self.failures(thread), [])
+
+    def test_more_than_100_threads_is_still_refused(self):
+        state = state_with(reviewThreads={"pageInfo": {"hasNextPage": True}, "nodes": [bot_thread(A_PERSON)]})
+        failures = evaluate_handoff(CLEAN, state=state, tool_name="kanban_complete")
+        self.assertEqual(failures, ["more than 100 review threads, so the gate cannot confirm they are all resolved"])
+
+    def test_without_a_thread_resolution_rule_neither_tool_changes(self):
+        rules = [{"type": "pull_request", "parameters": {"required_review_thread_resolution": False}}]
+        for tool_name in ("kanban_complete", "kanban_request_review"):
+            with self.subTest(tool_name):
+                self.assertEqual(self.failures(bot_thread(), tool_name=tool_name, rules=rules), [])
+
+    def test_the_review_hook_does_not_flag_queue_entry_and_reads_the_state_once(self):
+        shell = FakeShell(pr=APPROVED_BLOCKED, rules=UPDATE_RULES, state=threads_state(bot_thread()))
+        raw = call_review_hook(shell, ctx=declared_ctx())
+        self.assertIsNone(raw)
+        self.assertEqual(len(graphql_calls(shell, "reviewThreads")), 1)
 
 
 if __name__ == "__main__":
