@@ -3102,7 +3102,7 @@ launch runs, and a macOS update can restart the host under running cards.
 
 4. Check that `xcrun` answers: `xcrun simctl help`.
 5. Run `HERMES_HOME=<worker> python3 <source checkout>/profiles/claude-worker/scripts/check-install`.
-   It must print no `xcode first launch`, `app auto-update`, or `macos auto-update` line. Run
+   It must print no `xcode first launch`, `xcode first launch timeout`, `app auto-update`, or `macos auto-update` line. Run
    `disable-auto-updates` again when an update turned an automatic install back on.
 6. Run `hermes resume`.
 
