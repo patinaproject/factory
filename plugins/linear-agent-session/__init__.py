@@ -78,7 +78,9 @@ def register(ctx: Any) -> None:
         name="linear_issue",
         toolset=TOOLSET,
         schema=tools.ISSUE_SCHEMA,
-        handler=lambda args, **_: tools.run_issue(get_client, args),
+        handler=lambda args, **_: tools.run_issue(
+            get_client, lambda: ctx.get_config("repositories", default=[]), args
+        ),
         description=tools.ISSUE_SCHEMA["description"],
     )
     ctx.register_tool(

@@ -37,6 +37,12 @@ class Clock:
         return self.now
 
 
+REPOSITORIES = [
+    {"full_name": "Example-Org/Main", "path": "/srv/checkouts/main", "routing": "default"},
+    {"full_name": "Example-Org/Example-Repo", "path": "/srv/checkouts/example-repo", "routing": "linked"},
+]
+
+
 def make_client(fake, clock=None, token_cache_path=None):
     return linear.LinearClient(
         "client-id", "client-secret", urlopen=fake, clock=clock or Clock(), token_cache_path=token_cache_path
@@ -474,7 +480,7 @@ class TokenTest(unittest.TestCase):
             body = b'{"error":"Error","error_description":"Client does not support the client_credentials grant type"}'
             raise urllib.error.HTTPError(request.full_url, 400, "error", {}, io.BytesIO(body))
 
-        output = json.loads(tools.run_issue(lambda: make_client(refuse), {"issue": "ABC-1"}))
+        output = json.loads(tools.run_issue(lambda: make_client(refuse), lambda: REPOSITORIES, {"issue": "ABC-1"}))
         self.assertEqual(
             output,
             {"error": "client credentials token request failed: Client does not support the client_credentials grant type"},
@@ -744,7 +750,7 @@ class IssueArgumentTest(unittest.TestCase):
     """Hermes defers these tools, so models call them without the schema and guess the argument name."""
 
     RUNNERS = {
-        "linear_issue": lambda fake, args: tools.run_issue(lambda: make_client(fake), args),
+        "linear_issue": lambda fake, args: tools.run_issue(lambda: make_client(fake), lambda: REPOSITORIES, args),
         "linear_agent_session_create": lambda fake, args: tools.run_session_create(
             lambda: make_client(fake), {**args, "purpose": "work"}
         ),
@@ -964,7 +970,7 @@ class IssueTest(unittest.TestCase):
 
     def test_issue_fields(self):
         fake = FakeLinear([(200, self.RESPONSE), role_labels_response(team=["Ready for agent", "Bug"])])
-        output = json.loads(tools.run_issue(lambda: make_client(fake), {"issue": "ABC-123"}))
+        output = json.loads(tools.run_issue(lambda: make_client(fake), lambda: REPOSITORIES, {"issue": "ABC-123"}))
         self.assertEqual(
             output,
             {
@@ -987,6 +993,8 @@ class IssueTest(unittest.TestCase):
                 "assignee": {"id": "user-1", "name": "Ted Example", "gitHubUserId": "1001", "app": False},
                 "labels": ["bug", "ready-for-agent"],
                 "role_labels": {"ready-for-agent": "Ready for agent"},
+                "repository": "Example-Org/Example-Repo",
+                "repositoryConflict": None,
                 "attachments": [
                     {"url": "https://github.com/example-org/example-repo/issues/9", "sourceType": "github"},
                     {"url": "https://github.com/example-org/example-repo/pull/10", "sourceType": "github"},
@@ -1006,9 +1014,21 @@ class IssueTest(unittest.TestCase):
         self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "ABC-123"})
         self.assertEqual(fake.graphql_requests[1]["variables"], {"id": "2f9a6f0e-0000-4000-8000-000000000001"})
 
+    def test_an_issue_that_links_two_configured_repositories_reports_the_conflict(self):
+        response = json.loads(json.dumps(self.RESPONSE))
+        response["data"]["issue"]["attachments"]["nodes"].append(
+            {"url": "https://github.com/example-org/main", "sourceType": "github"}
+        )
+        fake = FakeLinear([(200, response), role_labels_response(team=[])])
+        output = json.loads(tools.run_issue(lambda: make_client(fake), lambda: REPOSITORIES, {"issue": "ABC-123"}))
+        self.assertEqual(
+            (output["repository"], output["repositoryConflict"]),
+            (None, ["Example-Org/Example-Repo", "Example-Org/Main"]),
+        )
+
     def test_an_issue_read_survives_a_failed_role_label_read(self):
         fake = FakeLinear([(200, self.RESPONSE), (400, {"errors": [{"message": "Cannot query field"}]})])
-        output = json.loads(tools.run_issue(lambda: make_client(fake), {"issue": "ABC-123"}))
+        output = json.loads(tools.run_issue(lambda: make_client(fake), lambda: REPOSITORIES, {"issue": "ABC-123"}))
         self.assertEqual((output["identifier"], output["role_labels"]), ("ABC-123", {}))
 
     def test_card_priority_inverts_the_linear_scale(self):

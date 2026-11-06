@@ -223,6 +223,10 @@ def configured_app_user_id() -> str:
     return value if isinstance(value, str) else ""
 
 
+def configured_repositories() -> list[dict]:
+    return json.loads(_hermes("config", "get", "plugins.entries.linear-agent-session.settings.repositories", "--json"))
+
+
 def operator_user_ids(value: Any) -> list[str]:
     if value is None:
         return []

@@ -6,6 +6,7 @@ import logging
 from typing import Callable, Optional
 
 from . import github_issue, idempotency, opened_sessions, triage_exit
+from .repository import resolve_repository
 from .linear import (
     ACTIVITY_TYPES,
     CLIENT_ERRORS,
@@ -78,7 +79,8 @@ ISSUE_SCHEMA = {
         "description, githubIssues (the URLs of the GitHub issues attached to it), "
         "state, stateType, delegate (the delegate's user ID, or null), labels (names), role_labels (the live label name of each triage role the issue's team and workspace "
         "have, keyed needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix; name a label to people "
-        "by it, never by the role), attachments, "
+        "by it, never by the role), attachments, repository (the configured owner/name whose checkout the issue's "
+        "cards run in), repositoryConflict (null, or the two configured repositories the issue links, so it gets no card), "
         "blockedBy (each blocking issue's id, identifier, gitBranchName, stateType, delegate), and agentSessions "
         "(id, status, createdAt, appUserId, creatorId (null when no person opened it); newest first)."
     ),
@@ -379,16 +381,22 @@ def run_session_read(client_factory: ClientFactory, args: dict) -> str:
     return _tool_result_or_error(run)
 
 
-def run_issue(client_factory: ClientFactory, args: dict) -> str:
+def run_issue(client_factory: ClientFactory, repositories: Callable[[], list], args: dict) -> str:
     def run() -> dict:
         client = client_factory()
         issue = client.get_issue(_issue_argument(args))
+        resolved = resolve_repository(repositories(), [a["url"] for a in issue["attachments"]])
         try:
             role_labels = client.role_labels(issue["id"])
         except CLIENT_ERRORS:
             # Every route decision reads the issue; the label names only word messages to people.
             role_labels = {}
-        return {**issue, "role_labels": role_labels}
+        return {
+            **issue,
+            "role_labels": role_labels,
+            "repository": resolved.repository,
+            "repositoryConflict": list(resolved.conflict) if resolved.conflict else None,
+        }
 
     return _tool_result_or_error(run)
 
