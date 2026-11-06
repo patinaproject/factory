@@ -1,0 +1,21 @@
+[
+  {
+    "tool": "tracker",
+    "args": [
+      "show",
+      "ISSUE-2"
+    ]
+  },
+  {
+    "tool": "tracker",
+    "args": [
+      "comment",
+      "ISSUE-2",
+      "--body",
+      "Priority: High, set by a person\nTriage kept the priority a person chose."
+    ]
+  },
+  {
+    "human": "acknowledge"
+  }
+]
