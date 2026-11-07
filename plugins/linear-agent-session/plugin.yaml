@@ -120,6 +120,13 @@ config_schema:
       The daily Dependabot sweep. team_key is the Linear team of a private default repository's issues, and label
       the theme label every issue gets, in Linear and in each synced_github repository. Empty means no sweep:
       check-install then expects no dependabot-sweep cron job, and check-github-access does not ask for Dependabot alerts.
+  dispatch_hold:
+    type: dict
+    default: {}
+    description: >-
+      The factory-wide hold on new runs. time_zone is the operator's IANA time zone for the usage-limit notices
+      (default UTC). usage_limit_base_minutes (15), usage_limit_margin_minutes (2), and usage_limit_cap_minutes
+      (300) set how long a Claude usage-limit hit holds new runs.
   scheduled_commands:
     type: list
     default: []
