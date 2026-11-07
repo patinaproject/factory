@@ -20,6 +20,8 @@ log = os.environ["FAKE_LOG"]
 record = {{"argv": sys.argv[1:], "env": dict(os.environ), "pid": os.getpid()}}
 if os.environ.get("FAKE_HOLD"):
     record["descendant"] = subprocess.Popen(["sleep", "600"], start_new_session=True).pid
+if os.environ.get("FAKE_LEAVE"):
+    record["left"] = subprocess.Popen(["sleep", "600"]).pid
 json.dump(record, open(log + ".tmp", "w"))
 os.rename(log + ".tmp", log)
 if os.environ.get("FAKE_HOLD"):
@@ -200,6 +202,12 @@ class NestedClaudeTest(unittest.TestCase):
 
         self.assertEqual((proc.returncode, stderr), (124, "nested-claude: ended claude after 2 s (lifetime limit)\n"))
         self.assert_gone(call["pid"], call["descendant"])
+
+    def test_a_child_that_exits_has_what_it_left_in_its_group_ended(self) -> None:
+        proc = self.run_wrapper("-p", "hi", env=self.env(FAKE_LEAVE="1"))
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assert_gone(self.call()["left"])
 
     def test_a_stop_signal_ends_the_child_and_its_descendants(self) -> None:
         proc = subprocess.Popen(self.command("-p", "hi"), env=self.env(FAKE_HOLD="1"))

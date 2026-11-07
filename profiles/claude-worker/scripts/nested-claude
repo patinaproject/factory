@@ -22,7 +22,8 @@ Refuses with exit 2 when the call is itself nested, the run has ended (its
 nested settings file is gone), the environment holds another credential or an
 endpoint other than `--base-url`, the caller passes its own `--settings` or
 asks for a background session, which would outlive the lifetime limit, or
-every one of MAX_NESTED_CALLS slots is taken. Ends the nested claude and every
+every one of MAX_NESTED_CALLS slots is taken. Ends what the nested claude
+leaves in its process group when it exits. Ends the nested claude and every
 process it started after `--lifetime` seconds (exit 124) or when this script
 gets SIGTERM, SIGINT, or SIGHUP (exit 128 plus the signal number).
 """
@@ -197,7 +198,9 @@ def main(argv: list[str]) -> int:
                 preexec_fn=unblock_stop_signals,
             )
             signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
-            return exit_code(proc.wait(timeout=args.lifetime))
+            code = exit_code(proc.wait(timeout=args.lifetime))
+            end(proc)
+            return code
         except subprocess.TimeoutExpired:
             end(proc)
             print(f"nested-claude: ended claude after {args.lifetime:g} s (lifetime limit)", file=sys.stderr)
