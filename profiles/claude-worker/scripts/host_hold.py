@@ -7,7 +7,7 @@ While any entry exists, `kanban.dispatch_profiles` is `[]` in the root home and 
 that the list set the key, so a key set while `applied` is false is a person's hold: the list neither overwrites nor unsets it.
 
 A holder whose change depends on other state takes `locked()` itself, reads the list with `read_holds`, and
-changes it with `add_locked` or `remove_locked`, so one lock covers the list and that state.
+changes it with `add_locked`, so one lock covers the list and that state.
 
 `dispatch-holds.log` in the same home gets one JSON line for each entry an `add` creates and each entry a removal
 deletes, which `held_seconds` reads back.
@@ -118,14 +118,12 @@ class HoldList:
 
     def remove(self, holder: str, readings: Optional[dict] = None, expired: bool = False) -> bool:
         with self.locked():
-            return self.remove_locked(read_holds(self.root), holder, readings, expired)
-
-    def remove_locked(self, data: dict, holder: str, readings: Optional[dict] = None, expired: bool = False) -> bool:
-        entry = data["holds"].pop(holder, None)
-        if entry is not None:
-            self.write(data)
-            self.log("remove", holder, entry.get("reason"), readings, expired=expired)
-        self.apply_locked(data)
+            data = read_holds(self.root)
+            entry = data["holds"].pop(holder, None)
+            if entry is not None:
+                self.write(data)
+                self.log("remove", holder, entry.get("reason"), readings, expired=expired)
+            self.apply_locked(data)
         return entry is not None
 
     def expire(self) -> List[str]:
