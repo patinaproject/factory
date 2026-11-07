@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Count and record a pull request's code-review rounds, which the worker may make at most three of while a blocking finding is open.
+
+`HERMES_HOME=<worker home> python3 code-review-limit --session-id <id> --task-id <card> --board <kanban db> <command>`
+
+`status --pr <owner>/<repo>#<number>` prints JSON: `rounds`, `history` (each round's `round`, `base`, `head`),
+`last_head`, `blocking` (the last round's count, null with no rounds), and `findings`, the path of a file holding the
+last round's findings, null with no rounds. Pass `last_head` and that file to `code-review` as its earlier round.
+
+`record --pr <owner>/<repo>#<number> --base <sha> --head <sha> --findings <file>` posts the round as a thought on the
+card's current Linear agent session and prints JSON with its `round` number, one more than `status` counts. The
+findings file is a JSON list of records with `id`, `axis`, `severity`, `location`, `text`, and `state` (`open` or
+`answered`). The script computes `blocking` from them. It is the only way a round is recorded.
+
+Exit 0 on success, 1 with the reason on stderr otherwise.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+import code_review_rounds as rounds
+import kanban_board
+
+
+def status_report(status: rounds.Status, pull: str) -> dict:
+    last = status.last
+    path = None
+    if last is not None and last.findings is not None:
+        path = rounds.findings_path(pull)
+        path.write_text(json.dumps(last.findings, indent=2))
+    return {
+        "rounds": len(status.rounds),
+        "history": [{"round": at, "base": each.base, "head": each.head} for at, each in enumerate(status.rounds, 1)],
+        "last_head": last.head if last else None,
+        "blocking": last.blocking if last else None,
+        "findings": str(path) if path else None,
+    }
+
+
+def record_round(linear, client, session_id: str, pull: str, base: str, head: str, findings: list[dict]) -> dict:
+    number = len(rounds.read_status(client, session_id, pull).rounds) + 1
+    blocking = rounds.blocking_count(findings)
+    line = rounds.marker(number, pull, base, head, blocking)
+    client.create_activity(session_id, linear.activity_content("thought", body=rounds.round_body(line, findings)))
+    return {"round": number, "blocking": blocking}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--session-id", required=True)
+    parser.add_argument("--task-id", required=True)
+    parser.add_argument("--board", required=True)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("status", "record"):
+        command = commands.add_parser(name)
+        command.add_argument("--pr", required=True)
+        if name == "record":
+            command.add_argument("--base", required=True)
+            command.add_argument("--head", required=True)
+            command.add_argument("--findings", required=True, type=Path)
+    args = parser.parse_args()
+    try:
+        if not rounds.PULL.fullmatch(args.pr):
+            raise ValueError(f"--pr must be <owner>/<repo>#<number>, not {args.pr!r}")
+        findings = rounds.parse_findings(json.loads(args.findings.read_text())) if args.command == "record" else None
+        linear = rounds.linear_module()
+        client = linear.TokenLinearClient(os.environ["LINEAR_API_KEY"])
+        session_id = kanban_board.current_session_id(args.board, args.task_id, args.session_id)
+        if args.command == "status":
+            report = status_report(rounds.read_status(client, session_id, args.pr), args.pr)
+        else:
+            report = record_round(linear, client, session_id, args.pr, args.base, args.head, findings)
+    except Exception as failure:
+        print(f"code-review-limit: {failure}", file=sys.stderr)
+        return 1
+    print(json.dumps(report))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

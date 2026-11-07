@@ -1,6 +1,13 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +15,7 @@ import {
   ISSUE_ENTRY_POINTS,
   ISSUE_ROUTE_ENTRYPOINTS,
   PROTECTED_OPERATIONS,
+  acceptedPlaybooks,
   decideContinuation,
   type CheckoutSnapshot,
   type RouteRequest,
@@ -18,14 +26,17 @@ const checkout: CheckoutSnapshot = {
   head: "0123456789abcdef",
   worktreePath: "/worktrees/issue-435",
 };
+const playbooks = new Set(["refactoring", "investigation", "figure-it-out"]);
 
 function request(
   entry: (typeof ISSUE_ENTRY_POINTS)[number],
-  operation: (typeof PROTECTED_OPERATIONS)[number]
+  operation: (typeof PROTECTED_OPERATIONS)[number],
+  playbook: string | null = "refactoring"
 ): RouteRequest {
   return {
     entry,
     operation,
+    ...(playbook === null ? {} : { playbook }),
     preflight: {
       kind: "passed",
       issue: {
@@ -59,7 +70,7 @@ describe("issue handoff policy", () => {
     for (const operation of PROTECTED_OPERATIONS) {
       it(`refuses ${entry} ${operation} when the preflight is missing`, () => {
         expect(
-          decideContinuation({ entry, operation }, checkout)
+          decideContinuation({ entry, operation }, checkout, playbooks)
         ).toEqual({
           kind: "stop",
           reason: "missing-preflight",
@@ -68,12 +79,26 @@ describe("issue handoff policy", () => {
       });
 
       it(`allows ${entry} ${operation} after a matching pass`, () => {
-        expect(decideContinuation(request(entry, operation), checkout)).toEqual(
-          {
-            kind: "continue",
-            issue: "#435",
-          }
-        );
+        expect(
+          decideContinuation(request(entry, operation), checkout, playbooks)
+        ).toEqual({
+          kind: "continue",
+          issue: "#435",
+        });
+      });
+
+      it(`refuses ${entry} ${operation} when the playbook is missing`, () => {
+        expect(
+          decideContinuation(
+            request(entry, operation, null),
+            checkout,
+            playbooks
+          )
+        ).toEqual({
+          kind: "stop",
+          reason: "missing-playbook",
+          blocked: PROTECTED_OPERATIONS,
+        });
       });
     }
   }
@@ -96,7 +121,8 @@ describe("issue handoff policy", () => {
               issue: "#435",
             },
           },
-          checkout
+          checkout,
+          playbooks
         )
       ).toEqual({
         kind: "stop",
@@ -114,7 +140,8 @@ describe("issue handoff policy", () => {
           operation: "edit",
           preflight: { kind: "no-issue" },
         },
-        checkout
+        checkout,
+        playbooks
       )
     ).toEqual({
       kind: "stop",
@@ -125,10 +152,11 @@ describe("issue handoff policy", () => {
 
   it("refuses a pass from a non-canonical branch", () => {
     expect(
-      decideContinuation(request("direct", "edit"), {
-        ...checkout,
-        branch: "t3code/generated",
-      })
+      decideContinuation(
+        request("direct", "edit", null),
+        { ...checkout, branch: "t3code/generated" },
+        playbooks
+      )
     ).toEqual({
       kind: "stop",
       reason: "stale-checkout",
@@ -138,15 +166,64 @@ describe("issue handoff policy", () => {
 
   it("refuses a pass from another physical worktree", () => {
     expect(
-      decideContinuation(request("session-pickup", "commit"), {
-        ...checkout,
-        worktreePath: "/worktrees/other",
-      })
+      decideContinuation(
+        request("session-pickup", "commit", null),
+        { ...checkout, worktreePath: "/worktrees/other" },
+        playbooks
+      )
     ).toEqual({
       kind: "stop",
       reason: "stale-checkout",
       blocked: PROTECTED_OPERATIONS,
     });
+  });
+
+  it("refuses a playbook outside the accepted set", () => {
+    expect(
+      decideContinuation(
+        request("direct", "edit", "not-a-playbook"),
+        checkout,
+        playbooks
+      )
+    ).toEqual({
+      kind: "stop",
+      reason: "unknown-playbook",
+      blocked: PROTECTED_OPERATIONS,
+    });
+  });
+
+  for (const operation of ["edit", "commit"] as const) {
+    it(`refuses ${operation} under a read-only playbook`, () => {
+      expect(
+        decideContinuation(
+          request("direct", operation, "investigation"),
+          checkout,
+          playbooks
+        )
+      ).toEqual({
+        kind: "stop",
+        reason: "playbook-not-allowed",
+        blocked: PROTECTED_OPERATIONS,
+      });
+    });
+  }
+
+  it("allows an operational run under a read-only playbook", () => {
+    expect(
+      decideContinuation(
+        request("direct", "operational-run", "investigation"),
+        checkout,
+        playbooks
+      )
+    ).toEqual({ kind: "continue", issue: "#435" });
+  });
+
+  it("accepts bundled stems, project stems, and figure-it-out", () => {
+    const accepted = acceptedPlaybooks(checkout);
+    expect(accepted.has("refactoring")).toBe(true);
+    expect(accepted.has("session-pickup")).toBe(true);
+    expect(accepted.has("figure-it-out")).toBe(true);
+    expect(accepted.has("not-a-playbook")).toBe(false);
   });
 });
 
@@ -188,6 +265,27 @@ describe("issue route entries", () => {
     return path;
   }
 
+  async function passedRoute(
+    checkoutPath: string,
+    fields: Record<string, unknown>
+  ) {
+    return {
+      ...fields,
+      preflight: {
+        kind: "passed",
+        issue: {
+          id: "#435",
+          provider: "github",
+          url: "https://github.com/patinaproject/skills/issues/435",
+        },
+        endingBranch: git(checkoutPath, "branch", "--show-current"),
+        worktreePath: realpathSync(
+          git(checkoutPath, "rev-parse", "--show-toplevel")
+        ),
+      },
+    };
+  }
+
   async function run(
     entry: keyof typeof entryPoints,
     input: unknown,
@@ -223,25 +321,12 @@ describe("issue route entries", () => {
 
     it(`routes the ${entry} entry only after a matching pass`, async () => {
       const checkoutPath = await makeCheckout();
-      const branch = git(checkoutPath, "branch", "--show-current");
-      const worktreePath = realpathSync(
-        git(checkoutPath, "rev-parse", "--show-toplevel")
-      );
       const result = await run(
         entry,
-        {
+        await passedRoute(checkoutPath, {
           operation: "operational-run",
-          preflight: {
-            kind: "passed",
-            issue: {
-              id: "#435",
-              provider: "github",
-              url: "https://github.com/patinaproject/skills/issues/435",
-            },
-            endingBranch: branch,
-            worktreePath,
-          },
-        },
+          playbook: "babysit",
+        }),
         checkoutPath
       );
 
@@ -253,7 +338,72 @@ describe("issue route entries", () => {
       expect(receipt.request.entry).toBe(entry);
       expect(receipt.decision.kind).toBe("continue");
     });
+
+    it(`refuses the ${entry} entry when an edit names no playbook`, async () => {
+      const checkoutPath = await makeCheckout();
+      const result = await run(
+        entry,
+        await passedRoute(checkoutPath, { operation: "edit" }),
+        checkoutPath
+      );
+
+      expect(result.exitCode).toBe(2);
+      const output = JSON.parse(result.stdout);
+      expect(output.reason).toBe("missing-playbook");
+      expect(existsSync(output.receiptPath)).toBe(true);
+    });
   }
+
+  it("records the playbook in a version 2 receipt", async () => {
+    const checkoutPath = await makeCheckout();
+    const result = await run(
+      "direct",
+      await passedRoute(checkoutPath, {
+        operation: "edit",
+        playbook: "refactoring",
+      }),
+      checkoutPath
+    );
+
+    expect(result.exitCode).toBe(0);
+    const output = JSON.parse(result.stdout);
+    expect(output.kind).toBe("continue");
+    const receipt = JSON.parse(readFileSync(output.receiptPath, "utf8"));
+    expect(receipt.schemaVersion).toBe(2);
+    expect(receipt.request.playbook).toBe("refactoring");
+  });
+
+  it("accepts a project playbook from the checkout", async () => {
+    const checkoutPath = await makeCheckout();
+    mkdirSync(join(checkoutPath, ".agents", "playbooks"), { recursive: true });
+    writeFileSync(
+      join(checkoutPath, ".agents", "playbooks", "release-train.md"),
+      "---\nextends:\nwhen: Cutting a release.\n---\n"
+    );
+    const result = await run(
+      "direct",
+      await passedRoute(checkoutPath, {
+        operation: "edit",
+        playbook: "release-train",
+      }),
+      checkoutPath
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout).kind).toBe("continue");
+  });
+
+  it("rejects a playbook that is not a string", async () => {
+    const checkoutPath = await makeCheckout();
+    const result = await run(
+      "direct",
+      await passedRoute(checkoutPath, { operation: "edit", playbook: 7 }),
+      checkoutPath
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("playbook must be a non-empty string\n");
+  });
 
   it("persists an explicit no-issue receipt while refusing the route", async () => {
     const result = await run("direct", {

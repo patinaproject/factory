@@ -555,6 +555,15 @@ class LinearClient:
             self._carry_pull_requests(agent_session_id, session, older)
         return closed
 
+    def issue_session_ids(self, agent_session_id: str) -> list:
+        """The agent sessions of this session's app user on its issue, oldest first. Empty when Linear has none."""
+        session = self._graphql(ISSUE_SESSIONS_QUERY, {"id": agent_session_id})["agentSession"]
+        if session is None or session["issue"] is None:
+            return []
+        app = session["appUser"]["id"] if session["appUser"] else None
+        own = [n for n in session["issue"]["agentSessions"]["nodes"] if n["appUser"] and n["appUser"]["id"] == app]
+        return [n["id"] for n in sorted(own, key=lambda n: n["createdAt"])]
+
     def _carry_pull_requests(self, agent_session_id: str, session: dict, older: list) -> None:
         held = {u["url"] for u in session_links(session)}
         missing = {}

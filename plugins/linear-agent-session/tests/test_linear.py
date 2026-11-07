@@ -186,6 +186,22 @@ class ActivityTest(unittest.TestCase):
             ],
         )
 
+    def test_the_issues_sessions_of_the_same_app_are_listed_oldest_first(self):
+        others = [
+            ("newer", "active", "2026-10-27T11:00:00.000Z", "app-1"),
+            ("other-app", "complete", "2026-10-27T08:00:00.000Z", "app-2"),
+            ("old", "complete", "2026-10-27T09:00:00.000Z", "app-1"),
+        ]
+        fake = FakeLinear([sessions_ok(others)])
+
+        self.assertEqual(make_client(fake).issue_session_ids("live"), ["old", "live", "newer"])
+        self.assertEqual(fake.graphql_requests[0]["variables"], {"id": "live"})
+
+    def test_a_session_without_an_issue_lists_no_sessions(self):
+        fake = FakeLinear([(200, {"data": {"agentSession": {"issue": None}}})])
+
+        self.assertEqual(make_client(fake).issue_session_ids("live"), [])
+
     def carried(self, others, live_urls=(), responses=None):
         fake = FakeLinear([sessions_ok(others, live_urls), activity_ok(), *(responses or [session_update_ok(), session_update_ok()])])
         make_client(fake).close_older_sessions("live")

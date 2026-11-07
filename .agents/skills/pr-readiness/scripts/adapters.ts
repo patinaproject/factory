@@ -6,12 +6,17 @@ import { POLICY_PATH } from "./policy.ts";
 import type { CheckRunFact, ForgeEvidence, ReviewDecision, ReviewFact } from "./evidence.ts";
 
 export interface PullRequestState extends Omit<CandidateIdentity, "policyDigest"> { readonly number: number; readonly isDraft: boolean; readonly body?: string; readonly baseRef?: string; readonly headRef?: string; }
+export interface AutoMergeState { readonly defaultBranch: string; readonly changedPaths: readonly string[]; readonly armed?: { readonly mergeMethod: string; readonly head?: string } }
 export interface Forge {
   readPullRequest(repository: string, number: number): PullRequestState;
   openPullRequest(input: { repository: string; base: string; head: string; draft?: boolean }): PullRequestState;
   markReady(repository: string, number: number, expectedHead: string): void;
   readPolicy(repository: string): string | undefined;
   readEvidence(repository: string, number: number, head: string): ForgeEvidence;
+  /** Replaces any existing auto-merge request with a squash request pinned to `head`. */
+  enableAutoMerge(repository: string, number: number, head: string): void;
+  readRequiredChecks(repository: string, baseRef: string): string[];
+  readAutoMergeState(repository: string, number: number): AutoMergeState;
 }
 export interface PacketStore { get(key: string): ReadinessPacket | undefined; putIfAbsent(key: string, packet: ReadinessPacket): ReadinessPacket; }
 
@@ -32,6 +37,14 @@ const isString = (value: unknown): value is string => typeof value === "string";
 const isId = (value: unknown): value is number => Number.isInteger(value) && (value as number) > 0;
 const isNullableString = (value: unknown): value is string | null | undefined => value === null || value === undefined || typeof value === "string";
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+export function parseChangedPaths(rows: readonly unknown[]): string[] {
+  const paths = rows.flatMap((row) => {
+    if (!isObject(row)) throw new Error("forge returned a malformed changed file");
+    const previous = row.previous_filename;
+    return [field(row, "filename", isString, "changed file"), ...(isString(previous) ? [previous] : [])];
+  });
+  return [...new Set(paths)];
+}
 export function parseCheckRun(value: unknown): CheckRunFact {
   if (!isObject(value)) throw new Error("forge returned a malformed check run");
   const app = field(value, "app", isObject, "check run");
@@ -67,6 +80,27 @@ function git(command: string, args: readonly string[]): string { return execFile
 function remoteDiff(command: string, repository: string, number: number): string { try { return execFileSync(command, ["pr", "diff", String(number), "--repo", repository, "--patch"], { encoding: "utf8" }); } catch { return ""; } }
 function derivePatchId(diff: string): string { if (!diff) return sha256(""); try { const result = execFileSync("git", ["patch-id", "--stable"], { input: diff, encoding: "utf8" }).trim(); return result.split(/\s+/)[0] || sha256(diff); } catch { return sha256(diff); } }
 
+const ARM_STATE_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){defaultBranchRef{name} pullRequest(number:$number){id autoMergeRequest{mergeMethod} timelineItems(itemTypes:[PULL_REQUEST_COMMIT,HEAD_REF_FORCE_PUSHED_EVENT,AUTO_MERGE_ENABLED_EVENT],last:100){nodes{__typename ... on PullRequestCommit{commit{oid}} ... on HeadRefForcePushedEvent{afterCommit{oid}} ... on AutoMergeEnabledEvent{createdAt}}}}}}";
+/** GitHub's autoMergeRequest carries no head OID, so replay the timeline: the armed head is the head current at the last enable event. */
+export function armedHeadFromTimeline(nodes: readonly unknown[]): string | undefined {
+  let current: string | undefined, armed: string | undefined;
+  for (const node of nodes) {
+    if (!isObject(node)) continue;
+    if (node.__typename === "PullRequestCommit") current = (node.commit as { oid?: string } | null)?.oid;
+    else if (node.__typename === "HeadRefForcePushedEvent") current = (node.afterCommit as { oid?: string } | null)?.oid;
+    else if (node.__typename === "AutoMergeEnabledEvent") armed = current;
+  }
+  return armed;
+}
+export function requiredContexts(rules: readonly unknown[]): string[] {
+  const contexts = rules.flatMap((rule) => {
+    if (!isObject(rule) || rule.type !== "required_status_checks") return [];
+    const checks = isObject(rule.parameters) ? rule.parameters.required_status_checks : undefined;
+    return Array.isArray(checks) ? checks.flatMap((check) => (isObject(check) && typeof check.context === "string" ? [check.context] : [])) : [];
+  });
+  return [...new Set(contexts)];
+}
+
 /** Production adapter. It only reads forge metadata and patch text; it never executes PR-head code. */
 export class GhForge implements Forge {
   constructor(readonly command: "gh" | "origin" = "gh") {}
@@ -94,6 +128,35 @@ export class GhForge implements Forge {
     const file: unknown = JSON.parse(output);
     if (!file || typeof file !== "object" || (file as { encoding?: unknown }).encoding !== "base64" || typeof (file as { content?: unknown }).content !== "string") throw new Error(`forge returned an unreadable ${POLICY_PATH}`);
     return Buffer.from((file as { content: string }).content, "base64").toString("utf8");
+  }
+  private graphql(query: string, variables: Record<string, string | number>): Record<string, unknown> {
+    const args = ["api", "graphql", "-f", `query=${query}`, ...Object.entries(variables).flatMap(([key, v]) => [typeof v === "number" ? "-F" : "-f", `${key}=${v}`])];
+    const parsed = jsonOutput(this.command, args);
+    if (parsed.errors) throw new Error(`forge graphql failed: ${JSON.stringify(parsed.errors)}`);
+    return field(parsed, "data", isObject, "graphql response");
+  }
+  private readArmState(repository: string, number: number): { id: string; defaultBranch: string; armed?: { mergeMethod: string; head?: string } } {
+    const [owner, name] = repository.split("/");
+    const data = this.graphql(ARM_STATE_QUERY, { owner: owner!, name: name!, number });
+    const repo = field(data, "repository", isObject, "pull request arm state");
+    const pr = field(repo, "pullRequest", isObject, "pull request arm state");
+    const defaultBranch = field(field(repo, "defaultBranchRef", isObject, "pull request arm state"), "name", isString, "pull request arm state");
+    const request = pr.autoMergeRequest;
+    const timeline = isObject(pr.timelineItems) && Array.isArray(pr.timelineItems.nodes) ? pr.timelineItems.nodes : [];
+    return { id: field(pr, "id", isString, "pull request arm state"), defaultBranch, armed: isObject(request) ? { mergeMethod: field(request, "mergeMethod", isString, "pull request arm state"), head: armedHeadFromTimeline(timeline) } : undefined };
+  }
+  readAutoMergeState(repository: string, number: number): AutoMergeState {
+    const { defaultBranch, armed } = this.readArmState(repository, number);
+    const changedPaths = parseChangedPaths(jsonLines(this.command, ["api", "--paginate", `repos/${repository}/pulls/${number}/files?per_page=100`, "--jq", ".[]"]));
+    return { defaultBranch, changedPaths, armed };
+  }
+  enableAutoMerge(repository: string, number: number, head: string): void {
+    const { id, armed } = this.readArmState(repository, number);
+    if (armed) this.graphql("mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){pullRequest{number}}}", { id });
+    this.graphql("mutation($id:ID!,$head:GitObjectID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:SQUASH,expectedHeadOid:$head}){pullRequest{number}}}", { id, head });
+  }
+  readRequiredChecks(repository: string, baseRef: string): string[] {
+    return requiredContexts(jsonLines(this.command, ["api", "--paginate", `repos/${repository}/rules/branches/${encodeURIComponent(baseRef)}?per_page=100`, "--jq", ".[]"]));
   }
   readEvidence(repository: string, number: number, head: string): ForgeEvidence {
     const checkRuns = jsonLines(this.command, ["api", "--paginate", `repos/${repository}/commits/${head}/check-runs?per_page=100`, "--jq", ".check_runs[]"]).map(parseCheckRun);

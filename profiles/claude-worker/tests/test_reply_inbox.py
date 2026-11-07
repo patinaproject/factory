@@ -27,6 +27,21 @@ def key(c: dict) -> list:
     return [c["created_at"], c["author"], c["body"]]
 
 
+
+class StandaloneLoadTest(unittest.TestCase):
+    def test_the_module_loads_from_its_file_alone_as_render_py_loads_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "reply_inbox.py"
+            copy.write_text((SCRIPTS / "reply_inbox.py").read_text())
+            proc = subprocess.run(
+                [sys.executable, "-I", "-c",
+                 "import importlib.util, sys; spec = importlib.util.spec_from_file_location('r', sys.argv[1]); "
+                 "module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
+                 "print(module.NOT_ASSIGNEE_MARKER)", str(copy)],
+                capture_output=True, text=True, cwd=tmp,
+            )
+        self.assertEqual((proc.returncode, proc.stdout.strip()), (0, "Context only, not from the assignee:"))
+
 class Clock:
     def __init__(self, now: float = 1000.0) -> None:
         self.now = now
