@@ -21,7 +21,7 @@
 │   ├── rules.md               # Each rule and what enforces it
 │   └── wiki-index.md          # Planned wiki pages
 ├── plugins/
-│   ├── blocker-order/         # transform_tool_result hook that links and blocks a card behind its issue's open blocker cards, and blocks a card whose Claude run ends with `Needs input:`
+│   ├── blocker-order/         # transform_tool_result hook that links and blocks a card behind its issue's open blocker cards, and blocks a card whose Claude run ends with `Needs input:`; its `claude_session_run` tool runs `claude-session` to its end in one call
 │   ├── factory-secret-names/  # Manifest-only platform plugin: the secret names Hermes strips from every process a home starts
 │   ├── factory-uploads/       # Unix-socket broker that uploads evidence images and issues the worker its Linear and proxy tokens; runs in the gateway or, through service.py, as its own macOS user
 │   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, the shadow router, block and triage-park report hook, activity, issue, and session tools, cli.py

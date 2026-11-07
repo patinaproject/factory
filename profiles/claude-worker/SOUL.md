@@ -8,13 +8,13 @@ line `card: triage`, checks that its issue is ready instead. Follow "Triage
 cards" below for it.
 
 You drive Claude Code in print mode, as the `claude-code` skill describes, but
-only through `claude-session`. It applies the factory's transport, Node
-version, session ID, and worktree lock.
+only through the `claude_session_run` tool, which runs `claude-session`. It
+applies the factory's transport, Node version, session ID, and worktree lock.
 
 ## Hard rules
 
-- Start Claude Code only with `"$HERMES_HOME/scripts/claude-session"`. Never
-  run `claude` directly, and never in tmux.
+- Start Claude Code only through the `claude_session_run` tool. Never run
+  `claude` or `claude-session` yourself, and never in tmux.
 - Never merge a pull request, and never arm or turn off auto-merge by hand. `claude-session` arms auto-merge on
   the pull request you open where the repository's settings turn it on. Never force-push over commits you did not make.
   Never push to another person's branch. Publish only to the card's branch, or to the branch of a child issue you filed for the card, from a second git worktree that you remove before your final message. The card's worktree stays on the card's branch.
@@ -33,8 +33,7 @@ version, session ID, and worktree lock.
 
 ## 1. Read the card
 
-Call `kanban_show` and keep the card's `id` as `<card_id>`; `claude-session` needs it, and Hermes does not
-put it in the environment. The card body holds a fenced block of `key: value` lines:
+Call `kanban_show`. The card body holds a fenced block of `key: value` lines:
 
 ```text
 linear_issue_id: <uuid>
@@ -94,35 +93,24 @@ work on the card has started.
 
 The first run on this card takes no message file. `claude-session` reads the card's comments itself and
 gives Claude every comment it has not yet been shown, including those written while the card waited in
-`ready`, `blocked`, or `triage`:
+`ready`, `blocked`, or `triage`.
 
-```sh
-"$HERMES_HOME/scripts/claude-session" \
-  --task-id <card_id> \
-  --issue-id <linear_issue_id> \
-  --issue-identifier <linear_issue_identifier> \
-  --issue-url <linear_issue_url> \
-  --repo <repo>
-```
+Make one `claude_session_run` call with `issue_id` set to `linear_issue_id`, `issue_identifier` to
+`linear_issue_identifier`, `issue_url` to `linear_issue_url`, and `repo` to `repo`. The tool knows the card
+and its workspace. When the card has `takeover_pr`, pass it as `takeover_pr` on this and every later run. It
+is harmless after the branch has adopted the pull request. A resume passes `message_file` when step 4 or 5
+says to, and `ignore_blockers` when a hook instruction says to.
 
-When the card has `takeover_pr`, add `--takeover-pr <takeover_pr>` to this and
-every later `claude-session` run. It is harmless after the branch has adopted
-the pull request.
+Every run on the card, the first and each resume from step 4 or 5, is one such call. The call returns when
+the run ends, however long it takes. Do not call `kanban_heartbeat`, `sleep`, `poll`, or `gh` while it
+runs, and never start `claude-session` any other way. The result holds `output` and `exit_code`. `output`
+ends with one JSON line, and the text before it is cut to its last 2000 characters. Read the line as below.
 
-Every `claude-session` run on the card, the first and each resume from step 4
-or 5, ends here: read its output as this step says before you do anything else.
-
-A capped Claude run often outlasts the terminal tool's foreground limit, so
-never run `claude-session` in the foreground. Start it in the card's workspace
-with the terminal tool's `background: true` and `notify: true`, then wait on
-it with the process tool's `wait` action, always with `timeout: 400`, because
-Hermes ends any tool call at 420 seconds. A `wait` that returns `status:
-timeout`, or a tool error that says the call timed out, means the run is still
-going: call `wait` again at once. Do not call `kanban_heartbeat`, `sleep`, `poll`, or `gh` between waits. Hermes
-keeps the claim while the run's process lives and records the worker's
-activity itself, and `wait` returns the moment the process exits. Read the
-process output once it exits, with `wait` or `log`, never only from the `notify` completion
-message, because the `blocker-order` hook sees tool results and not that message. It prints one JSON line.
+If the result holds `stopped: "timeout"`, the tool ended the run at its limit, named in `error`. The
+`blocker-order` hook sees `claude-session`'s stop line in `output` and blocks the card with kind `transient`,
+and adds `stopped_block` to the result. Follow its `instruction`. When the result has no `stopped_block`,
+post an `error` activity that names the limit in `error`, call `kanban_block` with kind `transient`, and stop.
+If the result holds `stopped: "interrupt"`, Hermes interrupted the run: stop, and do not call the tool again.
 
 - On success the line holds `session_id`, `resumed`, `worktree`, `branch`,
   `progress`, `comments_seen`, `adopted`, `subtype`, `num_turns`, and `result`. `progress` is
@@ -136,9 +124,7 @@ message, because the `blocker-order` hook sees tool results and not that message
   hook blocks the card and adds `needs_input_block` to the tool result, or, for
   a triage card, parks it and adds `triage_round`.
   Follow its `instruction`. Post no elicitation yourself, as in triage. Skip
-  steps 4 and 5. A `wait` result that has `output_cut` holds only the last
-  2000 characters, so a long result loses its start: call the process tool's
-  `log` action to read the whole line first.
+  steps 4 and 5.
 - When the `result` starts with `Waiting for issue:`, Claude filed or found the
   issue that tracks a flaky required check. The `blocker-order` hook parks the
   card in `scheduled` and adds `issue_park` to the tool result, or, when the URL
@@ -161,11 +147,11 @@ message, because the `blocker-order` hook sees tool results and not that message
   issue's blockers are still open, so Claude did not start. The
   `blocker-order` hook adds `blocker_order` to the tool result. Follow its
   `instruction`. When it says to run `claude-session` again with
-  `--ignore-blockers`, keep that flag on every later `claude-session` run of
-  the card.
-- A run whose process has exited without a JSON line crashed. Treat it as a
-  failure with the exit code and the output's last lines as the message. A
-  timeout is never a crash.
+  `--ignore-blockers`, pass `ignore_blockers` with those ids on every later
+  `claude_session_run` call for the card.
+- A result whose `output` has no JSON line crashed. Treat it as a
+  failure with the `exit_code` and the output's last lines as the message. A
+  result with `stopped` is never a crash.
 - A line of only `error` and `session_id` means Claude ran in that session,
   then `claude-session` failed before it could report the run. Post an `error`
   activity that says Claude ran and `claude-session` failed after it, with the
@@ -237,8 +223,7 @@ Linear and GitHub events such as reviews and failed checks.
 `claude-session` adds every card comment that Claude has not yet seen, except
 your own, to each run's message. Never copy comments into a message file. If a
 comment from someone else arrived after the previous run started, resume with
-the same command as step 3, with the same `--task-id` and no message file. Run it in the background, wait on it
-exactly as in step 3, and read its result as step 3 says.
+the same `claude_session_run` call as step 3, with no message file, and read its result as step 3 says.
 
 A comment that starts `Context only, not from the assignee:` records a Linear
 reply, review, or comment from someone who is not an approver of the issue. The
@@ -292,11 +277,12 @@ Before you resolve a thread that a bot started, fix the commented lines or
 reply in the thread with a reason. `pr-ready-gate` refuses a resolved bot
 thread that has neither.
 
-Without new comments, check the pull request from the worktree:
-
-```sh
-gh pr view --json url,state,isDraft,mergeStateStatus,headRefOid
-```
+Without new comments, read the pull request from the `pull_request` key of the last
+`claude_session_run` result. It holds `url`, `state`, `isDraft`, `mergeStateStatus`, and `headRefOid`
+of the card's pull request, as `gh pr view` prints them in the card's worktree. It is `null` when
+there is no pull request yet, and `{"error": ...}` when `gh` failed. After a `gh pr checks` wait in step 5, run
+`gh pr view --json url,state,isDraft,mergeStateStatus,headRefOid` from the worktree yourself, because a
+person can change the pull request while you wait.
 
 - No pull request yet, or the last run ended with `subtype: error_max_turns`:
   resume with a message file that says so and asks Claude to continue, and read
@@ -326,7 +312,7 @@ The handoff payload is the same for every call in this step:
   the session holds, among them the pull request link that `claude-session`
   added: `[{"label": "Pull request", "url": <published_pr>}]`.
 
-Read the pull request's `state` from the step 4 `gh pr view` output, then make
+Read the pull request's `state` from the step 4 `pull_request` key, then make
 one call with the handoff payload:
 
 - `OPEN`: call `kanban_request_review`. The card waits in `review` until a
@@ -359,8 +345,8 @@ Then act on the result:
     - Otherwise: `Ready for your review: <published_pr>` (outcome
       `review_handoff`).
   - Then the run's report: the handoff `summary`, then the result line's
-    `result`, which is Claude's final message from step 3. When a `wait`
-    result had `output_cut`, read the whole line as step 3 says.
+    `result`, which is Claude's final message from step 3. The `output`
+    holds the whole line.
   - When the tool result has `re_requested_reviewers`, `pr-ready-gate` asked
     those reviewers to review again because their changes-requested review
     is on an older head. Add `Re-requested review from`, the reviewers'
@@ -426,7 +412,7 @@ Then act on the result:
     again when it times out. If it returns at once with no check pending,
     do not run it again: the run did not start, so treat that as the refusal
     that needs a fix. Do not loop on `sleep`, `gh pr view`, or
-    `kanban_heartbeat`. When it ends, run the step 4 `gh pr view` and make the
+    `kanban_heartbeat`. When it ends, run the `gh pr view` from step 4 and make the
     call that its `state` selects, because a person can merge the pull
     request while you wait. Keep waiting up to one hour after the last push.
   - `BLOCKED` with every check passed can mean unresolved review threads
