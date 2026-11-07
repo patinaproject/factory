@@ -216,7 +216,7 @@ WORKER_JOBS = [
     cron_job("file-recurring-issues", 60),
 ]
 RETRY_SCRIPT = "retry-failed-webhooks"
-ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack"), cron_job("report-deploy", 5, "slack")]
+ROOT_JOBS = [cron_job(RETRY_SCRIPT, 10, "slack"), cron_job("report-deploy", 5, "slack"), cron_job("report-usage-limit", 5, "slack")]
 RETRY_SOURCE = f"skills/setup-factory/scripts/{RETRY_SCRIPT}"
 ROUTE_SCRIPT = "linear-route"
 ROUTE_SCRIPT_SOURCE = f"skills/setup-factory/scripts/{ROUTE_SCRIPT}"
@@ -251,7 +251,7 @@ REMEDY_CLASSES = (
      r"|terminal\.(timeout|env_passthrough)|platforms\.factory_uploads\.enabled|streaming\.enabled"
      r"|platforms\.slack\.extra\.native_task_cards|cron\.catch_up_missed|\S+\.github\.private_key_path) in ", "install"),
     ("config", "", "manual"),
-    ("cron job", r"^cron job (retry-failed-webhooks|report-deploy|scheduled-\S+) in .*: (is missing|delivers to \S+, not )", "manual"),
+    ("cron job", r"^cron job (retry-failed-webhooks|report-deploy|report-usage-limit|scheduled-\S+) in .*: (is missing|delivers to \S+, not )", "manual"),
     ("cron job", r": (is missing|is disabled|runs .*, not |is not a script-only job|delivers to \S+, not |belongs to"
      r"|runs without a \S+ section)", "install"),
     ("cron job", ": last run", "advisory"),
@@ -1410,7 +1410,8 @@ class CheckInstallTest(unittest.TestCase):
             self.check(),
             (1, f"cron job refresh-checkouts in {self.worker}: is missing (part 12)\n"
                 f"cron job {RETRY_SCRIPT} in {self.root}: exists 2 times (part 12)\n"
-                f"cron job report-deploy in {self.root}: exists 2 times (part 12)\n"),
+                f"cron job report-deploy in {self.root}: exists 2 times (part 12)\n"
+                f"cron job report-usage-limit in {self.root}: exists 2 times (part 12)\n"),
         )
 
     def test_cron_job_changed_by_hand(self) -> None:
@@ -1423,7 +1424,7 @@ class CheckInstallTest(unittest.TestCase):
             cron_job("file-dependency-update", 10080),
             cron_job("file-recurring-issues", 60),
         ])
-        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local"), ROOT_JOBS[1]])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "local"), *ROOT_JOBS[1:]])
 
         self.assertEqual(
             self.check(),
@@ -1681,6 +1682,8 @@ class CheckInstallTest(unittest.TestCase):
             (1, f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"
                 f"cron job report-deploy in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"
+                f"cron job report-usage-limit in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -1692,6 +1695,8 @@ class CheckInstallTest(unittest.TestCase):
             (1, f"cron job {RETRY_SCRIPT} in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"
                 f"cron job report-deploy in {self.root}: delivers to slack, which has no home channel in "
+                f"{self.root}, so Hermes drops its output (part 12)\n"
+                f"cron job report-usage-limit in {self.root}: delivers to slack, which has no home channel in "
                 f"{self.root}, so Hermes drops its output (part 12)\n"),
         )
 
@@ -1703,20 +1708,22 @@ class CheckInstallTest(unittest.TestCase):
 
     def test_explicit_and_local_delivery_targets_need_no_home_channel(self) -> None:
         (self.root / ".env").unlink()
-        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "slack:C0123"), cron_job("report-deploy", 5, "slack:C0123")])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 10, "slack:C0123"), cron_job("report-deploy", 5, "slack:C0123"),
+                              cron_job("report-usage-limit", 5, "slack:C0123")])
 
         self.assertEqual(self.check(), (0, ""))
 
     def test_retry_cron_job_missing_or_changed(self) -> None:
         self.cron(self.root, [])
         missing = self.check()
-        self.cron(self.root, [cron_job(RETRY_SCRIPT, 30, "slack", enabled=False), ROOT_JOBS[1]])
+        self.cron(self.root, [cron_job(RETRY_SCRIPT, 30, "slack", enabled=False), *ROOT_JOBS[1:]])
         changed = self.check()
 
         self.assertEqual(
             (missing, changed),
             ((1, f"cron job {RETRY_SCRIPT} in {self.root}: is missing (part 12)\n"
-                 f"cron job report-deploy in {self.root}: is missing (part 12)\n"),
+                 f"cron job report-deploy in {self.root}: is missing (part 12)\n"
+                 f"cron job report-usage-limit in {self.root}: is missing (part 12)\n"),
              (1, f"cron job {RETRY_SCRIPT} in {self.root}: is disabled (part 12)\n"
                  f"cron job {RETRY_SCRIPT} in {self.root}: runs every 30m, not every 10m (part 12)\n")),
         )

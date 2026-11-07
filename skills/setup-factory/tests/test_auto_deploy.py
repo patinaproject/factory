@@ -644,10 +644,18 @@ class AutoDeployTest(unittest.TestCase):
         self.assertTrue(self.m.hermes_state()["key"])
 
     def test_a_host_load_hold_neither_blocks_the_deploy_nor_is_released_by_it(self) -> None:
+        self.assert_another_holders_entry_neither_blocks_the_deploy_nor_is_released_by_it("host_load", "load average 30")
+
+    def test_a_usage_limit_hold_neither_blocks_the_deploy_nor_is_released_by_it(self) -> None:
+        self.assert_another_holders_entry_neither_blocks_the_deploy_nor_is_released_by_it(
+            "usage_limit", "the Claude usage limit was reached",
+        )
+
+    def assert_another_holders_entry_neither_blocks_the_deploy_nor_is_released_by_it(self, holder: str, reason: str) -> None:
         commit = self.m.push("B")
         self.m.drifts([self.m.install("profile", "update", "claude-worker", "-y", step="PROFILE")])
-        entry = {"reason": "load average 30", "until": FAR}
-        self.m.set_holds({"host_load": entry}, applied=True)
+        entry = {"reason": reason, "until": FAR}
+        self.m.set_holds({holder: entry}, applied=True)
         self.m.update_hermes(key=True)
 
         self.deploy()
@@ -656,7 +664,7 @@ class AutoDeployTest(unittest.TestCase):
         self.assertEqual([argv for argv in self.m.changes() if argv[0] == "config"], [])
         install = next(call for call in self.m.calls("hermes") if call["argv"][0] == "profile")
         self.assertTrue(install["held"])
-        self.assertEqual(self.m.holds(), {"holds": {"host_load": entry}, "applied": True})
+        self.assertEqual(self.m.holds(), {"holds": {holder: entry}, "applied": True})
         self.assertTrue(self.m.hermes_state()["key"])
 
     def test_the_deploy_keeps_a_host_load_hold_it_finds_gone_and_releases_only_its_own_entry(self) -> None:
