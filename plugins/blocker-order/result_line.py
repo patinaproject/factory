@@ -36,6 +36,10 @@ SERVER_ERROR = "server_error"
 SERVER_ERROR_PARK = "Waiting after a server error:"
 HOST_LOAD = "host_load"
 HOST_LOAD_PARK = "Waiting for the host load to fall:"
+# Claude Code hit the Claude usage limit, or the factory holds new runs for it; the card waits until the hold list
+# has no usage_limit entry. It holds the whole factory, so claude-session never counts it toward its park cap.
+USAGE_LIMIT = "usage_limit"
+USAGE_LIMIT_PARK = "Waiting for the usage limit:"
 # `xcodebuild -checkFirstLaunchStatus` timed out, which host load can cause; the card waits and runs again.
 XCODE_CHECK_TIMEOUT = "xcode_check_timeout"
 XCODE_CHECK_TIMEOUT_PARK = "Waiting for the Xcode check:"
@@ -69,6 +73,7 @@ PRECONDITION_PARKS = {
     WORKTREE_HELD: WORKTREE_HELD_PARK,
     SERVER_ERROR: SERVER_ERROR_PARK,
     HOST_LOAD: HOST_LOAD_PARK,
+    USAGE_LIMIT: USAGE_LIMIT_PARK,
     XCODE_CHECK_TIMEOUT: XCODE_CHECK_TIMEOUT_PARK,
 }
 MACHINE_PARKS = (*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK, PULL_REQUEST_PARK)

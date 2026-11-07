@@ -14,6 +14,7 @@ MACHINE_PARKS = (
     "Waiting for the worktree:",
     "Waiting after a server error:",
     "Waiting for the host load to fall:",
+    "Waiting for the usage limit:",
     "Waiting for the Xcode check:",
     "Waiting for an issue:",
     "Waiting for hermes resume:",
