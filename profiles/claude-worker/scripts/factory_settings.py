@@ -83,7 +83,6 @@ def load_hold_threshold(transport: dict) -> float | None:
 
 
 def progress_stall_minutes(transport: dict) -> int:
-    """How long cards may wait with no run finishing before progress-watch stops its heartbeat, in minutes."""
     value = transport.get("progress_stall_minutes", DEFAULT_PROGRESS_STALL_MINUTES)
     if not is_count(value):
         raise SettingsError(f"claude_session.progress_stall_minutes {value!r} must be a positive integer")

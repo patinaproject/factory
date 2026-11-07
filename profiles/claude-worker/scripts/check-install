@@ -345,7 +345,7 @@ LAUNCHD_JOBS = ("refresh-gh-app-login",)
 OWNED_REFS_MAX_AGE = 5 * 60 * next(job.every for job in CRON if job.name == "refresh-owned-refs")
 
 AUTO_DEPLOY_INTERVAL_SECONDS = 300  # equals auto-deploy's INTERVAL_SECONDS
-PROGRESS_WATCH_INTERVAL = 5 * 60  # equals progress-watch's INTERVAL_SECONDS
+PROGRESS_WATCH_INTERVAL = 5 * 60
 # macOS only. `plist` is a glob; the runbook lets the operator name the cloudflared plist.
 SERVICES = (
     Service(7, "cloudflared tunnel", "daemon", "/Library/LaunchDaemons/*cloudflared*.plist"),
@@ -373,7 +373,6 @@ WATCH_STATE = "gateway-watch.json"
 HEARTBEAT_FILE = "gateway-heartbeat-url"
 WATCH_INTERVAL = 5 * 60
 RESTARTS_PER_HOUR = 3
-# progress-watch's own files in the root home.
 PROGRESS_STATE = "progress-watch.json"
 PROGRESS_HEARTBEAT_FILE = "progress-heartbeat-url"
 
@@ -1117,8 +1116,6 @@ def check_gateway_watch(root: Path, now: float | None = None) -> list:
 
 
 def check_progress_watch(root: Path, now: float | None = None) -> list:
-    """Read progress-watch's state file and its heartbeat file's mode, and print the stall reasons the last tick
-    recorded. Prints no URL and no value."""
     now = time.time() if now is None else now
     state_path, beat_path = root / PROGRESS_STATE, root / PROGRESS_HEARTBEAT_FILE
     drifts = []

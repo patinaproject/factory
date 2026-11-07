@@ -1,7 +1,4 @@
-"""What Hermes' dispatcher logs when it holds a card in `ready`, and the text limits for reporting it.
-
-`check-install` and `progress-watch` both read the hold from a card's `respawn_guarded` events. The watcher runs
-under the macOS system Python 3.9 and loads this file by path, so it uses only the standard library.
+"""The watcher runs under the macOS system Python 3.9 and loads this file by path, so it uses only the standard library.
 """
 from __future__ import annotations
 
@@ -13,7 +10,6 @@ TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
 
 
 def mask_token_shapes(text: str) -> str:
-    """Mask a credential the process never held, such as a minted token, by its shape."""
     return TOKEN_SHAPED.sub(
         lambda m: "[redacted]" if re.search(r"\d", m[0]) and re.search(r"[A-Za-z]", m[0]) else m[0], text
     )
