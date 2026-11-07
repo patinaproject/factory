@@ -1718,6 +1718,15 @@ def check_kanban_boards(root: Path) -> list:
                 "finish-merged set it to local-only before they complete the card (part 15, check 24)",
                 Manual("change completion_contract.py and kanban_board.py to Hermes' new contract column in a pull request"),
             ))
+        runs = [column for column in missing if column.startswith("task_runs.")]
+        if runs:
+            missing = [column for column in missing if column not in runs]
+            drifts.append(Drift(
+                "kanban board database", path,
+                f"has no {', '.join(runs)}, so dispatch-triage cannot see a rate-limited run and hold dispatch for the "
+                "usage limit (part 12)",
+                Manual("change kanban_board.py to Hermes' new task_runs columns in a pull request"),
+            ))
         if missing:
             drifts.append(Drift(
                 "kanban board database", path,

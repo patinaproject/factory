@@ -28,6 +28,8 @@ COMMENTS_AND_EVENTS = (
     "body TEXT NOT NULL, created_at INTEGER NOT NULL);"
     "CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, run_id INTEGER, "
     "kind TEXT NOT NULL, payload TEXT, created_at INTEGER NOT NULL);"
+    "CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, profile TEXT, "
+    "status TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER, outcome TEXT, summary TEXT, error TEXT);"
 )
 
 
@@ -253,7 +255,23 @@ class KanbanBoardTest(unittest.TestCase):
 
         self.assertEqual(kanban_board.missing_columns(str(self.path)), [
             "tasks.branch_name", "tasks.block_kind", "tasks.completion_contract", "task_comments.body", "task_events.id", "task_events.task_id",
-            "task_events.kind", "task_events.payload", "task_events.created_at",
+            "task_events.kind", "task_events.payload", "task_events.created_at", "task_runs.id", "task_runs.task_id",
+            "task_runs.outcome", "task_runs.started_at", "task_runs.ended_at",
+        ])
+
+    def test_ended_runs_are_the_runs_that_ended_after_the_cursor_oldest_first(self) -> None:
+        with closing(sqlite3.connect(self.path)) as board:
+            board.executescript(COMMENTS_AND_EVENTS)
+            board.executemany(
+                "INSERT INTO task_runs (task_id, status, started_at, ended_at, outcome) VALUES (?, ?, ?, ?, ?)",
+                [("t_1", "rate_limited", 100, 200, "rate_limited"), ("t_2", "done", 150, 400, "completed"),
+                 ("t_3", "running", 300, None, None), ("t_4", "crashed", 250, 300, "crashed")],
+            )
+            board.commit()
+
+        self.assertEqual(kanban_board.ended_runs(str(self.path), 200), [
+            {"id": 4, "task_id": "t_4", "outcome": "crashed", "started_at": 250, "ended_at": 300},
+            {"id": 2, "task_id": "t_2", "outcome": "completed", "started_at": 150, "ended_at": 400},
         ])
 
     def test_run_state_is_the_cards_status_and_current_run_or_none_for_an_unknown_card(self) -> None:

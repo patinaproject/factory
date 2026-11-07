@@ -1803,12 +1803,13 @@ class CheckInstallTest(unittest.TestCase):
 
         self.assertEqual(self.check(), (1, f"kanban board triage: is missing in {self.root} (part 10)\n"))
 
-    def kanban_database(self, path: Path, columns: str) -> Path:
+    def kanban_database(self, path: Path, columns: str, runs: str = "id, task_id, outcome, started_at, ended_at") -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as board:
             board.execute(f"CREATE TABLE tasks ({columns})")
             board.execute("CREATE TABLE task_events (id, task_id, kind, payload, created_at)")
             board.execute("CREATE TABLE task_comments (id, task_id, author, body, created_at)")
+            board.execute(f"CREATE TABLE task_runs ({runs})")
         board.close()
         return path
 
@@ -1850,12 +1851,22 @@ class CheckInstallTest(unittest.TestCase):
             f"waiting triage card check {triage}: cannot be read: no such column: status (part 15, check 27)\n"
         )))
 
+    def test_a_board_database_missing_a_run_column_says_no_rate_limited_run_holds_dispatch(self) -> None:
+        columns = "id, title, body, branch_name, status, block_kind, completion_contract, assignee, claim_lock, created_at"
+        board = self.kanban_database(self.root / "kanban.db", columns, runs="id, task_id, status, started_at, finished_at")
+
+        self.assertEqual(self.check(), (1, (
+            f"kanban board database {board}: has no task_runs.outcome, task_runs.ended_at, so dispatch-triage cannot "
+            "see a rate-limited run and hold dispatch for the usage limit (part 12)\n"
+        )))
+
     def test_a_board_database_missing_a_comment_or_event_column_the_release_reads(self) -> None:
         board = self.root / "kanban.db"
         with sqlite3.connect(board) as db:
             db.execute("CREATE TABLE tasks (id, title, body, branch_name, status, block_kind, completion_contract)")
             db.execute("CREATE TABLE task_events (id, task_id, kind, data, created_at)")
             db.execute("CREATE TABLE task_comments (id, task_id, author, text, created_at)")
+            db.execute("CREATE TABLE task_runs (id, task_id, outcome, started_at, ended_at)")
         db.close()
 
         self.assertEqual(self.check(), (1, (

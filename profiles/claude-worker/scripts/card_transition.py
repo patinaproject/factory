@@ -577,6 +577,16 @@ def sweep_host_load() -> dict:
     return sweep_parked(prefix, lambda: host_hold.HOST_LOAD not in host_hold.read_holds(root)["holds"])
 
 
+def sweep_usage_limit() -> dict:
+    """Release every card parked for the Claude usage limit, on every board, once the hold list has no usage_limit
+    entry. `dispatch-triage` runs it after it removes an expired entry. No reply releases such a card."""
+    prefix = getattr(plugin_module("blocker-order", "result_line"), "USAGE_LIMIT_PARK", None)
+    if prefix is None:
+        return {"released": [], "failed": {}}
+    root = host_hold.root_home(Path(os.environ["HERMES_HOME"]))
+    return sweep_parked(prefix, lambda: host_hold.USAGE_LIMIT not in host_hold.read_holds(root)["holds"])
+
+
 def sweep_parked(prefix: str, ready: Callable[[], bool]) -> dict:
     """Release each card parked with `prefix` once `ready`, which is asked only when such a card waits."""
     released, failed = [], {}
