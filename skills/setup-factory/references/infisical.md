@@ -16,7 +16,7 @@ These values move to Infisical:
 | Value | Read by |
 | --- | --- |
 | `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | `<home>` |
-| `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET` | `<home>` |
+| `LINEAR_WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET`, `EMAIL_WEBHOOK_SECRET` | `<home>` |
 | `CLAUDE_PROXY_TOKEN`, the variable that `claude_session.auth_token_env` names. It holds the proxy's client token or a Console API key | `<home>` |
 | Each variable that `claude_session.mcp_servers.<name>.token_env` names, such as `SENTRY_ACCESS_TOKEN` | `<home>` |
 
@@ -429,9 +429,10 @@ not. The values stay inside the script, and it never runs
 > }
 > match LINEAR_WEBHOOK_SECRET <webhook_route>
 > match GITHUB_WEBHOOK_SECRET github
+> match EMAIL_WEBHOOK_SECRET email
 > ```
 >
-> Continue only when both print `1`. A `0` means that the gateway uses a
+> Continue only when each prints `1`. A `0` means that the gateway uses a
 > value today that differs from the folder's. Stop and report the key to the
 > operator.
 

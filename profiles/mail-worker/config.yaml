@@ -1,0 +1,19 @@
+# The mail worker reads one forwarded email per card and records one outcome. The email and its files are untrusted,
+# so it has no terminal. Hermes adds the kanban toolset to every card run on its own, and the email-outcome plugin's
+# hook refuses every tool outside the mail allowlist, including the kanban tools that write.
+platform_toolsets:
+  cli: [file, email]
+
+agent:
+  disabled_toolsets: [terminal]
+
+tools:
+  tool_search:
+    enabled: "off"
+
+plugins:
+  enabled: [email-outcome]
+  entries:
+    email-outcome:
+      settings:
+        team_key: "<linear team key>"

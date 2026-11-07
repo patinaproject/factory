@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,16 +26,21 @@ watch_gateway = importlib.util.module_from_spec(importlib.util.spec_from_loader(
 sys.modules[loader.name] = watch_gateway
 loader.exec_module(watch_gateway)
 
-REAL = {"linear": "real-linear-secret", "github": "real-github-secret", "factory-linear": "real-linear-secret"}
+REAL = {
+    "linear": "real-linear-secret", "github": "real-github-secret", "factory-linear": "real-linear-secret",
+    "email": "real-email-secret",
+}
 LITERAL = {
     "linear": "${LINEAR_WEBHOOK_SECRET}",
     "factory-linear": "${LINEAR_WEBHOOK_SECRET}",
     "github": "${GITHUB_WEBHOOK_SECRET}",
+    "email": "${EMAIL_WEBHOOK_SECRET}",
 }
 LISTED = {
     "linear": ["AgentSessionEvent", "Issue"],
     "factory-linear": ["AgentSessionEvent", "Issue"],
     "github": ["pull_request", "issue_comment", "check_run"],
+    "email": [],
 }
 HEARTBEAT_PATH = "/ping/9b1c-private-monitor-id"
 CONFIG = """\
@@ -81,8 +87,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return
         if route not in REAL:
             return self.reply(404)
-        header = "X-Hub-Signature-256" if route == "github" else "Linear-Signature"
         secret = LITERAL[route] if route in self.server.unresolved else REAL[route]
+        if route == "email":
+            timestamp = self.headers.get("X-Webhook-Timestamp") or ""
+            fresh = timestamp.isdigit() and abs(time.time() - int(timestamp)) <= 300
+            want = hmac.new(secret.encode(), timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+            if not fresh or self.headers.get("X-Webhook-Signature-V2") != want:
+                return self.reply(401)
+            if route in self.server.override:
+                return self.reply(self.server.override[route])
+            return self.reply(200 if "message_id" not in json.loads(body) else 202)
+        header = "X-Hub-Signature-256" if route == "github" else "Linear-Signature"
         digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
         want = f"sha256={digest}" if route == "github" else digest
         if self.headers.get(header) != want:
@@ -188,8 +203,16 @@ class WatchGatewayTest(unittest.TestCase):
 
         output = self.tick()
 
-        self.assertEqual((self.restarts, self.beat.paths, self.gateway.deliveries), (1, [], ["linear", "github"]))
+        self.assertEqual((self.restarts, self.beat.paths, self.gateway.deliveries), (1, [], ["linear", "github", "email"]))
         self.assertIn("route linear secret is its unresolved reference; restarting the gateway", output)
+
+    def test_the_email_route_is_probed_with_a_fresh_v2_signature_and_an_unresolved_secret_restarts(self) -> None:
+        self.gateway.unresolved = {"email"}
+
+        output = self.tick()
+
+        self.assertEqual(self.restarts, 1)
+        self.assertIn("route email secret is its unresolved reference; restarting the gateway", output)
 
     def test_a_listed_event_that_the_gateway_accepts_shows_an_unresolved_secret_too(self) -> None:
         self.gateway.unresolved = {"github"}
@@ -352,7 +375,7 @@ class WatchGatewayTest(unittest.TestCase):
         output = self.tick()
 
         self.assertEqual((self.restarts, self.beat.paths, output), (0, [HEARTBEAT_PATH], ""))
-        self.assertEqual(sorted(self.gateway.deliveries), ["factory-linear", "github"])
+        self.assertEqual(sorted(self.gateway.deliveries), ["email", "factory-linear", "github"])
 
     def test_a_missing_route_name_is_named_and_neither_restarts_nor_pings(self) -> None:
         (self.root / "config.yaml").write_text("plugins: {}\n")
@@ -401,7 +424,7 @@ class WatchGatewayTest(unittest.TestCase):
     def test_each_route_is_probed_once_per_check(self) -> None:
         self.tick()
 
-        self.assertEqual(sorted(self.gateway.deliveries), ["github", "linear"])
+        self.assertEqual(sorted(self.gateway.deliveries), ["email", "github", "linear"])
 
     def test_no_heartbeat_file_is_named_and_does_not_stop_the_check(self) -> None:
         (self.root / watch_gateway.HEARTBEAT_FILE).unlink()

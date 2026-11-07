@@ -1,0 +1,6 @@
+manifest_version: 2
+name: email-intake
+label: Email intake
+kind: platform
+version: "0.1.0"
+description: "Runs in the gateway only. Listens on a Unix socket in the Hermes home for the email route script. For a message_id that the email ledger already holds, it creates the email's blocked Kanban card for the mail-worker profile, fetches that row's stored objects from the configured object host with a signed GET, checks each object's size and SHA-256, writes the files once into the card's attachments directory, and unblocks the card. A mismatch or a failed fetch leaves the card blocked with a comment that names the object. It takes no URL, host, key, or destination from a caller. It is not a chat platform: it receives no messages, sends none, and is not a cron or send_message target."

@@ -91,7 +91,7 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
             "GITHUB_UPLOAD_TOKEN": TOKEN, "LINEAR_CLIENT_ID": "lin-id", "LINEAR_CLIENT_SECRET": "lin-secret",
             "EXAMPLE_PROXY_TOKEN": "proxy-FAKE-token", "EXAMPLE_SENTRY_TOKEN": "sntryu_FAKE",
             "FACTORY_INFISICAL_CLIENT_ID": "inf-id", "FACTORY_INFISICAL_CLIENT_SECRET": "inf-secret",
-            "LINEAR_WEBHOOK_SECRET": "lin-hook", "GITHUB_WEBHOOK_SECRET": "gh-hook",
+            "LINEAR_WEBHOOK_SECRET": "lin-hook", "GITHUB_WEBHOOK_SECRET": "gh-hook", "EMAIL_WEBHOOK_SECRET": "mail-hook",
         }
         self.settings = factory_settings("EXAMPLE_PROXY_TOKEN")
         plugin = self.home / "plugins" / "linear-agent-session"
@@ -209,7 +209,7 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_token_op_never_serves_the_upload_token_or_an_app_credential(self):
         for name in (
             "GITHUB_UPLOAD_TOKEN", "LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET", "FACTORY_INFISICAL_CLIENT_ID",
-            "FACTORY_INFISICAL_CLIENT_SECRET", "LINEAR_WEBHOOK_SECRET", "GITHUB_WEBHOOK_SECRET",
+            "FACTORY_INFISICAL_CLIENT_SECRET", "LINEAR_WEBHOOK_SECRET", "GITHUB_WEBHOOK_SECRET", "EMAIL_WEBHOOK_SECRET",
         ):
             with self.subTest(name=name):
                 self.settings.update(factory_settings(name, {"sentry": {"url": "https://mcp.example", "token_env": name}}))

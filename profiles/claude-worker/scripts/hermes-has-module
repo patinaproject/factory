@@ -1,0 +1,13 @@
+"""Print whether Hermes' own environment can import each named module, as a JSON object of name to true or false.
+
+Run by check-install with Hermes' own Python: `python3 -I -B hermes-has-module <checkout> <site-packages> <module>...`.
+It only looks the modules up and imports none of them. HERMES_HOME must name a scratch directory.
+"""
+import importlib.util
+import json
+import sys
+
+sys.dont_write_bytecode = True
+checkout, site_packages, *modules = sys.argv[1:]
+sys.path[:0] = [checkout, site_packages]
+print(json.dumps({name: importlib.util.find_spec(name) is not None for name in modules}))

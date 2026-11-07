@@ -17,6 +17,10 @@ optional_env:
     description: The Linear webhook signing secret. Only the gateway holds it.
   - name: GITHUB_WEBHOOK_SECRET
     description: The GitHub webhook signing secret. Only the gateway holds it.
+  - name: EMAIL_WEBHOOK_SECRET
+    description: >-
+      The email route's signing secret, shared with the Email Worker. It signs each
+      delivery and each attachment fetch. Only the gateway holds it.
   - name: GITHUB_UPLOAD_TOKEN
     description: The operator's upload-only token for evidence images. Only the gateway holds it.
   - name: FACTORY_INFISICAL_CLIENT_SECRET
