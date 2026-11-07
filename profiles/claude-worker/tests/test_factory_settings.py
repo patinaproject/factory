@@ -195,5 +195,18 @@ class LoadHoldThresholdTest(unittest.TestCase):
             )
 
 
+class ProgressStallMinutesTest(unittest.TestCase):
+    def test_a_positive_integer_is_valid_and_sixty_is_the_default(self) -> None:
+        self.assertEqual(factory_settings.progress_stall_minutes({}), 60)
+        self.assertEqual(factory_settings.progress_stall_minutes({"progress_stall_minutes": 15}), 15)
+
+    def test_zero_a_negative_a_float_a_string_and_a_bool_are_refused_by_validate(self) -> None:
+        for bad in (0, -1, 1.5, "x", True):
+            problems = factory_settings.validate(settings({"progress_stall_minutes": bad}))
+            self.assertEqual(
+                problems.global_errors, (f"claude_session.progress_stall_minutes {bad!r} must be a positive integer",), bad,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
