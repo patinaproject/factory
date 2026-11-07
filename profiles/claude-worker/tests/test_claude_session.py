@@ -2106,7 +2106,6 @@ class ClaudeSessionTest(GitFixture):
         return self.worktree_git_dir() / "claude-session.nested"
 
     def nested_run(self, env: dict | None = None) -> tuple[dict, dict, dict]:
-        """A run whose claude runs `claude -p hi` from its Bash tool: the run's call, the Bash call, and the nested call."""
         self.configure_fake_claude(steps=[{"bash": "claude -p hi"}])
         self.run_session(env=env)
         bash = json.loads(Path(f"{self.log}.bash").read_text().splitlines()[-1])

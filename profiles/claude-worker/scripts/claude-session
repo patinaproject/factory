@@ -1333,7 +1333,6 @@ def claude_settings(
 def restrictions(
     transport: dict, triage: bool, session_id: str | None, task_id: str, board: str, denials: tuple,
 ) -> dict:
-    """The settings a run and the nested claude it starts share: guards, the key helper, and deny rules."""
     # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
     # A refused commit or publish keeps a commit from closing an issue the pull request body does not; see guard-commit-closes.
     command_limit = factory_settings.command_timeout_seconds(transport)
@@ -1358,16 +1357,14 @@ def restrictions(
 def nested_settings(
     transport: dict, triage: bool, session_id: str | None, task_id: str, board: str, denials: tuple,
 ) -> dict:
-    """The flag-level settings of a nested claude: the run's restrictions and endpoint, and none of its hooks
-    that act as the run. Flag settings outrank a repository's own, so its settings cannot redirect the token."""
+    """Flag settings outrank a repository's own, so its settings cannot redirect the token."""
     settings = restrictions(transport, triage, session_id, task_id, board, denials)
     if transport.get("base_url"):
         settings = {"env": {"ANTHROPIC_BASE_URL": transport["base_url"]}, **settings}
     return settings
 
 
-def nested_wrapper(directory: Path, real: str, mcp: str, settings: dict, lifetime: int, base_url: str | None) -> Path:
-    """Write the run-local `claude` that runs nested-claude, and return its bin directory for PATH."""
+def write_nested_wrapper(directory: Path, real: str, mcp: str, settings: dict, lifetime: int, base_url: str | None) -> Path:
     directory.mkdir(mode=0o700)
     for name in ("bin", "slots"):
         (directory / name).mkdir(mode=0o700)
@@ -1394,7 +1391,7 @@ def remove_path(path: Path) -> None:
 
 
 def remove_on_stop(*paths: Path) -> None:
-    """Remove the run's settings on SIGTERM, SIGINT, or SIGHUP, then unwind so claude is ended too."""
+    """Remove the paths on SIGTERM, SIGINT, or SIGHUP, then unwind so claude is ended too."""
     def stop(signum: int, _frame) -> None:
         for each in STOP_SIGNALS:
             signal.signal(each, signal.SIG_IGN)
@@ -1749,7 +1746,6 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     worktree = resolve_worktree(workspace, repo["path"])
     check_first_launch(repo, worktree)
     check_toolchain(repo, worktree)
-    # Resolved before the run's PATH puts the nested wrapper first, so the run never starts the wrapper.
     real_claude = shutil.which(os.environ.get("CLAUDE_BIN", "claude"), path=child_env(worktree).get("PATH"))
     if real_claude is None:
         raise Refusal("CLAUDE_BIN names no executable claude on the run's PATH")
@@ -1858,7 +1854,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 transport, api_key, settings_path, triage, inbox, card_session_id, denials,
                 args.repo if factory_settings.auto_merge(repo) else None, args.task_id, board,
             ))
-            nested_bin = nested_wrapper(
+            nested_bin = write_nested_wrapper(
                 nested_dir, real_claude, mcp,
                 nested_settings(transport, triage, card_session_id, args.task_id, board, denials),
                 command_limit, transport.get("base_url"),
