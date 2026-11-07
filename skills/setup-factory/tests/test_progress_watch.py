@@ -59,7 +59,7 @@ class ProgressWatchTest(unittest.TestCase):
             "workspace_path TEXT, last_failure_error TEXT)"
         )
         db.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, created_at INTEGER)")
-        db.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, outcome TEXT, ended_at INTEGER, error TEXT)")
+        db.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, outcome TEXT, ended_at INTEGER, error TEXT, summary TEXT)")
         return db
 
     def write_beats(self, text: str) -> None:
@@ -78,9 +78,10 @@ class ProgressWatchTest(unittest.TestCase):
             )
         db.commit()
 
-    def run_ended(self, task: str, outcome: str, age: float, error: str | None = None) -> None:
+    def run_ended(self, task: str, outcome: str, age: float, error: str | None = None, summary: str | None = None) -> None:
         self.default.execute(
-            "INSERT INTO task_runs (task_id, outcome, ended_at, error) VALUES (?, ?, ?, ?)", (task, outcome, NOW - age * 60, error)
+            "INSERT INTO task_runs (task_id, outcome, ended_at, error, summary) VALUES (?, ?, ?, ?, ?)",
+            (task, outcome, NOW - age * 60, error, summary),
         )
         self.default.commit()
 
@@ -171,11 +172,14 @@ class ProgressWatchTest(unittest.TestCase):
 
     def test_an_idle_limit_run_and_a_crashed_run_in_the_window_are_not_progress(self) -> None:
         self.card("t_wait")
+        self.card("t_blocked")
+        self.run_ended("t_blocked", "blocked", 15, summary=IDLE)
         self.run_ended("t_wait", "crashed", 10, IDLE)
         self.run_ended("t_other", "crashed", 20, "claude exited 1 without JSON output")
         self.watch()
         self.assertEqual(self.state()["stalled"], True)
         self.assertEqual(self.state()["reasons"], [
+            {"kind": "idle_limit", "text": f"default/t_blocked ended a run on the idle limit: {IDLE}"},
             {"kind": "idle_limit", "text": f"default/t_wait ended a run on the idle limit: {IDLE}"},
         ])
         self.assertEqual([url for url, _ in self.sent], [FAIL])

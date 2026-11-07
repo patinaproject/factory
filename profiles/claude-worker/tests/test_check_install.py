@@ -261,6 +261,9 @@ REMEDY_CLASSES = (
     ("service", "", "manual"),
     ("gateway watch", "gateway-heartbeat-url: ", "manual"),
     ("gateway watch", "", "advisory"),
+    ("progress watch", "progress-heartbeat-url: ", "manual"),
+    ("progress watch", "", "advisory"),
+    ("progress stall", "", "advisory"),
     ("dispatch holds", r"cannot read \S*dispatch-holds\.json|is not a hold list", "manual"),
     ("dispatch holds", "", "advisory"),
     ("auto deploy", "auto-deploy.lock: ", "advisory"),
@@ -404,6 +407,9 @@ class CheckInstallTest(unittest.TestCase):
         self.install(self.root, "gateway-heartbeat-url", "https://monitor.example/ping/id\n")
         self.install(self.root, "auto-deploy.json", json.dumps({"deployed": git(self.repo, "rev-parse", "HEAD"), "hold": None}))
         os.chmod(self.root / "gateway-heartbeat-url", 0o600)
+        self.install(self.root, "progress-watch.json", json.dumps({"checked_at": time.time(), "stalled": False, "reasons": []}))
+        self.install(self.root, "progress-heartbeat-url", "https://monitor.example/ping/progress\n")
+        os.chmod(self.root / "progress-heartbeat-url", 0o600)
         self.boards(BOARDS)
 
         self.issuer = self.tmp / "issuer"
@@ -693,6 +699,42 @@ class CheckInstallTest(unittest.TestCase):
         self.assertEqual(self.check(), (1, (
             f"gateway watch {beat}: is missing, so nothing alerts a person when the gateway, Slack, or the machine "
             "is down (part 12)\n"
+        )))
+
+    def progress_state(self, **state) -> None:
+        self.install(self.root, "progress-watch.json", json.dumps({"checked_at": time.time(), "stalled": False, "reasons": [], **state}))
+
+    def test_a_stale_or_missing_progress_state_is_reported(self) -> None:
+        self.progress_state(checked_at=time.time() - 901)
+        self.assertEqual(self.check(), (1, (
+            f"progress watch {self.root}/progress-watch.json: was last written 15 minutes ago, "
+            "but progress-watch runs every 5 (part 12)\n"
+        )))
+
+        (self.root / "progress-watch.json").unlink()
+        self.assertEqual(self.check(), (1, (
+            f"progress watch {self.root}/progress-watch.json: is missing or unreadable, so progress-watch has not run (part 12)\n"
+        )))
+
+    def test_the_stall_reasons_progress_watch_recorded_are_printed(self) -> None:
+        self.progress_state(stalled=True, reasons=[
+            {"kind": "blocker_auth", "text": "default/t_1 is held as blocker_auth: quota exceeded"},
+            {"kind": "paused", "text": "hermes pause is engaged by /h/ESTOP: deploy"},
+        ])
+        self.assertEqual(self.check(), (1, (
+            "progress stall blocker_auth: default/t_1 is held as blocker_auth: quota exceeded\n"
+            "progress stall paused: hermes pause is engaged by /h/ESTOP: deploy\n"
+        )))
+
+    def test_a_missing_or_open_progress_heartbeat_file_is_reported_without_its_url(self) -> None:
+        beat = self.root / "progress-heartbeat-url"
+        os.chmod(beat, 0o644)
+        self.assertEqual(self.check(), (1, f"progress watch {beat}: has mode 644; it holds a URL, so use 600 (part 12)\n"))
+        self.assertNotIn("monitor.example", self.raw)
+
+        beat.unlink()
+        self.assertEqual(self.check(), (1, (
+            f"progress watch {beat}: is missing, so nothing alerts a person when the factory stops finishing card runs (part 12)\n"
         )))
 
     def test_the_watch_scripts_are_compared_with_the_repository(self) -> None:
@@ -2235,6 +2277,7 @@ class CheckInstallTest(unittest.TestCase):
         self.launchd.plist(
             f"{agents}/ai.patinaproject.factory.gateway-watch.plist", "ai.patinaproject.factory.gateway-watch"
         )
+        self.launchd.plist(f"{agents}/{PROGRESS_LABEL}.plist", PROGRESS_LABEL, **PROGRESS_FIELDS)
         self.launchd.plist(f"{agents}/ai.patinaproject.factory.gh-login.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS)
         self.launchd.plist(f"{agents}/{AUTO_DEPLOY_LABEL}.plist", AUTO_DEPLOY_LABEL, **AUTO_DEPLOY_FIELDS)
         self.launchd.plist(f"{agents}/{ARTIFACT_LABEL}.plist", ARTIFACT_LABEL, **ARTIFACT_FIELDS)
@@ -2598,6 +2641,8 @@ GH_LOGIN_FIELDS = {
     "StartInterval": 900, "EnvironmentVariables": {"GH_CONFIG_DIR": "/w/gh", "HERMES_HOME": "/w"},
 }
 AUTO_DEPLOY_LABEL = "ai.patinaproject.factory.auto-deploy"
+PROGRESS_LABEL = "ai.patinaproject.factory.progress-watch"
+PROGRESS_FIELDS = {"StartInterval": 300}
 ARTIFACT_LABEL = "ai.patinaproject.factory.claude-artifact"
 ARTIFACT_FIELDS = {"EnvironmentVariables": {"HERMES_HOME": "/w", "PATH": "/w/.local/bin:/usr/bin"}}
 AUTO_DEPLOY_FIELDS = {
@@ -2889,6 +2934,9 @@ class Launchd:
             f"{str(self.home).lstrip('/')}/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist",
             "ai.patinaproject.factory.gateway-watch",
         )
+        self.progress = self.plist(
+            f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{PROGRESS_LABEL}.plist", PROGRESS_LABEL, **PROGRESS_FIELDS,
+        )
         self.gh_login = self.plist(
             f"{str(self.home).lstrip('/')}/Library/LaunchAgents/{GH_LOGIN_LABEL}.plist", GH_LOGIN_LABEL, **GH_LOGIN_FIELDS,
         )
@@ -2902,7 +2950,7 @@ class Launchd:
         uid = os.getuid()
         self.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
-            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{PROGRESS_LABEL}": "not running",
             f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
             f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
             f"user/{uid}/{ARTIFACT_LABEL}": "running",
@@ -3843,7 +3891,7 @@ class CheckServicesTest(unittest.TestCase):
         uid = os.getuid()
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
-            f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+            f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"gui/{uid}/{PROGRESS_LABEL}": "not running",
             f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
             f"gui/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
             f"gui/{uid}/{ARTIFACT_LABEL}": "running",
@@ -3870,6 +3918,7 @@ class CheckServicesTest(unittest.TestCase):
             "service cloudflared tunnel: is waiting, not running (part 7)",
             "service Hermes gateway: is not loaded in launchd (part 15)",
             "service gateway watch: is not loaded in launchd (part 12)",
+            "service progress watch: is not loaded in launchd (part 12)",
             "service gh login refresh: is not loaded in launchd (part 10)",
             "service auto deploy: is not loaded in launchd (part 12)",
             "service claude artifact: is not loaded in launchd (part 18)",
@@ -3880,6 +3929,13 @@ class CheckServicesTest(unittest.TestCase):
 
         self.assertEqual(self.check(), [
             "service gateway watch: no plist matches ~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist (part 12)",
+        ])
+
+    def test_a_missing_progress_watch_job_is_reported(self) -> None:
+        self.launchd.progress.unlink()
+
+        self.assertEqual(self.check(), [
+            "service progress watch: no plist matches ~/Library/LaunchAgents/ai.patinaproject.factory.progress-watch.plist (part 12)",
         ])
 
     def test_a_missing_login_refresh_job_is_reported(self) -> None:
@@ -3897,7 +3953,7 @@ class CheckServicesTest(unittest.TestCase):
         uid = os.getuid()
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
-            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "waiting",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{PROGRESS_LABEL}": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "waiting",
             f"user/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
             f"user/{uid}/{ARTIFACT_LABEL}": "running",
         })
@@ -3920,7 +3976,7 @@ class CheckServicesTest(unittest.TestCase):
         uid = os.getuid()
         states = {
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
-            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{PROGRESS_LABEL}": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
             f"user/{uid}/{ARTIFACT_LABEL}": "running",
         }
         self.launchd.states({**states, f"user/{uid}/ai.patinaproject.factory.auto-deploy": "running"})
@@ -3956,7 +4012,7 @@ class CheckServicesTest(unittest.TestCase):
         )
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"user/{uid}/ai.hermes.gateway": "running",
-            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
+            f"user/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"user/{uid}/{PROGRESS_LABEL}": "not running", f"user/{uid}/{GH_LOGIN_LABEL}": "not running",
             f"user/{uid}/{AUTO_DEPLOY_LABEL}": "not running",
             f"user/{uid}/{ARTIFACT_LABEL}": "running",
         })
@@ -3972,7 +4028,7 @@ class CheckServicesTest(unittest.TestCase):
         uid = os.getuid()
         self.launchd.states({
             "system/com.example.cloudflared": "running", f"gui/{uid}/ai.hermes.gateway": "running",
-            f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running",
+            f"gui/{uid}/ai.patinaproject.factory.gateway-watch": "not running", f"gui/{uid}/{PROGRESS_LABEL}": "not running",
             f"gui/{uid}/{GH_LOGIN_LABEL}": "not running",
             f"gui/{uid}/ai.patinaproject.factory.auto-deploy": "not running",
             f"gui/{uid}/{ARTIFACT_LABEL}": "running",
@@ -4094,6 +4150,16 @@ class CheckHostHoldTest(unittest.TestCase):
 
                 self.assertEqual(drifts, [
                     f"config claude_session in {self.root}: claude_session.load_hold_threshold {bad!r} must be a positive number",
+                ])
+
+
+    def test_it_reports_a_stall_threshold_that_is_not_a_positive_integer(self) -> None:
+        for bad in (0, -5, 1.5, "60", True):
+            with self.subTest(bad=bad):
+                drifts = classified(self, check_install.check_settings({"claude_session": {"progress_stall_minutes": bad}}, self.root))
+
+                self.assertEqual(drifts, [
+                    f"config claude_session in {self.root}: claude_session.progress_stall_minutes {bad!r} must be a positive integer",
                 ])
 
 

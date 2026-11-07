@@ -268,7 +268,11 @@ def read_boards(root: Path, modules: Modules, start: float, config_dir: Path) ->
         "SELECT ended_at AS moment FROM task_runs WHERE outcome = 'completed' AND ended_at >= ? "
         f"UNION ALL SELECT created_at FROM task_events WHERE kind IN ({finish_events}) AND created_at >= ?"
     )
-    idle_sql = "SELECT task_id, error FROM task_runs WHERE ended_at >= ? AND error LIKE ? ORDER BY ended_at"
+    # The worker passes claude-session's failure to kanban_block, which stores it as the run's summary.
+    idle_sql = (
+        "SELECT task_id, COALESCE(NULLIF(error, ''), summary) AS error FROM task_runs WHERE ended_at >= ? "
+        "AND (error LIKE ? OR summary LIKE ?) ORDER BY ended_at"
+    )
     reading = BoardReading([], [], [], [])
     for path in sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")]):
         if not path.is_file():
@@ -278,7 +282,7 @@ def read_boards(root: Path, modules: Modules, start: float, config_dir: Path) ->
             rows = board.read(str(path), cards_sql)
             events = board.read(str(path), guard_sql)
             finished = board.read(str(path), finished_sql, (start, start))
-            idle = board.read(str(path), idle_sql, (start, f"%{IDLE_TEXT}%"))
+            idle = board.read(str(path), idle_sql, (start, f"%{IDLE_TEXT}%", f"%{IDLE_TEXT}%"))
         except (sqlite3.Error, OSError) as error:
             reading.errors.append(clean(f"{label} board {path} cannot be read: {error}", guards))
             continue
