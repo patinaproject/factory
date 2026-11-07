@@ -701,3 +701,151 @@ class HostLoadTest(ParkedHarness):
                 self.assertIn(f"claude_session.load_hold_threshold {bad!r} must be a positive number", proc.stderr)
                 self.assertEqual(sorted(self.holds_file()["holds"]), ["usage_limit"])
                 self.assertEqual(self.holds_file()["applied"], True)
+
+
+USAGE_LIMIT_PARKED = "Waiting for the usage limit: Claude Code hit the usage limit"
+USAGE = "the Claude usage limit was reached"
+
+
+def stamp_in(minutes: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + minutes * 60))
+
+
+def minutes_from_now(stamp: str) -> float:
+    return (time.mktime(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")) - time.mktime(time.gmtime())) / 60
+
+
+class UsageLimitHoldTest(ParkedHarness):
+    def holds_path(self) -> Path:
+        return self.home.parent.parent / "dispatch-holds.json"
+
+    def holds_file(self) -> dict:
+        return json.loads(self.holds_path().read_text())
+
+    def write_holds(self, holds: dict, applied: bool) -> None:
+        self.holds_path().write_text(json.dumps({"holds": holds, "applied": applied}))
+
+    def episode(self, **fields) -> dict:
+        path = self.home.parent.parent / "dispatch-holds.usage-limit.json"
+        if fields:
+            path.write_text(json.dumps({"hits": 0, "released_at": None, "started_notified": False,
+                                        "released_notified": False, "cursor": None, **fields}))
+        return json.loads(path.read_text())
+
+    def board_run(self, outcome: str, started: float, ended: float) -> None:
+        with closing(sqlite3.connect(self.default_board)) as db:
+            db.execute("INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome) "
+                       "VALUES ('t_x', 'claude-worker', ?, ?, ?, ?)", (outcome, int(started), int(ended), outcome))
+            db.commit()
+
+    def tick(self, tasks: list, default_tasks: list = (), **state) -> subprocess.CompletedProcess:
+        return self.run_script(tasks, default_tasks=list(default_tasks), default_db=str(self.default_board), **state)
+
+    def key(self) -> object:
+        return json.loads(self.state_path.read_text()).get("dispatch_profiles", "unset")
+
+    def calls(self) -> list:
+        return [json.loads(line) for line in Path(f"{self.state_path}.log").read_text().splitlines()]
+
+    def test_a_rate_limited_run_after_the_cursor_holds_dispatch_assigns_no_triage_card_and_stops_no_running_card(self) -> None:
+        now = time.time()
+        self.episode(cursor=int(now) - 600)
+        self.board_run("rate_limited", now - 1500, now - 60)
+
+        proc = self.tick([task("t_running", "running", "claude-worker"), task("t_waiting", "ready")])
+
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        until = self.holds_file()["holds"]["usage_limit"]["until"]
+        self.assertEqual(proc.stdout, f"held usage_limit until {until}\n")
+        self.assertAlmostEqual(minutes_from_now(until), 15, delta=1)
+        self.assertEqual((self.holds_file()["applied"], self.key(), self.episode()["hits"]), (True, [], 1))
+        self.assertEqual(self.assignees(), {"t_running": "claude-worker", "t_waiting": None})
+        self.assertEqual([call for call in self.calls() if call[:3] == ["kanban", "--board", "triage"]], [])
+
+        proc = self.tick([task("t_running", "running", "claude-worker"), task("t_waiting", "ready")], dispatch_profiles=[])
+
+        self.assertEqual((proc.returncode, proc.stdout, self.key()), (0, "", []))
+        self.assertEqual((self.holds_file()["holds"]["usage_limit"]["until"], self.episode()["hits"]), (until, 1))
+
+    def test_with_no_cursor_older_rate_limited_runs_add_nothing(self) -> None:
+        now = time.time()
+        self.board_run("rate_limited", now - 3000, now - 60)
+
+        proc = self.tick([task("t_waiting", "ready")])
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "assigned t_waiting\n", ""))
+        self.assertFalse(self.holds_path().exists())
+        self.assertAlmostEqual(self.episode()["cursor"], now, delta=60)
+        self.assertEqual(self.key(), "unset")
+
+    def test_after_until_one_tick_removes_the_entry_unsets_the_key_releases_the_card_and_assigns_again(self) -> None:
+        self.park(self.default_board, "t_default", USAGE_LIMIT_PARKED)
+        self.write_holds({"usage_limit": {"reason": USAGE, "until": stamp_in(-1)}}, applied=True)
+
+        proc = self.tick([task("t_waiting", "ready")], [task("t_default", "scheduled", "claude-worker")], dispatch_profiles=[])
+
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertEqual(proc.stdout, "released t_default\nassigned t_waiting\n")
+        self.assertEqual((self.holds_file(), self.key()), ({"holds": {}, "applied": False}, "unset"))
+        self.assertEqual(self.statuses()["t_default"], ("ready", "claude-worker"))
+
+    def test_a_parked_card_with_a_reply_stays_parked_while_the_entry_is_live(self) -> None:
+        self.park(self.default_board, "t_default", USAGE_LIMIT_PARKED, comments=("Linear reply: any news?",))
+        self.write_holds({"usage_limit": {"reason": USAGE, "until": stamp_in(10)}}, applied=True)
+
+        proc = self.tick([], [task("t_default", "scheduled", "claude-worker")], dispatch_profiles=[])
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+        self.assertEqual(self.statuses()["t_default"], ("scheduled", "claude-worker"))
+
+    def test_a_key_a_person_set_is_never_unset_or_overwritten(self) -> None:
+        for until in (stamp_in(10), stamp_in(-1)):
+            with self.subTest(until=until):
+                self.write_holds({"usage_limit": {"reason": USAGE, "until": until}}, applied=False)
+                Path(f"{self.state_path}.log").unlink(missing_ok=True)
+
+                proc = self.tick([], dispatch_profiles=["claude-worker"])
+
+                self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+                self.assertEqual(self.key(), ["claude-worker"])
+                self.assertEqual([call for call in self.calls() if call[:2] in (["config", "set"], ["config", "unset"])], [])
+
+    def test_another_holders_live_entry_keeps_the_key_after_the_usage_limit_entry_ends(self) -> None:
+        deploy = {"reason": "auto-deploy is deploying abc", "until": stamp_in(30)}
+        self.write_holds({"usage_limit": {"reason": USAGE, "until": stamp_in(-1)}, "auto-deploy": deploy}, applied=True)
+
+        proc = self.tick([task("t_waiting", "ready")], dispatch_profiles=[])
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+        self.assertEqual((self.holds_file(), self.key()), ({"holds": {"auto-deploy": deploy}, "applied": True}, []))
+
+    def test_an_invalid_cap_still_removes_an_expired_entry_and_unsets_the_key(self) -> None:
+        self.write_holds({"usage_limit": {"reason": USAGE, "until": stamp_in(-1)}}, applied=True)
+
+        proc = self.tick([task("t_waiting", "ready")], settings={"triage": {"max_running": 0}}, dispatch_profiles=[])
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("triage.max_running", proc.stderr)
+        self.assertEqual((self.holds_file(), self.key()), ({"holds": {}, "applied": False}, "unset"))
+
+    def test_a_hold_file_that_does_not_parse_fails_the_tick_and_leaves_the_key(self) -> None:
+        self.holds_path().write_text("{not json")
+
+        proc = self.tick([task("t_waiting", "ready")], dispatch_profiles=[])
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("cannot read", proc.stderr)
+        self.assertEqual((self.key(), self.assignees()), ([], {"t_waiting": None}))
+        self.assertEqual(self.holds_path().read_text(), "{not json")
+
+    def test_an_invalid_backoff_setting_reads_no_run_and_exits_2(self) -> None:
+        now = time.time()
+        self.episode(cursor=int(now) - 600)
+        self.board_run("rate_limited", now - 1500, now - 60)
+        settings = {"triage": {"max_running": 2}, "dispatch_hold": {"usage_limit_base_minutes": 0}}
+
+        proc = self.tick([], settings=settings)
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("dispatch_hold.usage_limit_base_minutes 0 must be an integer of at least 1", proc.stderr)
+        self.assertFalse(self.holds_path().exists())

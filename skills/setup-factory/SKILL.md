@@ -92,6 +92,7 @@ your task notes, not in the repository.
 | `kanban.max_in_progress`, how many workers may run at once on the host | Kanban |
 | `kanban.max_spawn`, how many workers the default board may run at once | Kanban |
 | `triage.max_running`, how many triage cards may run at once | Kanban |
+| The operator's IANA time zone, such as `Europe/Berlin`, for the usage-limit notices | Settings |
 | Factory hostname, Cloudflare account, and zone | Ingress |
 | Identities allowed through Access, for example an email domain, and the session length | Ingress |
 | Whether people SSH into the machine through Access, and if so the SSH hostname and each person's email | Ingress, host exposure |
@@ -942,6 +943,7 @@ key file but does not contain the key.
   "sentry_sync": {},
   "dependabot_sweep": {},
   "scheduled_commands": [],
+  "dispatch_hold": {"time_zone": "<IANA time zone>"},
   "claude_session": {"base_url": "", "model": "", "tier_models": {}, "auth_token_env": "", "mcp_servers": {}, "disabled_mcp_servers": [], "max_turns": 0, "command_timeout_seconds": 600, "idle_limit_seconds": 2700}
 }
 ```
@@ -1109,6 +1111,17 @@ Linear team and in each `synced_github` repository, which also needs a
 "Upgrade an existing App's permissions" in `references/github.md`.
 `check-install` reports each malformed key, and `check-github-access` reports
 the missing permission once the section is set.
+
+`dispatch_hold` configures the factory-wide hold on new runs that part 12's
+"Dispatch hold" describes. `time_zone` is the operator's IANA time zone, in
+which `report-usage-limit` gives times. It defaults to `UTC`.
+`usage_limit_base_minutes` (default 15) is how long the first usage-limit hit
+with no reset time holds new runs. Each further hit in the same episode doubles
+it, up to `usage_limit_cap_minutes` (default 300). A hit whose message gives a
+reset time holds until that time plus `usage_limit_margin_minutes` (default 2),
+clamped to the same cap. Leave the minute keys out unless the defaults need
+tuning. `check-install` reports a value that is not valid, and `claude-session`
+refuses a run with the same text.
 
 `scheduled_commands` lists repository commands that run on a cron schedule, default `[]`. Part 12 installs
 a runner and a job for each entry. An entry has five keys:
@@ -1506,8 +1519,8 @@ jobs: `refresh-checkouts`, `refresh-owned-refs`, `reopen-conflicts`,
 `finish-merged`, `dispatch-triage`, `file-dependency-update`,
 `file-recurring-issues`, and
 `sentry-linear-sync` when `sentry_sync` is set. A copy there runs without the worker's scripts and settings, so remove it the
-same way. The default home holds two jobs, `retry-failed-webhooks` and
-`report-deploy`, described below. A second setup session runs this check before it
+same way. The default home holds three jobs, `retry-failed-webhooks`,
+`report-deploy`, and `report-usage-limit`, described below. A second setup session runs this check before it
 creates anything.
 
 **Create** the job only when the list has none:
@@ -1757,8 +1770,8 @@ profile, a cron job that delivers to a platform with no home channel in its
 profile, a cron job whose last run failed or was not delivered, with the first
 line of its error and secrets masked, the root home's
 `scripts/retry-failed-webhooks`, `scripts/watch-gateway`,
-`scripts/restart-gateway`, `scripts/auto-deploy`, and `scripts/report-deploy`
-when one is missing or differs from the repository,
+`scripts/restart-gateway`, `scripts/auto-deploy`, `scripts/report-deploy`, and
+`scripts/report-usage-limit` when one is missing or differs from the repository,
 that `watch-gateway` has run in the last 15 minutes
 without spending its restart budget, that `<root>/gateway-heartbeat-url` exists with mode `600`, and, on macOS, a
 launchd service from part 7, 10, 12, or 15
@@ -1997,6 +2010,38 @@ HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --status
 HERMES_HOME=<root> python3 <root>/scripts/auto-deploy --dry-run
 ```
 
+**Dispatch hold.** One list stops new worker and triage runs for the whole
+factory: `<root>/dispatch-holds.json`. It maps each holder, such as
+`auto-deploy`, `host_load`, or `usage_limit`, to a reason and an `until` time in
+ISO-8601 UTC. Each holder adds and removes only its own entry, under a lock on
+`<root>/dispatch-holds.lock`. A watcher outside Hermes can read the file with
+the Python standard library. Each `dispatch-triage` tick first removes every
+entry whose `until` has passed. While any entry remains,
+`kanban.dispatch_profiles` is `[]` in the root home and the tick assigns no
+triage card. Once none remains, the key is unset, but only when the list set
+it. A value a person set stays. Running cards are never stopped.
+
+The `usage_limit` entry starts in two ways. A `dispatch-triage` tick that
+finds a board run that ended `rate_limited` adds it, and `claude-session`
+adds it when Claude Code's result is a rate-limit API error. That card parks
+with a reason that starts with `Waiting for the usage limit:`. It never counts
+toward the park cap, and no reply releases it. `dispatch-triage` returns it to
+the queue on the first tick after the entry ends.
+`<root>/dispatch-holds.usage-limit.json` keeps the episode: its hit count,
+when the entry ends, which notices were sent, and the board cursor. A clean
+run that started after the entry ended ends the episode. Part 10's
+`dispatch_hold` settings give the durations. `hermes pause` is not the hold,
+because it also stops cron and every chat and webhook turn.
+
+`report-usage-limit` is a `--no-agent` cron job in the root profile beside
+`report-deploy`, also every 5 minutes. It reads the dispatch hold and prints
+one line when a usage-limit episode's entry is first live, with its end time in
+the operator's zone, and one line once the episode has ended. A hit after the
+entry ends and before a clean run holds new runs again without either line,
+so the release line waits for the clean run. It prints nothing else,
+so each episode sends the operator two messages, however many cards hit the
+limit.
+
 `report-deploy` is a `--no-agent` cron job in the root profile, like
 `retry-failed-webhooks`, and runs every 5 minutes. It reads only
 `<root>/auto-deploy.json`. It prints each `FAILED`, `WAITING`, or `BLOCKED`
@@ -2015,6 +2060,8 @@ install -d <root>/scripts
 install -m 0644 skills/setup-factory/scripts/auto-deploy <root>/scripts/auto-deploy
 install -m 0644 skills/setup-factory/scripts/report-deploy <root>/scripts/report-deploy
 hermes cron create "every 5m" --name report-deploy --no-agent --script report-deploy --deliver <platform> </dev/null
+install -m 0644 skills/setup-factory/scripts/report-usage-limit <root>/scripts/report-usage-limit
+hermes cron create "every 5m" --name report-usage-limit --no-agent --script report-usage-limit --deliver <platform> </dev/null
 python3 skills/setup-factory/scripts/auto-deploy --root <root> --print-plist \
   > ~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.patinaproject.factory.auto-deploy.plist
@@ -2935,8 +2982,9 @@ Hermes process starts. The new helper also writes
      When the questions are missing, post them as an `elicitation` from the
      card's newest `scheduled` reason. The line clears when the card parks
      again after a reply.
-   - A `cron job report-deploy` line, a `script <root>/scripts/auto-deploy`
-     or `<root>/scripts/report-deploy` line, or a `service auto deploy` line:
+   - A `cron job report-deploy` or `cron job report-usage-limit` line, a
+     `script <root>/scripts/auto-deploy`, `<root>/scripts/report-deploy`, or
+     `<root>/scripts/report-usage-limit` line, or a `service auto deploy` line:
      follow the part 12 "Auto deploy" steps.
    - A `plugin factory-deploy in <root>` line: run the part 5 install command
      for the root home. A `plugin factory-deploy in <worker>` line: remove it

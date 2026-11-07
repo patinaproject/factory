@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 from tests.support import REPO, SCRIPTS
@@ -19,6 +20,35 @@ SERVER = {"url": "https://mcp.example/mcp", "token_env": "SENTRY_ACCESS_TOKEN"}
 
 def settings(transport: dict | None = None, **repository) -> dict:
     return {"claude_session": transport or {}, "repositories": [{"full_name": "o/r", "path": "/r", **repository}]}
+
+
+class DispatchHoldSettingsTest(unittest.TestCase):
+    def test_the_defaults_are_15_minutes_2_minutes_5_hours_and_utc(self) -> None:
+        backoff = factory_settings.usage_limit_backoff({})
+        self.assertEqual(backoff, (timedelta(minutes=15), timedelta(minutes=2), timedelta(hours=5)))
+        self.assertEqual(str(factory_settings.operator_time_zone({})), "UTC")
+
+    def test_set_values_are_used(self) -> None:
+        section = {"usage_limit_base_minutes": 10, "usage_limit_margin_minutes": 0, "usage_limit_cap_minutes": 60,
+                   "time_zone": "America/Chicago"}
+        backoff = factory_settings.usage_limit_backoff({"dispatch_hold": section})
+        self.assertEqual(backoff, (timedelta(minutes=10), timedelta(0), timedelta(hours=1)))
+        self.assertEqual(str(factory_settings.operator_time_zone({"dispatch_hold": section})), "America/Chicago")
+
+    def test_bad_values_are_problems_that_refuse_a_run(self) -> None:
+        for section, error in (
+            ({"usage_limit_base_minutes": 0}, "dispatch_hold.usage_limit_base_minutes 0 must be an integer of at least 1"),
+            ({"usage_limit_margin_minutes": -1}, "dispatch_hold.usage_limit_margin_minutes -1 must be an integer of at least 0"),
+            ({"usage_limit_cap_minutes": "5h"}, "dispatch_hold.usage_limit_cap_minutes '5h' must be an integer of at least 1"),
+            ({"usage_limit_base_minutes": 30, "usage_limit_cap_minutes": 20},
+             "dispatch_hold.usage_limit_cap_minutes must be at least usage_limit_base_minutes"),
+            ({"time_zone": "Mars/Olympus"}, "dispatch_hold.time_zone 'Mars/Olympus' must be an IANA time zone such as Europe/Berlin"),
+            ({"cap": 1}, "dispatch_hold must be an object with only time_zone, usage_limit_base_minutes, "
+                         "usage_limit_cap_minutes, usage_limit_margin_minutes"),
+        ):
+            with self.subTest(section=section):
+                problems = factory_settings.validate({**settings(), "dispatch_hold": section})
+                self.assertEqual(problems.global_errors, (error,))
 
 
 class ValidateTest(unittest.TestCase):

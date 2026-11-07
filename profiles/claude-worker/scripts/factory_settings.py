@@ -11,8 +11,11 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import parse_qsl, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SETTINGS_KEY = "plugins.entries.linear-agent-session.settings"
 DEFAULT_FRESH_AFTER_TOKENS = 100_000
@@ -233,10 +236,58 @@ def artifact(settings) -> ArtifactSettings:
     )
 
 
+DISPATCH_HOLD_SECTION = "dispatch_hold"
+# The first usage-limit hit without a reset time, the margin after a reset time, and the cap, in minutes.
+USAGE_LIMIT_MINUTES = {"usage_limit_base_minutes": 15, "usage_limit_margin_minutes": 2, "usage_limit_cap_minutes": 300}
+DISPATCH_HOLD_KEYS = frozenset({*USAGE_LIMIT_MINUTES, "time_zone"})
+DEFAULT_TIME_ZONE = "UTC"
+
+
+class UsageLimitBackoff(NamedTuple):
+    base: timedelta
+    margin: timedelta
+    cap: timedelta
+
+
+def dispatch_hold_section(settings) -> dict:
+    section = settings.get(DISPATCH_HOLD_SECTION) if isinstance(settings, dict) else None
+    if section is None:
+        return {}
+    if not isinstance(section, dict) or not set(section) <= DISPATCH_HOLD_KEYS:
+        raise SettingsError(f"{DISPATCH_HOLD_SECTION} must be an object with only {', '.join(sorted(DISPATCH_HOLD_KEYS))}")
+    return section
+
+
+def usage_limit_backoff(settings) -> UsageLimitBackoff:
+    """How long the usage-limit entry holds new runs, from `dispatch_hold` or the defaults."""
+    section = dispatch_hold_section(settings)
+    minutes = {key: section.get(key, default) for key, default in USAGE_LIMIT_MINUTES.items()}
+    for key, value in minutes.items():
+        smallest = 0 if key == "usage_limit_margin_minutes" else 1
+        if isinstance(value, bool) or not isinstance(value, int) or value < smallest:
+            raise SettingsError(f"{DISPATCH_HOLD_SECTION}.{key} {value!r} must be an integer of at least {smallest}")
+    if minutes["usage_limit_cap_minutes"] < minutes["usage_limit_base_minutes"]:
+        raise SettingsError(f"{DISPATCH_HOLD_SECTION}.usage_limit_cap_minutes must be at least usage_limit_base_minutes")
+    return UsageLimitBackoff(*(timedelta(minutes=minutes[key]) for key in USAGE_LIMIT_MINUTES))
+
+
+def operator_time_zone(settings) -> ZoneInfo:
+    """The operator's IANA time zone, in which the usage-limit notices give times."""
+    name = dispatch_hold_section(settings).get("time_zone", DEFAULT_TIME_ZONE)
+    try:
+        if not isinstance(name, str) or not name:
+            raise ValueError(name)
+        return ZoneInfo(name)
+    except (ValueError, ZoneInfoNotFoundError):
+        raise SettingsError(f"{DISPATCH_HOLD_SECTION}.time_zone {name!r} must be an IANA time zone such as Europe/Berlin") from None
+
+
 GLOBAL_FIELDS = (
     fresh_after_tokens, max_turns, command_timeout_seconds, idle_limit_seconds, tier_models, mcp_servers, disabled_mcp_servers,
     load_hold_threshold,
 )
+# Fields read from the whole settings object rather than from `claude_session`.
+SETTINGS_FIELDS = (usage_limit_backoff, operator_time_zone)
 REPOSITORY_FIELDS = (worker_entry, toolchain_checks, auto_merge)
 
 
@@ -265,7 +316,9 @@ def validate(settings: dict) -> Problems:
     transport = settings.get("claude_session")
     repositories = settings.get("repositories") or []
     return Problems(
-        errors(GLOBAL_FIELDS, transport if isinstance(transport, dict) else {}),
+        tuple(dict.fromkeys(
+            errors(GLOBAL_FIELDS, transport if isinstance(transport, dict) else {}) + errors(SETTINGS_FIELDS, settings)
+        )),
         {
             repo["full_name"]: found
             for repo in repositories

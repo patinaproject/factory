@@ -2,9 +2,12 @@
 
 `dispatch-holds.json` in the root Hermes home (two levels above the worker profile home, as `install_drift` finds
 `auto-deploy.json`) is `{"holds": {<holder>: {"reason": str, "until": ISO-8601 UTC}}, "applied": bool}`. Each holder
-owns its own entry: `host_load` (this module's load gate), `auto-deploy`, and later `usage_limit`. While any entry
-exists, `kanban.dispatch_profiles` is `[]` in the root home and Hermes' dispatcher claims no card. `applied` records
+owns its own entry: `host_load` (this module's load gate), `auto-deploy`, and `usage_limit` (`usage_limit.py`).
+While any entry exists, `kanban.dispatch_profiles` is `[]` in the root home and Hermes' dispatcher claims no card. `applied` records
 that the list set the key, so a key set while `applied` is false is a person's hold: the list neither overwrites nor unsets it.
+
+A holder whose change depends on other state takes `locked()` itself, reads the list with `read_holds`, and
+changes it with `add_locked`, so one lock covers the list and that state.
 
 `dispatch-holds.log` in the same home gets one JSON line for each entry an `add` creates and each entry a removal
 deletes, which `held_seconds` reads back.
@@ -31,6 +34,7 @@ LOCK_FILE = "dispatch-holds.lock"
 HOLD_KEY = "kanban.dispatch_profiles"
 HOST_LOAD = "host_load"
 AUTO_DEPLOY = "auto-deploy"
+USAGE_LIMIT = "usage_limit"
 HOLD_MINUTES = 10
 LOAD_PER_CPU = 1.5
 WINDOW = timedelta(hours=24)
@@ -101,13 +105,15 @@ class HoldList:
 
     def add(self, holder: str, reason: str, until: datetime, readings: Optional[dict] = None) -> bool:
         with self.locked():
-            data = read_holds(self.root)
-            created = holder not in data["holds"]
-            data["holds"][holder] = {"reason": reason, "until": stamp(until)}
-            self.write(data)
-            if created:
-                self.log("add", holder, reason, readings)
-            self.apply_locked(data)
+            return self.add_locked(read_holds(self.root), holder, reason, until, readings)
+
+    def add_locked(self, data: dict, holder: str, reason: str, until: datetime, readings: Optional[dict] = None) -> bool:
+        created = holder not in data["holds"]
+        data["holds"][holder] = {"reason": reason, "until": stamp(until)}
+        self.write(data)
+        if created:
+            self.log("add", holder, reason, readings)
+        self.apply_locked(data)
         return created
 
     def remove(self, holder: str, readings: Optional[dict] = None, expired: bool = False) -> bool:

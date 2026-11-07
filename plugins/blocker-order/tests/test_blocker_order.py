@@ -794,6 +794,16 @@ class HostLoadTest(GhLoginTest):
     ERROR = "the host load is too high to start a run: load average 30 (1 min)"
 
 
+class UsageLimitTest(GhLoginTest):
+    STOPPED = (
+        "Claude Code hit the Claude usage limit, so this card waits in scheduled while the factory holds new runs "
+        "and goes back to the queue once the hold ends. Stop now: call no other tool, do not call kanban_block, do "
+        "not post an activity, and do not run claude-session again."
+    )
+    PRECONDITION, PARK, KEY = "usage_limit", "Waiting for the usage limit:", "usage_limit_park"
+    ERROR = "Claude Code hit the usage limit (API Error: 429), so the factory holds new runs until 2026-11-06T12:15:00Z"
+
+
 class XcodeCheckTimeoutTest(GhLoginTest):
     STOPPED = (
         "The Xcode first launch check timed out, so this card waits in scheduled and goes back to the queue after "

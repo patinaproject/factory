@@ -1,9 +1,9 @@
 """Read a Hermes board database without writing to it.
 
 `claude-session` reads the cards for its blocker check and the status of the card each run serves, `dispatch-triage` and `check-install` read the cards that
-wait for a reply, `finish-merged` reads the cards whose pull request may have merged, and `check-install` probes
+wait for a reply, `dispatch-triage` reads the runs that ended since its usage-limit cursor, `finish-merged` reads the cards whose pull request may have merged, and `check-install` probes
 that every read still works, so all of them read the board here. `completion_contract.py` and `stale_failure.py`
-make the only writes. The columns are Hermes' internal `tasks`, `task_comments`, and `task_events` schema, which
+make the only writes. The columns are Hermes' internal `tasks`, `task_comments`, `task_events`, and `task_runs` schema, which
 Hermes may change.
 """
 from __future__ import annotations
@@ -21,7 +21,9 @@ import reply_inbox
 COLUMNS = ("id", "title", "body", "branch_name", "status", "block_kind", "completion_contract")
 COMMENT_COLUMNS = ("id", "task_id", "author", "body", "created_at")
 EVENT_COLUMNS = ("id", "task_id", "kind", "payload", "created_at")
-TABLES = {"tasks": COLUMNS, "task_comments": COMMENT_COLUMNS, "task_events": EVENT_COLUMNS}
+RUN_COLUMNS = ("id", "task_id", "outcome", "started_at", "ended_at")
+TABLES = {"tasks": COLUMNS, "task_comments": COMMENT_COLUMNS, "task_events": EVENT_COLUMNS, "task_runs": RUN_COLUMNS}
+ENDED_RUNS_QUERY = f"SELECT {', '.join(RUN_COLUMNS)} FROM task_runs WHERE ended_at > ? ORDER BY ended_at, id"
 BOARD_QUERY = f"SELECT {', '.join(COLUMNS)} FROM tasks WHERE status != 'archived'"
 # The ways a card waited for input before triage rounds parked in `scheduled`.
 BLOCKED_FOR_INPUT_QUERY = (
@@ -106,6 +108,12 @@ def run_state(path: str, task_id: str) -> tuple[str, int | None] | None:
     """The card's status and current run id, or None when the board has no such card."""
     rows = read(path, RUN_STATE_QUERY, (task_id,))
     return (rows[0]["status"], rows[0]["current_run_id"]) if rows else None
+
+
+def ended_runs(path: str, since: int) -> list[dict]:
+    """The runs that ended after `since`, epoch seconds, oldest first. Hermes records `rate_limited` as the outcome
+    of a worker turn that exited on its model provider's limit."""
+    return read(path, ENDED_RUNS_QUERY, (since,))
 
 
 def blocked_for_input(path: str) -> list[dict]:

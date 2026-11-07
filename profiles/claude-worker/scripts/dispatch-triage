@@ -28,9 +28,13 @@ same line once the issue closes or a person replies, and otherwise leaves it par
 For each card parked for a GitHub pull request it applies `card_transition.sweep_pull_request`: it releases
 the card with the same line once the pull request merges or closes or a person replies.
 Before any release it expires stale holds in the hold list and holds dispatch while the host's load average is over
-the threshold (`host_hold.refresh`), and it assigns no card while the `host_load` hold exists. A card
-parked for the load is released once that hold is gone (`card_transition.sweep_host_load`). An invalid
-`claude_session.load_hold_threshold` skips the load step and exits 2.
+the threshold (`host_hold.refresh`). It reads every board's runs that ended since the usage-limit cursor
+(`usage_limit.read_board`): a `rate_limited` run adds the `usage_limit` entry and prints `held usage_limit until
+<time>`, and with no cursor yet it stores the current time and reads nothing older. It assigns no card while any
+hold exists. A card parked for the load or the usage limit is released once that hold is gone
+(`card_transition.sweep_host_load`, `card_transition.sweep_usage_limit`). An invalid
+`claude_session.load_hold_threshold` skips the load step, and an invalid `dispatch_hold` section skips the board
+read; either exits 2.
 Then it counts the board's cards that are `running`, or `ready` with an
 assignee, and assigns `claude-worker` to waiting `ready` cards, highest priority
 and then oldest first, until that count reaches `triage.max_running` in the
@@ -50,6 +54,8 @@ from pathlib import Path
 import card_transition
 import factory_settings
 import host_hold
+import kanban_board
+import usage_limit
 
 TRIAGE_BOARD = "triage"
 WORKER = "claude-worker"
@@ -114,21 +120,48 @@ def release_parked(sweep, waits_for: str) -> bool:
     return not swept["failed"]
 
 
-def hold_for_load(binary: str, settings) -> tuple[host_hold.HoldList, bool]:
+def ended_runs(since: int) -> list[dict]:
+    """Every board's runs that ended after `since`, oldest first."""
+    runs = []
+    for board in card_transition.boards():
+        if os.path.exists(board["db_path"]):
+            runs += kanban_board.ended_runs(board["db_path"], since)
+    return sorted(runs, key=lambda run: (run["ended_at"], run["id"]))
+
+
+def hold_for_usage_limit(holds: host_hold.HoldList, settings) -> int:
+    """Read the board's rate-limited runs into the usage-limit hold; the exit code its problems call for."""
+    try:
+        backoff = factory_settings.usage_limit_backoff(settings)
+    except factory_settings.SettingsError as error:
+        print(f"dispatch-triage: {error}, so no rate-limited run holds dispatch", file=sys.stderr)
+        return 2
+    try:
+        added = usage_limit.read_board(holds, ended_runs, backoff)
+    except (card_transition.Failed, sqlite3.Error) as exc:
+        print(f"dispatch-triage: cannot read the board's runs for the usage-limit hold: {exc}", file=sys.stderr)
+        return 1
+    if added is not None:
+        print(f"held {usage_limit.USAGE_LIMIT} until {host_hold.stamp(added)}")
+    return 0
+
+
+def keep_holds(binary: str, settings) -> tuple[host_hold.HoldList, int]:
     root = host_hold.root_home(Path(os.environ["HERMES_HOME"]))
     holds = host_hold.HoldList(root, host_hold.hermes_config(lambda: binary, root))
     holds.expire()
     transport = settings.get("claude_session") if isinstance(settings, dict) else None
-    valid = True
+    problem = 0
     try:
         threshold = factory_settings.load_hold_threshold(transport if isinstance(transport, dict) else {})
     except factory_settings.SettingsError as error:
         print(f"dispatch-triage: {error}", file=sys.stderr)
-        valid = False
+        problem = 2
     else:
         host_hold.refresh(holds, threshold)
+    problem = max(problem, hold_for_usage_limit(holds, settings))
     holds.apply()
-    return holds, valid
+    return holds, problem
 
 
 def main() -> int:
@@ -140,10 +173,10 @@ def main() -> int:
         settings = factory_settings.read(raw=False)
         os.environ["HERMES_BIN"] = binary
         try:
-            holds, valid = hold_for_load(binary, settings)
+            holds, problem = keep_holds(binary, settings)
         except host_hold.HoldError as exc:
             print(f"dispatch-triage: {exc}", file=sys.stderr)
-            holds, valid = None, True
+            holds, problem = None, 1
         cap = max_running(settings)
         released = release_waiting()
         released = release_parked(card_transition.sweep_login, "the gh login") and released
@@ -156,14 +189,15 @@ def main() -> int:
         released = release_parked(card_transition.sweep_issue, "a GitHub issue") and released
         released = release_parked(card_transition.sweep_pull_request, "a GitHub pull request") and released
         released = release_parked(card_transition.sweep_host_load, "the host load") and released
-        if holds is not None and host_hold.HOST_LOAD not in holds.holders():
+        released = release_parked(card_transition.sweep_usage_limit, "the usage limit") and released
+        if holds is not None and not holds.holders():
             tasks = json.loads(hermes(binary, "kanban", "--board", TRIAGE_BOARD, "list", "--json"))
             for task_id in to_assign(tasks, cap):
                 hermes(binary, "kanban", "--board", TRIAGE_BOARD, "assign", task_id, WORKER)
                 print(f"assigned {task_id}")
-        if not valid:
+        if problem == 2:
             return 2
-        if holds is None or not released:
+        if problem or not released:
             return 1
     except Refusal as exc:
         print(f"dispatch-triage: {exc}", file=sys.stderr)

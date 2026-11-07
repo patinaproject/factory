@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Tell the operator once when the usage-limit hold starts and once when it ends.
+
+A `--no-agent` cron job in the root profile runs this every 5 minutes with `--deliver <platform>`, like
+`report-deploy`. It reads the hold list in the root home through the worker profile's `usage_limit.py` and prints
+one line when an episode's `usage_limit` entry is first live and one line once the episode has ended, with the time in the
+operator's zone from `dispatch_hold.time_zone` in the factory settings. Otherwise it prints nothing, so Hermes
+delivers nothing. The sent flag is written in the episode state under the hold list's lock before the line is
+printed, so a crash sends at most one message.
+"""
+import os
+import sys
+from pathlib import Path
+
+WORKER = "claude-worker"
+
+
+def main() -> int:
+    root = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    sys.path.insert(0, str(root / "profiles" / WORKER / "scripts"))
+    import factory_settings
+    import host_hold
+    import usage_limit
+
+    try:
+        settings = factory_settings.read(raw=False)
+        zone = factory_settings.operator_time_zone(settings)
+        holds = host_hold.HoldList(root, host_hold.hermes_config(factory_settings.find_hermes, root))
+        found = usage_limit.next_notice(holds)
+    except (factory_settings.SettingsError, host_hold.HoldError) as error:
+        print(f"report-usage-limit: {error}", file=sys.stderr)
+        return 1
+    if found is None:
+        return 0
+    kind, at = found
+    local = at.astimezone(zone).strftime("%Y-%m-%d %H:%M %Z")
+    if kind == "start":
+        print(f"The factory holds new worker and triage runs for the Claude usage limit until {local}. Running cards finish.")
+    else:
+        print(f"The usage-limit hold ended at {local}. New worker and triage runs start again.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
