@@ -28,7 +28,7 @@ Configure the transport only through these settings in
 `--settings`. Claude Code lets an `env` block in the user's
 `~/.claude/settings.json` override the process environment, so plain
 environment variables would lose to it; `--settings` wins over user settings.
-The file is deleted when the run ends. A nested `claude` gets its own settings file from the same run, holding the run's endpoint, guards, and deny rules, and that file goes when the run ends too. A nested call's token usage is not counted in the run's result line. `nested-claude` installs with the profile's scripts, so `check-install` reports it when it is missing or stale. Never put an `ANTHROPIC_*` variable in a
+The file is deleted when the run ends. A nested `claude` gets its own settings file from the same run, holding the run's endpoint, guards, and deny rules, and that file goes when the run ends too. Those settings are flag settings, so they outrank the repository's and the user's settings, and the wrapper refuses a caller's own `--settings`, another credential variable, a different `ANTHROPIC_BASE_URL`, and `--bg`. A nested call's token usage is not counted in the run's result line. `nested-claude` installs with the profile's scripts, so `check-install` reports it when it is missing or stale. Never put an `ANTHROPIC_*` variable in a
 `.env` file or in the gateway's service unit. The DirectSDK provider refuses to
 start when it finds one.
 

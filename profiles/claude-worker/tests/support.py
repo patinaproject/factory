@@ -64,7 +64,7 @@ import json, os, sys
 # The real claude gets no test variables, so the fake reads its options from the file beside it.
 options = json.load(open(__file__ + ".json"))
 if os.environ.get("CLAUDE_SESSION_NESTED"):
-    options = {"log": options["log"] + ".nested"}
+    options = {"log": options["log"] + ".nested", **options.get("nested", {})}
 argv = sys.argv[1:]
 settings = None
 if "--settings" in argv:

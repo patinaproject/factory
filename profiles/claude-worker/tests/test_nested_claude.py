@@ -43,12 +43,12 @@ class NestedClaudeTest(unittest.TestCase):
         self.slots.mkdir()
         self.log = self.tmp / "call.json"
 
-    def command(self, *caller: str, lifetime: float = 30, base_url: str | None = None) -> list[str]:
+    def command(self, *caller: str, lifetime: float = 30, base_url: str = "http://127.0.0.1:9999") -> list[str]:
         return [
             sys.executable, str(SCRIPTS / "nested-claude"),
             "--claude", str(self.claude), "--settings", str(self.settings), "--mcp-config", str(self.mcp),
             "--slots", str(self.slots), "--lifetime", str(lifetime),
-            *(["--base-url", base_url] if base_url else []), "--", *caller,
+            "--base-url", base_url, "--", *caller,
         ]
 
     def env(self, **extra: str) -> dict:
@@ -95,9 +95,24 @@ class NestedClaudeTest(unittest.TestCase):
         self.assertEqual(self.run_wrapper("-p", "hi", env=self.env(FAKE_EXIT="7")).returncode, 7)
 
     def test_a_matching_endpoint_is_accepted(self) -> None:
-        proc = self.run_wrapper("-p", "hi", env=self.env(ANTHROPIC_BASE_URL="http://127.0.0.1:9999"), base_url="http://127.0.0.1:9999")
+        for current in ("http://127.0.0.1:9999", "http://127.0.0.1:9999/"):
+            with self.subTest(current=current):
+                proc = self.run_wrapper("-p", "hi", env=self.env(ANTHROPIC_BASE_URL=current))
 
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_a_subcommand_passes_through_without_the_run_flags(self) -> None:
+        for caller in (("mcp", "list"), ("doctor",), ("update",)):
+            with self.subTest(caller=caller):
+                proc = self.run_wrapper(*caller)
+
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(self.call()["argv"], list(caller))
+
+    def test_a_claude_ended_by_a_signal_exits_128_plus_the_signal(self) -> None:
+        self.claude.write_text(f"#!{sys.executable}\nimport os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n")
+
+        self.assertEqual(self.run_wrapper("-p", "hi").returncode, 128 + signal.SIGKILL)
 
     def test_refusals(self) -> None:
         cases = (
@@ -107,8 +122,15 @@ class NestedClaudeTest(unittest.TestCase):
              "ANTHROPIC_API_KEY in the environment would conflict with the run's apiKeyHelper; unset it"),
             ("auth token", ("-p", "hi"), {"ANTHROPIC_AUTH_TOKEN": "synthetic-key", "CLAUDE_CODE_OAUTH_TOKEN": "synthetic-oauth"}, {},
              "ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN in the environment would conflict with the run's apiKeyHelper; unset it"),
-            ("endpoint", ("-p", "hi"), {"ANTHROPIC_BASE_URL": "http://elsewhere.invalid"}, {"base_url": "http://127.0.0.1:9999"},
+            ("endpoint", ("-p", "hi"), {"ANTHROPIC_BASE_URL": "http://elsewhere.invalid"}, {},
              "ANTHROPIC_BASE_URL differs from the run's endpoint; unset it or leave the run's value"),
+            ("endpoint without a proxy", ("-p", "hi"), {"ANTHROPIC_BASE_URL": "http://elsewhere.invalid"},
+             {"base_url": "https://api.anthropic.com"},
+             "ANTHROPIC_BASE_URL differs from the run's endpoint; unset it or leave the run's value"),
+            ("background", ("--bg", "-p", "hi"), {}, {},
+             "a background session would outlive the run's lifetime limit; run claude in the foreground"),
+            ("background long form", ("-p", "hi", "--background"), {}, {},
+             "a background session would outlive the run's lifetime limit; run claude in the foreground"),
             ("settings flag", ("-p", "hi", "--settings", "/tmp/x.json"), {}, {},
              "--settings is set by the run; pass settings another way or not at all"),
             ("settings value", ("--settings={}", "-p", "hi"), {}, {},
@@ -127,6 +149,14 @@ class NestedClaudeTest(unittest.TestCase):
         self.assert_refused(
             self.run_wrapper("-p", "hi"),
             "the run's nested settings file is gone, so the run that set up this wrapper has ended",
+        )
+
+    def test_a_run_whose_slots_are_gone_refuses_its_wrapper(self) -> None:
+        self.slots.rmdir()
+
+        self.assert_refused(
+            self.run_wrapper("-p", "hi"),
+            "the run's nested directory is gone, so the run that set up this wrapper has ended",
         )
 
     def test_all_slots_held_refuses_a_fifth_call(self) -> None:

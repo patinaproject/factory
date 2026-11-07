@@ -2161,7 +2161,7 @@ class ClaudeSessionTest(GitFixture):
         artifact = ["Read(//proxy/oauth/**)", "Edit(//proxy/oauth/**)", f"Read(/{state}/**)", f"Edit(/{state}/**)"]
         push_signed = (SCRIPTS / "push-signed").resolve()
         publish = ["Bash(git push:*)", f"Bash(python3 {push_signed}:*)", f"Bash({push_signed}:*)", "Bash(gh pr create:*)"]
-        for env, run_hooks, matchers, deny in (
+        for env, run_hooks, run_matchers, deny in (
             (None, ["SessionStart", "PreToolUse", "PostToolUse", "Stop"], ["Bash", "Skill"], artifact),
             (TRIAGE_ENV, ["SessionStart", "PreToolUse"], ["Bash"], publish + artifact),
         ):
@@ -2169,22 +2169,54 @@ class ClaudeSessionTest(GitFixture):
                 parent, _, nested = self.nested_run(env=env)
 
                 run_settings, content = parent["settings"]["content"], nested["settings"]["content"]
+                run_pre_tool_use = run_settings["hooks"]["PreToolUse"]
                 self.assertEqual(sorted(run_settings["hooks"]), sorted(run_hooks))
-                self.assertEqual(sorted(content), ["hooks", "permissions"])
-                self.assertEqual(content["hooks"], {"PreToolUse": run_settings["hooks"]["PreToolUse"]})
-                self.assertEqual([group["matcher"] for group in content["hooks"]["PreToolUse"]], matchers)
+                self.assertEqual([group["matcher"] for group in run_pre_tool_use], run_matchers)
+                self.assertEqual(sorted(content), ["env", "hooks", "permissions"])
+                self.assertEqual(content["hooks"], {"PreToolUse": [run_pre_tool_use[0]]})
+                self.assertEqual(
+                    [hook["command"].split()[1] for hook in run_pre_tool_use[0]["hooks"]],
+                    [str((SCRIPTS / "guard-ci-wait").resolve()), str((SCRIPTS / "guard-commit-closes").resolve())],
+                )
                 self.assertEqual(content["permissions"], {"deny": deny})
+                self.assertNotIn("guard-code-review", json.dumps(content))
                 self.assertNotIn("LINEAR_API_KEY", json.dumps(content))
 
+    def test_without_a_base_url_a_nested_claude_is_pinned_to_anthropics_api(self) -> None:
+        self.settings = self.write_settings([self.repository], {"auth_token_env": "EXAMPLE_PROXY_TOKEN"})
+
+        _, bash, nested = self.nested_run()
+
+        self.assertEqual(nested["settings"]["content"]["env"], {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"})
+        self.assertIn(" --base-url https://api.anthropic.com -- ", bash["script"])
+
     def test_a_stopped_run_removes_its_nested_wrapper(self) -> None:
-        session = self.hold_a_run()
-        self.assertTrue((self.nested_dir() / "bin" / "claude").exists())
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with self.subTest(signal=signum.name):
+                session = self.hold_a_run()
+                self.assertTrue((self.nested_dir() / "bin" / "claude").exists())
 
-        session.send_signal(signal.SIGTERM)
+                session.send_signal(signum)
 
-        session.communicate(timeout=30)
-        self.assertEqual(session.returncode, -signal.SIGTERM)
-        self.assertFalse(self.nested_dir().exists())
+                session.communicate(timeout=30)
+                self.assertFalse(self.nested_dir().exists())
+
+    def test_the_end_of_a_run_ends_a_nested_claude_that_is_still_running(self) -> None:
+        held = self.tmp / "nested-held.pid"
+        self.configure_fake_claude(
+            nested={"group_child_pid_file": str(held), "hold_seconds": 600},
+            steps=[{"bash": f"claude -p hi >/dev/null 2>&1 & while [ ! -s {held} ]; do sleep 0.1; done"}],
+        )
+
+        status, _ = self.run_session()
+
+        self.assertEqual(status, 0)
+        nested = json.loads(Path(f"{self.log}.nested").read_text())
+        deadline = time.monotonic() + 10
+        pids = [nested["pid"], int(held.read_text())]
+        while any(process_alive(pid) for pid in pids) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertEqual([pid for pid in pids if process_alive(pid)], [])
 
     def model_env(self, claude_session: dict) -> dict:
         self.settings = self.write_settings([self.repository], {"model": "transport-model", **claude_session})
@@ -4413,3 +4445,11 @@ class ProgressTimeTest(unittest.TestCase):
             progress = module.progress_time("session", Path("/worktree"), started=1000.0)
 
         self.assertEqual(progress, 5000.0)
+
+
+def process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True

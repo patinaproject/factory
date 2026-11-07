@@ -377,6 +377,7 @@ TOOLCHAIN_CHECK_ENV = "CLAUDE_SESSION_TOOLCHAIN_CHECK_SECONDS"
 STILL_RUNNING_CHARS = 500
 LOCK_NAME = "claude-session.lock"
 NESTED_DIR_NAME = "claude-session.nested"
+ANTHROPIC_API_URL = "https://api.anthropic.com"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
 POLL_ENV = "CLAUDE_SESSION_REPLY_POLL_SECONDS"
 INBOX_NAME = "claude-session.replies.json"
@@ -1311,8 +1312,11 @@ def claude_settings(
         env["BASH_MAX_TIMEOUT_MS"] = str(factory_settings.command_timeout_seconds(transport) * 1000)
     # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
-    shared = restrictions(transport, triage, session_id, task_id, board, denials)
+    shared = restrictions(transport, triage, denials)
     settings = {"env": env, **shared, "hooks": {"SessionStart": [{"hooks": [remove]}], **shared["hooks"]}}
+    if session_id and not triage:
+        review = {"type": "command", "command": " ".join([helper_command(CODE_REVIEW_GUARD), *session_arguments(session_id, task_id, board)])}
+        settings["hooks"]["PreToolUse"].append({"matcher": "Skill", "hooks": [review]})
     if inbox:
         # Hands Claude a person's Linear reply during the run; see reply_inbox.
         for event, mode in (("PostToolUse", "post-tool-use"), ("Stop", "stop")):
@@ -1330,9 +1334,7 @@ def claude_settings(
     return settings
 
 
-def restrictions(
-    transport: dict, triage: bool, session_id: str | None, task_id: str, board: str, denials: tuple,
-) -> dict:
+def restrictions(transport: dict, triage: bool, denials: tuple) -> dict:
     # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
     # A refused commit or publish keeps a commit from closing an issue the pull request body does not; see guard-commit-closes.
     command_limit = factory_settings.command_timeout_seconds(transport)
@@ -1341,9 +1343,6 @@ def restrictions(
         for script, argument in ((CI_WAIT_GUARD, f" {command_limit}"), (COMMIT_CLOSES_GUARD, ""))
     ]
     settings: dict = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": guards}]}}
-    if session_id and not triage:
-        review = {"type": "command", "command": " ".join([helper_command(CODE_REVIEW_GUARD), *session_arguments(session_id, task_id, board)])}
-        settings["hooks"]["PreToolUse"].append({"matcher": "Skill", "hooks": [review]})
     if transport.get("auth_token_env"):
         settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)
     disabled = factory_settings.disabled_mcp_servers(transport)
@@ -1354,17 +1353,16 @@ def restrictions(
     return settings
 
 
-def nested_settings(
-    transport: dict, triage: bool, session_id: str | None, task_id: str, board: str, denials: tuple,
-) -> dict:
+def nested_endpoint(transport: dict) -> str:
+    return transport.get("base_url") or ANTHROPIC_API_URL
+
+
+def nested_settings(transport: dict, triage: bool, denials: tuple) -> dict:
     """Flag settings outrank a repository's own, so its settings cannot redirect the token."""
-    settings = restrictions(transport, triage, session_id, task_id, board, denials)
-    if transport.get("base_url"):
-        settings = {"env": {"ANTHROPIC_BASE_URL": transport["base_url"]}, **settings}
-    return settings
+    return {"env": {"ANTHROPIC_BASE_URL": nested_endpoint(transport)}, **restrictions(transport, triage, denials)}
 
 
-def write_nested_wrapper(directory: Path, real: str, mcp: str, settings: dict, lifetime: int, base_url: str | None) -> Path:
+def write_nested_wrapper(directory: Path, real: str, mcp: str, settings: dict, lifetime: int, endpoint: str) -> Path:
     directory.mkdir(mode=0o700)
     for name in ("bin", "slots"):
         (directory / name).mkdir(mode=0o700)
@@ -1375,7 +1373,7 @@ def write_nested_wrapper(directory: Path, real: str, mcp: str, settings: dict, l
     words = [
         sys.executable, str(NESTED_CLAUDE), "--claude", real, "--settings", str(directory / "settings.json"),
         "--mcp-config", str(directory / "mcp.json"), "--slots", str(directory / "slots"), "--lifetime", str(lifetime),
-        *(["--base-url", base_url] if base_url else []), "--",
+        "--base-url", endpoint, "--",
     ]
     fd = os.open(directory / "bin" / "claude", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
     with os.fdopen(fd, "w") as handle:
@@ -1746,7 +1744,8 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     worktree = resolve_worktree(workspace, repo["path"])
     check_first_launch(repo, worktree)
     check_toolchain(repo, worktree)
-    real_claude = shutil.which(os.environ.get("CLAUDE_BIN", "claude"), path=child_env(worktree).get("PATH"))
+    run_path = child_env(worktree).get("PATH", "")
+    real_claude = shutil.which(os.environ.get("CLAUDE_BIN", "claude"), path=run_path)
     if real_claude is None:
         raise Refusal("CLAUDE_BIN names no executable claude on the run's PATH")
     real_claude = str(Path(real_claude).absolute())
@@ -1856,8 +1855,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
             ))
             nested_bin = write_nested_wrapper(
                 nested_dir, real_claude, mcp,
-                nested_settings(transport, triage, card_session_id, args.task_id, board, denials),
-                command_limit, transport.get("base_url"),
+                nested_settings(transport, triage, denials), command_limit, nested_endpoint(transport),
             )
             with reply_watch(inbox, client, args, comments, own):
                 try:
@@ -1865,7 +1863,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                         command, worktree, session_id, idle_limit,
                         {
                             artifact_service.CAPABILITY_ENV: capability.secret, **test_worker_env(),
-                            "PATH": f"{nested_bin}{os.pathsep}{child_env(worktree).get('PATH', '')}",
+                            "PATH": f"{nested_bin}{os.pathsep}{run_path}",
                         }, watch,
                     )
                 except CardEnded as ended:
