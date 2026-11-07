@@ -1756,14 +1756,16 @@ missing, duplicated, changed, not created by the runbook, or in the wrong
 profile, a cron job that delivers to a platform with no home channel in its
 profile, a cron job whose last run failed or was not delivered, with the first
 line of its error and secrets masked, the root home's
-`scripts/retry-failed-webhooks`, `scripts/watch-gateway`,
+`scripts/retry-failed-webhooks`, `scripts/watch-gateway`, `scripts/progress-watch`,
 `scripts/restart-gateway`, `scripts/auto-deploy`, and `scripts/report-deploy`
 when one is missing or differs from the repository,
 that `watch-gateway` has run in the last 15 minutes
-without spending its restart budget, that `<root>/gateway-heartbeat-url` exists with mode `600`, and, on macOS, a
+without spending its restart budget, that `<root>/gateway-heartbeat-url` exists with mode `600`,
+that `progress-watch` has run in the last 15 minutes, that `<root>/progress-heartbeat-url` exists with mode `600`,
+the stall reasons `progress-watch` last recorded, and, on macOS, a
 launchd service from part 7, 10, 12, or 15
 that is not installed, does not run at load, does not set its `EnvironmentVariables` or `StartInterval`, or is not running (the `watch-gateway`,
-`refresh-gh-app-login`, and `auto-deploy` jobs run on an interval or on demand, so they need only be loaded),
+`progress-watch`, `refresh-gh-app-login`, and `auto-deploy` jobs run on an interval or on demand, so they need only be loaded),
 what a dead `auto-deploy` run left engaged, a default-branch commit that
 `auto-deploy` has not deployed a day after it was committed, and
 `<home>/owned-refs.json` that is missing or older than 5 minutes. It never
@@ -1903,6 +1905,58 @@ Run `python3 <root>/scripts/watch-gateway --root <root>` once and read
 gateway is not healthy or has just become healthy. After a deploy that changes
 `watch-gateway` or `restart-gateway`, install the copies again and run
 `launchctl kickstart -k gui/$(id -u)/ai.patinaproject.factory.gateway-watch`.
+
+**The progress watch.** A healthy gateway can still finish no card runs: every
+card held on a usage limit, workers ending on the idle limit, a forgotten
+`hermes pause`, or a card that Hermes holds in `ready` as `blocker_auth` or
+`active_pr`. `watch-gateway` keeps pinging through all of them.
+`progress-watch` is a second launchd job outside Hermes, so it keeps running
+through `hermes pause`. Every 5 minutes it reads the Kanban boards, the shared
+dispatch hold list in `<root>/dispatch-holds.json`, the `ESTOP` sentinels, and
+the worker's Claude transcripts. It writes none of them. It reads no secret
+except its own heartbeat URL.
+
+A card waits when it has been `ready` or `running` for
+`claude_session.progress_stall_minutes` minutes (default 60). The factory is
+stalled when a card waits and that window holds no progress: no run that ended
+`completed`, no card that moved to `review` or `done`, and no transcript write
+by a `running` card. The watcher pings its heartbeat only when the factory is
+not stalled, or when every stall reason is a hold-list entry whose `until` is
+still ahead. A hold past its `until`, a held card, an idle-limit end, a pause,
+or a board it cannot read keeps the heartbeat quiet. Each tick writes its
+reasons, the load averages, and the core count to `<root>/progress-watch.json`
+and `<root>/logs/progress-watch.log`, and `check-install` prints the reasons.
+
+> **HUMAN CHECKPOINT.** Ask the operator to create a second dead-man's-switch
+> monitor, separate from the gateway's, that expects a ping every 5 minutes,
+> with a grace period of 15 minutes, and alerts them on a channel that does not
+> depend on this machine. Its "up" notice is the recovery message. Ask them to
+> store its ping URL with the `read -rs` line below, in their own terminal, into
+> `<root>/progress-heartbeat-url`, mode `600`. When the monitor also accepts a
+> failure signal with a body, they can put that URL on a second line, and a
+> stalled tick posts its reasons there. Never ask for either URL in chat, and
+> never print one. The monitor and its URLs go in the private record only.
+
+```sh
+( umask 077; read -rs url && printf '%s\n' "$url" > <root>/progress-heartbeat-url )
+```
+
+Install the script and the launchd job, from the factory checkout. Pass the
+worker profile home and Claude Code's config directory, because a launchd job
+inherits neither `HERMES_HOME` nor `CLAUDE_CONFIG_DIR`:
+
+```sh
+install -m 0644 skills/setup-factory/scripts/progress-watch <root>/scripts/progress-watch
+python3 skills/setup-factory/scripts/progress-watch --root <root> \
+  --worker-home <root>/profiles/claude-worker --claude-config-dir ~/.claude --print-plist \
+  > ~/Library/LaunchAgents/ai.patinaproject.factory.progress-watch.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.patinaproject.factory.progress-watch.plist
+```
+
+Run `python3 <root>/scripts/progress-watch --root <root> --worker-home
+<root>/profiles/claude-worker` once and read `<root>/progress-watch.json`. The
+monitor shows the ping unless the state lists a reason. `auto-deploy`
+reinstalls `<root>/scripts/progress-watch` after a deploy that changes it.
 
 **Auto deploy.** A merge that moves the factory repository's default branch
 deploys itself. GitHub sends a `push` delivery, which needs the App's Push

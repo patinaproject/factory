@@ -147,6 +147,7 @@ import stale_failure
 import xcode
 from factory_settings import SETTINGS_KEY, find_hermes
 from install_drift import PROFILE, Commit, GitError, compare_files
+from card_guards import RUN_ERROR_LIMIT, guard_run_starts, mask_token_shapes
 from install_plan import ADVISORY, Drift, Homes, Install, Manual
 
 PROFILE_PATHS = (f"{PROFILE}/SOUL.md", f"{PROFILE}/scripts")
@@ -165,10 +166,8 @@ LINEAR_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 NON_PLATFORM_TARGETS = ("local", "origin", "all")
 # Statuses of a job's last run that are not a failure; None means the job has not run yet.
 HEALTHY_RUNS = (None, "ok", "delivery_queued")
-RUN_ERROR_LIMIT = 200
 SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE)
-TOKEN_SHAPED = re.compile(r"[A-Za-z0-9_\-+=.]{24,}")
-ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "restart-gateway", "auto-deploy", "report-deploy", *install_plan.ROUTE_SCRIPTS)
+ROOT_WRAPPERS = ("retry-failed-webhooks", "watch-gateway", "progress-watch", "restart-gateway", "auto-deploy", "report-deploy", *install_plan.ROUTE_SCRIPTS)
 SCHEDULED_RUNNER = "skills/setup-factory/scripts/scheduled-command"
 SCHEDULED_PREFIX = "scheduled-"
 # Hermes' self-hosted provider requests these scopes when dashboard.oauth.self_hosted.scopes is unset.
@@ -346,11 +345,16 @@ LAUNCHD_JOBS = ("refresh-gh-app-login",)
 OWNED_REFS_MAX_AGE = 5 * 60 * next(job.every for job in CRON if job.name == "refresh-owned-refs")
 
 AUTO_DEPLOY_INTERVAL_SECONDS = 300  # equals auto-deploy's INTERVAL_SECONDS
+PROGRESS_WATCH_INTERVAL = 5 * 60
 # macOS only. `plist` is a glob; the runbook lets the operator name the cloudflared plist.
 SERVICES = (
     Service(7, "cloudflared tunnel", "daemon", "/Library/LaunchDaemons/*cloudflared*.plist"),
     Service(15, "Hermes gateway", "agent", "~/Library/LaunchAgents/ai.hermes.gateway.plist"),
     Service(12, "gateway watch", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gateway-watch.plist", scheduled=True),
+    Service(
+        12, "progress watch", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.progress-watch.plist",
+        scheduled=True, interval=PROGRESS_WATCH_INTERVAL,
+    ),
     Service(
         10, "gh login refresh", "agent", "~/Library/LaunchAgents/ai.patinaproject.factory.gh-login.plist",
         scheduled=True, env=("GH_CONFIG_DIR", "HERMES_HOME"), interval=gh_login.REFRESH_INTERVAL_SECONDS, gates_runs=True,
@@ -369,6 +373,8 @@ WATCH_STATE = "gateway-watch.json"
 HEARTBEAT_FILE = "gateway-heartbeat-url"
 WATCH_INTERVAL = 5 * 60
 RESTARTS_PER_HOUR = 3
+PROGRESS_STATE = "progress-watch.json"
+PROGRESS_HEARTBEAT_FILE = "progress-heartbeat-url"
 
 
 def git(repo: Path, *args: str) -> str:
@@ -769,9 +775,7 @@ def redact(text: str, secrets: list) -> str:
     for value in secrets:
         text = text.replace(value, "[redacted]")
     # A credential the process never held, such as a minted token, is masked by its shape.
-    return TOKEN_SHAPED.sub(
-        lambda m: "[redacted]" if re.search(r"\d", m[0]) and re.search(r"[A-Za-z]", m[0]) else m[0], text
-    )
+    return mask_token_shapes(text)
 
 
 def error_summary(error: str) -> str:
@@ -1108,6 +1112,45 @@ def check_gateway_watch(root: Path, now: float | None = None) -> list:
     else:
         if mode & 0o077:
             drifts.append(Drift("gateway watch", str(beat_path), f"has mode {mode:03o}; it holds a URL, so use 600 (part 12)", HEARTBEAT_FIX))
+    return drifts
+
+
+def check_progress_watch(root: Path, now: float | None = None) -> list:
+    now = time.time() if now is None else now
+    state_path, beat_path = root / PROGRESS_STATE, root / PROGRESS_HEARTBEAT_FILE
+    drifts = []
+    try:
+        state = json.loads(state_path.read_text())
+        checked = float(state["checked_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        drifts.append(Drift(
+            "progress watch", str(state_path), "is missing or unreadable, so progress-watch has not run (part 12)", ADVISORY
+        ))
+    else:
+        if now - checked > 3 * PROGRESS_WATCH_INTERVAL:
+            drifts.append(Drift(
+                "progress watch", str(state_path),
+                f"was last written {int((now - checked) // 60)} minutes ago, but progress-watch runs every "
+                f"{PROGRESS_WATCH_INTERVAL // 60} (part 12)",
+                ADVISORY,
+            ))
+        reasons = state.get("reasons") if isinstance(state, dict) else None
+        drifts.extend(
+            Drift("progress stall", reason["kind"], reason["text"], ADVISORY)
+            for reason in (reasons if isinstance(reasons, list) else [])
+            if isinstance(reason, dict) and isinstance(reason.get("kind"), str) and isinstance(reason.get("text"), str)
+        )
+    try:
+        mode = beat_path.stat().st_mode & 0o777
+    except OSError:
+        drifts.append(Drift(
+            "progress watch", str(beat_path),
+            "is missing, so nothing alerts a person when the factory stops finishing card runs (part 12)",
+            HEARTBEAT_FIX,
+        ))
+    else:
+        if mode & 0o077:
+            drifts.append(Drift("progress watch", str(beat_path), f"has mode {mode:03o}; it holds a URL, so use 600 (part 12)", HEARTBEAT_FIX))
     return drifts
 
 
@@ -1561,10 +1604,6 @@ GUARDED_FIX = Manual(
 )
 
 
-def board_databases(root: Path) -> list:
-    return sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")])
-
-
 def check_guarded_cards(root: Path, now: float) -> list:
     """A card that Hermes' dispatcher holds in `ready`, so no worker ever starts it.
 
@@ -1578,7 +1617,7 @@ def check_guarded_cards(root: Path, now: float) -> list:
         "JOIN tasks t ON t.id = e.task_id WHERE t.status = 'ready' ORDER BY e.task_id, e.created_at, e.id"
     )
     drifts = []
-    for path in board_databases(root):
+    for path in kanban_board.board_databases(root):
         if not path.is_file():
             continue
         try:
@@ -1619,24 +1658,6 @@ def stale_failures(path: Path, events: list, now: float) -> dict:
     )
     reviewed = {row["id"] for row in outcomes if row["outcome"] in stale_failure.REVIEWED}
     return {task_id: since for task_id, since in old.items() if task_id in reviewed}
-
-
-def guard_run_starts(events: list, reason: str) -> dict:
-    runs = {}
-    for event in events:
-        if event["kind"] == "respawn_guarded" and guard_reason(event["payload"]) == reason:
-            runs.setdefault(event["id"], event["created_at"])
-        else:
-            runs.pop(event["id"], None)
-    return runs
-
-
-def guard_reason(payload) -> str | None:
-    try:
-        data = json.loads(payload or "{}")
-    except ValueError:
-        return None
-    return data.get("reason") if isinstance(data, dict) else None
 
 
 PARK_WAITING_FIX = Manual(
@@ -1702,7 +1723,7 @@ def check_kanban_boards(root: Path) -> list:
     and stops the sweep that releases a waiting card, with nothing else to say so. Without `completion_contract`,
     no merged card whose old check runs failed can reach `done`."""
     drifts = []
-    for path in board_databases(root):
+    for path in kanban_board.board_databases(root):
         if not path.is_file():
             continue
         try:
@@ -2566,6 +2587,7 @@ def main() -> int:
             *check_dashboard(root, hermes),
             *check_rejected_deliveries(root),
             *check_gateway_watch(root),
+            *check_progress_watch(root),
             *check_owned_refs(homes_),
             *check_triage_board(homes_, settings),
             *check_kanban_boards(root),

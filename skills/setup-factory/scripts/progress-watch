@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""Stop pinging a monitor when the factory stops finishing card runs, whatever the gateway reports.
+"""
+from __future__ import annotations
+
+import argparse
+import http.client
+import importlib.util
+import json
+import os
+import plistlib
+import re
+import sqlite3
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+
+LABEL = "ai.patinaproject.factory.progress-watch"
+INTERVAL_SECONDS = 300
+STATE_FILE = "progress-watch.json"
+HEARTBEAT_FILE = "progress-heartbeat-url"
+PROBE_SECONDS = 10
+IDLE_TEXT = "claude made no progress for"
+READY_EVENTS = ("created", "promoted", "reclaimed", "unblocked", "assigned")
+RUNNING_EVENTS = ("claimed",)
+FINISH_EVENTS = ("completed", "review_requested")
+# Claude Code truncates a longer encoded folder name and appends a hash.
+ENCODED_PREFIX = 200
+KANBAN_SECTION = re.compile(r"^kanban:[ \t]*(?:#.*)?\n((?:[ \t]+.*\n?|[ \t]*\n)*)", re.MULTILINE)
+DISPATCH_PROFILES_LINE = re.compile(r"^[ \t]+dispatch_profiles:[ \t]*(.*?)[ \t]*(?:#.*)?$\n?([ \t]*-)?", re.MULTILINE)
+EMPTY_PROFILES = ("", "[]", "null", "~", '""', "''")
+
+HOLD_ENTRY, HOLD_EXPIRED, HOLD_UNREADABLE = "hold_entry", "hold_expired", "hold_unreadable"
+BLOCKER_AUTH, ACTIVE_PR, IDLE_LIMIT, PAUSED = "blocker_auth", "active_pr", "idle_limit", "paused"
+DISPATCH_PROFILES, BOARD_UNREADABLE, SETTINGS, UNEXPLAINED = "dispatch_profiles", "board_unreadable", "settings", "unexplained"
+
+Sender = Callable[[str, Optional[bytes]], Optional[str]]
+
+
+class Reason(NamedTuple):
+    kind: str
+    text: str
+    covered: bool = False
+
+
+class Context(NamedTuple):
+    load1: Optional[float]
+    load5: Optional[float]
+    cores: Optional[int]
+
+
+class Card(NamedTuple):
+    ref: str
+    status: str
+    since: float
+    last_failure_error: str
+    guard: Optional[str]
+    transcript: Optional[float]
+
+
+class Hold(NamedTuple):
+    holder: str
+    reason: str
+    until: float
+
+
+class Inputs(NamedTuple):
+    window_minutes: int
+    cards: List[Card]
+    finished: List[float]
+    idle_runs: List[Tuple[str, str]]
+    holds: List[Hold]
+    hold_error: Optional[str]
+    pauses: List[str]
+    dispatch_profiles_set: bool
+    board_errors: List[str]
+    settings_error: Optional[str]
+    context: Context
+
+
+class Verdict(NamedTuple):
+    stalled: bool
+    reasons: List[Reason]
+    context: Context
+
+    @property
+    def ping(self) -> bool:
+        return not self.stalled or all(reason.covered for reason in self.reasons)
+
+
+def clean(text: str, card_guards) -> str:
+    redacted = card_guards.mask_token_shapes(" ".join(text.split()))
+    if len(redacted) > card_guards.RUN_ERROR_LIMIT:
+        return redacted[:card_guards.RUN_ERROR_LIMIT - 3] + "..."
+    return redacted
+
+
+def stamp(moment: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(moment))
+
+
+def tick(inputs: Inputs, now: float) -> Verdict:
+    start = now - inputs.window_minutes * 60
+    waiting = [card for card in inputs.cards if min(card.since, now) <= start]
+    progress = any(min(moment, now) >= start for moment in inputs.finished) or any(
+        card.status == "running" and card.transcript is not None and min(card.transcript, now) >= start
+        for card in inputs.cards
+    )
+    problems = [Reason(BOARD_UNREADABLE, text) for text in inputs.board_errors]
+    if inputs.settings_error:
+        problems.append(Reason(SETTINGS, inputs.settings_error))
+    if not problems and not (waiting and not progress):
+        return Verdict(False, [], inputs.context)
+
+    reasons = list(problems)
+    if inputs.hold_error:
+        reasons.append(Reason(HOLD_UNREADABLE, inputs.hold_error))
+    for hold in sorted(inputs.holds):
+        text = f"{hold.holder} holds dispatch until {stamp(hold.until)}: {hold.reason}"
+        if hold.until > now:
+            reasons.append(Reason(HOLD_ENTRY, text, covered=True))
+        else:
+            reasons.append(Reason(HOLD_EXPIRED, f"{hold.holder} hold expired at {stamp(hold.until)} and is still listed: {hold.reason}"))
+    for card in inputs.cards:
+        if card.guard == BLOCKER_AUTH:
+            reasons.append(Reason(BLOCKER_AUTH, f"{card.ref} is held as blocker_auth: {card.last_failure_error or 'no error recorded'}"))
+        elif card.guard == ACTIVE_PR:
+            reasons.append(Reason(ACTIVE_PR, f"{card.ref} is held as active_pr"))
+    reasons.extend(Reason(IDLE_LIMIT, f"{ref} ended a run on the idle limit: {error}") for ref, error in inputs.idle_runs)
+    reasons.extend(Reason(PAUSED, text) for text in inputs.pauses)
+    if inputs.dispatch_profiles_set and not inputs.holds and not inputs.hold_error:
+        reasons.append(Reason(DISPATCH_PROFILES, "kanban.dispatch_profiles is set in config.yaml and no hold-list entry explains it"))
+    if not reasons:
+        reasons.append(Reason(UNEXPLAINED, "cards are waiting, no run finished in the window, and nothing known holds them"))
+    return Verdict(True, reasons, inputs.context)
+
+
+def load_module(scripts: Path, name: str):
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    spec = importlib.util.spec_from_file_location(name, scripts / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class Modules(NamedTuple):
+    kanban_board: object
+    factory_settings: object
+    card_guards: object
+    host_hold: object
+
+
+def load_modules(worker_home: Path) -> Modules:
+    scripts = worker_home / "scripts"
+    return Modules(*(load_module(scripts, name) for name in Modules._fields))
+
+
+def encode_path(path: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def transcript_cwd(transcript: Path) -> Optional[str]:
+    try:
+        with open(transcript, encoding="utf-8") as lines:
+            for line in lines:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and entry.get("cwd"):
+                    return entry["cwd"]
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def newest_write(folder: Path) -> Optional[float]:
+    times = []
+    for path in [*folder.glob("*.jsonl"), *folder.glob("*/subagents/*.jsonl")]:
+        try:
+            times.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return max(times) if times else None
+
+
+def transcript_time(config_dir: Path, workspace: str) -> Optional[float]:
+    projects = config_dir / "projects"
+    encoded = encode_path(workspace)
+    exact = projects / encoded
+    if exact.is_dir():
+        return newest_write(exact)
+    times = []
+    for transcript in projects.glob(f"{encoded[:ENCODED_PREFIX]}*/*.jsonl"):
+        if transcript_cwd(transcript) != workspace:
+            continue
+        for path in (transcript, *transcript.with_suffix("").glob("subagents/*.jsonl")):
+            try:
+                times.append(path.stat().st_mtime)
+            except OSError:
+                continue
+    return max(times) if times else None
+
+
+def board_label(root: Path, path: Path) -> str:
+    return "default" if path.parent == root else path.parent.name
+
+
+class BoardReading(NamedTuple):
+    cards: List[Card]
+    finished: List[float]
+    idle_runs: List[Tuple[str, str]]
+    errors: List[str]
+
+
+def read_boards(root: Path, modules: Modules, start: float, config_dir: Path) -> BoardReading:
+    board, guards = modules.kanban_board, modules.card_guards
+    ready_events = ", ".join(f"'{kind}'" for kind in READY_EVENTS)
+    running_events = ", ".join(f"'{kind}'" for kind in RUNNING_EVENTS)
+    finish_events = ", ".join(f"'{kind}'" for kind in FINISH_EVENTS)
+    cards_sql = (
+        "SELECT t.id AS id, t.status AS status, t.workspace_path AS workspace_path, "
+        "COALESCE(t.last_failure_error, '') AS last_failure_error, CASE t.status "
+        f"WHEN 'ready' THEN COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id AND e.kind IN ({ready_events})), t.created_at) "
+        f"ELSE COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id AND e.kind IN ({running_events})), t.started_at, t.created_at) "
+        "END AS since FROM tasks t WHERE t.status IN ('ready', 'running') AND TRIM(COALESCE(t.assignee, '')) != '' ORDER BY t.id"
+    )
+    guard_sql = (
+        "SELECT e.task_id AS id, e.kind AS kind, e.payload AS payload, e.created_at AS created_at FROM task_events e "
+        "JOIN tasks t ON t.id = e.task_id WHERE t.status = 'ready' ORDER BY e.task_id, e.created_at, e.id"
+    )
+    finished_sql = (
+        "SELECT ended_at AS moment FROM task_runs WHERE outcome = 'completed' AND ended_at >= ? "
+        f"UNION ALL SELECT created_at FROM task_events WHERE kind IN ({finish_events}) AND created_at >= ?"
+    )
+    # Hermes stores a kanban_block reason, which is how claude-session's idle-limit failure arrives, as the run's summary.
+    idle_sql = (
+        "SELECT task_id, COALESCE(NULLIF(error, ''), summary) AS error FROM task_runs WHERE ended_at >= ? "
+        "AND (error LIKE ? OR summary LIKE ?) ORDER BY ended_at"
+    )
+    reading = BoardReading([], [], [], [])
+    for path in board.board_databases(root):
+        if not path.is_file():
+            continue
+        label = board_label(root, path)
+        try:
+            rows = board.read(str(path), cards_sql)
+            events = board.read(str(path), guard_sql)
+            finished = board.read(str(path), finished_sql, (start, start))
+            idle = board.read(str(path), idle_sql, (start, f"%{IDLE_TEXT}%", f"%{IDLE_TEXT}%"))
+        except (sqlite3.Error, OSError) as error:
+            reading.errors.append(clean(f"{label} board {path} cannot be read: {error}", guards))
+            continue
+        guarded = {
+            kind: guards.guard_run_starts(events, kind) for kind in (BLOCKER_AUTH, ACTIVE_PR)
+        }
+        for row in rows:
+            guard = next((kind for kind in (BLOCKER_AUTH, ACTIVE_PR) if row["id"] in guarded[kind]), None)
+            workspace = row["workspace_path"]
+            seen = transcript_time(config_dir, workspace) if row["status"] == "running" and workspace else None
+            reading.cards.append(Card(
+                f"{label}/{row['id']}", row["status"], row["since"], clean(row["last_failure_error"], guards), guard, seen,
+            ))
+        reading.finished.extend(row["moment"] for row in finished)
+        reading.idle_runs.extend((f"{label}/{row['task_id']}", clean(row["error"], guards)) for row in idle)
+    return reading
+
+
+def read_holds(root: Path, host_hold, card_guards) -> Tuple[List[Hold], Optional[str]]:
+    try:
+        data = host_hold.read_holds(root)
+    except host_hold.HoldError as error:
+        return [], str(error)
+    return [
+        Hold(holder, clean(str(entry.get("reason")), card_guards), host_hold.parse(entry["until"]).timestamp())
+        for holder, entry in data["holds"].items()
+    ], None
+
+
+def read_pauses(root: Path, worker_home: Path) -> List[str]:
+    """The reason of each engaged pause. Hermes honours the sentinel in the process home and the root."""
+    pauses = []
+    for home in (root, worker_home):
+        sentinel = home / "ESTOP"
+        if not os.path.lexists(sentinel):
+            continue
+        try:
+            body = json.loads(sentinel.read_text())
+            reason = body.get("reason") if isinstance(body, dict) else None
+        except (OSError, ValueError):
+            reason = None
+        pauses.append(f"hermes pause is engaged by {sentinel}: {reason or 'no reason recorded'}")
+    return pauses
+
+
+def dispatch_profiles_set(root: Path) -> bool:
+    try:
+        section = KANBAN_SECTION.search((root / "config.yaml").read_text())
+    except (OSError, ValueError):
+        return False
+    line = DISPATCH_PROFILES_LINE.search(section.group(1)) if section else None
+    return bool(line) and line.group(1) in EMPTY_PROFILES and not line.group(2)
+
+
+def read_threshold(settings_reader: Callable[[], dict], settings_module) -> Tuple[int, Optional[str]]:
+    try:
+        settings = settings_reader()
+        transport = settings.get("claude_session") if isinstance(settings, dict) else None
+        return settings_module.progress_stall_minutes(transport if isinstance(transport, dict) else {}), None
+    except (settings_module.SettingsError, ValueError, OSError) as error:
+        return settings_module.DEFAULT_PROGRESS_STALL_MINUTES, f"progress_stall_minutes cannot be read: {error}"
+
+
+def read_load() -> Context:
+    try:
+        one, five, _ = os.getloadavg()
+    except OSError:
+        one = five = None
+    return Context(one, five, os.cpu_count())
+
+
+def read_beats(path: Path) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return None, None
+    urls = [line.strip() for line in lines[:2]]
+    urls += [""] * (2 - len(urls))
+    first, second = (url if url.startswith("https://") else None for url in urls)
+    return first, second if first else None
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def http_send(url: str, body: Optional[bytes]) -> Optional[str]:
+    headers = {"Content-Type": "text/plain; charset=utf-8"} if body is not None else {}
+    request = urllib.request.Request(url, data=body, headers=headers)
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=PROBE_SECONDS):
+            return None
+    except urllib.error.HTTPError as error:
+        error.close()
+        return f"HTTP {error.code}"
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        return type(error).__name__
+
+
+def write_state(path: Path, state: dict) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump(state, handle)
+    os.replace(temporary, path)
+
+
+def gather(root: Path, worker_home: Path, config_dir: Path, modules: Modules, settings_reader: Callable[[], dict],
+           now: float, load: Callable[[], Context]) -> Inputs:
+    minutes, settings_error = read_threshold(settings_reader, modules.factory_settings)
+    boards = read_boards(root, modules, now - minutes * 60, config_dir)
+    holds, hold_error = read_holds(root, modules.host_hold, modules.card_guards)
+    guards = modules.card_guards
+    return Inputs(
+        minutes, boards.cards, boards.finished, boards.idle_runs, holds, clean(hold_error, guards) if hold_error else None,
+        [clean(text, guards) for text in read_pauses(root, worker_home)], dispatch_profiles_set(root), boards.errors,
+        clean(settings_error, guards) if settings_error else None, load(),
+    )
+
+
+def watch(
+    root: Path,
+    worker_home: Path,
+    config_dir: Path,
+    settings_reader: Optional[Callable[[], dict]] = None,
+    now: Callable[[], float] = time.time,
+    load: Callable[[], Context] = read_load,
+    send: Sender = http_send,
+    out=sys.stdout,
+) -> Verdict:
+    modules = load_modules(worker_home)
+    settings_reader = settings_reader or (lambda: modules.factory_settings.read(False, str(root)))
+    moment = now()
+    inputs = gather(root, worker_home, config_dir, modules, settings_reader, moment, load)
+    verdict = tick(inputs, moment)
+    guards = modules.card_guards
+    ping_url, failure_url = read_beats(root / HEARTBEAT_FILE)
+    lines = []
+    pinged = False
+    if verdict.ping and ping_url is None:
+        lines.append(f"{root / HEARTBEAT_FILE} holds no URL, so nothing alerts a person when the factory stops")
+    elif verdict.ping:
+        failure = send(ping_url, None)
+        pinged = failure is None
+        lines.append("pinged" if pinged else f"the heartbeat ping failed: {failure}")
+    elif failure_url is None:
+        lines.append("stalled, so the heartbeat stays quiet")
+    else:
+        body = "\n".join(clean(reason.text, guards) for reason in verdict.reasons)
+        failure = send(failure_url, body.encode())
+        lines.append("stalled, so the heartbeat stays quiet; the reasons went to the failure URL" if failure is None
+                     else f"stalled, so the heartbeat stays quiet; sending the reasons failed: {failure}")
+    lines.extend(f"{reason.kind}: {reason.text}" for reason in verdict.reasons)
+
+    write_state(root / STATE_FILE, {
+        "checked_at": moment,
+        "stalled": verdict.stalled,
+        "pinged": pinged,
+        "reasons": [{"kind": reason.kind, "text": reason.text} for reason in verdict.reasons],
+        "context": verdict.context._asdict(),
+    })
+    for line in lines:
+        print(f"{stamp(moment)} progress-watch: {line}", file=out, flush=True)
+    return verdict
+
+
+def plist(root: Path, worker_home: Path, config_dir: Path) -> bytes:
+    log = str(root / "logs" / "progress-watch.log")
+    return plistlib.dumps({
+        "Label": LABEL,
+        "ProgramArguments": [
+            "/usr/bin/python3", str(root / "scripts" / "progress-watch"), "--root", str(root),
+            "--worker-home", str(worker_home), "--claude-config-dir", str(config_dir),
+        ],
+        "StartInterval": INTERVAL_SECONDS,
+        "RunAtLoad": True,
+        "EnvironmentVariables": {"PATH": f"{Path.home() / '.local' / 'bin'}:/usr/local/bin:/usr/bin:/bin"},
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+    })
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--root", type=Path, default=Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes"))
+    parser.add_argument("--worker-home", type=Path, help="the claude-worker profile home (default <root>/profiles/claude-worker)")
+    parser.add_argument("--claude-config-dir", type=Path, default=Path.home() / ".claude", help="Claude Code's config directory (default ~/.claude)")
+    parser.add_argument("--print-plist", action="store_true", help="print the launchd job that runs this script")
+    args = parser.parse_args(argv)
+    worker_home = args.worker_home or args.root / "profiles" / "claude-worker"
+    if args.print_plist:
+        sys.stdout.buffer.write(plist(args.root, worker_home, args.claude_config_dir))
+        return 0
+    watch(args.root, worker_home, args.claude_config_dir)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

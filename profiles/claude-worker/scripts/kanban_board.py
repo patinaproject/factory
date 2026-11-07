@@ -13,6 +13,7 @@ import os
 import sqlite3
 import time
 from contextlib import closing
+from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
@@ -39,6 +40,10 @@ ORDER BY task_id, list, created_at, row
 """
 RUN_STATE_QUERY = "SELECT status, current_run_id FROM tasks WHERE id = ?"
 ATTEMPTS = 5
+
+
+def board_databases(root: Path) -> list:
+    return sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")])
 
 
 class FileState(NamedTuple):

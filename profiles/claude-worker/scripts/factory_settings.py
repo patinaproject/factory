@@ -20,6 +20,7 @@ DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 # guard-ci-wait refuses a foreground wait over 270 s, so a lower command limit would cap `wait-for-checks`.
 MIN_COMMAND_TIMEOUT_SECONDS = 270
 DEFAULT_IDLE_LIMIT_SECONDS = 2700
+DEFAULT_PROGRESS_STALL_MINUTES = 60
 MODEL_TIERS = ("sonnet", "haiku", "fable")
 MCP_SERVER_KEYS = frozenset({"url", "token_env", "scheme", "headers"})
 # Fixed headers and the URL reach argv in --mcp-config, where ps shows them, so a name or value that could carry a secret is refused.
@@ -79,6 +80,13 @@ def load_hold_threshold(transport: dict) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
         raise SettingsError(f"claude_session.load_hold_threshold {value!r} must be a positive number")
     return float(value)
+
+
+def progress_stall_minutes(transport: dict) -> int:
+    value = transport.get("progress_stall_minutes", DEFAULT_PROGRESS_STALL_MINUTES)
+    if not is_count(value):
+        raise SettingsError(f"claude_session.progress_stall_minutes {value!r} must be a positive integer")
+    return value
 
 
 def is_count(value) -> bool:
@@ -235,7 +243,7 @@ def artifact(settings) -> ArtifactSettings:
 
 GLOBAL_FIELDS = (
     fresh_after_tokens, max_turns, command_timeout_seconds, idle_limit_seconds, tier_models, mcp_servers, disabled_mcp_servers,
-    load_hold_threshold,
+    load_hold_threshold, progress_stall_minutes,
 )
 REPOSITORY_FIELDS = (worker_entry, toolchain_checks, auto_merge)
 
