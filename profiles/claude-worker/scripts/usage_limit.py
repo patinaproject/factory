@@ -73,20 +73,24 @@ def is_limit(result: dict) -> bool:
 
 
 def reset_time(text: str, now: datetime) -> datetime | None:
-    """The reset time a limit message gives, or None. Most proxy messages give none."""
-    at = RESETS_AT.search(text)
-    if at:
-        return datetime.fromisoformat(at.group(1).replace("Z", "+00:00"))
-    epoch = RESETS_EPOCH.search(text)
-    if epoch:
-        return datetime.fromtimestamp(int(epoch.group(1)), timezone.utc)
-    resets = RESETS_IN.search(text)
-    if resets:
-        minutes = sum(int(amount) * (60 if unit[0].lower() == "h" else 1) for amount, unit in UNITS.findall(resets.group(1)))
-        if minutes:
-            return now + timedelta(minutes=minutes)
-    after = RETRY_AFTER.search(text)
-    return now + timedelta(seconds=int(after.group(1))) if after else None
+    """The reset time a limit message gives, or None. Most proxy messages give none, and a time that cannot be a
+    date counts as none, so the backoff still holds new runs."""
+    try:
+        at = RESETS_AT.search(text)
+        if at:
+            return datetime.fromisoformat(at.group(1).replace("Z", "+00:00"))
+        epoch = RESETS_EPOCH.search(text)
+        if epoch:
+            return datetime.fromtimestamp(int(epoch.group(1)), timezone.utc)
+        resets = RESETS_IN.search(text)
+        if resets:
+            minutes = sum(int(amount) * (60 if unit[0].lower() == "h" else 1) for amount, unit in UNITS.findall(resets.group(1)))
+            if minutes:
+                return now + timedelta(minutes=minutes)
+        after = RETRY_AFTER.search(text)
+        return now + timedelta(seconds=int(after.group(1))) if after else None
+    except (ValueError, OverflowError):
+        return None
 
 
 def hit(episode: Episode, now: datetime, reset_at: datetime | None, backoff) -> datetime:
@@ -112,11 +116,12 @@ def clean_run(episode: Episode, live: bool, started_at: datetime) -> bool:
 
 def notice(episode: Episode, live_until: datetime | None) -> tuple[str, datetime] | None:
     """The episode's next operator notice, `("start", until)` or `("release", released_at)`, with its flag set, or
-    None. Each episode gets one of each."""
+    None. Each episode gets one of each. The release waits for the clean run that ends the episode, because a hit
+    after the entry ends holds new runs again with no second start notice."""
     if live_until is not None and not episode.started_notified:
         episode.started_notified = True
         return "start", live_until
-    if live_until is None and episode.started_notified and not episode.released_notified and episode.released_at:
+    if live_until is None and episode.hits == 0 and episode.started_notified and not episode.released_notified and episode.released_at:
         episode.released_notified = True
         return "release", episode.released_at
     return None

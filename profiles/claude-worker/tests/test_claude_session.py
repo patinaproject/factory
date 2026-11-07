@@ -3375,7 +3375,7 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual((status, report["transient"], report["precondition"]), (2, True, "usage_limit"))
         self.assertEqual(set(report), {"error", "transient", "precondition"})
-        self.assertIn("are cooling down via provider claude", report["error"])
+        self.assertIn("Claude Code hit the usage limit, so the factory holds new runs until", report["error"])
         self.assertAlmostEqual(self.usage_limit_until() - started, 15 * 60, delta=60)
         self.assertEqual(json.loads(self.holds_file().read_text())["applied"], True)
         self.assertEqual(self.hermes_calls(), [f"{self.hermes_home.parent.parent} config set kanban.dispatch_profiles []"])

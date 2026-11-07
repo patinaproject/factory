@@ -3,7 +3,7 @@
 
 A `--no-agent` cron job in the root profile runs this every 5 minutes with `--deliver <platform>`, like
 `report-deploy`. It reads the hold list in the root home through the worker profile's `usage_limit.py` and prints
-one line when an episode's `usage_limit` entry is first live and one line once it has ended, with the time in the
+one line when an episode's `usage_limit` entry is first live and one line once the episode has ended, with the time in the
 operator's zone from `dispatch_hold.time_zone` in the factory settings. Otherwise it prints nothing, so Hermes
 delivers nothing. The sent flag is written in the episode state under the hold list's lock before the line is
 printed, so a crash sends at most one message.

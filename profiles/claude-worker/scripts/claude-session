@@ -1707,7 +1707,7 @@ def hold_for_usage_limit(settings: dict, output: dict) -> Refusal:
     except host_hold.HoldError as error:
         return Refusal(f"Claude Code hit the usage limit, and {error}", transient=True, precondition=USAGE_LIMIT)
     return Refusal(
-        f"Claude Code hit the usage limit ({text[:300]}), so the factory holds new runs until {host_hold.stamp(until)}",
+        f"Claude Code hit the usage limit, so the factory holds new runs until {host_hold.stamp(until)}",
         transient=True, precondition=USAGE_LIMIT,
     )
 

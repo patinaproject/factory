@@ -132,8 +132,28 @@ class UsageLimitTest(unittest.TestCase):
         self.assertEqual(usage_limit.next_notice(self.holds), ("start", NOW + timedelta(minutes=15)))
         self.assertIsNone(usage_limit.next_notice(self.holds))
         self.release()
+        self.assertIsNone(usage_limit.next_notice(self.holds))
+        clean = {"outcome": "completed", "started_at": int(self.clock.timestamp()), "ended_at": int(self.clock.timestamp()) + 60}
+        self.episode_cursor(clean["ended_at"] - 120)
+        usage_limit.read_board(self.holds, lambda since: [clean], BACKOFF)
         self.assertEqual(usage_limit.next_notice(self.holds), ("release", NOW + timedelta(minutes=15)))
         self.assertIsNone(usage_limit.next_notice(self.holds))
+
+    def test_a_hit_after_the_entry_ends_holds_again_with_no_release_notice_between(self) -> None:
+        usage_limit.record_hit(self.holds, None, BACKOFF)
+        self.assertEqual(usage_limit.next_notice(self.holds)[0], "start")
+        self.release()
+        self.assertIsNone(usage_limit.next_notice(self.holds))
+
+        usage_limit.record_hit(self.holds, None, BACKOFF)
+
+        self.assertIsNone(usage_limit.next_notice(self.holds))
+        self.assertEqual(self.episode()["hits"], 2)
+
+    def test_a_reset_time_that_is_not_a_date_gives_none(self) -> None:
+        for text in ("limit resets at 2026-13-45T00:00Z", "resets in 99999999999999999 hours", "retry after 99999999999999999999 seconds"):
+            with self.subTest(text=text):
+                self.assertIsNone(usage_limit.reset_time(text, NOW))
 
     def test_a_usage_limit_result_needs_is_error_and_a_rate_limit_text(self) -> None:
         for result, expected in (

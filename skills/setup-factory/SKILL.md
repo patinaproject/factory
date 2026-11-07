@@ -2036,7 +2036,9 @@ because it also stops cron and every chat and webhook turn.
 `report-usage-limit` is a `--no-agent` cron job in the root profile beside
 `report-deploy`, also every 5 minutes. It reads the dispatch hold and prints
 one line when a usage-limit episode's entry is first live, with its end time in
-the operator's zone, and one line once it has ended. It prints nothing else,
+the operator's zone, and one line once the episode has ended. A hit after the
+entry ends and before a clean run holds new runs again without either line,
+so the release line waits for the clean run. It prints nothing else,
 so each episode sends the operator two messages, however many cards hit the
 limit.
 

@@ -62,13 +62,14 @@ class ReportUsageLimitTest(unittest.TestCase):
         return datetime.strptime(entry["until"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
     def end_entry(self) -> str:
-        """Expire the entry as dispatch-triage does, with the episode's release time moved into the past."""
+        """Expire the entry and end the episode with a clean run, as dispatch-triage does, with the episode's release
+        time moved into the past."""
         ended = (datetime.now(timezone.utc) - timedelta(minutes=1)).replace(second=0, microsecond=0)
         holds = self.root / "dispatch-holds.json"
         holds.write_text(json.dumps({"holds": {}, "applied": False}))
         path = self.root / "dispatch-holds.usage-limit.json"
         episode = json.loads(path.read_text())
-        path.write_text(json.dumps({**episode, "released_at": ended.strftime("%Y-%m-%dT%H:%M:%SZ")}))
+        path.write_text(json.dumps({**episode, "hits": 0, "released_at": ended.strftime("%Y-%m-%dT%H:%M:%SZ")}))
         return ended.astimezone(REGINA).strftime("%Y-%m-%d %H:%M CST")
 
     def test_one_episode_prints_one_start_line_and_one_release_line_however_many_cards_hit(self) -> None:
@@ -87,7 +88,7 @@ class ReportUsageLimitTest(unittest.TestCase):
         self.assertEqual(self.report(), [])
 
         self.hits(1)
-        self.assertEqual(self.report(), [])
+        self.assertEqual(len(self.report()), 1)
 
     def test_a_quiet_factory_prints_nothing(self) -> None:
         self.assertEqual(self.report(), [])
