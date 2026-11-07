@@ -7,7 +7,7 @@ Invoke the `patina-mode` skill and follow its instructions when a task meets any
 - it involves a design or architecture choice
 - it is a bug whose cause is not yet known, or a performance issue
 
-It routes to the right Code skill from there. For smaller tasks, such as a contained change to one file with an obvious test, a question, or a one-line edit, work directly and verify on the real artifact.
+It routes to the right Code skill from there. For smaller tasks, such as a contained change to one file with an obvious test, a question, or a one-line edit, work directly and verify on the real artifact. That exception does not apply to issue-linked work, which always enters patina-mode's issue gate with a chosen playbook.
 
 When the intent is already specific, enter that skill directly: `tdd`, `architect`, `how`, `why`, `arena`, `interrogate`.
 

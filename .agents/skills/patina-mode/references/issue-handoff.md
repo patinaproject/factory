@@ -37,6 +37,14 @@ Use `failed` for every preflight stop or failed supported mutation. Name the
 specific gate or operation in `gate`. Preserve `no-issue` as an explicit
 result.
 
+## Choose the playbook
+
+After the preflight passes, choose the playbook per patina-mode's
+**Playbooks** section before the first route request. Every repository change
+routes through one, including docs, tests, config, and dependency updates. The
+playbook is a stem from patina-mode's `playbooks/` directory, a stem from the
+checkout's `.agents/playbooks/`, or `figure-it-out`.
+
 ## Authorize the transition
 
 Before another playbook changes a branch, edits a file, creates a commit,
@@ -49,11 +57,13 @@ bun <patina-mode-directory>/scripts/issue-routes/session-pickup.ts
 ```
 
 The executable fixes the entry identity. The request names the next protected
-operation and the exact machine result from **working-on-issues**:
+operation, the chosen playbook, and the exact machine result from
+**working-on-issues**:
 
 ```json
 {
   "operation": "edit",
+  "playbook": "feature",
   "preflight": {
     "kind": "passed",
     "issue": {
@@ -71,8 +81,14 @@ Do not run `scripts/issue-handoff.ts` directly. It is the shared policy module,
 not a route entry. Continue only when the selected entry command exits `0` and
 returns `kind: "continue"`.
 Keep the returned `receiptPath` with the task evidence. Exit `2` records and
-refuses a missing, failed, `no-issue`, or stale-checkout handoff. Exit `1`
-means that the request or runtime boundary is invalid.
+refuses a missing, failed, `no-issue`, or stale-checkout handoff. After those,
+it refuses `missing-playbook` when the request names no playbook,
+`unknown-playbook` when the stem is not one listed above, and
+`playbook-not-allowed` when an `edit` or `commit` names a read-only playbook:
+`investigation`, `triage`, `runtime-forensics`, `trace-forensics`,
+`pause-safely`, or `worktree-cleanup`. Exit `1` means that the request or
+runtime boundary is invalid, such as a `playbook` that is not a non-empty
+string.
 
 The gate compares a passed result with the live physical worktree and branch.
 Let **working-on-issues** finish canonical branch handling before calling the
