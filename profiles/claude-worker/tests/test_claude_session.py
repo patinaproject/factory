@@ -2025,12 +2025,12 @@ class ClaudeSessionTest(GitFixture):
         self.run_session()
 
         path = self.claude_call()["env"]["PATH"].split(os.pathsep)
-        self.assertEqual(path[0], str(self.nvm_dir / "versions" / "node" / "v24.10.1" / "bin"))
+        self.assertEqual(path[:2], [str(self.nested_dir() / "bin"), str(self.nvm_dir / "versions" / "node" / "v24.10.1" / "bin")])
 
     def test_missing_nvmrc_leaves_path_unchanged(self) -> None:
         self.run_session(env={"PATH": "/usr/bin:/bin"})
 
-        self.assertEqual(self.claude_call()["env"]["PATH"], "/usr/bin:/bin")
+        self.assertEqual(self.claude_call()["env"]["PATH"], f"{self.nested_dir() / 'bin'}:/usr/bin:/bin")
 
     def test_uninstalled_nvmrc_version_refuses(self) -> None:
         (self.worktree / ".nvmrc").write_text("v20\n")
@@ -2101,6 +2101,91 @@ class ClaudeSessionTest(GitFixture):
         self.run_session()
 
         self.assertNotIn("apiKeyHelper", self.claude_call()["settings"]["content"])
+
+    def nested_dir(self) -> Path:
+        return self.worktree_git_dir() / "claude-session.nested"
+
+    def nested_run(self, env: dict | None = None) -> tuple[dict, dict, dict]:
+        """A run whose claude runs `claude -p hi` from its Bash tool: the run's call, the Bash call, and the nested call."""
+        self.configure_fake_claude(steps=[{"bash": "claude -p hi"}])
+        self.run_session(env=env)
+        bash = json.loads(Path(f"{self.log}.bash").read_text().splitlines()[-1])
+        self.assertEqual(bash["code"], 0, bash["stderr"])
+        return self.claude_call(), bash, json.loads(Path(f"{self.log}.nested").read_text())
+
+    def test_a_nested_claude_gets_the_proxy_token_from_the_runs_key_helper_and_never_in_an_environment(self) -> None:
+        self.settings = self.write_settings([self.repository], {
+            "base_url": "http://127.0.0.1:9999", "auth_token_env": "EXAMPLE_PROXY_TOKEN",
+        })
+
+        parent, bash, nested = self.nested_run()
+
+        helper = nested["settings"]["content"]["apiKeyHelper"]
+        self.assertEqual(helper, parent["settings"]["content"]["apiKeyHelper"])
+        printed = subprocess.run(helper, shell=True, env=nested["env"], capture_output=True, text=True)
+        self.assertEqual((printed.returncode, printed.stdout), (0, "token-value\n"))
+        self.assertEqual(nested["settings"]["content"]["env"], {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9999"})
+        self.assertEqual(nested["settings"]["mode"], "0o600")
+        self.assertNotIn("token-value", json.dumps([nested["env"], nested["settings"], nested["argv"], bash]))
+
+    def test_without_a_token_variable_a_nested_claude_gets_no_key_helper(self) -> None:
+        self.settings = self.write_settings([self.repository], {"base_url": "http://127.0.0.1:9999"})
+
+        _, _, nested = self.nested_run()
+
+        self.assertNotIn("apiKeyHelper", nested["settings"]["content"])
+
+    def test_the_run_starts_the_real_claude_and_its_bash_finds_the_nested_wrapper_first(self) -> None:
+        wrapper_bin = self.nested_dir() / "bin"
+
+        parent, bash, nested = self.nested_run(env={"CLAUDE_BIN": "fake-claude", "PATH": f"{self.tmp}{os.pathsep}{os.environ['PATH']}"})
+
+        self.assertEqual(parent["argv0"], str(self.claude))
+        self.assertEqual(parent["env"]["PATH"].split(os.pathsep)[0], str(wrapper_bin))
+        self.assertEqual(bash["claude"], str(wrapper_bin / "claude"))
+        self.assertEqual(nested["argv0"], str(self.claude))
+        self.assertEqual(nested["argv"], [
+            "-p", "hi", "--settings", str(self.nested_dir() / "settings.json"),
+            "--mcp-config", str(self.nested_dir() / "mcp.json"),
+        ])
+        self.assertEqual(nested["env"]["CLAUDE_SESSION_NESTED"], "1")
+        self.assertFalse(self.nested_dir().exists())
+
+    def test_a_nested_claude_keeps_the_runs_restrictions_and_none_of_its_hooks_that_act_as_the_run(self) -> None:
+        settings = json.loads(self.settings.read_text())
+        settings["claude_artifact"] = {
+            "auth_dir": "/proxy/oauth", "organization_uuid": "11111111-2222-3333-4444-555555555555", "claude": "/bin/claude",
+        }
+        self.settings.write_text(json.dumps(settings))
+        self.set_comments(body=SESSION_BODY)
+        state = self.hermes_home / "claude-artifact"
+        artifact = ["Read(//proxy/oauth/**)", "Edit(//proxy/oauth/**)", f"Read(/{state}/**)", f"Edit(/{state}/**)"]
+        push_signed = (SCRIPTS / "push-signed").resolve()
+        publish = ["Bash(git push:*)", f"Bash(python3 {push_signed}:*)", f"Bash({push_signed}:*)", "Bash(gh pr create:*)"]
+        for env, run_hooks, matchers, deny in (
+            (None, ["SessionStart", "PreToolUse", "PostToolUse", "Stop"], ["Bash", "Skill"], artifact),
+            (TRIAGE_ENV, ["SessionStart", "PreToolUse"], ["Bash"], publish + artifact),
+        ):
+            with self.subTest(triage=bool(env)):
+                parent, _, nested = self.nested_run(env=env)
+
+                run_settings, content = parent["settings"]["content"], nested["settings"]["content"]
+                self.assertEqual(sorted(run_settings["hooks"]), sorted(run_hooks))
+                self.assertEqual(sorted(content), ["hooks", "permissions"])
+                self.assertEqual(content["hooks"], {"PreToolUse": run_settings["hooks"]["PreToolUse"]})
+                self.assertEqual([group["matcher"] for group in content["hooks"]["PreToolUse"]], matchers)
+                self.assertEqual(content["permissions"], {"deny": deny})
+                self.assertNotIn("LINEAR_API_KEY", json.dumps(content))
+
+    def test_a_stopped_run_removes_its_nested_wrapper(self) -> None:
+        session = self.hold_a_run()
+        self.assertTrue((self.nested_dir() / "bin" / "claude").exists())
+
+        session.send_signal(signal.SIGTERM)
+
+        session.communicate(timeout=30)
+        self.assertEqual(session.returncode, -signal.SIGTERM)
+        self.assertFalse(self.nested_dir().exists())
 
     def model_env(self, claude_session: dict) -> dict:
         self.settings = self.write_settings([self.repository], {"model": "transport-model", **claude_session})
@@ -2868,13 +2953,13 @@ class ClaudeSessionTest(GitFixture):
 
         self.assertEqual((code, report["servers"]), (0, [{"name": "linear", "status": "connected"}]))
 
-    def test_a_claude_that_cannot_start_is_not_reported_as_crashed(self) -> None:
+    def test_a_missing_claude_is_refused_before_the_run_starts(self) -> None:
         missing = self.tmp / "no-claude"
 
         status, report = self.run_session(env={"CLAUDE_BIN": str(missing)})
 
-        self.assertEqual(status, 1)
-        self.assertEqual(report, {"error": f"FileNotFoundError: [Errno 2] No such file or directory: '{missing}'"})
+        self.assertEqual((status, report), (2, {"error": "CLAUDE_BIN names no executable claude on the run's PATH"}))
+        self.assertFalse(self.log.exists())
 
     def test_a_failure_after_claude_ran_reports_its_session_as_crashed(self) -> None:
         module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"

@@ -63,6 +63,9 @@ FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys
 # The real claude gets no test variables, so the fake reads its options from the file beside it.
 options = json.load(open(__file__ + ".json"))
+if os.environ.get("CLAUDE_SESSION_NESTED"):
+    # A nested call through the run's wrapper records itself apart and does nothing else.
+    options = {"log": options["log"] + ".nested"}
 argv = sys.argv[1:]
 settings = None
 if "--settings" in argv:
@@ -78,7 +81,7 @@ if "--settings" in argv:
 with open(options["log"] + ".tmp", "w") as log:
     linear_log = options.get("linear_log")
     seen = open(linear_log).read() if linear_log and os.path.exists(linear_log) else ""
-    json.dump({"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings, "pid": os.getpid(), "linear_log": seen}, log)
+    json.dump({"argv0": sys.argv[0], "argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "settings": settings, "pid": os.getpid(), "linear_log": seen}, log)
 os.rename(options["log"] + ".tmp", options["log"])
 for step in options.get("steps", []):
     import subprocess, time
@@ -106,6 +109,17 @@ for step in options.get("steps", []):
             time.sleep(0.1)
         with open(options["log"] + ".hooks", "a") as hook_log:
             hook_log.write(json.dumps({"hook": step["hook"], "stdout": printed, "codes": [o.returncode for o in outputs]}) + "\\n")
+    elif "bash" in step:
+        # Like Claude Code's Bash tool, run the command with the settings' env exported over the process's own.
+        import shutil
+        shell_env = {**os.environ, **settings["content"].get("env", {})}
+        found = shutil.which("claude", path=shell_env.get("PATH"))
+        done = subprocess.run(step["bash"], shell=True, capture_output=True, text=True, env=shell_env)
+        with open(options["log"] + ".bash", "a") as bash_log:
+            bash_log.write(json.dumps({
+                "claude": found, "script": open(found).read() if found else None,
+                "code": done.returncode, "stdout": done.stdout, "stderr": done.stderr,
+            }) + "\\n")
 if options.get("work"):
     import subprocess
     open("claude-made.txt", "w").write("work\\n")
