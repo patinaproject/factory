@@ -22,8 +22,20 @@ state = json.load(open(path))
 argv = sys.argv[1:]
 with open(path + ".log", "a") as log:
     log.write(json.dumps(argv) + "\\n")
-if argv[:2] == ["config", "get"]:
+if argv[:3] == ["config", "get", "kanban.dispatch_profiles"]:
+    if "dispatch_profiles" in state:
+        print(json.dumps(state["dispatch_profiles"]))
+    else:
+        sys.stderr.write("Config key not set: kanban.dispatch_profiles\\n")
+        sys.exit(1)
+elif argv[:2] == ["config", "get"]:
     print(json.dumps(state["settings"]))
+elif argv[:2] == ["config", "set"]:
+    state["dispatch_profiles"] = []
+    json.dump(state, open(path, "w"))
+elif argv[:2] == ["config", "unset"]:
+    state.pop("dispatch_profiles", None)
+    json.dump(state, open(path, "w"))
 elif argv == ["kanban", "boards", "list", "--json"]:
     print(json.dumps([{"slug": "default", "db_path": state.get("default_db", "/nowhere")},
                       {"slug": "triage", "db_path": state["db_path"]}]))
@@ -81,7 +93,7 @@ class Harness(unittest.TestCase):
         self.hermes.write_text(with_interpreter(FAKE_HERMES))
         os.chmod(self.hermes, 0o755)
         self.state_path = self.tmp / "state.json"
-        self.home = self.tmp / "home"
+        self.home = self.tmp / "r" / "p" / "h"
         (self.home / "plugins").mkdir(parents=True)
         (self.home / "plugins" / "blocker-order").symlink_to(REPO / "plugins" / "blocker-order")
         self.board = self.tmp / "triage.db"
@@ -94,7 +106,7 @@ class Harness(unittest.TestCase):
         state = {"default_tasks": [], "tasks": tasks, "settings": settings, "db_path": str(self.board), **state}
         self.state_path.write_text(json.dumps(state))
         env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path),
-               "HERMES_HOME": str(self.home), **(_env or {})}
+               "HERMES_HOME": str(self.home), "HOST_HOLD_LOADAVG": "0,0,0", "HOST_HOLD_CPUS": "8", **(_env or {})}
         return subprocess.run([sys.executable, str(SCRIPTS / "dispatch-triage")], env=env, capture_output=True, text=True)
 
     def assignees(self) -> dict:
@@ -226,7 +238,7 @@ class ParkedHarness(Harness):
 
 class LoginReleaseTest(ParkedHarness):
     def login(self, seconds_left: float | None) -> None:
-        gh = self.tmp / "home" / "gh"
+        gh = self.home / "gh"
         gh.mkdir(exist_ok=True)
         (gh / "token-expiry.json").unlink(missing_ok=True)
         if seconds_left is not None:
@@ -259,7 +271,7 @@ class LoginReleaseTest(ParkedHarness):
             ("stale", lambda: self.login(14 * 60 + 50)),
             ("expired", lambda: self.login(-60)),
             ("missing", lambda: self.login(None)),
-            ("unreadable", lambda: (self.login(None), (self.tmp / "home" / "gh" / "token-expiry.json").write_text("{"))),
+            ("unreadable", lambda: (self.login(None), (self.home / "gh" / "token-expiry.json").write_text("{"))),
         ):
             with self.subTest(name):
                 setup()
@@ -540,7 +552,7 @@ class PullRequestSweepDispatchTest(ParkedHarness):
             "db_path": str(self.board), "default_db": str(self.default_board),
         }))
         env = {**os.environ, "HERMES_BIN": str(self.hermes), "FAKE_HERMES_STATE": str(self.state_path),
-               "HERMES_HOME": str(self.home)}
+               "HERMES_HOME": str(self.home), "HOST_HOLD_LOADAVG": "0,0,0", "HOST_HOLD_CPUS": "8"}
         return subprocess.run([sys.executable, "-c", self.DRIVER.format(swept=swept)], cwd=SCRIPTS, env=env,
                               capture_output=True, text=True)
 
@@ -555,3 +567,137 @@ class PullRequestSweepDispatchTest(ParkedHarness):
         proc = self.dispatch({"released": ["t_waiting"], "failed": {}})
 
         self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "released t_waiting\n", ""))
+
+
+HOST_LOAD_PARKED = "Waiting for the host load to fall: load average 20 (1 min) against a threshold of 12"
+OLD = "2020-01-01T00:00:00Z"
+
+
+class HostLoadTest(ParkedHarness):
+    def holds_file(self) -> dict:
+        return json.loads((self.home.parent.parent / "dispatch-holds.json").read_text())
+
+    def write_holds(self, holds: dict, applied: bool) -> None:
+        (self.home.parent.parent / "dispatch-holds.json").write_text(json.dumps({"holds": holds, "applied": applied}))
+
+    def config_calls(self) -> list:
+        log = Path(f"{self.state_path}.log")
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return [call[1:] for call in calls if call[:1] == ["config"] and call[1] in ("set", "unset")]
+
+    def entry(self, until: str = "2999-01-01T00:00:00Z") -> dict:
+        return {"reason": "load average 20", "until": until}
+
+    def test_a_load_over_the_threshold_assigns_no_triage_card_and_holds_dispatch(self) -> None:
+        proc = self.run_script([task("t_waiting", "ready")], _env={"HOST_HOLD_LOADAVG": "13,2,2"})
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+        self.assertIsNone(self.assignees()["t_waiting"])
+        self.assertEqual(self.holds_file()["applied"], True)
+        reason = self.holds_file()["holds"]["host_load"]["reason"]
+        self.assertEqual(reason, "load average 13 (1 min) and 2 (5 min) against a threshold of 12")
+        self.assertEqual(self.config_calls(), [["set", "kanban.dispatch_profiles", "[]"]])
+
+    def test_a_key_a_person_set_is_neither_overwritten_nor_unset_by_a_load_hold(self) -> None:
+        proc = self.run_script([task("t_waiting", "ready")], _env={"HOST_HOLD_LOADAVG": "13,2,2"}, dispatch_profiles=["claude-worker"])
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+        self.assertIsNone(self.assignees()["t_waiting"])
+        self.assertIn("host_load", self.holds_file()["holds"])
+        self.assertFalse(self.holds_file()["applied"])
+
+        proc = self.run_script([task("t_waiting", "ready")], dispatch_profiles=["claude-worker"])
+
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertEqual(self.holds_file(), {"holds": {}, "applied": False})
+        self.assertEqual(self.config_calls(), [])
+        self.assertEqual(json.loads(self.state_path.read_text())["dispatch_profiles"], ["claude-worker"])
+
+    def test_an_entry_without_a_valid_until_assigns_nothing_and_exits_nonzero(self) -> None:
+        self.write_holds({"auto-deploy": {"reason": "a factory deploy is installing"}}, applied=True)
+
+        proc = self.run_script([task("t_waiting", "ready")], _env={"HOST_HOLD_LOADAVG": "1,1,1"})
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("has an entry for auto-deploy without a valid until", proc.stderr)
+        self.assertIsNone(self.assignees()["t_waiting"])
+
+    def test_the_five_minute_average_alone_holds(self) -> None:
+        self.run_script([], _env={"HOST_HOLD_LOADAVG": "1,12.5,2"})
+
+        self.assertIn("host_load", self.holds_file()["holds"])
+
+    def test_a_load_at_or_below_the_threshold_for_both_averages_clears_the_hold_and_releases_parked_cards_in_the_same_run(self) -> None:
+        self.write_holds({"host_load": self.entry()}, applied=True)
+        self.park(self.default_board, "t_default", HOST_LOAD_PARKED)
+        self.park(self.board, "t_triage", HOST_LOAD_PARKED)
+
+        proc = self.sweep(
+            [task("t_triage", "scheduled", "claude-worker")], [task("t_default", "scheduled", "claude-worker")],
+        )
+
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertEqual(sorted(proc.stdout.splitlines()), ["assigned t_triage", "released t_default", "released t_triage"])
+        self.assertEqual(self.statuses()["t_default"], ("ready", "claude-worker"))
+        self.assertEqual(self.holds_file(), {"holds": {}, "applied": False})
+        self.assertEqual(self.config_calls(), [["unset", "kanban.dispatch_profiles"]])
+
+    def test_a_parked_card_stays_parked_while_the_load_holds(self) -> None:
+        self.park(self.default_board, "t_default", HOST_LOAD_PARKED)
+
+        proc = self.sweep([], [task("t_default", "scheduled", "claude-worker")], )
+        self.assertEqual(proc.stdout, "released t_default\n")
+
+        self.park(self.default_board, "t_other", HOST_LOAD_PARKED)
+        held = self.run_script(
+            [], default_tasks=[task("t_other", "scheduled", "claude-worker")], default_db=str(self.default_board),
+            _env={"HOST_HOLD_LOADAVG": "30,30,30"},
+        )
+
+        self.assertEqual((held.returncode, held.stdout), (0, ""))
+        self.assertEqual(self.statuses()["t_other"], ("scheduled", "claude-worker"))
+
+    def test_an_entry_past_its_until_is_removed_by_the_next_run(self) -> None:
+        self.write_holds({"auto-deploy": self.entry(OLD)}, applied=True)
+
+        proc = self.run_script([])
+
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertEqual(self.holds_file(), {"holds": {}, "applied": False})
+        self.assertEqual(self.config_calls(), [["unset", "kanban.dispatch_profiles"]])
+
+    def test_a_key_a_person_set_stays_set_with_an_empty_list(self) -> None:
+        self.write_holds({}, applied=False)
+
+        proc = self.run_script([task("t_waiting", "ready")])
+
+        self.assertEqual((proc.returncode, proc.stdout), (0, "assigned t_waiting\n"))
+        self.assertEqual(self.config_calls(), [])
+
+    def test_an_unreadable_load_holds_nothing_and_assigns(self) -> None:
+        proc = self.run_script([task("t_waiting", "ready")], _env={"HOST_HOLD_LOADAVG": "error"})
+
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "assigned t_waiting\n", ""))
+        self.assertFalse((self.home.parent.parent / "dispatch-holds.json").exists())
+        log = (self.home.parent.parent / "dispatch-holds.log").read_text()
+        self.assertEqual(json.loads(log)["event"], "load-unreadable")
+
+    def test_a_threshold_setting_overrides_the_default(self) -> None:
+        settings = {"triage": {"max_running": 2}, "claude_session": {"load_hold_threshold": 40}}
+
+        proc = self.run_script([task("t_waiting", "ready")], settings, _env={"HOST_HOLD_LOADAVG": "30,30,30"})
+
+        self.assertEqual(proc.stdout, "assigned t_waiting\n")
+
+    def test_an_invalid_threshold_still_expires_and_applies_skips_the_load_step_and_exits_nonzero(self) -> None:
+        for bad in (0, -1, "x", True):
+            with self.subTest(bad=bad):
+                self.write_holds({"auto-deploy": self.entry(OLD), "usage_limit": self.entry()}, applied=False)
+                settings = {"triage": {"max_running": 2}, "claude_session": {"load_hold_threshold": bad}}
+
+                proc = self.run_script([], settings, _env={"HOST_HOLD_LOADAVG": "99,99,99"})
+
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn(f"claude_session.load_hold_threshold {bad!r} must be a positive number", proc.stderr)
+                self.assertEqual(sorted(self.holds_file()["holds"]), ["usage_limit"])
+                self.assertEqual(self.holds_file()["applied"], True)

@@ -145,6 +145,7 @@ import completion_contract
 import factory_settings
 import factory_source
 import gh_login
+import host_hold
 import install_drift
 import kanban_board
 import merged_checks
@@ -566,6 +567,14 @@ def sweep_xcode_check() -> dict:
     park. The resumed run is the check that Xcode answers. `dispatch-triage` runs it each minute."""
     prefix = getattr(plugin_module("blocker-order", "result_line"), "XCODE_CHECK_TIMEOUT_PARK", None)
     return sweep_cause(prefix, lambda card, show: park_wait_over(show, XCODE_CHECK_WAIT_SECONDS), "the Xcode check wait is over")
+
+
+def sweep_host_load() -> dict:
+    prefix = getattr(plugin_module("blocker-order", "result_line"), "HOST_LOAD_PARK", None)
+    if prefix is None:
+        return {"released": [], "failed": {}}
+    root = host_hold.root_home(Path(os.environ["HERMES_HOME"]))
+    return sweep_parked(prefix, lambda: host_hold.HOST_LOAD not in host_hold.read_holds(root)["holds"])
 
 
 def sweep_parked(prefix: str, ready: Callable[[], bool]) -> dict:

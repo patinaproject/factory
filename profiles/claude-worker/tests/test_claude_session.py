@@ -115,6 +115,7 @@ TODAYS_ENDING = (
 )
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
+import run_owner  # noqa: E402
 _session_loader = importlib.machinery.SourceFileLoader("claude_session_prompt", str(SCRIPTS / "claude-session"))
 _SESSION = importlib.util.module_from_spec(importlib.util.spec_from_loader(_session_loader.name, _session_loader))
 _session_loader.exec_module(_SESSION)
@@ -176,6 +177,7 @@ ALLOWED_NAMES = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TZ", "NVM_DIR",
     "GH_CONFIG_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
     "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "DEVELOPER_DIR", "FACTORY_ARTIFACT_CAPABILITY",
+    "PATINAPROJECT_TEST_WORKERS",
 }
 TOOLCHAIN = {
     "JAVA_HOME": "/opt/jdk", "ANDROID_HOME": "/opt/android-sdk", "ANDROID_SDK_ROOT": "/opt/android-sdk",
@@ -216,6 +218,13 @@ class ClaudeSessionTest(GitFixture):
         self.claude_config = self.tmp / "claude-config"
         self.nvm_dir = self.tmp / "nvm"
         self.hermes_home = self.tmp / "hermes" / "profiles" / "claude-worker"
+        self.hermes_bin = self.tmp / "hermes-bin"
+        self.hermes_bin.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1 $2" = "config get" ]; then echo "Config key not set: $3" >&2; exit 1; fi\n'
+            f"echo \"$HERMES_HOME $@\" >> {self.tmp / 'hermes-calls'}\n"
+        )
+        os.chmod(self.hermes_bin, 0o755)
         self.install_linear_plugin(self.hermes_home)
         self.broker = self.start_broker(linear_token=[granted("cached-token")], proxy_token=[granted("token-value", None)])
         self.checkout = self.plain_checkout("factory")
@@ -271,6 +280,8 @@ class ClaudeSessionTest(GitFixture):
             CLAUDE_CONFIG_DIR=str(self.claude_config),
             NVM_DIR=str(self.nvm_dir),
             GH_CONFIG_DIR=str(self.tmp / "gh"),
+            HOST_HOLD_LOADAVG="0,0,0",
+            HOST_HOLD_CPUS="18",
             **HERMES_CHILD_ENV,
             **WORKER_SECRETS,
             **self.github.env(),
@@ -4155,6 +4166,117 @@ class ClaudeSessionTest(GitFixture):
         self.run_session("--takeover-pr", TAKEOVER_PR)
 
         self.assertEqual(self.claude_call()["argv"][1], "Continue.")
+
+    def overloaded(self, load: str) -> dict:
+        return {"HOST_HOLD_LOADAVG": load, "HERMES_BIN": str(self.hermes_bin)}
+
+    def hermes_calls(self) -> list:
+        log = self.tmp / "hermes-calls"
+        return log.read_text().splitlines() if log.exists() else []
+
+    def holds_file(self) -> Path:
+        return self.hermes_home.parent.parent / "dispatch-holds.json"
+
+    def assert_no_run_started(self) -> None:
+        self.assertFalse(self.log.exists())
+        self.assertFalse((self.worktree_git_dir() / "claude-session.lock").exists())
+        self.assertFalse((self.hermes_home / "claude-session-runs").exists())
+
+    def test_a_load_over_the_threshold_starts_nothing_holds_dispatch_and_refuses_with_host_load(self) -> None:
+        status, report = self.run_session(env=self.overloaded("30,10,5"))
+
+        reading = "load average 30 (1 min) and 10 (5 min) against a threshold of 27"
+        self.assertEqual(status, 2)
+        self.assertEqual(report, {
+            "error": f"the host load is too high to start a run: {reading}", "transient": True, "precondition": "host_load",
+        })
+        self.assert_no_run_started()
+        holds = json.loads(self.holds_file().read_text())
+        self.assertEqual(holds["applied"], True)
+        self.assertEqual(holds["holds"]["host_load"]["reason"], reading)
+        self.assertEqual(self.hermes_calls(), [f"{self.hermes_home.parent.parent} config set kanban.dispatch_profiles []"])
+
+    def test_the_five_minute_average_alone_refuses(self) -> None:
+        status, report = self.run_session(env=self.overloaded("1,27.5,5"))
+
+        self.assertEqual((status, report["precondition"]), (2, "host_load"))
+
+    def test_a_load_at_the_threshold_starts_the_run(self) -> None:
+        status, _ = self.run_session(env=self.overloaded("27,27,27"))
+
+        self.assertEqual(status, 0)
+        self.assertFalse(self.holds_file().exists())
+
+    def test_a_configured_threshold_replaces_the_per_cpu_default(self) -> None:
+        self.settings = self.write_settings([self.repository], {"load_hold_threshold": 5.5})
+
+        status, report = self.run_session(env=self.overloaded("6,1,1"))
+
+        self.assertEqual(status, 2)
+        self.assertIn("against a threshold of 5.5", report["error"])
+
+    def test_a_card_refused_for_load_four_times_in_the_window_still_parks(self) -> None:
+        self.write_parks(*[(age, "Waiting for the host load to fall:") for age in (30, 900, 2000, 3000)])
+
+        status, report = self.run_session(env=self.overloaded("30,30,30"))
+
+        self.assertEqual((status, report["transient"], report["precondition"]), (2, True, "host_load"))
+        self.assertNotIn("time in an hour", report["error"])
+
+    def test_an_installed_result_line_that_lacks_host_load_gets_a_plain_transient_refusal(self) -> None:
+        module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
+        text = module.read_text()
+        self.assertIn("    HOST_LOAD: HOST_LOAD_PARK,\n", text)
+        module.unlink()
+        module.write_text(text.replace("    HOST_LOAD: HOST_LOAD_PARK,\n", ""))
+
+        status, report = self.run_session(env=self.overloaded("30,30,30"))
+
+        self.assertEqual((status, report["transient"], "precondition" in report), (2, True, False))
+        self.assertIn("the host load is too high", report["error"])
+
+    def test_an_unreadable_load_lets_the_run_start_and_holds_nothing(self) -> None:
+        status, _ = self.run_session(env={"HOST_HOLD_LOADAVG": "error"})
+
+        self.assertEqual(status, 0)
+        self.assertTrue(self.log.exists())
+        self.assertFalse(self.holds_file().exists())
+
+    def test_an_invalid_threshold_refuses_before_claude_starts(self) -> None:
+        for bad in (0, -1, "x", True):
+            with self.subTest(bad=bad):
+                self.settings = self.write_settings([self.repository], {"load_hold_threshold": bad})
+
+                status, report = self.run_session()
+
+                self.assertEqual(status, 2)
+                self.assertEqual(report, {"error": f"claude_session.load_hold_threshold {bad!r} must be a positive number"})
+                self.assert_no_run_started()
+
+    def other_runs(self, count: int) -> None:
+        sleeper = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(sleeper.wait)
+        self.addCleanup(sleeper.kill)
+        started = run_owner.process_start(sleeper.pid)
+        runs = self.hermes_home / "claude-session-runs"
+        runs.mkdir(parents=True)
+        for number in range(count):
+            (runs / f"other-{number}.json").write_text(json.dumps({
+                "pid": sleeper.pid, "started": started, "task_id": f"t_other{number}", "run_id": None, "board": None,
+                "session_id": None, "worktree": f"/elsewhere/{number}", "claude_pid": None,
+            }))
+
+    def test_claude_gets_an_equal_share_of_the_cpus_for_its_test_workers(self) -> None:
+        for others, expected in ((0, "18"), (3, "4"), (31, "1"), (40, "1")):
+            with self.subTest(others=others):
+                shutil.rmtree(self.hermes_home / "claude-session-runs", ignore_errors=True)
+                self.other_runs(others)
+
+                status, _ = self.run_session()
+
+                self.assertEqual(status, 0)
+                self.assertEqual(self.claude_call()["env"]["PATINAPROJECT_TEST_WORKERS"], expected)
+                self.log.unlink()
 
 
 class FencedPromptTest(unittest.TestCase):
