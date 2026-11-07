@@ -19,7 +19,11 @@ and when it ends, whether it returns or stops on SIGTERM, SIGINT, or SIGHUP.
 The proxy token and the token of each MCP server in claude_session.mcp_servers
 never enter Claude Code's environment: the settings point apiKeyHelper at
 proxy-token, each such server's headersHelper is mcp-headers, and both ask the
-gateway's broker.
+gateway's broker. A nested `claude` that a run starts from its Bash tool gets
+the proxy token the same way: the run's PATH starts with a run-local `claude`
+wrapper that runs nested-claude with the run's restrictions and the same
+apiKeyHelper, so the nested claude also holds the token only in its memory.
+claude-session removes that wrapper with the settings file.
 
 While claude runs, claude-session reads its own card on the board every few seconds and stops claude when the
 card is no longer the live one, such as when it is archived, which Hermes does by signaling only the worker. A
@@ -43,6 +47,7 @@ import os
 import re
 import shlex
 import select
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -224,6 +229,7 @@ LINK_PR_HOOK = Path(__file__).resolve().with_name("link-pr-hook")
 CODE_REVIEW_LIMIT = Path(__file__).resolve().with_name("code-review-limit")
 CODE_REVIEW_GUARD = Path(__file__).resolve().with_name("guard-code-review")
 PROXY_TOKEN_HELPER = Path(__file__).resolve().with_name("proxy-token")
+NESTED_CLAUDE = Path(__file__).resolve().with_name("nested-claude")
 MCP_HEADERS_HELPER = Path(__file__).resolve().with_name("mcp-headers")
 TRIAGE_DOCUMENTS = ("Triage notes", "Agent brief")
 TRIAGE_RULE = (
@@ -370,6 +376,8 @@ TOOLCHAIN_KILL_GRACE_SECONDS = 2
 TOOLCHAIN_CHECK_ENV = "CLAUDE_SESSION_TOOLCHAIN_CHECK_SECONDS"
 STILL_RUNNING_CHARS = 500
 LOCK_NAME = "claude-session.lock"
+NESTED_DIR_NAME = "claude-session.nested"
+ANTHROPIC_API_URL = "https://api.anthropic.com"
 SETTINGS_FILE_NAME = "claude-session.settings.json"
 POLL_ENV = "CLAUDE_SESSION_REPLY_POLL_SECONDS"
 INBOX_NAME = "claude-session.replies.json"
@@ -1304,17 +1312,11 @@ def claude_settings(
         env["BASH_MAX_TIMEOUT_MS"] = str(factory_settings.command_timeout_seconds(transport) * 1000)
     # Claude Code applies the env block once at startup, so the file can go as soon as the session starts.
     remove = {"type": "command", "command": f"rm -f -- {shlex.quote(str(path))}"}
-    # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
-    # A refused commit or publish keeps a commit from closing an issue the pull request body does not; see guard-commit-closes.
-    command_limit = factory_settings.command_timeout_seconds(transport)
-    guards = [
-        {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}{argument}"}
-        for script, argument in ((CI_WAIT_GUARD, f" {command_limit}"), (COMMIT_CLOSES_GUARD, ""))
-    ]
-    settings = {"env": env, "hooks": {
-        "SessionStart": [{"hooks": [remove]}],
-        "PreToolUse": [{"matcher": "Bash", "hooks": guards}],
-    }}
+    shared = restrictions(transport, triage, denials)
+    settings = {"env": env, **shared, "hooks": {"SessionStart": [{"hooks": [remove]}], **shared["hooks"]}}
+    if session_id and not triage:
+        review = {"type": "command", "command": " ".join([helper_command(CODE_REVIEW_GUARD), *session_arguments(session_id, task_id, board)])}
+        settings["hooks"]["PreToolUse"].append({"matcher": "Skill", "hooks": [review]})
     if inbox:
         # Hands Claude a person's Linear reply during the run; see reply_inbox.
         for event, mode in (("PostToolUse", "post-tool-use"), ("Stop", "stop")):
@@ -1326,12 +1328,21 @@ def claude_settings(
         *(session_arguments(session_id, task_id, board) if session_id else []),
         *(["--auto-merge-repo", shlex.quote(auto_merge_repo)] if auto_merge_repo else []),
     ]
-    if session_id and not triage:
-        review = {"type": "command", "command": " ".join([helper_command(CODE_REVIEW_GUARD), *session_arguments(session_id, task_id, board)])}
-        settings["hooks"]["PreToolUse"].append({"matcher": "Skill", "hooks": [review]})
     if hook_arguments and not triage:
         link = {"type": "command", "command": " ".join([helper_command(LINK_PR_HOOK), *hook_arguments])}
         settings["hooks"].setdefault("PostToolUse", []).append({"matcher": "Bash", "hooks": [link]})
+    return settings
+
+
+def restrictions(transport: dict, triage: bool, denials: tuple) -> dict:
+    # A refused CI wait keeps the worker inside the prompt cache; see guard-ci-wait.
+    # A refused commit or publish keeps a commit from closing an issue the pull request body does not; see guard-commit-closes.
+    command_limit = factory_settings.command_timeout_seconds(transport)
+    guards = [
+        {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}{argument}"}
+        for script, argument in ((CI_WAIT_GUARD, f" {command_limit}"), (COMMIT_CLOSES_GUARD, ""))
+    ]
+    settings: dict = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": guards}]}}
     if transport.get("auth_token_env"):
         settings["apiKeyHelper"] = helper_command(PROXY_TOKEN_HELPER)
     disabled = factory_settings.disabled_mcp_servers(transport)
@@ -1342,12 +1353,48 @@ def claude_settings(
     return settings
 
 
-def remove_on_stop(path: Path) -> None:
-    """Remove the settings file on SIGTERM, SIGINT, or SIGHUP, then unwind so claude is ended too."""
+def nested_endpoint(transport: dict) -> str:
+    return transport.get("base_url") or ANTHROPIC_API_URL
+
+
+def nested_settings(transport: dict, triage: bool, denials: tuple) -> dict:
+    """Flag settings outrank a repository's own, so its settings cannot redirect the token."""
+    return {"env": {"ANTHROPIC_BASE_URL": nested_endpoint(transport)}, **restrictions(transport, triage, denials)}
+
+
+def write_nested_wrapper(directory: Path, real: str, mcp: str, settings: dict, lifetime: int, endpoint: str) -> Path:
+    directory.mkdir(mode=0o700)
+    for name in ("bin", "slots"):
+        (directory / name).mkdir(mode=0o700)
+    write_private(directory / "settings.json", settings)
+    fd = os.open(directory / "mcp.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(mcp)
+    words = [
+        sys.executable, str(NESTED_CLAUDE), "--claude", real, "--settings", str(directory / "settings.json"),
+        "--mcp-config", str(directory / "mcp.json"), "--slots", str(directory / "slots"), "--lifetime", str(lifetime),
+        "--base-url", endpoint, "--",
+    ]
+    fd = os.open(directory / "bin" / "claude", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(f"#!/bin/sh\nexec {' '.join(map(shlex.quote, words))} \"$@\"\n")
+    return directory / "bin"
+
+
+def remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def remove_on_stop(*paths: Path) -> None:
+    """Remove the paths on SIGTERM, SIGINT, or SIGHUP, then unwind so claude is ended too."""
     def stop(signum: int, _frame) -> None:
         for each in STOP_SIGNALS:
             signal.signal(each, signal.SIG_IGN)
-        path.unlink(missing_ok=True)
+        for path in paths:
+            remove_path(path)
         raise Stopped(signum)
 
     for signum in STOP_SIGNALS:
@@ -1697,6 +1744,11 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     worktree = resolve_worktree(workspace, repo["path"])
     check_first_launch(repo, worktree)
     check_toolchain(repo, worktree)
+    run_path = child_env(worktree).get("PATH", "")
+    real_claude = shutil.which(os.environ.get("CLAUDE_BIN", "claude"), path=run_path)
+    if real_claude is None:
+        raise Refusal("CLAUDE_BIN names no executable claude on the run's PATH")
+    real_claude = str(Path(real_claude).absolute())
     lock_path = Path(git(worktree, "rev-parse", "--absolute-git-dir")) / LOCK_NAME
     stops: list[tuple[str, str]] = []
     # The stack exits first, so the run's record is gone before the lock is released.
@@ -1705,9 +1757,11 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         record = run_owner.register(args.task_id, worktree)
         owned.callback(run_owner.unregister, record)
         settings_path = lock_path.with_name(SETTINGS_FILE_NAME)
-        # A killed run leaves its file behind; os.open would also keep that file's mode.
+        nested_dir = lock_path.with_name(NESTED_DIR_NAME)
+        # A killed run leaves its files behind; os.open would also keep that file's mode.
         settings_path.unlink(missing_ok=True)
-        remove_on_stop(settings_path)
+        remove_path(nested_dir)
+        remove_on_stop(settings_path, nested_dir)
         client, api_key = linear_access()
         card = read_card(args.card_json, args.task_id)
         card_session_id = reply_inbox.session_id_of(card["task"]["body"])
@@ -1770,7 +1824,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
             reply_inbox.reset(inbox, answer_command, card_session_id)
         own = os.environ.get("HERMES_PROFILE") or Path(os.environ.get("HERMES_HOME", "")).name
         command = [
-            os.environ.get("CLAUDE_BIN", "claude"),
+            real_claude,
             "-p", build_prompt(
                 args, prefix, branch, plan.resumed, adopted, handoff, unseen_comments(comments, seen, own), triage
             ),
@@ -1792,17 +1846,25 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         capability = artifact_service.issue_capability(artifact_state, args.task_id, session_id, triage, os.getpid())
         watch = run_owner.Watch(record, float(os.environ.get(run_owner.CARD_POLL_ENV, run_owner.CARD_POLL_SECONDS)))
         card_ended = None
+        board = os.environ.get("HERMES_KANBAN_DB", "")
         try:
+            denials = artifact_denials(settings)
             write_private(settings_path, claude_settings(
-                transport, api_key, settings_path, triage, inbox, card_session_id, artifact_denials(settings),
-                args.repo if factory_settings.auto_merge(repo) else None,
-                args.task_id, os.environ.get("HERMES_KANBAN_DB", ""),
+                transport, api_key, settings_path, triage, inbox, card_session_id, denials,
+                args.repo if factory_settings.auto_merge(repo) else None, args.task_id, board,
             ))
+            nested_bin = write_nested_wrapper(
+                nested_dir, real_claude, mcp,
+                nested_settings(transport, triage, denials), command_limit, nested_endpoint(transport),
+            )
             with reply_watch(inbox, client, args, comments, own):
                 try:
                     output, exit_code, detail, idle = run_claude(
                         command, worktree, session_id, idle_limit,
-                        {artifact_service.CAPABILITY_ENV: capability.secret, **test_worker_env()}, watch,
+                        {
+                            artifact_service.CAPABILITY_ENV: capability.secret, **test_worker_env(),
+                            "PATH": f"{nested_bin}{os.pathsep}{run_path}",
+                        }, watch,
                     )
                 except CardEnded as ended:
                     output, exit_code, detail, idle, card_ended = None, None, "", None, ended
@@ -1812,6 +1874,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         finally:
             capability.revoke()
             settings_path.unlink(missing_ok=True)
+            remove_path(nested_dir)
         if card_ended and run_owner.claim(record):
             stops.append((record.task_id, card_ended.reason))
             post_stop_notes(client, issue_session_id(args.issue_id, record.task_id, card_session_id), stops)

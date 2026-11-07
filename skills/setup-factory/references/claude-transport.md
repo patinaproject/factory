@@ -20,7 +20,7 @@ Configure the transport only through these settings in
 | `base_url` | Sets `ANTHROPIC_BASE_URL` |
 | `model` | Passes `--model` and sets `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_OPUS_MODEL`. The main agent runs on it. Any tier without a `tier_models` entry, and the subagent default, also use it |
 | `tier_models` | Optional map from `sonnet`, `haiku`, and `fable` to model ids the endpoint serves. Each sets that `ANTHROPIC_DEFAULT_<TIER>_MODEL`. When `sonnet` is set, `CLAUDE_CODE_SUBAGENT_MODEL` is the alias `sonnet`, so a subagent that names no model runs on the Sonnet model and an explicit `opus` still runs on `model`. Any other key or a non-string value refuses the run |
-| `auth_token_env` | Names the variable that holds the proxy's client token or a Console API key, `CLAUDE_PROXY_TOKEN`. Only the gateway holds its value. `claude-session` sets Claude Code's `apiKeyHelper` to `<worker>/scripts/proxy-token`, which asks the gateway's broker for the value. Claude Code keeps it in memory and sends it as the `Authorization` and `x-api-key` headers, so neither Claude Code's environment nor any process it starts holds it |
+| `auth_token_env` | Names the variable that holds the proxy's client token or a Console API key, `CLAUDE_PROXY_TOKEN`. Only the gateway holds its value. `claude-session` sets Claude Code's `apiKeyHelper` to `<worker>/scripts/proxy-token`, which asks the gateway's broker for the value. Claude Code keeps it in memory and sends it as the `Authorization` and `x-api-key` headers. A nested `claude` that a run starts from its Bash tool reaches a run-local wrapper first on the run's PATH, `<worker>/scripts/nested-claude`, which gives it the same `apiKeyHelper`, so it also holds the token only in memory. No environment, settings file, or argv holds it |
 | `mcp_servers` | Optional map from an MCP server name to the factory's own server on that service: its `url`, the `token_env` variable that only the gateway holds, and an optional `scheme` and fixed `headers`. Each server gets its token through a `headersHelper`, `<worker>/scripts/mcp-headers`, which asks the broker for it. See [MCP server identities](mcp-identities.md) |
 | `disabled_mcp_servers` | Optional list of repository MCP server names. Sets `disabledMcpjsonServers` |
 
@@ -28,7 +28,7 @@ Configure the transport only through these settings in
 `--settings`. Claude Code lets an `env` block in the user's
 `~/.claude/settings.json` override the process environment, so plain
 environment variables would lose to it; `--settings` wins over user settings.
-The file is deleted when the run ends. Never put an `ANTHROPIC_*` variable in a
+The file is deleted when the run ends. A nested `claude` gets its own settings file from the same run, holding the run's endpoint, guards, and deny rules, and that file goes when the run ends too. Those settings are flag settings, so they outrank the repository's and the user's settings, and the wrapper refuses a caller's own `--settings`, another credential variable, a different `ANTHROPIC_BASE_URL`, and `--bg`. A nested call's token usage is not counted in the run's result line. `nested-claude` installs with the profile's scripts, so `check-install` reports it when it is missing or stale. Never put an `ANTHROPIC_*` variable in a
 `.env` file or in the gateway's service unit. The DirectSDK provider refuses to
 start when it finds one.
 

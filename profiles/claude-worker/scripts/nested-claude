@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Run a nested `claude` that a worker run starts from its Bash tool.
+
+The nested claude gets the run's restrictions and the same apiKeyHelper as
+the run, so it holds the proxy token only in its own memory. It gets no
+permission-mode flag and none of the run's SessionStart, reply, pull request,
+or code-review hooks.
+
+The caller's arguments pass through as one argument list, never through a
+shell. `--settings` and `--mcp-config` follow the caller's options, because
+`--mcp-config` takes several values and would swallow a prompt after it. A
+call to a Claude Code subcommand, such as `claude mcp list` or `claude
+doctor`, passes through without them, because subcommands reject both
+options; it gets no apiKeyHelper, so it cannot reach the model.
+
+Settings precedence: Claude Code ranks `--settings` above local, project, and
+user settings (`~/.claude/settings.json`), so the run's apiKeyHelper and its
+pinned ANTHROPIC_BASE_URL win over any a repository or user file sets. A
+caller's own `--settings` is refused, so no two flag settings combine.
+
+Refuses with exit 2 when the call is itself nested, the run has ended (its
+nested settings file is gone), the environment holds another credential or an
+endpoint other than `--base-url`, the caller passes its own `--settings` or
+asks for a background session, which would outlive the lifetime limit, or
+every one of MAX_NESTED_CALLS slots is taken. Ends what the nested claude
+leaves in its process group when it exits. Ends the nested claude and every
+process it started after `--lifetime` seconds (exit 124) or when this script
+gets SIGTERM, SIGINT, or SIGHUP (exit 128 plus the signal number).
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+MAX_NESTED_CALLS = 4
+NESTED_ENV = "CLAUDE_SESSION_NESTED"
+CONFLICTING_AUTH = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+BACKGROUND_OPTIONS = ("--bg", "--background")
+SUBCOMMANDS = frozenset({
+    "agents", "attach", "auth", "auto-mode", "doctor", "gateway", "import", "install", "logs", "mcp", "plugin",
+    "plugins", "purge", "respawn", "rm", "setup-token", "stop", "kill", "ultrareview", "update", "upgrade",
+})
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+GRACE_SECONDS = 5
+TIMED_OUT = 124
+
+
+class Refused(Exception):
+    pass
+
+
+class Signalled(BaseException):
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+def parse(argv: list[str]) -> tuple[argparse.Namespace, list[str], list[str]]:
+    """The wrapper's own arguments, the caller's options, and the caller's arguments from its own `--` on."""
+    if "--" not in argv:
+        raise SystemExit("nested-claude: usage: nested-claude --claude ... -- <claude arguments>")
+    split = argv.index("--")
+    parser = argparse.ArgumentParser(prog="nested-claude")
+    parser.add_argument("--claude", required=True)
+    parser.add_argument("--settings", required=True)
+    parser.add_argument("--mcp-config", required=True)
+    parser.add_argument("--slots", required=True)
+    parser.add_argument("--lifetime", type=float, required=True)
+    parser.add_argument("--base-url", required=True)
+    caller = argv[split + 1:]
+    end = caller.index("--") if "--" in caller else len(caller)
+    return parser.parse_args(argv[:split]), caller[:end], caller[end:]
+
+
+def same_endpoint(one: str, other: str) -> bool:
+    return one.rstrip("/") == other.rstrip("/")
+
+
+def check(args: argparse.Namespace, options: list[str]) -> None:
+    if os.environ.get(NESTED_ENV):
+        raise Refused(f"{NESTED_ENV} is set, so this claude is already nested and cannot start another")
+    if not Path(args.settings).exists():
+        raise Refused("the run's nested settings file is gone, so the run that set up this wrapper has ended")
+    held = [name for name in CONFLICTING_AUTH if os.environ.get(name)]
+    if held:
+        raise Refused(f"{', '.join(held)} in the environment would conflict with the run's apiKeyHelper; unset it")
+    current = os.environ.get("ANTHROPIC_BASE_URL")
+    if current and not same_endpoint(current, args.base_url):
+        raise Refused("ANTHROPIC_BASE_URL differs from the run's endpoint; unset it or leave the run's value")
+    if any(option == "--settings" or option.startswith("--settings=") for option in options):
+        raise Refused("--settings is set by the run; pass settings another way or not at all")
+    if any(option in BACKGROUND_OPTIONS for option in options):
+        raise Refused("a background session would outlive the run's lifetime limit; run claude in the foreground")
+
+
+def take_slot(slots: Path):
+    for index in range(MAX_NESTED_CALLS):
+        try:
+            handle = open(slots / f"{index}.lock", "a")
+        except FileNotFoundError:
+            raise Refused("the run's nested directory is gone, so the run that set up this wrapper has ended") from None
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            continue
+        return handle
+    raise Refused(f"all {MAX_NESTED_CALLS} nested claude slots are in use; wait for one to finish")
+
+
+def command(args: argparse.Namespace, options: list[str], rest: list[str]) -> list[str]:
+    if options and options[0] in SUBCOMMANDS:
+        return [args.claude, *options, *rest]
+    return [args.claude, *options, "--settings", args.settings, "--mcp-config", args.mcp_config, *rest]
+
+
+def process_tree(root: int) -> set[int]:
+    listing = subprocess.run(["ps", "-Ao", "pid=,ppid=,pgid="], capture_output=True, text=True, check=True)
+    rows = [tuple(int(field) for field in line.split()) for line in listing.stdout.splitlines() if line.strip()]
+    pids = {pid for pid, _, pgid in rows if pgid == root}
+    pending = [root]
+    while pending:
+        parent = pending.pop()
+        for pid, ppid, _ in rows:
+            if ppid == parent and pid not in pids:
+                pids.add(pid)
+                pending.append(pid)
+    return pids
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def end(proc: subprocess.Popen) -> None:
+    for each in STOP_SIGNALS:
+        signal.signal(each, signal.SIG_IGN)
+    pids: set[int] = set()
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        pids |= process_tree(proc.pid) - {proc.pid}
+        if proc.poll() is None:
+            proc.send_signal(signum)
+        for pid in pids:
+            try:
+                os.kill(pid, signum)
+            except (ProcessLookupError, PermissionError):
+                pass
+        deadline = time.monotonic() + GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if proc.poll() is not None and not any(alive(pid) for pid in pids):
+                return
+            time.sleep(0.1)
+    proc.wait()
+
+
+def stop(signum: int, _frame) -> None:
+    for each in STOP_SIGNALS:
+        signal.signal(each, signal.SIG_IGN)
+    raise Signalled(signum)
+
+
+def unblock_stop_signals() -> None:
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
+
+
+def exit_code(returncode: int) -> int:
+    return 128 - returncode if returncode < 0 else returncode
+
+
+def main(argv: list[str]) -> int:
+    args, options, rest = parse(argv)
+    try:
+        check(args, options)
+        slot = take_slot(Path(args.slots))
+    except Refused as refusal:
+        print(f"nested-claude: refused: {refusal}", file=sys.stderr)
+        return 2
+    with slot:
+        proc = None
+        try:
+            for signum in STOP_SIGNALS:
+                signal.signal(signum, stop)
+            signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+            proc = subprocess.Popen(
+                command(args, options, rest), env={**os.environ, NESTED_ENV: "1"}, start_new_session=True,
+                preexec_fn=unblock_stop_signals,
+            )
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
+            code = exit_code(proc.wait(timeout=args.lifetime))
+            end(proc)
+            return code
+        except subprocess.TimeoutExpired:
+            end(proc)
+            print(f"nested-claude: ended claude after {args.lifetime:g} s (lifetime limit)", file=sys.stderr)
+            return TIMED_OUT
+        except Signalled as signalled:
+            if proc is not None:
+                end(proc)
+            return 128 + signalled.signum
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
