@@ -28,7 +28,7 @@ export type Provenance =
 export const EVALUATOR_VERSION = "pr-readiness/4";
 export function provenanceUrls(provenance: Provenance): string[] { return provenance.kind === "approval" ? [provenance.url] : provenance.checks.map((check) => check.url); }
 export type ProducerSpec = { readonly producer: "checks"; readonly checks: readonly string[]; readonly allowSkipped?: boolean } | { readonly producer: "approval" };
-export interface ReadinessPolicy { readonly version: 1; readonly obligations: Readonly<Record<Obligation, ProducerSpec>>; readonly digest: string; }
+export interface ReadinessPolicy { readonly version: 1; readonly obligations: Readonly<Record<Obligation, ProducerSpec>>; readonly autoMerge: boolean; readonly digest: string; }
 export interface Observation {
   readonly id: string;
   readonly obligation: Obligation;

@@ -35,8 +35,14 @@ What it materializes from `assets/`:
   The context names skills by their bare names.
 - The **Code agents** (from `assets/agents/`) into the repo's
   `.claude/agents/`, so `subagent_type: "patina-agent"` resolves, the effort
-  agents `patina-agent-<level>` and `effort-<level>` resolve, and no-comments
-  can reach `comment-sicko`. The agents keep their bare names, so the same
+  agents `patina-agent-<level>` and `effort-<level>` resolve, the review agents
+  `patina-reader` and `patina-reader-<level>` resolve, and no-comments
+  can reach `comment-sicko`. `patina-reader` and `comment-sicko` set
+  `omitClaudeMd`, so they start without the user, project, and local CLAUDE.md
+  files and keep only managed policy. An installation puts the machine-specific
+  safety rules these agents need in a managed policy file. Examples are which
+  GitHub identity or config directory to use and a ban on pushing with the
+  plain `git` command. The agents keep their bare names, so the same
   names resolve when Code is also installed as a plugin. Model choice
   per role comes from the `setup-pstack` sheet at runtime, not from an agent
   definition.

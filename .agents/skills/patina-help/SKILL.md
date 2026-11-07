@@ -104,6 +104,7 @@ Playbooks are step lists inside `/patina-mode`, not skills, so they have no slas
 - "babysit this pr" or "check on pr 123" runs Babysit. It drives the PR to merge-ready and stops there. It doesn't merge unless the user asks to merge, land, or ship.
 - "land the stack" runs Shipping.
 - "take over this branch" runs Session pickup.
+- Continuing an issue that already has a branch with commits or an open pull request runs Session pickup. An open pull request goes on to Babysit. Commits without a pull request go on to the rest of the build playbook.
 - "pause safely" runs Pause safely.
 - "full autopilot on this queue" runs [Autopilot-full](../patina-mode/playbooks/autopilot-full.md). "stack them, don't ship" runs [Autopilot-stack](../patina-mode/playbooks/autopilot-stack.md). Read the selected playbook's merge rules before explaining what runs unattended.
 - "run the eval playbook" runs Eval.

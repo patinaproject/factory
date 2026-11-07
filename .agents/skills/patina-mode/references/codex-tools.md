@@ -38,7 +38,8 @@ patina-mode's Subagents section sets Claude-specific defaults (`subagent_type: "
 
 - There is no `patina-agent` subagent type. Route an ad-hoc subagent through patina-mode's style by dispatching a `spawn_agent` whose instructions tell it to read the `patina-mode` skill in full first.
 - `spawn_agent` calls already run concurrently with your turn, so `run_in_background: true` has no separate flag. Issue the dispatch and continue.
-- There are no `effort-<level>` or `patina-agent-<level>` types. When a role value carries `@<level>`, or the `default effort` line names a level, pass that level as `spawn_agent`'s `reasoning_effort` and keep the dispatch otherwise unchanged. `session` passes no `reasoning_effort`.
+- There is no `patina-reader` subagent type. Dispatch a `spawn_agent` whose instructions say it is a read-only reviewer that edits no files and makes no commits, pushes, or tracker writes. Codex does not omit `AGENTS.md` for it.
+- There are no `effort-<level>`, `patina-agent-<level>`, or `patina-reader-<level>` types. When a role value carries `@<level>`, or the `default effort` line names a level, pass that level as `spawn_agent`'s `reasoning_effort` and keep the dispatch otherwise unchanged. `session` passes no `reasoning_effort`.
 - There is no `comment-sicko` subagent type either. The **no-comments** skill spawns it on Claude Code; on Codex dispatch a `spawn_agent` whose instructions tell it to read `patina-mode/references/agents/comment-sicko.md` in full first.
 - Claude Code runs every subagent on this machine, so the **swarm** skill's workers and the fan-out playbooks (`orchestrate`, `autopilot-full`, `autopilot-stack`) isolate writers with worktrees. The same holds on Codex.
 - Keep the rest of the policy unchanged. Pass file pointers not inlined context, give each worker its own worktree or branch when they write, review every subagent's diff yourself.
@@ -93,9 +94,11 @@ Affected skill entry points and the optional Codex slash stubs point here. Most 
 
 ### Code-review presentation
 
-The shared `code-review` contract stays runtime-neutral: both axes use ordinary
-Markdown findings with exact file and line references, and both runtimes write
-the same typed review record for readiness. Codex may add one inline directive
+The shared `code-review` contract stays runtime-neutral, and both runtimes keep
+the report in the session. Every axis uses ordinary Markdown findings with exact
+file and line references. Evidence findings and Spec findings that quote a claim
+or requirement are the exception, as the contract says. Every finding carries
+one severity tag, `Important`, `Nit`, or `Pre-existing`. Codex may add one inline directive
 for each discrete, actionable finding that belongs to a changed line:
 
 ```text
@@ -103,10 +106,12 @@ for each discrete, actionable finding that belongs to a changed line:
 ```
 
 Keep the Markdown finding beside the directive. Use the active worktree path
-for `file`, keep `start` and `end` tight, and omit directives when there are no
-actionable changed-line findings. A directive is UI presentation metadata; it
-does not enter the review record or replace its head pinning, separate
-Standards and Spec results, finding dispositions, or current-head validation.
+for `file`, keep `start` and `end` tight, and set `priority` from the severity
+tag: `Important` and every blocking Security finding map to 1, and a
+non-blocking `Nit` or `Pre-existing` finding maps to 3. Omit directives when
+there are no actionable changed-line findings. A directive is UI presentation
+metadata; it does not replace the separate Standards, Spec, Evidence, Bugs, and
+Security results, finding dispositions, or current-head validation.
 Claude emits the Markdown finding without Codex directives.
 
 ## Vendored scripts

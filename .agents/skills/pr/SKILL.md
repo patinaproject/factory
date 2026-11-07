@@ -36,6 +36,8 @@ Use this template whenever you create or rewrite a PR body:
 
 <optional: description>
 
+**Revert:** <one sentence, or ordered steps beyond reverting the squash commit>
+
 **Blast Radius:** <one-word description>
 
 <optional: potential ramifications of merge>
@@ -187,6 +189,12 @@ For a change without a user interface, name the command that exercises the chang
 ### Merge Danger
 
 Describe whether it's a one-way or two-way door. You can walk back through two-way doors, but not one-way doors. A PR that is cheap to roll back is lower risk. Changes that involve destructive actions or hard-to-reverse decisions are one-way doors.
+
+The revert field tells a reviewer how to undo the change after it merges.
+
+- When reverting the squash commit fully undoes the change, write one sentence that says so.
+- Otherwise, list the steps in order. Name each step a squash revert misses, such as a data or schema migration, a deployed or external configuration, a ruleset or repository setting, a published package or release, a secret, or state written outside the repository.
+- For a one-way door, name what cannot be restored, so the door and the revert agree.
 
 The blast radius is the potential impact or scope of the changes introduced by this PR. Consider all possibilities. Examples are layout shift, breakages for consumers, mobile responsiveness, and workflow changes.
 

@@ -8,5 +8,10 @@
     "to-spec",
     "to-tickets",
     "triage"
-  ]
+  ],
+  "release": {
+    "tag": "v4.23.0",
+    "commit": "71f3896f5ca7bdc208a05fea0b91863544caadcf",
+    "url": "https://github.com/patinaproject/skills/releases/tag/v4.23.0"
+  }
 }
