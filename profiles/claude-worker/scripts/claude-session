@@ -68,6 +68,7 @@ import kanban_board
 import reply_inbox
 import run_owner
 import session_links
+import usage_limit
 import xcode
 
 DEFAULT_WORKER_ENTRY = (
@@ -389,6 +390,9 @@ WORKTREE_HELD = "worktree_held"
 # The `precondition` of a refusal because GitHub or the gateway's broker answered with a server error.
 SERVER_ERROR = "server_error"
 HOST_LOAD = host_hold.HOST_LOAD
+# The `precondition` of a refusal because Claude Code hit the Claude usage limit, or the factory holds new runs for it.
+# It holds the whole factory, so it is not a PARK_CAUSES cause and never stops parking.
+USAGE_LIMIT = usage_limit.USAGE_LIMIT
 # The `precondition` of a refusal because `xcodebuild -checkFirstLaunchStatus` timed out, which host load can cause.
 XCODE_CHECK_TIMEOUT = "xcode_check_timeout"
 # What each parking cause is called in the refusal that stops parking after PARK_CAP parks in PARK_WINDOW_SECONDS.
@@ -1673,6 +1677,41 @@ def require_load_below_threshold(threshold: float | None) -> None:
     raise Refusal(f"the host load is too high to start a run: {reading.describe()}{note}", transient=True, precondition=HOST_LOAD)
 
 
+def usage_limit_holds() -> host_hold.HoldList:
+    root = host_hold.root_home(Path(os.environ["HERMES_HOME"]))
+    return host_hold.HoldList(root, host_hold.hermes_config(factory_settings.find_hermes, root))
+
+
+def require_no_usage_limit_hold() -> None:
+    """A card that starts while the usage-limit entry is live waits for it, before Claude Code runs."""
+    holds = usage_limit_holds()
+    try:
+        until = usage_limit.live_until(host_hold.read_holds(holds.root), holds.clock())
+    except host_hold.HoldError as error:
+        raise Refusal(f"{error}, so claude-session cannot tell whether the factory holds new runs") from None
+    if until is not None:
+        raise Refusal(
+            f"the factory holds new runs for the Claude usage limit until {host_hold.stamp(until)}",
+            transient=True, precondition=USAGE_LIMIT,
+        )
+
+
+def hold_for_usage_limit(settings: dict, output: dict) -> Refusal:
+    """Add or keep the usage-limit entry for a run that hit the limit, and the refusal that parks its card."""
+    text = output["result"]
+    holds = usage_limit_holds()
+    try:
+        until = usage_limit.record_hit(
+            holds, usage_limit.reset_time(text, holds.clock()), factory_settings.usage_limit_backoff(settings),
+        )
+    except host_hold.HoldError as error:
+        return Refusal(f"Claude Code hit the usage limit, and {error}", transient=True, precondition=USAGE_LIMIT)
+    return Refusal(
+        f"Claude Code hit the usage limit ({text[:300]}), so the factory holds new runs until {host_hold.stamp(until)}",
+        transient=True, precondition=USAGE_LIMIT,
+    )
+
+
 def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     import result_line
 
@@ -1693,6 +1732,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     servers = factory_settings.mcp_servers(transport)
     threshold = factory_settings.fresh_after_tokens(transport)
     prefix = factory_settings.worker_entry(repo)
+    require_no_usage_limit_hold()
     require_load_below_threshold(factory_settings.load_hold_threshold(transport))
     worktree = resolve_worktree(workspace, repo["path"])
     check_first_launch(repo, worktree)
@@ -1836,6 +1876,8 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         except Exception as error:
             raise AfterClaude(error, session_id) from error
 
+    if output is not None and not idle and not card_ended and usage_limit.is_limit(output):
+        raise hold_for_usage_limit(settings, output)
     try:
         session = result_line.Session(
             session_id=session_id, resumed=plan.resumed, reason=plan.reason, worktree=str(worktree), branch=branch,
@@ -1946,8 +1988,13 @@ def refused(result_line, refusal: Refusal):
     its hook blocks. A copy older than PRECONDITION_PARKS parks only on `gh_login`."""
     declared = {each.name for each in dataclasses.fields(result_line.Refused)}
     parks = getattr(result_line, "PRECONDITION_PARKS", (GH_LOGIN,))
-    if refusal.precondition in parks and "precondition" in declared:
-        return result_line.Refused(str(refusal), refusal.transient, refusal.precondition)
+    precondition = refusal.precondition
+    if precondition == USAGE_LIMIT and precondition not in parks:
+        # A copy without the usage-limit park would block the card for a person. Its server-error park waits a few
+        # minutes instead, and the hold list keeps the card from starting again until the limit ends.
+        precondition = SERVER_ERROR
+    if precondition in parks and "precondition" in declared:
+        return result_line.Refused(str(refusal), refusal.transient, precondition)
     return result_line.Refused(str(refusal), refusal.transient)
 
 

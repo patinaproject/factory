@@ -15,6 +15,7 @@ import time
 import types
 import unittest
 import uuid
+from datetime import datetime, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -3355,6 +3356,97 @@ class ClaudeSessionTest(GitFixture):
                 self.assertEqual(report, {
                     "error": f"claude_session.max_turns {value!r} must be a positive integer, or 0 for no limit",
                 })
+
+    def usage_limit_result(self, text: str | None = None) -> dict:
+        recorded = json.loads((Path(__file__).parent / "fixtures" / "claude-result-usage-limit.json").read_text())
+        return {**recorded, "result": text} if text is not None else recorded
+
+    def run_limited(self, result: dict | None = None):
+        self.configure_fake_claude(raw_output=result or self.usage_limit_result())
+        return self.run_session(env={"HERMES_BIN": str(self.hermes_bin)})
+
+    def usage_limit_until(self) -> float:
+        until = json.loads(self.holds_file().read_text())["holds"]["usage_limit"]["until"]
+        return datetime.fromisoformat(until.replace("Z", "+00:00")).timestamp()
+
+    def test_a_run_that_hit_the_usage_limit_is_an_uncounted_usage_limit_refusal_that_holds_dispatch(self) -> None:
+        started = time.time()
+        status, report = self.run_limited()
+
+        self.assertEqual((status, report["transient"], report["precondition"]), (2, True, "usage_limit"))
+        self.assertEqual(set(report), {"error", "transient", "precondition"})
+        self.assertIn("are cooling down via provider claude", report["error"])
+        self.assertAlmostEqual(self.usage_limit_until() - started, 15 * 60, delta=60)
+        self.assertEqual(json.loads(self.holds_file().read_text())["applied"], True)
+        self.assertEqual(self.hermes_calls(), [f"{self.hermes_home.parent.parent} config set kanban.dispatch_profiles []"])
+
+    def test_a_finished_run_whose_text_names_a_rate_limit_error_is_done(self) -> None:
+        for text in ("Fixed the 429 rate_limit_error handling.", "Opened the pull request."):
+            with self.subTest(text=text):
+                self.configure_fake_claude(result=text)
+
+                status, report = self.run_session(env={"HERMES_BIN": str(self.hermes_bin)})
+
+                self.assertEqual((status, report["subtype"], report["result"]), (0, "success", text))
+                self.assertFalse(self.holds_file().exists())
+
+    def test_a_limit_result_with_a_reset_time_holds_until_it_plus_two_minutes_at_most_five_hours(self) -> None:
+        for hours in (1, 7):
+            with self.subTest(hours=hours):
+                self.holds_file().unlink(missing_ok=True)
+                (self.holds_file().parent / "dispatch-holds.usage-limit.json").unlink(missing_ok=True)
+                reset = datetime.fromtimestamp(int(time.time()) + hours * 3600, timezone.utc)
+                text = f"API Error: 429 rate_limit_error: limit reached; resets at {reset.isoformat()}"
+
+                started = time.time()
+                status, report = self.run_limited(self.usage_limit_result(text))
+
+                self.assertEqual((status, report["precondition"]), (2, "usage_limit"))
+                if hours == 1:
+                    self.assertEqual(self.usage_limit_until(), reset.timestamp() + 120)
+                else:
+                    self.assertAlmostEqual(self.usage_limit_until() - started, 5 * 3600, delta=60)
+
+    def test_a_card_that_starts_while_the_usage_limit_entry_is_live_is_refused_before_claude_runs(self) -> None:
+        until = datetime.fromtimestamp(int(time.time()) + 600, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        entry = {"reason": "the Claude usage limit was reached", "until": until}
+        self.holds_file().write_text(json.dumps({"holds": {"usage_limit": entry}, "applied": True}))
+
+        status, report = self.run_session(env={"HERMES_BIN": str(self.hermes_bin)})
+
+        self.assertEqual(report, {
+            "error": f"the factory holds new runs for the Claude usage limit until {until}",
+            "transient": True, "precondition": "usage_limit",
+        })
+        self.assertEqual(status, 2)
+        self.assert_no_run_started()
+
+    def test_another_holders_live_entry_does_not_refuse_the_card(self) -> None:
+        entry = {"reason": "auto-deploy is installing", "until": "2999-01-01T00:00:00Z"}
+        self.holds_file().write_text(json.dumps({"holds": {"auto-deploy": entry}, "applied": True}))
+
+        status, _ = self.run_session(env={"HERMES_BIN": str(self.hermes_bin)})
+
+        self.assertEqual(status, 0)
+
+    def test_a_usage_limit_refusal_keeps_parking_after_four_parks_in_an_hour(self) -> None:
+        self.write_parks(*[(age, "Waiting for the usage limit:") for age in (60, 600, 1200, 1800)])
+
+        status, report = self.run_limited()
+
+        self.assertEqual((status, report["transient"], report["precondition"]), (2, True, "usage_limit"))
+        self.assertNotIn("time in an hour", report["error"])
+
+    def test_a_blocker_order_copy_without_the_usage_limit_park_parks_on_the_server_error_wait(self) -> None:
+        module = self.hermes_home / "plugins" / "blocker-order" / "result_line.py"
+        text = module.read_text()
+        self.assertIn("    USAGE_LIMIT: USAGE_LIMIT_PARK,\n", text)
+        module.unlink()
+        module.write_text(text.replace("    USAGE_LIMIT: USAGE_LIMIT_PARK,\n", ""))
+
+        status, report = self.run_limited()
+
+        self.assertEqual((status, report["transient"], report["precondition"]), (2, True, "server_error"))
 
     def test_result_line_reports_token_counts_per_model_including_subagents(self) -> None:
         recorded = json.loads((Path(__file__).parent / "fixtures" / "claude-result-with-subagent.json").read_text())

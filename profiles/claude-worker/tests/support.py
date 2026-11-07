@@ -155,6 +155,9 @@ for line in options.get("transcript_lines", []):
         transcript.write(json.dumps(line) + "\\n")
 if options.get("no_json"):
     sys.exit(3)
+if "raw_output" in options:
+    print(json.dumps(options["raw_output"]), flush=True)
+    sys.exit(0)
 print(json.dumps({
     **options.get("output", {}),
     "type": "result",
