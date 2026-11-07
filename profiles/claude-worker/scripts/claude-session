@@ -62,6 +62,7 @@ import closing
 import factory_settings
 import factory_source
 import gh_login
+import host_hold
 import install_drift
 import kanban_board
 import reply_inbox
@@ -220,6 +221,8 @@ COMMIT_CLOSES_GUARD = Path(__file__).resolve().with_name("guard-commit-closes")
 REPLY_HOOK = Path(__file__).resolve().with_name("reply-hook")
 SESSION_REPLY = Path(__file__).resolve().with_name("session-reply")
 LINK_PR_HOOK = Path(__file__).resolve().with_name("link-pr-hook")
+CODE_REVIEW_LIMIT = Path(__file__).resolve().with_name("code-review-limit")
+CODE_REVIEW_GUARD = Path(__file__).resolve().with_name("guard-code-review")
 PROXY_TOKEN_HELPER = Path(__file__).resolve().with_name("proxy-token")
 MCP_HEADERS_HELPER = Path(__file__).resolve().with_name("mcp-headers")
 TRIAGE_DOCUMENTS = ("Triage notes", "Agent brief")
@@ -311,6 +314,18 @@ NO_PARTIAL_WORK_RULE = (
     "Do no partial-work flow. When a person asks on the card for work that completes only part of the card's "
     "issue, make the first line of your final message `Needs input:` followed by the reason."
 )
+CODE_REVIEW_RULE = (
+    "Make at most three code-review rounds on a pull request, counting every `code-review` report you make on it. "
+    "Keep each report in your session. Put nothing about code review on the pull request: no review, comment, "
+    "round count, or SHA in the description. After each round, write its findings to a JSON file: its new "
+    "findings and the earlier findings it reports still open, not the fixed ones, as a list of records with `id`, `axis`, `severity`, `location`, `text`, and `state` (`open` or `answered`), and run "
+    "`{command} record --pr <owner>/<repo>#<number> --base <base sha> --head <head sha> --findings <file>`. "
+    "From round 2, run `{command} status --pr <owner>/<repo>#<number>` and pass its `last_head` and `findings` "
+    "file to `code-review` as its Earlier round inputs, the reviewed head and the earlier findings. After round 3 "
+    "with a blocking finding open, make the first line of your final message `Needs input:` followed by a "
+    "summary of the open findings. File all `Pre-existing` findings together in one follow-up issue in the "
+    "pull request's base repository. They never block."
+)
 
 
 def implementation_prompt(result_line) -> str:
@@ -373,6 +388,7 @@ NEEDS_BRIEF = "needs_brief"
 WORKTREE_HELD = "worktree_held"
 # The `precondition` of a refusal because GitHub or the gateway's broker answered with a server error.
 SERVER_ERROR = "server_error"
+HOST_LOAD = host_hold.HOST_LOAD
 # The `precondition` of a refusal because `xcodebuild -checkFirstLaunchStatus` timed out, which host load can cause.
 XCODE_CHECK_TIMEOUT = "xcode_check_timeout"
 # What each parking cause is called in the refusal that stops parking after PARK_CAP parks in PARK_WINDOW_SECONDS.
@@ -1265,6 +1281,10 @@ def artifact_denials(settings: dict) -> list[str]:
     return [f"{tool}(/{path}/**)" for path in paths for tool in ("Read", "Edit")]
 
 
+def session_arguments(session_id: str, task_id: str, board: str) -> list[str]:
+    return ["--session-id", shlex.quote(session_id), "--task-id", shlex.quote(task_id), "--board", shlex.quote(board)]
+
+
 def claude_settings(
     transport: dict, api_key: str, path: Path, triage: bool = False, inbox: Path | None = None,
     session_id: str | None = None, denials: tuple = (), auto_merge_repo: str | None = None,
@@ -1303,10 +1323,12 @@ def claude_settings(
     # One hook acts on the pull request Claude opens: it links the Linear session and arms auto-merge, each when asked.
     # It reads the card's session from the board, since a later session can take the card over mid-run.
     hook_arguments = [
-        *(["--session-id", shlex.quote(session_id), "--task-id", shlex.quote(task_id), "--board", shlex.quote(board)]
-          if session_id else []),
+        *(session_arguments(session_id, task_id, board) if session_id else []),
         *(["--auto-merge-repo", shlex.quote(auto_merge_repo)] if auto_merge_repo else []),
     ]
+    if session_id and not triage:
+        review = {"type": "command", "command": " ".join([helper_command(CODE_REVIEW_GUARD), *session_arguments(session_id, task_id, board)])}
+        settings["hooks"]["PreToolUse"].append({"matcher": "Skill", "hooks": [review]})
     if hook_arguments and not triage:
         link = {"type": "command", "command": " ".join([helper_command(LINK_PR_HOOK), *hook_arguments])}
         settings["hooks"].setdefault("PostToolUse", []).append({"matcher": "Bash", "hooks": [link]})
@@ -1492,6 +1514,13 @@ def last_bash_command(session_id: str, worktree: Path) -> str:
     return command[:LAST_COMMAND_CHARS]
 
 
+def test_worker_env() -> dict:
+    cpus = host_hold.cpu_count()
+    if cpus is None:
+        return {}
+    return {host_hold.TEST_WORKERS_ENV: str(host_hold.test_workers(cpus, run_owner.live_count()))}
+
+
 def run_claude(
     command: list[str], worktree: Path, session_id: str, idle_limit: int, extra_env: dict, watch: run_owner.Watch,
 ) -> tuple[dict | None, int, str, Idle | None]:
@@ -1630,6 +1659,20 @@ def require_fresh_login() -> None:
         )
 
 
+def require_load_below_threshold(threshold: float | None) -> None:
+    root = host_hold.root_home(Path(os.environ["HERMES_HOME"]))
+    holds = host_hold.HoldList(root, host_hold.hermes_config(factory_settings.find_hermes, root))
+    reading = host_hold.observe(holds, threshold)
+    if reading is None or not reading.over:
+        return
+    note = ""
+    try:
+        host_hold.hold_for_load(holds, reading)
+    except host_hold.HoldError as error:
+        note = f"; dispatch-triage sets the hold on its next run ({error})"
+    raise Refusal(f"the host load is too high to start a run: {reading.describe()}{note}", transient=True, precondition=HOST_LOAD)
+
+
 def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     import result_line
 
@@ -1650,6 +1693,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
     servers = factory_settings.mcp_servers(transport)
     threshold = factory_settings.fresh_after_tokens(transport)
     prefix = factory_settings.worker_entry(repo)
+    require_load_below_threshold(factory_settings.load_hold_threshold(transport))
     worktree = resolve_worktree(workspace, repo["path"])
     check_first_launch(repo, worktree)
     check_toolchain(repo, worktree)
@@ -1665,6 +1709,8 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
         settings_path.unlink(missing_ok=True)
         remove_on_stop(settings_path)
         client, api_key = linear_access()
+        card = read_card(args.card_json, args.task_id)
+        card_session_id = reply_inbox.session_id_of(card["task"]["body"])
         require_mcp_tokens(servers)
         mcp = mcp_config(servers)
         if triage:
@@ -1682,10 +1728,14 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 wait_for_checks=Path(__file__).resolve().with_name("wait-for-checks"),
                 command_limit=command_limit,
             )
+            if card_session_id:
+                limit = " ".join([
+                    helper_command(CODE_REVIEW_LIMIT),
+                    *session_arguments(card_session_id, args.task_id, os.environ.get("HERMES_KANBAN_DB", "")),
+                ])
+                system_prompt += "\n\n" + CODE_REVIEW_RULE.format(command=limit)
         plan = plan_session(session_key(args.issue_id, triage), worktree, threshold, time.time())
         session_id = plan.session_id
-        card = read_card(args.card_json, args.task_id)
-        card_session_id = reply_inbox.session_id_of(card["task"]["body"])
         try:
             for running_id in filter(None, [plan.previous_id, session_id]):
                 require_session_free(running_id, stops)
@@ -1752,7 +1802,7 @@ def run(args: argparse.Namespace) -> tuple[int, result_line.Report]:
                 try:
                     output, exit_code, detail, idle = run_claude(
                         command, worktree, session_id, idle_limit,
-                        {artifact_service.CAPABILITY_ENV: capability.secret}, watch,
+                        {artifact_service.CAPABILITY_ENV: capability.secret, **test_worker_env()}, watch,
                     )
                 except CardEnded as ended:
                     output, exit_code, detail, idle, card_ended = None, None, "", None, ended

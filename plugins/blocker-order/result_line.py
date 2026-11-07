@@ -34,6 +34,8 @@ WORKTREE_HELD_PARK = "Waiting for the worktree:"
 # GitHub or the gateway's token broker answered with a server error; the card waits a few minutes and runs again.
 SERVER_ERROR = "server_error"
 SERVER_ERROR_PARK = "Waiting after a server error:"
+HOST_LOAD = "host_load"
+HOST_LOAD_PARK = "Waiting for the host load to fall:"
 # `xcodebuild -checkFirstLaunchStatus` timed out, which host load can cause; the card waits and runs again.
 XCODE_CHECK_TIMEOUT = "xcode_check_timeout"
 XCODE_CHECK_TIMEOUT_PARK = "Waiting for the Xcode check:"
@@ -66,6 +68,7 @@ PRECONDITION_PARKS = {
     NEEDS_BRIEF: NEEDS_BRIEF_PARK,
     WORKTREE_HELD: WORKTREE_HELD_PARK,
     SERVER_ERROR: SERVER_ERROR_PARK,
+    HOST_LOAD: HOST_LOAD_PARK,
     XCODE_CHECK_TIMEOUT: XCODE_CHECK_TIMEOUT_PARK,
 }
 MACHINE_PARKS = (*PRECONDITION_PARKS.values(), ISSUE_PARK, STOPPED_PARK, PULL_REQUEST_PARK)

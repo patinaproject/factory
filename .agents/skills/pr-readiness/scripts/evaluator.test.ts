@@ -77,3 +77,16 @@ describe("pr-readiness policy", () => {
     expect(produceCommand({ producer: "checks", checks: ["Unit tests"] }, { ...ctx, failedRunIds: [41, 42] })).toBe('push the head so CI runs "Unit tests", or rerun it: gh run rerun 41 --failed --repo o/r && gh run rerun 42 --failed --repo o/r');
   });
 });
+
+describe("parsePolicy autoMerge", () => {
+  const policy = (autoMerge?: unknown) => JSON.stringify({ version: 1, ...(autoMerge === undefined ? {} : { autoMerge }), obligations: {} });
+  it("accepts true and false and treats a missing key as off", () => {
+    expect(parsePolicy(policy(true)).autoMerge).toBe(true);
+    expect(parsePolicy(policy(false)).autoMerge).toBe(false);
+    expect(parsePolicy(policy()).autoMerge).toBe(false);
+    expect(parsePolicy(undefined).autoMerge).toBe(false);
+  });
+  it("rejects a non-boolean naming the file and key", () => {
+    expect(() => parsePolicy(policy("true"))).toThrow(".github/pr-readiness.json autoMerge must be a boolean");
+  });
+});

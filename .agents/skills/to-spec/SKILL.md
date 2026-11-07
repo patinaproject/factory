@@ -1,75 +1,29 @@
 ---
 name: to-spec
-description: "Turn the current conversation into a spec and publish it to the project issue tracker: no interview, just synthesis of what you've already discussed."
+description: "Turn the current conversation into a spec and publish it to the project issue tracker, applying a ready label only when the triage readiness check passes."
 disable-model-invocation: true
 ---
 
-This skill takes the current conversation context and codebase understanding and produces a spec. Do NOT interview the user; just synthesize what you already know.
+This skill takes the current conversation context and codebase understanding and produces a spec. Do NOT interview the user; just synthesize what you already know. The one exception is a decision the readiness check needs a person to approve. Ask each one as a grilling question with your recommended answer.
 
 The issue tracker and triage label vocabulary should have been provided to you. If not, tell the user to run `/setup-work-skills`.
 
 ## Process
 
-1. Explore the repo to understand the current state of the codebase, if you haven't already. Use the project's domain glossary vocabulary throughout the spec, and respect any ADRs in the area you're touching.
+1. Explore the repo to understand the current state of the codebase, if you haven't already. Use the project's domain glossary vocabulary throughout the spec, and respect any ADRs in the area you're touching. Before the spec limits files, name the layer that owns the rule and cite the deciding ADR or domain doc, as the **Owning layer before scope boundaries** principle in [../triage/AGENT-BRIEF.md](../triage/AGENT-BRIEF.md) describes.
 
-2. Sketch out the seams at which you're going to test the feature. Existing seams should be preferred to new ones. Use the highest seam possible. If new seams are needed, propose them at the highest point you can. The fewer seams across the codebase, the better - the ideal number is one.
+2. Sketch out the seams at which you're going to test the feature. Existing seams should be preferred to new ones. Use the highest seam possible. If new seams are needed, choose them at the highest point you can. The fewer seams across the codebase, the better - the ideal number is one.
 
-Check with the user that these seams match their expectations.
+Choose the seams with your own judgment and continue without asking the user. Record them in the brief's Testing decisions, with the reason each new seam is needed.
 
-3. Write the spec using the template below, then publish it to the project issue tracker. Apply the `Ready for agent` triage label and one Type label - no need for additional triage.
+3. Write the spec as an agent brief, using the template in [../triage/AGENT-BRIEF.md](../triage/AGENT-BRIEF.md). Fill its User stories, Implementation decisions, and Testing decisions as well as its core sections. Make User stories a long, numbered list that covers every aspect of the feature. Implementation decisions name the modules and interfaces to change, schema changes, API contracts, and architectural decisions. Testing decisions say what makes a good test here (external behavior, not implementation details), which modules are tested, the seams, and prior art in the codebase. Leave out file paths and code snippets, except a prototype snippet that encodes a decision more precisely than prose can. Trim that snippet to the decision-rich parts and note that it came from a prototype.
 
-<spec-template>
+4. Run the triage readiness check in [../triage/READINESS.md](../triage/READINESS.md) against the spec. Its Type item holds once you have chosen the Type. Before you publish, close the gaps you can and ask about unapproved decisions, as its **Outcome** section says.
 
-## Problem Statement
+5. Confirm the issue-tracker config defines the **Attach an artifact** operation. When it does not, stop before writing anything and tell the user to re-run `/setup-work-skills`.
 
-The problem that the user is facing, from the user's perspective.
+6. Publish the issue description for people: a short summary of the problem and the solution, from the user's perspective. On an existing issue, keep its original text first and unchanged, and add the new context below a `---` line.
 
-## Solution
+7. Save the full spec as `<identifier> Agent brief` through the **Attach an artifact** operation, where `<identifier>` is the tracker's issue reference, such as `PAT-123` or `#123`. Then follow READINESS.md's **Record it** and **Outcome** sections: record the checklist and decisions, and apply the Triage label the outcome names. Apply one Type label and `Ready for agent` only after every readiness item holds. With a ready label, also apply the ready state from the issue-tracker config's **When an issue becomes ready** section.
 
-The solution to the problem, from the user's perspective.
-
-## User Stories
-
-A LONG, numbered list of user stories. Each user story should be in the format of:
-
-1. As an <actor>, I want a <feature>, so that <benefit>
-
-<user-story-example>
-1. As a mobile bank customer, I want to see balance on my accounts, so that I can make better informed decisions about my spending
-</user-story-example>
-
-This list of user stories should be extremely extensive and cover all aspects of the feature.
-
-## Implementation Decisions
-
-A list of implementation decisions that were made. This can include:
-
-- The modules that will be built/modified
-- The interfaces of those modules that will be modified
-- Technical clarifications from the developer
-- Architectural decisions
-- Schema changes
-- API contracts
-- Specific interactions
-
-Do NOT include specific file paths or code snippets. They may end up being outdated very quickly.
-
-Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it within the relevant decision and note briefly that it came from a prototype. Trim to the decision-rich parts, not a working demo, just the important bits.
-
-## Testing Decisions
-
-A list of testing decisions that were made. Include:
-
-- A description of what makes a good test (only test external behavior, not implementation details)
-- Which modules will be tested
-- Prior art for the tests (i.e. similar types of tests in the codebase)
-
-## Out of Scope
-
-A description of the things that are out of scope for this spec.
-
-## Further Notes
-
-Any further notes about the feature.
-
-</spec-template>
+8. End the run with a short report and nothing else that asks for work. Name the issue identifier and its link, or its path when the tracker has no link, the readiness outcome, and the labels applied. With a ready label, say the issue is ready for an implementation agent. Without one, name each open question and say it is recorded in `<identifier> Triage notes`. Do not offer, suggest, or ask to implement the issue, in prose, a question, a next-step item, a suggested action, or button text. When the operator asks for the implementation in a later message, treat it as a new request.

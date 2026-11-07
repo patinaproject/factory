@@ -24,7 +24,7 @@
 │   ├── blocker-order/         # transform_tool_result hook that links and blocks a card behind its issue's open blocker cards, and blocks a card whose Claude run ends with `Needs input:`
 │   ├── factory-secret-names/  # Manifest-only platform plugin: the secret names Hermes strips from every process a home starts
 │   ├── factory-uploads/       # Unix-socket broker that uploads evidence images and issues the worker its Linear and proxy tokens; runs in the gateway or, through service.py, as its own macOS user
-│   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, block and triage-park report hook, activity, issue, and session tools, cli.py
+│   ├── linear-agent-session/  # Webhook secret guard, Linear acknowledgement hook, the shadow router, block and triage-park report hook, activity, issue, and session tools, cli.py
 │   ├── pr-ready-gate/         # pre_tool_call hook that gates kanban_complete and kanban_request_review
 │   ├── webhook-retry/         # Hooks that queue a delivery that arrived while paused, never reached a turn, or failed on a usage limit, and retry.py, which reruns it
 │   └── work/                  # Registers the skills in a configured directory as work:<name> skills
@@ -33,7 +33,7 @@
 │       ├── SOUL.md            # Worker instructions
 │       ├── config.yaml        # Toolsets, skills, plugins, and placeholder settings
 │       ├── distribution.yaml  # Profile distribution manifest
-│       └── scripts/           # claude-session, card_branch.py, factory_source.py, archive_card.py, blockers.py, kanban_board.py, github-upload-image, guard-ci-wait, guard-commit-closes, wait-for-checks, token-spend, push-signed, worker-secrets, proxy-token, mcp-headers, check-install, and the refresh cron scripts
+│       └── scripts/           # claude-session, card_branch.py, factory_source.py, archive_card.py, blockers.py, kanban_board.py, github-upload-image, guard-ci-wait, guard-commit-closes, guard-code-review, code-review-limit, code_review_rounds.py, wait-for-checks, token-spend, router-shadow-report, push-signed, worker-secrets, proxy-token, mcp-headers, check-install, and the refresh cron scripts
 ├── scripts/
 │   ├── test.sh                # Runs every component's unittest suite
 │   ├── skills-sync            # Syncs the vendored skills and agents from the latest stable skills release

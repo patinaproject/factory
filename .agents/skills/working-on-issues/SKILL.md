@@ -9,7 +9,8 @@ Resolve exactly one issue per invocation. Run this preflight before editing,
 committing, or opening a pull request. Re-running it must converge on the same
 issue, branch, worktree, assignee, status, and task title.
 
-Do not read project Markdown to discover tracker behavior. Resolve the provider
+Do not read project Markdown to discover tracker behavior. The one exception is
+the agent-brief lookup in **Read the agent brief**. Resolve the provider
 from the issue reference, repository, connected tracker tools, and live tracker
 data. Prefer an explicit issue URL or identifier, then an issue linked to the
 current branch. Reject multiple explicit issue references. Return `no-issue`
@@ -19,8 +20,8 @@ continue without one.
 ## Resolve the tracker contract
 
 Fetch the issue and its native relationships before changing anything. Record
-its identifier, URL, title, state, assignee, blockers, and provider-owned branch
-name.
+its identifier, URL, title, state, labels, description and its last edit time,
+assignee, blockers, and provider-owned branch name.
 
 Use these provider rules when they apply:
 
@@ -38,6 +39,28 @@ Use these provider rules when they apply:
 Resolve a bare reference against the current repository and authenticated
 tracker. When more than one provider or issue remains possible, stop and ask the
 operator for one explicit issue URL.
+
+## Read the agent brief
+
+After the issue resolves, and before any branch, worktree, or file step, fetch
+`<identifier> Agent brief`. The **Attach an artifact** operation in the
+repository's issue-tracker adapter, `docs/agents/issue-tracker.md`, names the
+identifier, where the brief lives, and how to find it. The brief is the agent
+contract. The issue description is for people.
+
+1. When the issue carries `Ready for agent` and has no brief, stop and report
+   the missing brief. Any other issue with no brief continues.
+2. When the description was last edited before the brief's `Last updated:`
+   time, the brief already accounts for it. Continue. Read the description's own
+   edit time, such as GitHub's `lastEditedAt`, not the issue's `updatedAt`.
+   Treat an edit time you cannot read as later than the brief.
+3. A newer decision stated outright is a description edited after the brief's
+   `Last updated:` time that names a value replacing one the brief names, and
+   that adds or removes no acceptance criterion and no scope. Continue, and
+   record the old and new values for **Mark the work started**.
+4. In any other case where the later description and the brief differ, stop
+   and ask the operator. A change that removes an acceptance criterion or
+   widens scope always stops. Leave the brief unchanged.
 
 ## Pass the read-only gates
 
@@ -94,6 +117,10 @@ Only mutate tracker and session state after every gate and branch check passes.
    available start signals.
 3. If the host can rename the current chat or task, set its title to
    `<Issue ID> <Issue title>`. Do not duplicate an existing issue-ID prefix.
+4. If **Read the agent brief** recorded a newer decision, add one line
+   `Amended: <YYYY-MM-DD>` to the brief through the adapter's **Attach an
+   artifact** operation, naming the old value and the new one. Then post one
+   note in the agent session, or one issue comment when there is no session.
 
 Retry safe transient failures. If assignment or a supported status transition
 still fails, stop and report the failed operation. A missing task-rename
@@ -101,10 +128,11 @@ capability is not a blocker; report other rename failures.
 
 ## Report
 
-Return the issue identifier, URL, title, provider, ending branch, worktree path,
-assignee result, status result, and task-title result. Name any blocker or
-unsupported provider operation that stopped the preflight. Never edit the issue
-body or decide whether its requested work is sufficiently specified.
+Return the issue identifier, URL, title, provider, agent-brief result, ending
+branch, worktree path, assignee result, status result, and task-title result.
+Name any blocker or unsupported provider operation that stopped the preflight.
+Never edit the issue body or decide whether its requested work is sufficiently
+specified.
 
 When **patina-mode** invokes this skill, also return the machine result defined
 in [`../patina-mode/references/issue-handoff.md`](../patina-mode/references/issue-handoff.md).

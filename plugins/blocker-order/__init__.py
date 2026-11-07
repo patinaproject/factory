@@ -36,11 +36,12 @@ once the install matches that commit. A report with `"precondition": "needs_brie
 issue carries `ready-for-agent` but has no `<ID> Agent brief` Document. The hook parks it with a reason that
 starts with `result_line.NEEDS_BRIEF_PARK`, and `card_transition.py` queues one triage card for the issue and
 releases the card once the brief exists or the issue no longer carries the label. `worktree_held` (a live run
-holds the card's worktree) and `server_error` (GitHub or the broker answered with a server error) park the same
-way under `result_line.WORKTREE_HELD_PARK` and `result_line.SERVER_ERROR_PARK`, and `card_transition.py` releases
-the card once the lock is free or five minutes have passed. `xcode_check_timeout` (`xcodebuild
--checkFirstLaunchStatus` timed out) parks under `result_line.XCODE_CHECK_TIMEOUT_PARK` and is released after five
-minutes. Hermes refuses to schedule a
+holds the card's worktree), `server_error` (GitHub or the broker answered with a server error), and `host_load`
+(the host's load is over the factory's threshold) park the same way under `result_line.WORKTREE_HELD_PARK`,
+`result_line.SERVER_ERROR_PARK`, and `result_line.HOST_LOAD_PARK`, and `card_transition.py` releases the card
+once the lock is free, five minutes have passed, or the `host_load` hold is gone. `xcode_check_timeout`
+(`xcodebuild -checkFirstLaunchStatus` timed out) parks under `result_line.XCODE_CHECK_TIMEOUT_PARK` and is
+released after five minutes. Hermes refuses to schedule a
 `goal_mode` card, and that card keeps the transient block the worker's prompt gives a `"transient": true`
 refusal.
 
@@ -163,6 +164,11 @@ PRECONDITION_PARKED = {
         "server_error_park",
         "GitHub or the gateway's broker answered with a server error, so this card waits in scheduled and goes "
         "back to the queue after a short wait.",
+    ),
+    result_line.HOST_LOAD: (
+        "host_load_park",
+        "The host's load is over the factory's threshold, so this card waits in scheduled and goes back to the "
+        "queue once the load falls.",
     ),
     result_line.XCODE_CHECK_TIMEOUT: (
         "xcode_check_timeout_park",

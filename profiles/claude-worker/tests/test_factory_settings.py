@@ -182,5 +182,18 @@ class ArtifactSettingsTest(unittest.TestCase):
                 factory_settings.artifact({"claude_artifact": section} if section is not None else {})
 
 
+class LoadHoldThresholdTest(unittest.TestCase):
+    def test_a_positive_number_or_nothing_is_valid(self) -> None:
+        for value, expected in ((None, None), (5, 5.0), (0.5, 0.5)):
+            self.assertEqual(factory_settings.load_hold_threshold({} if value is None else {"load_hold_threshold": value}), expected)
+
+    def test_zero_a_negative_a_string_a_bool_and_a_nan_are_refused_by_validate(self) -> None:
+        for bad in (0, -1, "x", True, False, float("nan")):
+            problems = factory_settings.validate(settings({"load_hold_threshold": bad}))
+            self.assertEqual(
+                problems.global_errors, (f"claude_session.load_hold_threshold {bad!r} must be a positive number",), bad,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, extname, isAbsolute, join } from "node:path";
 
 export const ISSUE_ENTRY_POINTS = ["direct", "session-pickup"] as const;
 export const PROTECTED_OPERATIONS = [
@@ -16,6 +18,18 @@ export const PROTECTED_OPERATIONS = [
   "pull-request-change",
   "operational-run",
 ] as const;
+const READ_ONLY_PLAYBOOKS: ReadonlySet<string> = new Set([
+  "investigation",
+  "triage",
+  "runtime-forensics",
+  "trace-forensics",
+  "pause-safely",
+  "worktree-cleanup",
+]);
+const WRITING_OPERATIONS: ReadonlySet<ProtectedOperation> = new Set([
+  "edit",
+  "commit",
+]);
 
 export type IssueEntryPoint = (typeof ISSUE_ENTRY_POINTS)[number];
 type ProtectedOperation = (typeof PROTECTED_OPERATIONS)[number];
@@ -61,6 +75,7 @@ type WorkingOnIssuesResult =
 export interface RouteRequest {
   readonly entry: IssueEntryPoint;
   readonly operation: ProtectedOperation;
+  readonly playbook?: string;
   readonly preflight?: WorkingOnIssuesResult;
 }
 
@@ -68,7 +83,10 @@ type StopReason =
   | "missing-preflight"
   | "preflight-failed"
   | "no-issue"
-  | "stale-checkout";
+  | "stale-checkout"
+  | "missing-playbook"
+  | "unknown-playbook"
+  | "playbook-not-allowed";
 
 export type RoutingDecision =
   | { readonly kind: "continue"; readonly issue: string }
@@ -79,7 +97,7 @@ export type RoutingDecision =
     };
 
 interface Receipt {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly request: RouteRequest;
   readonly checkout: CheckoutSnapshot;
   readonly decision: RoutingDecision;
@@ -91,7 +109,8 @@ function stop(reason: StopReason): RoutingDecision {
 
 export function decideContinuation(
   request: RouteRequest,
-  checkout: CheckoutSnapshot
+  checkout: CheckoutSnapshot,
+  playbooks: ReadonlySet<string>
 ): RoutingDecision {
   if (request.preflight === undefined) {
     return stop("missing-preflight");
@@ -110,6 +129,21 @@ export function decideContinuation(
     request.preflight.worktreePath !== checkout.worktreePath
   ) {
     return stop("stale-checkout");
+  }
+
+  if (request.playbook === undefined) {
+    return stop("missing-playbook");
+  }
+
+  if (!playbooks.has(request.playbook)) {
+    return stop("unknown-playbook");
+  }
+
+  if (
+    WRITING_OPERATIONS.has(request.operation) &&
+    READ_ONLY_PLAYBOOKS.has(request.playbook)
+  ) {
+    return stop("playbook-not-allowed");
   }
 
   return { kind: "continue", issue: request.preflight.issue.id };
@@ -194,6 +228,9 @@ export function parseRouteInput(
   return {
     entry,
     operation: readEnum(value.operation, "operation", PROTECTED_OPERATIONS),
+    ...(value.playbook === undefined
+      ? {}
+      : { playbook: readString(value.playbook, "playbook") }),
     ...(value.preflight === undefined
       ? {}
       : { preflight: parsePreflight(value.preflight) }),
@@ -215,6 +252,21 @@ export function readCheckout(cwd: string): CheckoutSnapshot {
     head: runGit(cwd, ["rev-parse", "HEAD"]),
     worktreePath: realpathSync(runGit(cwd, ["rev-parse", "--show-toplevel"])),
   };
+}
+
+function playbookStems(directory: string): string[] {
+  return readdirSync(directory)
+    .filter((name) => extname(name) === ".md")
+    .map((name) => basename(name, ".md"));
+}
+
+export function acceptedPlaybooks(checkout: CheckoutSnapshot): Set<string> {
+  const project = join(checkout.worktreePath, ".agents", "playbooks");
+  return new Set([
+    ...playbookStems(join(import.meta.dir, "..", "playbooks")),
+    ...(existsSync(project) ? playbookStems(project) : []),
+    "figure-it-out",
+  ]);
 }
 
 function receiptDirectory(): string {
@@ -259,9 +311,13 @@ export async function runIssueRoute(entry: IssueEntryPoint): Promise<void> {
     const raw = JSON.parse(source);
     const request = parseRouteInput(entry, raw);
     const checkout = readCheckout(process.cwd());
-    const decision = decideContinuation(request, checkout);
+    const decision = decideContinuation(
+      request,
+      checkout,
+      acceptedPlaybooks(checkout)
+    );
     const receiptPath = writeReceipt({
-      schemaVersion: 1,
+      schemaVersion: 2,
       request,
       checkout,
       decision,

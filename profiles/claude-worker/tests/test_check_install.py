@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -261,6 +261,8 @@ REMEDY_CLASSES = (
     ("service", "", "manual"),
     ("gateway watch", "gateway-heartbeat-url: ", "manual"),
     ("gateway watch", "", "advisory"),
+    ("dispatch holds", r"cannot read \S*dispatch-holds\.json|is not a hold list", "manual"),
+    ("dispatch holds", "", "advisory"),
     ("auto deploy", "auto-deploy.lock: ", "advisory"),
     ("auto deploy", "", "manual"),
     ("upload broker", "", "advisory"),
@@ -480,6 +482,15 @@ class CheckInstallTest(unittest.TestCase):
     def test_matching_install_is_silent(self) -> None:
         self.assertEqual(self.check(), (0, ""))
         self.assertEqual(json.loads(self.raw), [])
+
+    def test_the_time_the_load_held_dispatch_comes_from_the_hold_log(self) -> None:
+        now = datetime.now(timezone.utc)
+        stamps = [(now - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ") for minutes in (60, 30)]
+        (self.root / "dispatch-holds.log").write_text("".join(
+            json.dumps({"time": at, "event": event, "holder": "host_load"}) + "\n" for at, event in zip(stamps, ("add", "remove"))
+        ))
+
+        self.assertEqual(self.check(), (1, "dispatch holds dispatch-holds.log: the host load held dispatch for 30 minutes in the last 24 hours\n"))
 
     def test_an_app_without_the_push_event_adds_one_manual_line_and_nothing_else(self) -> None:
         settings = {**SETTINGS, "github": {"login": "example-app[bot]"}}
@@ -2687,11 +2698,18 @@ class CheckAutoDeployTest(unittest.TestCase):
     def state(self, **fields) -> None:
         (self.root / "auto-deploy.json").write_text(json.dumps({"deployed": self.SHA, "hold": None, **fields}))
 
-    def check(self, dispatch_profiles=None, *, age_hours: float = 1, commit="default") -> list:
+    def check(self, dispatch_profiles=None, *, age_hours: float = 1, commit="default", applied: bool = False) -> list:
         commit = self.commit if commit == "default" else commit
         return classified(self, check_install.check_auto_deploy(
             self.root, dispatch_profiles, commit, self.NOW - age_hours * 3600, self.NOW, self.alive.__contains__,
+            applied=applied,
         ))
+
+    def test_a_key_set_with_applied_true_is_not_drift_and_one_set_with_applied_false_is(self) -> None:
+        self.state()
+
+        self.assertEqual(self.check([], applied=True), [])
+        self.assertEqual(len(self.check([], applied=False)), 1)
 
     def hold(self, pid: int = 4242, **parts) -> dict:
         return {"pid": pid, "commit": "d" * 40, "dispatch_profiles": False, "pause": None, "gateway_lock": False, **parts}
@@ -4097,6 +4115,68 @@ class CheckServicesTest(unittest.TestCase):
         self.launchd.states({})
 
         self.assertNotIn("s3cr3t", "\n".join(self.check()))
+
+
+class CheckHostHoldTest(unittest.TestCase):
+    NOW = datetime(2026, 11, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.root)
+        env = mock.patch.dict(os.environ, {"HOST_HOLD_LOADAVG": "0,0,0", "HOST_HOLD_CPUS": "8"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def log(self, *events: tuple) -> None:
+        with (self.root / "dispatch-holds.log").open("w") as log:
+            for event, minutes_ago in events:
+                at = (self.NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                log.write(json.dumps({"time": at, "event": event, "holder": "host_load"}) + "\n")
+
+    def check(self, settings=None) -> list:
+        return classified(self, check_install.check_host_hold(self.root, settings or {}, self.NOW))
+
+    def test_it_is_silent_when_nothing_was_held(self) -> None:
+        self.assertEqual(self.check(), [])
+
+    def test_it_reports_the_minutes_the_load_held_dispatch_in_the_last_24_hours(self) -> None:
+        self.log(("add", 3000), ("remove", 2990), ("add", 100), ("remove", 40), ("add", 30), ("remove", 0))
+
+        self.assertEqual(self.check(), [
+            "dispatch holds dispatch-holds.log: the host load held dispatch for 90 minutes in the last 24 hours",
+        ])
+
+    def test_it_flags_an_entry_still_present_after_its_until(self) -> None:
+        (self.root / "dispatch-holds.json").write_text(json.dumps({"applied": True, "holds": {
+            "auto-deploy": {"reason": "deploying", "until": "2026-11-06T11:59:59Z"},
+            "host_load": {"reason": "load", "until": "2026-11-06T12:05:00Z"},
+        }}))
+
+        self.assertEqual(self.check(), [
+            f"dispatch holds {self.root}/dispatch-holds.json: auto-deploy is still held after 2026-11-06T11:59:59Z; "
+            "dispatch-triage removes it on its next run",
+        ])
+
+    def test_it_reports_a_hold_file_it_cannot_read(self) -> None:
+        (self.root / "dispatch-holds.json").write_text("{")
+
+        self.assertRegex(self.check()[0], r"^dispatch holds .*dispatch-holds.json: cannot read .*dispatch-holds.json: ")
+
+    def test_it_reports_a_load_it_cannot_read(self) -> None:
+        with mock.patch.dict(os.environ, {"HOST_HOLD_LOADAVG": "error"}):
+            self.assertEqual(self.check(), [
+                f"dispatch holds {self.root}/dispatch-holds.json: cannot read the load average: load average unavailable, "
+                "so the load gate holds nothing",
+            ])
+
+    def test_it_reports_each_invalid_threshold_with_the_text_claude_session_refuses_with(self) -> None:
+        for bad in (0, -1, "x", True):
+            with self.subTest(bad=bad):
+                drifts = classified(self, check_install.check_settings({"claude_session": {"load_hold_threshold": bad}}, self.root))
+
+                self.assertEqual(drifts, [
+                    f"config claude_session in {self.root}: claude_session.load_hold_threshold {bad!r} must be a positive number",
+                ])
 
 
 if __name__ == "__main__":
