@@ -1134,13 +1134,12 @@ def check_progress_watch(root: Path, now: float | None = None) -> list:
                 f"{PROGRESS_WATCH_INTERVAL // 60} (part 12)",
                 ADVISORY,
             ))
-        else:
-            reasons = state.get("reasons") if isinstance(state, dict) else None
-            drifts.extend(
-                Drift("progress stall", reason["kind"], reason["text"], ADVISORY)
-                for reason in (reasons if isinstance(reasons, list) else [])
-                if isinstance(reason, dict) and isinstance(reason.get("kind"), str) and isinstance(reason.get("text"), str)
-            )
+        reasons = state.get("reasons") if isinstance(state, dict) else None
+        drifts.extend(
+            Drift("progress stall", reason["kind"], reason["text"], ADVISORY)
+            for reason in (reasons if isinstance(reasons, list) else [])
+            if isinstance(reason, dict) and isinstance(reason.get("kind"), str) and isinstance(reason.get("text"), str)
+        )
     try:
         mode = beat_path.stat().st_mode & 0o777
     except OSError:
@@ -1605,10 +1604,6 @@ GUARDED_FIX = Manual(
 )
 
 
-def board_databases(root: Path) -> list:
-    return sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")])
-
-
 def check_guarded_cards(root: Path, now: float) -> list:
     """A card that Hermes' dispatcher holds in `ready`, so no worker ever starts it.
 
@@ -1622,7 +1617,7 @@ def check_guarded_cards(root: Path, now: float) -> list:
         "JOIN tasks t ON t.id = e.task_id WHERE t.status = 'ready' ORDER BY e.task_id, e.created_at, e.id"
     )
     drifts = []
-    for path in board_databases(root):
+    for path in kanban_board.board_databases(root):
         if not path.is_file():
             continue
         try:
@@ -1728,7 +1723,7 @@ def check_kanban_boards(root: Path) -> list:
     and stops the sweep that releases a waiting card, with nothing else to say so. Without `completion_contract`,
     no merged card whose old check runs failed can reach `done`."""
     drifts = []
-    for path in board_databases(root):
+    for path in kanban_board.board_databases(root):
         if not path.is_file():
             continue
         try:

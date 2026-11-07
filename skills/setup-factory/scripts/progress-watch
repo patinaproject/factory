@@ -30,7 +30,8 @@ RUNNING_EVENTS = ("claimed",)
 FINISH_EVENTS = ("completed", "review_requested")
 # Claude Code truncates a longer encoded folder name and appends a hash.
 ENCODED_PREFIX = 200
-DISPATCH_PROFILES_LINE = re.compile(r"^[ \t]+dispatch_profiles:[ \t]*(.*?)[ \t]*(?:#.*)?$", re.MULTILINE)
+KANBAN_SECTION = re.compile(r"^kanban:[ \t]*(?:#.*)?\n((?:[ \t]+.*\n?|[ \t]*\n)*)", re.MULTILINE)
+DISPATCH_PROFILES_LINE = re.compile(r"^[ \t]+dispatch_profiles:[ \t]*(.*?)[ \t]*(?:#.*)?$\n?([ \t]*-)?", re.MULTILINE)
 EMPTY_PROFILES = ("", "[]", "null", "~", '""', "''")
 
 HOLD_ENTRY, HOLD_EXPIRED, HOLD_UNREADABLE = "hold_entry", "hold_expired", "hold_unreadable"
@@ -174,7 +175,7 @@ def transcript_cwd(transcript: Path) -> Optional[str]:
                     continue
                 if isinstance(entry, dict) and entry.get("cwd"):
                     return entry["cwd"]
-    except OSError:
+    except (OSError, ValueError):
         return None
     return None
 
@@ -195,12 +196,15 @@ def transcript_time(config_dir: Path, workspace: str) -> Optional[float]:
     exact = projects / encoded
     if exact.is_dir():
         return newest_write(exact)
-    found = []
-    for folder in projects.glob(f"{encoded[:ENCODED_PREFIX]}*"):
-        first = next(iter(sorted(folder.glob("*.jsonl"))), None)
-        if first is not None and transcript_cwd(first) == workspace:
-            found.append(newest_write(folder))
-    times = [moment for moment in found if moment is not None]
+    times = []
+    for transcript in projects.glob(f"{encoded[:ENCODED_PREFIX]}*/*.jsonl"):
+        if transcript_cwd(transcript) != workspace:
+            continue
+        for path in (transcript, *transcript.with_suffix("").glob("subagents/*.jsonl")):
+            try:
+                times.append(path.stat().st_mtime)
+            except OSError:
+                continue
     return max(times) if times else None
 
 
@@ -225,7 +229,7 @@ def read_boards(root: Path, modules: Modules, start: float, config_dir: Path) ->
         "COALESCE(t.last_failure_error, '') AS last_failure_error, CASE t.status "
         f"WHEN 'ready' THEN COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id AND e.kind IN ({ready_events})), t.created_at) "
         f"ELSE COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id AND e.kind IN ({running_events})), t.started_at, t.created_at) "
-        "END AS since FROM tasks t WHERE t.status IN ('ready', 'running') ORDER BY t.id"
+        "END AS since FROM tasks t WHERE t.status IN ('ready', 'running') AND TRIM(COALESCE(t.assignee, '')) != '' ORDER BY t.id"
     )
     guard_sql = (
         "SELECT e.task_id AS id, e.kind AS kind, e.payload AS payload, e.created_at AS created_at FROM task_events e "
@@ -241,7 +245,7 @@ def read_boards(root: Path, modules: Modules, start: float, config_dir: Path) ->
         "AND (error LIKE ? OR summary LIKE ?) ORDER BY ended_at"
     )
     reading = BoardReading([], [], [], [])
-    for path in sorted([root / "kanban.db", *root.glob("kanban/boards/*/kanban.db")]):
+    for path in board.board_databases(root):
         if not path.is_file():
             continue
         label = board_label(root, path)
@@ -297,10 +301,11 @@ def read_pauses(root: Path, worker_home: Path) -> List[str]:
 
 def dispatch_profiles_set(root: Path) -> bool:
     try:
-        line = DISPATCH_PROFILES_LINE.search((root / "config.yaml").read_text())
-    except OSError:
+        section = KANBAN_SECTION.search((root / "config.yaml").read_text())
+    except (OSError, ValueError):
         return False
-    return bool(line) and line.group(1) in EMPTY_PROFILES
+    line = DISPATCH_PROFILES_LINE.search(section.group(1)) if section else None
+    return bool(line) and line.group(1) in EMPTY_PROFILES and not line.group(2)
 
 
 def read_threshold(settings_reader: Callable[[], dict], settings_module) -> Tuple[int, Optional[str]]:
@@ -327,15 +332,20 @@ def read_beats(path: Path) -> Tuple[Optional[str], Optional[str]]:
         return None, None
     urls = [line.strip() for line in lines[:2]]
     urls += [""] * (2 - len(urls))
-    first, second = (url if url.startswith(("http://", "https://")) else None for url in urls)
+    first, second = (url if url.startswith("https://") else None for url in urls)
     return first, second if first else None
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 def http_send(url: str, body: Optional[bytes]) -> Optional[str]:
     headers = {"Content-Type": "text/plain; charset=utf-8"} if body is not None else {}
     request = urllib.request.Request(url, data=body, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=PROBE_SECONDS):
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=PROBE_SECONDS):
             return None
     except urllib.error.HTTPError as error:
         error.close()

@@ -711,6 +711,13 @@ class CheckInstallTest(unittest.TestCase):
             "but progress-watch runs every 5 (part 12)\n"
         )))
 
+        self.progress_state(checked_at=time.time() - 901, stalled=True, reasons=[{"kind": "paused", "text": "hermes pause is engaged"}])
+        self.assertEqual(self.check(), (1, (
+            f"progress watch {self.root}/progress-watch.json: was last written 15 minutes ago, "
+            "but progress-watch runs every 5 (part 12)\n"
+            "progress stall paused: hermes pause is engaged\n"
+        )))
+
         (self.root / "progress-watch.json").unlink()
         self.assertEqual(self.check(), (1, (
             f"progress watch {self.root}/progress-watch.json: is missing or unreadable, so progress-watch has not run (part 12)\n"

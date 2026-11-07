@@ -21,9 +21,9 @@ sys.modules[loader.name] = progress_watch
 loader.exec_module(progress_watch)
 
 NOW = 1_000_000.0
-PING = "http://monitor.invalid/ping/private-ping-id"
-FAIL = "http://monitor.invalid/fail/private-fail-id"
-GATEWAY_BEAT = "http://monitor.invalid/gateway/private-gateway-id"
+PING = "https://monitor.invalid/ping/private-ping-id"
+FAIL = "https://monitor.invalid/fail/private-fail-id"
+GATEWAY_BEAT = "https://monitor.invalid/gateway/private-gateway-id"
 IDLE = "claude made no progress for 2700 s (idle limit 2700 s); last command: none"
 LOAD = progress_watch.Context(2.5, 1.75, 8)
 
@@ -49,6 +49,7 @@ class ProgressWatchTest(unittest.TestCase):
         self.send_failure = None
         self.out = io.StringIO()
         self.default = self.board(self.root / "kanban.db")
+        self.addCleanup(lambda: self.assertNotIn(GATEWAY_BEAT, [url for url, _ in self.sent]))
 
     def board(self, path: Path) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,7 +57,7 @@ class ProgressWatchTest(unittest.TestCase):
         self.addCleanup(db.close)
         db.execute(
             "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, created_at INTEGER, started_at INTEGER, "
-            "workspace_path TEXT, last_failure_error TEXT)"
+            "workspace_path TEXT, last_failure_error TEXT, assignee TEXT)"
         )
         db.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, created_at INTEGER)")
         db.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, outcome TEXT, ended_at INTEGER, error TEXT, summary TEXT)")
@@ -68,9 +69,11 @@ class ProgressWatchTest(unittest.TestCase):
         path.chmod(0o600)
 
     def card(self, id: str, status: str = "ready", age: float = 90, *, workspace: str | None = None, error: str | None = None,
-             guard: str | None = None, db: sqlite3.Connection | None = None) -> None:
+             guard: str | None = None, db: sqlite3.Connection | None = None, assignee: str | None = "claude-worker") -> None:
         db = db or self.default
-        db.execute("INSERT INTO tasks VALUES (?, ?, ?, NULL, ?, ?)", (id, status, NOW - age * 60, workspace, error))
+        db.execute(
+            "INSERT INTO tasks VALUES (?, ?, ?, NULL, ?, ?, ?)", (id, status, NOW - age * 60, workspace, error, assignee)
+        )
         if guard:
             db.execute(
                 "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'respawn_guarded', ?, ?)",
@@ -247,6 +250,48 @@ class ProgressWatchTest(unittest.TestCase):
         self.transcript(workspace, 5, folder=progress_watch.encode_path(workspace) + "-abc123")
         self.watch()
         self.assertEqual(self.sent, [(PING, None)])
+
+    def test_only_the_transcripts_that_record_the_cards_directory_count_in_a_shared_folder(self) -> None:
+        workspace = "/work/tree.1/t_run"
+        self.card("t_run", "running", 300, workspace=workspace)
+        folder = progress_watch.encode_path(workspace) + "-abc123"
+        self.transcript(workspace, 120, folder=folder)
+        other = self.config_dir / "projects" / folder / "other.jsonl"
+        other.write_text(json.dumps({"cwd": "/somewhere/else"}) + "\n")
+        os.utime(other, (NOW - 60, NOW - 60))
+        self.watch()
+        self.assertEqual([url for url, _ in self.sent], [FAIL])
+
+    def test_a_transcript_that_is_not_utf8_is_skipped_without_a_crash(self) -> None:
+        workspace = "/work/tree.1/t_run"
+        self.card("t_run", "running", 300, workspace=workspace)
+        folder = self.config_dir / "projects" / (progress_watch.encode_path(workspace) + "-abc123")
+        folder.mkdir(parents=True)
+        (folder / "broken.jsonl").write_bytes(b"\xff\xfe{}\n")
+        self.watch()
+        self.assertEqual(self.kinds(), ["unexplained"])
+
+    def test_an_unassigned_ready_card_is_not_waiting(self) -> None:
+        self.card("t_parked", assignee=None)
+        self.card("t_blank", assignee=" ")
+        self.watch()
+        self.assertEqual(self.sent, [(PING, None)])
+        self.assertEqual(self.state()["reasons"], [])
+
+    def test_a_plain_http_heartbeat_url_is_never_requested(self) -> None:
+        self.write_beats("http://monitor.invalid/ping/private-ping-id\n")
+        self.watch()
+        self.assertEqual(self.sent, [])
+        self.assertIn("holds no URL", self.out.getvalue())
+
+    def test_a_dispatch_profiles_list_that_names_a_profile_is_not_a_hold(self) -> None:
+        self.card("t_wait")
+        (self.root / "config.yaml").write_text("other:\n  dispatch_profiles: []\nkanban:\n  dispatch_profiles:\n  - claude-worker\n")
+        self.watch()
+        self.assertEqual(self.kinds(), ["unexplained"])
+        (self.root / "config.yaml").write_text("kanban:\n  max_spawn: 2\n  dispatch_profiles: []  # held\n")
+        self.watch()
+        self.assertEqual(self.kinds(), ["dispatch_profiles"])
 
     def test_a_folder_that_only_shares_the_prefix_is_not_the_cards_transcript(self) -> None:
         workspace = "/work/tree.1/t_run"
